@@ -31,6 +31,11 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
     engine.register_adapter(adapter_dyn);
 
     let files = collect_py_files(&args.path)?;
+    let index_root = if args.path.is_dir() {
+        args.path.clone()
+    } else {
+        args.path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."))
+    };
 
     let index_store = AsgIndexStore { repo: &engine.repo };
     let effect_store = AsgEffectStore { repo: &engine.repo };
@@ -41,7 +46,8 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
     for file in &files {
         let source = std::fs::read_to_string(file)
             .with_context(|| format!("read {}", file.display()))?;
-        let file_str = file.to_string_lossy().to_string();
+        let rel = file.strip_prefix(&index_root).unwrap_or(file);
+        let file_str = rel.to_string_lossy().replace('\\', "/");
 
         let parsed = adapter.parse_symbols(&file_str, &source)?;
 

@@ -224,27 +224,109 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
         }
     }
 
-    // print(...) / sys.stdout / sys.stderr writes -> Log
-    if contains_call(body, "print(")
-        || body.contains("sys.stdout.write")
-        || body.contains("sys.stderr.write")
-        || body.contains("sys.stdout")
-        || body.contains("sys.stderr")
-    {
-        let note = first_matching_line(
-            body,
-            &[
-                "print(",
-                "sys.stdout.write",
-                "sys.stderr.write",
-                "sys.stdout",
-                "sys.stderr",
-            ],
-        );
+    // print(...) / sys.stdout / sys.stderr / logging.* / log.* / logger.* -> Log
+    let log_needles = [
+        "print(",
+        "sys.stdout",
+        "sys.stderr",
+        "logging.debug",
+        "logging.info",
+        "logging.warning",
+        "logging.warn",
+        "logging.error",
+        "logging.critical",
+        "logging.exception",
+        "log.debug",
+        "log.info",
+        "log.warning",
+        "log.warn",
+        "log.error",
+        "log.critical",
+        "log.exception",
+        "logger.debug",
+        "logger.info",
+        "logger.warning",
+        "logger.warn",
+        "logger.error",
+        "logger.critical",
+        "logger.exception",
+    ];
+    if log_needles.iter().any(|n| body.contains(n)) {
+        let note = first_matching_line(body, &log_needles);
         effects.push(Effect {
             effect: EffectCategory::Log,
             qualifiers: serde_json::Value::Null,
             note,
+        });
+    }
+
+    // Database cursor/conn/db.execute(...) / .fetchone() / .commit()  -> IoDb*
+    // Heuristic: inspect the SQL-like first arg of `.execute(` to decide
+    // read vs write. Common names: db, conn, cursor, cur, session, c.
+    let db_receivers = [
+        "db.execute(",
+        "conn.execute(",
+        "cursor.execute(",
+        "cur.execute(",
+        "session.execute(",
+        "c.execute(",
+        "self.db.execute(",
+        "self.conn.execute(",
+    ];
+    let mut seen_db_read = false;
+    let mut seen_db_write = false;
+    for recv in db_receivers {
+        for call_site in find_calls(body, recv) {
+            let args = &body[call_site.args_start..call_site.args_end];
+            let sql = args.trim_start_matches(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == 'f' || c == 'r' || c == 'b');
+            let upper: String = sql.chars().take(16).collect::<String>().to_uppercase();
+            let is_write = upper.starts_with("INSERT")
+                || upper.starts_with("UPDATE")
+                || upper.starts_with("DELETE")
+                || upper.starts_with("REPLACE")
+                || upper.starts_with("CREATE")
+                || upper.starts_with("DROP")
+                || upper.starts_with("ALTER")
+                || upper.starts_with("TRUNCATE");
+            let is_read = upper.starts_with("SELECT") || upper.starts_with("WITH") || upper.starts_with("SHOW");
+            let note = Some(trim_note(&body[call_site.call_start..call_site.args_end + 1]));
+            if is_write && !seen_db_write {
+                effects.push(Effect {
+                    effect: EffectCategory::IoDbWrite,
+                    qualifiers: serde_json::Value::Null,
+                    note,
+                });
+                seen_db_write = true;
+            } else if is_read && !seen_db_read {
+                effects.push(Effect {
+                    effect: EffectCategory::IoDbRead,
+                    qualifiers: serde_json::Value::Null,
+                    note,
+                });
+                seen_db_read = true;
+            } else if !is_write && !is_read && !seen_db_read && !seen_db_write {
+                // Unrecognized SQL — conservatively emit both.
+                effects.push(Effect {
+                    effect: EffectCategory::IoDbRead,
+                    qualifiers: serde_json::Value::Null,
+                    note: note.clone(),
+                });
+                effects.push(Effect {
+                    effect: EffectCategory::IoDbWrite,
+                    qualifiers: serde_json::Value::Null,
+                    note,
+                });
+                seen_db_read = true;
+                seen_db_write = true;
+            }
+        }
+    }
+    // .commit() implies a preceding write
+    if !seen_db_write && (body.contains(".commit()") || body.contains("conn.commit")) {
+        effects.push(Effect {
+            effect: EffectCategory::IoDbWrite,
+            qualifiers: serde_json::Value::Null,
+            note: first_matching_line(body, &[".commit()", "conn.commit"]),
         });
     }
 
@@ -391,6 +473,7 @@ fn find_calls(body: &str, needle: &str) -> Vec<CallSite> {
     out
 }
 
+#[allow(dead_code)]
 fn contains_call(body: &str, needle: &str) -> bool {
     !find_calls(body, needle).is_empty()
 }

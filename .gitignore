@@ -12,3 +12,7 @@ Cargo.lock
 examples/sample-py-repo/.asd-state.db
 examples/sample-py-repo/.asd/
 .asd-state.db
+web/node_modules/
+web/build/
+web/.svelte-kit/
+web/package-lock.json
