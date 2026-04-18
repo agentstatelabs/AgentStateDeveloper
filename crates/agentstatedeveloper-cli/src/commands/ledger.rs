@@ -17,6 +17,27 @@ use crate::config::Config;
 pub enum LedgerCmd {
     /// Append a new ledger entry for a symbol.
     Append(AppendArgs),
+
+    /// Approve an entry currently tagged `awaiting-approval`. Flips the
+    /// tag to `approved` and records approver + timestamp on the entry.
+    Approve(ApproveArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ApproveArgs {
+    /// Entry id (e.g., `led_abc…`) to approve. Found by scanning the
+    /// ledger tree — no symbol qname needed.
+    pub entry_id: String,
+
+    /// Approver identifier. Recorded as `approved-by:<id>`.
+    #[arg(long)]
+    pub approver: String,
+
+    /// Approver kind (e.g., `human`, `senior_agent`). Must match one of
+    /// the `approver:*` tags the original entry was written with, unless
+    /// the id itself matches.
+    #[arg(long, default_value = "human")]
+    pub approver_kind: String,
 }
 
 #[derive(Debug, Args)]
@@ -86,7 +107,29 @@ impl From<CliAuthorKind> for AuthorKind {
 pub fn run(cfg: &Config, cmd: LedgerCmd) -> Result<()> {
     match cmd {
         LedgerCmd::Append(args) => append(cfg, args),
+        LedgerCmd::Approve(args) => approve(cfg, args),
     }
+}
+
+fn approve(cfg: &Config, args: ApproveArgs) -> Result<()> {
+    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let ledger_store = AsgLedgerStore { repo: &engine.repo };
+    let outcome = ledger_store.approve_entry(
+        &engine.ref_name,
+        &args.entry_id,
+        &args.approver,
+        &args.approver_kind,
+        &cfg.agent_id,
+    )?;
+
+    let out = json!({
+        "status": if outcome.already_approved { "already-approved" } else { "approved" },
+        "entry_id": outcome.entry.entry_id,
+        "symbol_id": outcome.entry.symbol_id,
+        "tags": outcome.entry.tags,
+    });
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
 }
 
 fn append(cfg: &Config, args: AppendArgs) -> Result<()> {

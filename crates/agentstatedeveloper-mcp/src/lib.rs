@@ -62,7 +62,11 @@ pub fn build_router(
         .route("/symbols/{qname}/effects", get(get_symbol_effects))
         .route("/symbols/{qname}/callers", get(get_symbol_callers))
         .route("/symbols/{qname}/callees", get(get_symbol_callees))
-        .route("/ledger", get(list_ledger));
+        .route("/ledger", get(list_ledger))
+        .route(
+            "/approvals/{entry_id}/approve",
+            axum::routing::post(approve_entry),
+        );
 
     let mut router = Router::new().nest("/api/v1", api);
 
@@ -332,6 +336,50 @@ async fn list_ledger(
 
     entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Ok(Json(entries))
+}
+
+/// Body for POST /approvals/:entry_id/approve.
+#[derive(Debug, Deserialize)]
+struct ApproveBody {
+    /// Approver id — recorded as `approved-by:<id>`.
+    approver: String,
+    /// Approver kind — must match one of the original `approver:*` tags.
+    #[serde(default = "default_approver_kind")]
+    approver_kind: String,
+    /// Optional commit agent id. Defaults to "asd-http".
+    #[serde(default = "default_http_agent_id")]
+    agent_id: String,
+}
+
+fn default_approver_kind() -> String {
+    "human".into()
+}
+
+fn default_http_agent_id() -> String {
+    "asd-http".into()
+}
+
+async fn approve_entry(
+    State(state): State<AppState>,
+    Path(entry_id): Path<String>,
+    Json(body): Json<ApproveBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let engine = state.engine.lock().await;
+    let ref_name = engine.ref_name.clone();
+    let ledger_store = AsgLedgerStore { repo: &engine.repo };
+    let outcome = ledger_store
+        .approve_entry(
+            &ref_name,
+            &entry_id,
+            &body.approver,
+            &body.approver_kind,
+            &body.agent_id,
+        )
+        .map_err(ApiError::from)?;
+    Ok(Json(json!({
+        "status": if outcome.already_approved { "already-approved" } else { "approved" },
+        "entry": outcome.entry,
+    })))
 }
 
 async fn get_symbol_effects(

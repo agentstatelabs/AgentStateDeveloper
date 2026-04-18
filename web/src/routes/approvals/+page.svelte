@@ -1,26 +1,45 @@
 <script lang="ts">
-	import { getAwaitingApproval } from '$lib/api';
+	import { getAwaitingApproval, approveEntry } from '$lib/api';
 	import type { LedgerEntry } from '$lib/types';
 	import { symbols, approvals } from '$lib/stores';
 
 	let entries = $state<LedgerEntry[]>([]);
 	let err = $state<string | null>(null);
 	let loading = $state(true);
+	let approver = $state('reviewer-1');
+	let approverKind = $state('human');
+	let pendingId = $state<string | null>(null);
+	let rowError = $state<Record<string, string>>({});
+
+	async function refresh() {
+		const list = await getAwaitingApproval();
+		entries = list;
+		approvals.set(list.length);
+	}
 
 	$effect(() => {
 		loading = true;
 		err = null;
-		getAwaitingApproval()
-			.then((list) => {
-				entries = list;
-				approvals.set(list.length);
-				loading = false;
-			})
+		refresh()
+			.then(() => (loading = false))
 			.catch((e) => {
 				err = String(e);
 				loading = false;
 			});
 	});
+
+	async function approve(entryId: string) {
+		pendingId = entryId;
+		rowError = { ...rowError, [entryId]: '' };
+		try {
+			await approveEntry(entryId, approver, approverKind);
+			await refresh();
+		} catch (e) {
+			rowError = { ...rowError, [entryId]: String(e) };
+		} finally {
+			pendingId = null;
+		}
+	}
 
 	function ts(s: string): string {
 		try {
@@ -41,6 +60,19 @@
 	<p class="muted">
 		Ledger entries gated by a policy that requires human or senior-agent attestation before they land.
 	</p>
+	<div class="approver-bar">
+		<label>
+			Approver
+			<input type="text" bind:value={approver} class="approver-input" />
+		</label>
+		<label>
+			Kind
+			<select bind:value={approverKind} class="approver-kind">
+				<option value="human">human</option>
+				<option value="senior_agent">senior_agent</option>
+			</select>
+		</label>
+	</div>
 </header>
 
 {#if loading}
@@ -79,6 +111,18 @@
 				{#if approvers.length > 0}
 					<div class="row-approvers">approvers: {approvers.join(', ')}</div>
 				{/if}
+				<div class="row-actions">
+					<button
+						class="approve-btn"
+						disabled={pendingId === le.entry_id}
+						onclick={() => approve(le.entry_id)}
+					>
+						{pendingId === le.entry_id ? 'approving…' : 'approve'}
+					</button>
+					{#if rowError[le.entry_id]}
+						<span class="row-err">{rowError[le.entry_id]}</span>
+					{/if}
+				</div>
 			</li>
 		{/each}
 	</ul>
@@ -206,5 +250,58 @@
 		color: var(--fg-dim);
 		font-size: 11px;
 		font-style: italic;
+	}
+	.approver-bar {
+		display: flex;
+		gap: 16px;
+		margin-top: 10px;
+		align-items: baseline;
+		font-size: 11px;
+		color: var(--fg-dim);
+	}
+	.approver-bar label {
+		display: flex;
+		gap: 6px;
+		align-items: baseline;
+	}
+	.approver-input,
+	.approver-kind {
+		background: var(--bg);
+		color: var(--fg);
+		border: 1px solid var(--border);
+		border-radius: 3px;
+		padding: 3px 6px;
+		font-family: inherit;
+		font-size: 11px;
+	}
+	.row-actions {
+		margin-top: 8px;
+		display: flex;
+		gap: 10px;
+		align-items: baseline;
+	}
+	.approve-btn {
+		background: rgba(111, 207, 151, 0.15);
+		color: var(--ok);
+		border: 1px solid rgba(111, 207, 151, 0.4);
+		border-radius: 3px;
+		padding: 4px 12px;
+		font-size: 11px;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		font-weight: 600;
+		cursor: pointer;
+		font-family: inherit;
+	}
+	.approve-btn:hover:not(:disabled) {
+		background: rgba(111, 207, 151, 0.25);
+	}
+	.approve-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+	.row-err {
+		color: var(--bad);
+		font-size: 11px;
 	}
 </style>

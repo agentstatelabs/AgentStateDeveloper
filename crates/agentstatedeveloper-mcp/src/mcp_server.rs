@@ -109,6 +109,23 @@ pub struct LedgerAppendParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct LedgerApproveParams {
+    /// Entry id (returned by a prior `ledger_append` call).
+    pub entry_id: String,
+    /// Approver identifier — recorded on the entry as `approved-by:<id>`.
+    pub approver: String,
+    /// Approver kind. Must match an `approver:*` tag on the original
+    /// entry (e.g., "human", "senior_agent") unless `approver` itself
+    /// matches directly.
+    #[serde(default = "default_approver_kind_mcp")]
+    pub approver_kind: String,
+}
+
+fn default_approver_kind_mcp() -> String {
+    "human".to_string()
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct EffectDeclareParams {
     /// Fully-qualified symbol name.
     pub qname: String,
@@ -532,6 +549,30 @@ impl AsdMcpServer {
             "status": status,
         }))
         .unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[tool(
+        description = "Approve a ledger entry currently tagged `awaiting-approval`. Flips tags to `approved` + records `approved-by:<approver>` and `approved-at:<timestamp>`. Scans ledger by entry_id — no qname needed. Enforces that the approver kind/id matches one of the original entry's `approver:*` tags."
+    )]
+    async fn ledger_approve(&self, params: Parameters<LedgerApproveParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        match ledger_store.approve_entry(
+            &ref_name,
+            &p.entry_id,
+            &p.approver,
+            &p.approver_kind,
+            "asd-mcp",
+        ) {
+            Ok(outcome) => serde_json::to_string(&serde_json::json!({
+                "status": if outcome.already_approved { "already-approved" } else { "approved" },
+                "entry": outcome.entry,
+            }))
+            .unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
     }
 
     #[tool(

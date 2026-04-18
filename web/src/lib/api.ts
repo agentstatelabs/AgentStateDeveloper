@@ -50,3 +50,29 @@ export function getLedgerByTag(tag?: string): Promise<LedgerEntry[]> {
 export function getAwaitingApproval(): Promise<LedgerEntry[]> {
 	return getLedgerByTag('awaiting-approval');
 }
+
+export interface ApproveResponse {
+	status: 'approved' | 'already-approved';
+	entry: LedgerEntry;
+}
+
+/// Approve a ledger entry currently tagged `awaiting-approval`.
+export async function approveEntry(
+	entryId: string,
+	approver: string,
+	approverKind: string = 'human'
+): Promise<ApproveResponse> {
+	const res = await fetch(
+		`${API_BASE}/api/v1/approvals/${encodeURIComponent(entryId)}/approve`,
+		{
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ approver, approver_kind: approverKind, agent_id: 'asd-lens' })
+		}
+	);
+	if (!res.ok) {
+		const text = await res.text();
+		throw new Error(`${res.status} ${res.statusText} — ${text}`);
+	}
+	return (await res.json()) as ApproveResponse;
+}
