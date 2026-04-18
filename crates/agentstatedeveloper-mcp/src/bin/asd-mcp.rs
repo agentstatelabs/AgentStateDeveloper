@@ -1,78 +1,48 @@
-//! `asd-mcp` — MCP server stub for AgentStateDeveloper.
+//! `asd-mcp` — AgentStateDeveloper MCP stdio server.
 //!
-//! M1 placeholder: prints the planned MCP tool surface to stderr and exits 0.
-//! The real stdio/HTTP MCP server lands in M2.
+//! Opens an ASD SQLite database and serves the MCP tool surface over stdio.
+//! MCP uses stdout for protocol frames, so all logging is routed to stderr.
+//!
+//! Env:
+//! - `ASD_DB` — path to SQLite db (default: `./.asd-state.db`)
 
-use anyhow::Result;
+use std::path::PathBuf;
+use std::sync::Arc;
 
-/// (name, one-line purpose) — mirrors DESIGN.md § "MCP tool surface".
-const READ_TOOLS: &[(&str, &str)] = &[
-    ("code_query", "find symbols by name/kind/file/tag/effect"),
-    (
-        "code_read",
-        "fetch symbol source with declared effects + top ledger entries inline (primary \"read a function\" path)",
-    ),
-    ("callers_of", "inbound call edges for a symbol"),
-    ("callees_of", "outbound call edges"),
-    (
-        "effects_of",
-        "declared + transitive effects, with verification status",
-    ),
-    ("ledger_get", "entries for a symbol (non-superseded by default)"),
-    (
-        "ledger_find",
-        "search ledger by kind, tag, author, date, free-text",
-    ),
-    ("traces_of", "execution evidence for a symbol"),
-];
+use agentstatedeveloper_core::Engine;
+use agentstatedeveloper_mcp::AsdMcpServer;
+use anyhow::{Context, Result};
+use rmcp::ServiceExt;
+use tokio::sync::Mutex;
 
-const WRITE_TOOLS: &[(&str, &str)] = &[
-    (
-        "ledger_append",
-        "new entry (symbol_id, kind, summary required)",
-    ),
-    (
-        "ledger_supersede",
-        "write new entry that supersedes one or more existing",
-    ),
-    (
-        "effect_declare",
-        "set/replace declared effects for a symbol; triggers re-verify",
-    ),
-];
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Write all tracing output to stderr — stdout is reserved for MCP frames.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
 
-const ADMIN_TOOLS: &[(&str, &str)] = &[
-    (
-        "verify_effects",
-        "run checker against declared effects; returns mismatches",
-    ),
-    (
-        "reindex",
-        "force re-parse of file or symbol (normally automatic)",
-    ),
-    (
-        "health",
-        "indexer status, last-sync per file, orphaned-entry count",
-    ),
-];
+    let db_path = PathBuf::from(
+        std::env::var("ASD_DB").unwrap_or_else(|_| "./.asd-state.db".to_string()),
+    );
 
-fn print_section(title: &str, tools: &[(&str, &str)]) {
-    eprintln!("{}:", title);
-    for (name, purpose) in tools {
-        eprintln!("  {} — {}", name, purpose);
-    }
-    eprintln!();
-}
+    tracing::info!(?db_path, "starting asd-mcp stdio server");
 
-fn main() -> Result<()> {
-    eprintln!("asd-mcp — AgentStateDeveloper MCP server (M1 stub)");
-    eprintln!("planned MCP tool surface:");
-    eprintln!();
+    let engine = Engine::open_sqlite(&db_path)
+        .with_context(|| format!("failed to open ASD db at {}", db_path.display()))?;
+    let shared = Arc::new(Mutex::new(engine));
 
-    print_section("Read", READ_TOOLS);
-    print_section("Write", WRITE_TOOLS);
-    print_section("Admin", ADMIN_TOOLS);
+    let server = AsdMcpServer::new(shared);
+    let service = server
+        .serve(rmcp::transport::stdio())
+        .await
+        .map_err(|e| anyhow::anyhow!("MCP server error: {}", e))?;
 
-    eprintln!("Note: M1 stub — real MCP server lands in M2.");
+    service.waiting().await?;
+    tracing::info!("asd-mcp shut down");
     Ok(())
 }

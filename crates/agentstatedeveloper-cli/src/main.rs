@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 mod config;
 mod commands;
 
-use commands::{init, index, ledger, read, verify_effects};
+use commands::{init, index, ledger, read, trace, verify_effects};
 
 /// AgentStateDeveloper — code-level context and audit overlay.
 #[derive(Debug, Parser)]
@@ -39,6 +39,10 @@ enum Command {
 
     /// Verify declared effects for a symbol (M1: prints declared as unverified).
     VerifyEffects(verify_effects::VerifyEffectsArgs),
+
+    /// Run a Python program under the ASD runtime tracer and ingest the
+    /// observed effects into ASG.
+    Trace(trace::TraceArgs),
 }
 
 fn main() -> Result<()> {
@@ -51,5 +55,6 @@ fn main() -> Result<()> {
         Command::Read(args) => read::run(&cfg, args),
         Command::Ledger(sub) => ledger::run(&cfg, sub),
         Command::VerifyEffects(args) => verify_effects::run(&cfg, args),
+        Command::Trace(args) => trace::run(&cfg, args),
     }
 }

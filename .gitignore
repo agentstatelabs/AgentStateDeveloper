@@ -16,3 +16,6 @@ web/node_modules/
 web/build/
 web/.svelte-kit/
 web/package-lock.json
+.asd-trace.json
+examples/sample-py-repo/.asd-trace.json
+examples/**/.asd-trace.json
