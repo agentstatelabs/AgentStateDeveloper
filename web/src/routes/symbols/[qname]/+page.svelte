@@ -1,9 +1,11 @@
 <script lang="ts">
-	import { getSymbolDetail } from '$lib/api';
-	import type { SymbolDetail } from '$lib/types';
+	import { getSymbolDetail, getCallers, getCallees } from '$lib/api';
+	import type { SymbolDetail, SymbolSummary } from '$lib/types';
 	import { page } from '$app/state';
 
 	let detail = $state<SymbolDetail | null>(null);
+	let callers = $state<SymbolSummary[]>([]);
+	let callees = $state<SymbolSummary[]>([]);
 	let err = $state<string | null>(null);
 	let loading = $state(true);
 
@@ -14,6 +16,8 @@
 		loading = true;
 		err = null;
 		detail = null;
+		callers = [];
+		callees = [];
 		getSymbolDetail(q)
 			.then((d) => {
 				detail = d;
@@ -23,6 +27,8 @@
 				err = String(e);
 				loading = false;
 			});
+		getCallers(q).then((c) => (callers = c)).catch(() => {});
+		getCallees(q).then((c) => (callees = c)).catch(() => {});
 	});
 
 	function fmtQualifiers(q: unknown): string | null {
@@ -108,6 +114,43 @@
 		{:else}
 			<div class="muted">no effect record</div>
 		{/if}
+	</section>
+
+	<section class="call-graph">
+		<div class="cg-col">
+			<h2>Called by ({callers.length})</h2>
+			{#if callers.length === 0}
+				<div class="muted">no known callers in index</div>
+			{:else}
+				<ul class="cg-list">
+					{#each callers as c}
+						<li>
+							<a href="/symbols/{encodeURIComponent(c.qname)}">
+								<span class="kind {c.kind}">{c.kind}</span>
+								<span class="qname">{c.qname}</span>
+							</a>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		</div>
+		<div class="cg-col">
+			<h2>Calls ({callees.length})</h2>
+			{#if callees.length === 0}
+				<div class="muted">no known callees in index</div>
+			{:else}
+				<ul class="cg-list">
+					{#each callees as c}
+						<li>
+							<a href="/symbols/{encodeURIComponent(c.qname)}">
+								<span class="kind {c.kind}">{c.kind}</span>
+								<span class="qname">{c.qname}</span>
+							</a>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		</div>
 	</section>
 
 	<section>
@@ -326,5 +369,29 @@
 	}
 	.error {
 		color: var(--bad);
+	}
+	.call-graph {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 24px;
+	}
+	.cg-col {
+		min-width: 0;
+	}
+	.cg-list {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+	}
+	.cg-list li a {
+		display: grid;
+		grid-template-columns: 60px 1fr;
+		gap: 8px;
+		padding: 6px 10px;
+		border-radius: 4px;
+		align-items: baseline;
+	}
+	.cg-list li a:hover {
+		background: var(--bg-hover);
 	}
 </style>

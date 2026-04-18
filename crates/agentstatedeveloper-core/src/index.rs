@@ -8,6 +8,18 @@ use crate::schema::Symbol;
 pub trait IndexStore {
     fn put_symbol(&self, ref_name: &str, symbol: &Symbol, agent_id: &str) -> Result<()>;
     fn get_symbol_by_qname(&self, ref_name: &str, qname: &str) -> Result<Option<Symbol>>;
+
+    /// Read the callees list previously written for `symbol_id`. Returns an
+    /// empty Vec if no edges have been recorded.
+    fn get_callees(&self, _ref_name: &str, _symbol_id: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    /// Read the callers list previously written for `symbol_id`. Returns an
+    /// empty Vec if no edges have been recorded.
+    fn get_callers(&self, _ref_name: &str, _symbol_id: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 }
 
 pub struct AsgIndexStore<'a> {
@@ -45,4 +57,31 @@ impl<'a> IndexStore for AsgIndexStore<'a> {
             Err(_) => Ok(None),
         }
     }
+
+    fn get_callees(&self, ref_name: &str, symbol_id: &str) -> Result<Vec<String>> {
+        let path = paths::callees_path(symbol_id);
+        match self.repo.get_json(ref_name, &path) {
+            Ok(v) => Ok(extract_string_array(&v, "callees")),
+            Err(_) => Ok(Vec::new()),
+        }
+    }
+
+    fn get_callers(&self, ref_name: &str, symbol_id: &str) -> Result<Vec<String>> {
+        let path = paths::callers_path(symbol_id);
+        match self.repo.get_json(ref_name, &path) {
+            Ok(v) => Ok(extract_string_array(&v, "callers")),
+            Err(_) => Ok(Vec::new()),
+        }
+    }
+}
+
+fn extract_string_array(v: &serde_json::Value, field: &str) -> Vec<String> {
+    v.get(field)
+        .and_then(|f| f.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
 }

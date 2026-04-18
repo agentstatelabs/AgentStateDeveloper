@@ -31,3 +31,11 @@ export function getLedger(qname: string): Promise<LedgerEntry[]> {
 export function getEffects(qname: string): Promise<EffectDecl | null> {
 	return getJson<EffectDecl | null>(`/api/v1/symbols/${encodeURIComponent(qname)}/effects`);
 }
+
+export function getCallers(qname: string): Promise<SymbolSummary[]> {
+	return getJson<SymbolSummary[]>(`/api/v1/symbols/${encodeURIComponent(qname)}/callers`);
+}
+
+export function getCallees(qname: string): Promise<SymbolSummary[]> {
+	return getJson<SymbolSummary[]>(`/api/v1/symbols/${encodeURIComponent(qname)}/callees`);
+}

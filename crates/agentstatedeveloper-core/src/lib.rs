@@ -14,8 +14,9 @@ pub mod paths;
 pub mod policy;
 pub mod schema;
 pub mod symbol;
+pub mod transitive;
 
-pub use adapter::{LanguageAdapter, ParsedSymbol};
+pub use adapter::{CallEdge, LanguageAdapter, ParsedSymbol};
 pub use effects::{AsgEffectStore, EffectStore};
 pub use engine::Engine;
 pub use error::{AsdError, Result};
@@ -28,3 +29,4 @@ pub use schema::{
     Verification, VerificationSource, VerificationStatus,
 };
 pub use symbol::{REBIND_SIMILARITY_THRESHOLD, canonical_symbol_id, symbol_fingerprint};
+pub use transitive::propagate_transitive;

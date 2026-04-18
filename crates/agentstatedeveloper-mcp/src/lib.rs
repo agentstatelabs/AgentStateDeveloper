@@ -59,7 +59,9 @@ pub fn build_router(
         .route("/symbols", get(list_symbols))
         .route("/symbols/{qname}", get(get_symbol))
         .route("/symbols/{qname}/ledger", get(get_symbol_ledger))
-        .route("/symbols/{qname}/effects", get(get_symbol_effects));
+        .route("/symbols/{qname}/effects", get(get_symbol_effects))
+        .route("/symbols/{qname}/callers", get(get_symbol_callers))
+        .route("/symbols/{qname}/callees", get(get_symbol_callees));
 
     let mut router = Router::new().nest("/api/v1", api);
 
@@ -217,6 +219,73 @@ async fn get_symbol_ledger(
         .list_entries(&ref_name, &symbol.symbol_id)
         .map_err(ApiError::from)?;
     Ok(Json(entries))
+}
+
+async fn get_symbol_callers(
+    State(state): State<AppState>,
+    Path(qname): Path<String>,
+) -> Result<Json<Vec<agentstatedeveloper_core::Symbol>>, ApiError> {
+    let engine = state.engine.lock().await;
+    let ref_name = engine.ref_name.clone();
+    let index = AsgIndexStore { repo: &engine.repo };
+    let target = index
+        .get_symbol_by_qname(&ref_name, &qname)
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::NotFound(format!("symbol not found: {}", qname)))?;
+    let ids = index
+        .get_callers(&ref_name, &target.symbol_id)
+        .map_err(ApiError::from)?;
+    let syms = resolve_symbols_by_ids(&engine, &ids).map_err(ApiError::from)?;
+    Ok(Json(syms))
+}
+
+async fn get_symbol_callees(
+    State(state): State<AppState>,
+    Path(qname): Path<String>,
+) -> Result<Json<Vec<agentstatedeveloper_core::Symbol>>, ApiError> {
+    let engine = state.engine.lock().await;
+    let ref_name = engine.ref_name.clone();
+    let index = AsgIndexStore { repo: &engine.repo };
+    let target = index
+        .get_symbol_by_qname(&ref_name, &qname)
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::NotFound(format!("symbol not found: {}", qname)))?;
+    let ids = index
+        .get_callees(&ref_name, &target.symbol_id)
+        .map_err(ApiError::from)?;
+    let syms = resolve_symbols_by_ids(&engine, &ids).map_err(ApiError::from)?;
+    Ok(Json(syms))
+}
+
+/// Resolve a list of `symbol_id`s to full `Symbol` records by scanning the
+/// qname index. O(N) per lookup; acceptable for M4 solo-dev scale.
+fn resolve_symbols_by_ids(
+    engine: &Engine,
+    ids: &[String],
+) -> agentstatedeveloper_core::Result<Vec<agentstatedeveloper_core::Symbol>> {
+    let ref_name = &engine.ref_name;
+    let prefix = format!("{}/index/by-qname", agentstatedeveloper_core::ASD_PATH_PREFIX);
+    let tree = match engine.repo.get_tree(ref_name, &prefix) {
+        Ok(t) => t,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let qnames: Vec<String> = match tree {
+        serde_json::Value::Object(map) => map.keys().cloned().collect(),
+        _ => return Ok(Vec::new()),
+    };
+
+    let index = AsgIndexStore { repo: &engine.repo };
+    let id_set: std::collections::HashSet<&String> = ids.iter().collect();
+    let mut out = Vec::new();
+    for qn in qnames {
+        if let Some(sym) = index.get_symbol_by_qname(ref_name, &qn)? {
+            if id_set.contains(&sym.symbol_id) {
+                out.push(sym);
+            }
+        }
+    }
+    out.sort_by(|a, b| a.qname.cmp(&b.qname));
+    Ok(out)
 }
 
 async fn get_symbol_effects(

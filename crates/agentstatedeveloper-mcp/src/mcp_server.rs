@@ -3,6 +3,7 @@
 //!
 //! Patterns mirror `agentstategraph-mcp::server` (same `rmcp` version).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -21,6 +22,7 @@ use agentstatedeveloper_core::{
 #[derive(Clone)]
 pub struct AsdMcpServer {
     engine: Arc<Mutex<Engine>>,
+    db_path: PathBuf,
     tool_router: ToolRouter<Self>,
 }
 
@@ -47,6 +49,18 @@ pub struct CodeReadParams {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct EffectsOfParams {
+    /// Fully-qualified symbol name.
+    pub qname: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CallersOfParams {
+    /// Fully-qualified symbol name.
+    pub qname: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CalleesOfParams {
     /// Fully-qualified symbol name.
     pub qname: String,
 }
@@ -116,9 +130,10 @@ fn default_author_id() -> String {
 
 #[tool_router]
 impl AsdMcpServer {
-    pub fn new(engine: Arc<Mutex<Engine>>) -> Self {
+    pub fn new(engine: Arc<Mutex<Engine>>, db_path: PathBuf) -> Self {
         Self {
             engine,
+            db_path,
             tool_router: Self::tool_router(),
         }
     }
@@ -136,9 +151,15 @@ impl AsdMcpServer {
             Ok(serde_json::Value::Object(map)) => map.len(),
             _ => 0,
         };
+        let db_path = self
+            .db_path
+            .canonicalize()
+            .unwrap_or_else(|_| self.db_path.clone())
+            .to_string_lossy()
+            .to_string();
         let payload = serde_json::json!({
             "status": "ok",
-            "db_path": "(engine)",
+            "db_path": db_path,
             "symbol_count": symbol_count,
         });
         serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())
@@ -260,6 +281,54 @@ impl AsdMcpServer {
             Ok(None) => "null".to_string(),
             Err(e) => err_json(&e.to_string()),
         }
+    }
+
+    #[tool(
+        description = "List symbols that call the given symbol (inbound call edges, intra-module)."
+    )]
+    async fn callers_of(&self, params: Parameters<CallersOfParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let index = AsgIndexStore { repo: &engine.repo };
+        let target = match index.get_symbol_by_qname(&ref_name, &p.qname) {
+            Ok(Some(s)) => s,
+            Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
+            Err(e) => return err_json(&e.to_string()),
+        };
+        let ids = match index.get_callers(&ref_name, &target.symbol_id) {
+            Ok(v) => v,
+            Err(e) => return err_json(&e.to_string()),
+        };
+        let syms = match resolve_symbols_by_ids(&engine, &ids) {
+            Ok(v) => v,
+            Err(e) => return err_json(&e.to_string()),
+        };
+        serde_json::to_string(&syms).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    #[tool(
+        description = "List symbols called by the given symbol (outbound call edges, intra-module)."
+    )]
+    async fn callees_of(&self, params: Parameters<CalleesOfParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let index = AsgIndexStore { repo: &engine.repo };
+        let target = match index.get_symbol_by_qname(&ref_name, &p.qname) {
+            Ok(Some(s)) => s,
+            Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
+            Err(e) => return err_json(&e.to_string()),
+        };
+        let ids = match index.get_callees(&ref_name, &target.symbol_id) {
+            Ok(v) => v,
+            Err(e) => return err_json(&e.to_string()),
+        };
+        let syms = match resolve_symbols_by_ids(&engine, &ids) {
+            Ok(v) => v,
+            Err(e) => return err_json(&e.to_string()),
+        };
+        serde_json::to_string(&syms).unwrap_or_else(|_| "[]".to_string())
     }
 
     #[tool(
@@ -486,4 +555,33 @@ fn parse_author_kind(s: &str) -> Result<AuthorKind, String> {
         "human" => Ok(AuthorKind::Human),
         other => Err(format!("unknown author kind: {}", other)),
     }
+}
+
+/// Resolve symbol_ids to full Symbol records by scanning the qname index.
+fn resolve_symbols_by_ids(
+    engine: &Engine,
+    ids: &[String],
+) -> agentstatedeveloper_core::Result<Vec<agentstatedeveloper_core::Symbol>> {
+    let ref_name = &engine.ref_name;
+    let prefix = format!("{}/index/by-qname", agentstatedeveloper_core::ASD_PATH_PREFIX);
+    let tree = match engine.repo.get_tree(ref_name, &prefix) {
+        Ok(t) => t,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let qnames: Vec<String> = match tree {
+        serde_json::Value::Object(map) => map.keys().cloned().collect(),
+        _ => return Ok(Vec::new()),
+    };
+    let index = AsgIndexStore { repo: &engine.repo };
+    let id_set: std::collections::HashSet<&String> = ids.iter().collect();
+    let mut out = Vec::new();
+    for qn in qnames {
+        if let Some(sym) = index.get_symbol_by_qname(ref_name, &qn)? {
+            if id_set.contains(&sym.symbol_id) {
+                out.push(sym);
+            }
+        }
+    }
+    out.sort_by(|a, b| a.qname.cmp(&b.qname));
+    Ok(out)
 }

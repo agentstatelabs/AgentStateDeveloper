@@ -24,3 +24,8 @@ tokio = { workspace = true }
 chrono = { workspace = true }
 directories = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+agentstatedeveloper-core = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }

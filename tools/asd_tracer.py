@@ -27,9 +27,11 @@ Limitations (M3):
     are not traced; we only record that the parent invoked them.
   * Threads other than the main thread are not traced (``sys.settrace`` only
     installs on the current thread).
-  * Monkeypatching coverage is intentionally narrow: ``open``, ``print``,
-    ``logging`` module functions, any ``Logger`` method, ``time.sleep``,
-    ``time.time``, ``time.monotonic``. Enough to demonstrate the pipeline.
+  * Monkeypatching coverage: ``open``, ``print``, ``logging`` module functions,
+    any ``Logger`` method, ``time.sleep``, ``time.time``, ``time.monotonic``,
+    ``subprocess`` / ``os.system`` / ``os.exec*`` / ``os.spawn*`` (proc.spawn),
+    ``os.environ`` reads (env.read), ``urllib`` / ``http.client`` (io.net.out),
+    ``random`` / ``secrets`` (random). Enough to demonstrate the pipeline.
 """
 
 from __future__ import annotations
@@ -307,6 +309,236 @@ def _install_patches() -> None:
         return _orig_mono()
 
     time.monotonic = mono_patch  # type: ignore[assignment]
+
+    # -- subprocess / os.system / os.exec* / os.spawn* --------------------
+    def _argv_note(args, kwargs) -> str:
+        """Best-effort stringification of the first positional arg as a note."""
+        try:
+            if args:
+                first = args[0]
+            elif "args" in kwargs:
+                first = kwargs["args"]
+            elif "cmd" in kwargs:
+                first = kwargs["cmd"]
+            elif "path" in kwargs:
+                first = kwargs["path"]
+            else:
+                return ""
+            if isinstance(first, (list, tuple)):
+                return " ".join(str(x) for x in first)
+            return str(first)
+        except Exception:  # pragma: no cover
+            return ""
+
+    import subprocess as _subprocess
+
+    for _name in ("Popen", "run", "call", "check_call", "check_output"):
+        _orig = getattr(_subprocess, _name, None)
+        if _orig is None:
+            continue
+
+        def _wrap_subproc(orig=_orig, name=_name):
+            def wrapper(*args, **kwargs):
+                TRACER.record_effect(
+                    "proc.spawn", f"subprocess.{name}({_argv_note(args, kwargs)})"
+                )
+                return orig(*args, **kwargs)
+
+            return wrapper
+
+        try:
+            setattr(_subprocess, _name, _wrap_subproc())
+        except (AttributeError, TypeError):
+            pass
+
+    # os.system / os.exec* / os.spawn*
+    _os_proc_names = [
+        "system",
+        "execv",
+        "execve",
+        "execvp",
+        "execvpe",
+        "execl",
+        "execle",
+        "execlp",
+        "execlpe",
+        "spawnv",
+        "spawnve",
+        "spawnvp",
+        "spawnvpe",
+        "spawnl",
+        "spawnle",
+        "spawnlp",
+        "spawnlpe",
+        "posix_spawn",
+        "posix_spawnp",
+    ]
+    for _name in _os_proc_names:
+        _orig = getattr(os, _name, None)
+        if _orig is None:
+            continue
+
+        def _wrap_os_proc(orig=_orig, name=_name):
+            def wrapper(*args, **kwargs):
+                TRACER.record_effect(
+                    "proc.spawn", f"os.{name}({_argv_note(args, kwargs)})"
+                )
+                return orig(*args, **kwargs)
+
+            return wrapper
+
+        try:
+            setattr(os, _name, _wrap_os_proc())
+        except (AttributeError, TypeError):
+            pass
+
+    # -- env.read: os.environ + os.getenv ---------------------------------
+    # Replacing os.environ entirely is risky; instead, monkey-patch
+    # __getitem__/get on the class of the live mapping.
+    _orig_environ = os.environ
+    _orig_environ_getitem = type(_orig_environ).__getitem__
+    _orig_environ_get = type(_orig_environ).get
+
+    def _environ_getitem(self, key):
+        try:
+            note = str(key)
+        except Exception:
+            note = ""
+        TRACER.record_effect("env.read", note)
+        return _orig_environ_getitem(self, key)
+
+    def _environ_get(self, key, *args, **kwargs):
+        try:
+            note = str(key)
+        except Exception:
+            note = ""
+        TRACER.record_effect("env.read", note)
+        return _orig_environ_get(self, key, *args, **kwargs)
+
+    try:
+        type(_orig_environ).__getitem__ = _environ_getitem  # type: ignore[assignment]
+        type(_orig_environ).get = _environ_get  # type: ignore[assignment]
+    except (AttributeError, TypeError):
+        pass
+
+    _orig_getenv = os.getenv
+
+    def getenv_patch(key, *args, **kwargs):
+        try:
+            note = str(key)
+        except Exception:
+            note = ""
+        TRACER.record_effect("env.read", note)
+        return _orig_getenv(key, *args, **kwargs)
+
+    os.getenv = getenv_patch  # type: ignore[assignment]
+
+    # -- io.net.out: urllib + http.client ---------------------------------
+    try:
+        import urllib.request as _urllib_request
+    except Exception:  # pragma: no cover
+        _urllib_request = None  # type: ignore[assignment]
+
+    if _urllib_request is not None:
+        _orig_urlopen = _urllib_request.urlopen
+
+        def urlopen_patch(url, *args, **kwargs):
+            try:
+                note = url.full_url if hasattr(url, "full_url") else str(url)
+            except Exception:
+                note = ""
+            TRACER.record_effect("io.net.out", f"urlopen({note})")
+            return _orig_urlopen(url, *args, **kwargs)
+
+        try:
+            _urllib_request.urlopen = urlopen_patch  # type: ignore[assignment]
+        except (AttributeError, TypeError):
+            pass
+
+    try:
+        import http.client as _http_client
+    except Exception:  # pragma: no cover
+        _http_client = None  # type: ignore[assignment]
+
+    if _http_client is not None:
+        for _name in ("HTTPConnection", "HTTPSConnection"):
+            _orig_cls = getattr(_http_client, _name, None)
+            if _orig_cls is None:
+                continue
+            _orig_init = _orig_cls.__init__
+
+            def _wrap_init(orig_init=_orig_init, name=_name):
+                def init_wrapper(self, host="", *args, **kwargs):
+                    try:
+                        note = str(host)
+                    except Exception:
+                        note = ""
+                    TRACER.record_effect("io.net.out", f"{name}({note})")
+                    return orig_init(self, host, *args, **kwargs)
+
+                return init_wrapper
+
+            try:
+                _orig_cls.__init__ = _wrap_init()  # type: ignore[assignment]
+            except (AttributeError, TypeError):
+                pass
+
+    # -- random: random + secrets -----------------------------------------
+    import random as _random
+
+    for _name in (
+        "random",
+        "randint",
+        "choice",
+        "randrange",
+        "uniform",
+        "shuffle",
+        "sample",
+    ):
+        _orig = getattr(_random, _name, None)
+        if _orig is None:
+            continue
+
+        def _wrap_random(orig=_orig, name=_name):
+            def wrapper(*args, **kwargs):
+                TRACER.record_effect("random", f"random.{name}")
+                return orig(*args, **kwargs)
+
+            return wrapper
+
+        try:
+            setattr(_random, _name, _wrap_random())
+        except (AttributeError, TypeError):
+            pass
+
+    try:
+        import secrets as _secrets
+    except Exception:  # pragma: no cover
+        _secrets = None  # type: ignore[assignment]
+
+    if _secrets is not None:
+        for _name in (
+            "randbits",
+            "token_bytes",
+            "token_hex",
+            "token_urlsafe",
+            "choice",
+        ):
+            _orig = getattr(_secrets, _name, None)
+            if _orig is None:
+                continue
+
+            def _wrap_secrets(orig=_orig, name=_name):
+                def wrapper(*args, **kwargs):
+                    TRACER.record_effect("random", f"secrets.{name}")
+                    return orig(*args, **kwargs)
+
+                return wrapper
+
+            try:
+                setattr(_secrets, _name, _wrap_secrets())
+            except (AttributeError, TypeError):
+                pass
 
 
 # ---------------------------------------------------------------------------

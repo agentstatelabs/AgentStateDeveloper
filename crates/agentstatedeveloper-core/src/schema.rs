@@ -114,7 +114,7 @@ pub struct Effect {
     pub note: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EffectCategory {
     #[serde(rename = "io.fs.read")]
     IoFsRead,

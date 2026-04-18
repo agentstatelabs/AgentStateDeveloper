@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
         .with_context(|| format!("failed to open ASD db at {}", db_path.display()))?;
     let shared = Arc::new(Mutex::new(engine));
 
-    let server = AsdMcpServer::new(shared);
+    let server = AsdMcpServer::new(shared, db_path.clone());
     let service = server
         .serve(rmcp::transport::stdio())
         .await

@@ -4,7 +4,9 @@
 //! on top of `tree-sitter-python`. Parses module-level functions, methods,
 //! and classes, and runs a small substring-based effect inference pass.
 
-use agentstatedeveloper_core::adapter::{LanguageAdapter, ParsedSymbol};
+use std::collections::{HashMap, HashSet};
+
+use agentstatedeveloper_core::adapter::{CallEdge, LanguageAdapter, ParsedSymbol};
 use agentstatedeveloper_core::error::{AsdError, Result};
 use agentstatedeveloper_core::schema::{Effect, EffectCategory, SymbolKind};
 use serde_json::json;
@@ -45,6 +47,15 @@ impl LanguageAdapter for PythonAdapter {
 
     fn infer_effects(&self, _source: &str, symbol: &ParsedSymbol) -> Vec<Effect> {
         infer_effects_from_body(&symbol.body)
+    }
+
+    fn extract_call_edges(
+        &self,
+        file: &str,
+        _source: &str,
+        symbols: &[ParsedSymbol],
+    ) -> Vec<CallEdge> {
+        extract_call_edges_impl(file, symbols)
     }
 }
 
@@ -646,6 +657,210 @@ fn has_raise_statement(body: &str) -> bool {
     false
 }
 
+// -----------------------------------------------------------------------------
+// Call-edge extraction (intra-module)
+// -----------------------------------------------------------------------------
+
+/// Build the (caller_qname -> callee_qname) edge set for one file. Resolution
+/// is intra-module only and best-effort:
+///
+/// - `identifier()` -> resolve via the module's `simple_name -> qname` map.
+/// - `Class.method()` -> resolve `<module>.Class.method`.
+/// - `self.method()` inside `<module>.Class.<fn>` -> resolve to `<module>.Class.method`.
+///
+/// Anything we can't resolve (subscripts, lambdas, cross-module calls, dynamic
+/// dispatch) is silently skipped.
+fn extract_call_edges_impl(file: &str, symbols: &[ParsedSymbol]) -> Vec<CallEdge> {
+    let module_prefix = module_qname_prefix(file);
+
+    // All known qnames in this file.
+    let known: HashSet<&str> = symbols.iter().map(|s| s.qname.as_str()).collect();
+
+    // simple_name -> qname for single-identifier resolution. If two symbols
+    // share a simple name (e.g. method/function collision), we keep the first
+    // module-level one we see; this is best-effort by design.
+    let mut by_simple: HashMap<String, String> = HashMap::new();
+    for s in symbols {
+        let simple = s.qname.rsplit('.').next().unwrap_or(&s.qname).to_string();
+        // Prefer module-level functions/classes over nested entries: only fill
+        // if the qname has exactly module_prefix + "." + simple.
+        let module_level = if module_prefix.is_empty() {
+            s.qname == simple
+        } else {
+            s.qname == format!("{}.{}", module_prefix, simple)
+        };
+        if module_level {
+            by_simple.insert(simple, s.qname.clone());
+        } else {
+            by_simple.entry(simple).or_insert_with(|| s.qname.clone());
+        }
+    }
+
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_python::LANGUAGE.into())
+        .is_err()
+    {
+        return Vec::new();
+    }
+
+    let mut edges: HashSet<CallEdge> = HashSet::new();
+
+    for sym in symbols {
+        // Only function and method bodies can contain calls in a meaningful
+        // sense; skip class/module symbols (their bodies' calls are usually
+        // attributed to a wrapping function anyway).
+        if !matches!(sym.kind, SymbolKind::Function | SymbolKind::Method) {
+            continue;
+        }
+
+        let src_bytes = sym.body.as_bytes();
+        let tree = match parser.parse(src_bytes, None) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        // The parsed body is a `function_definition` at (or near) the root —
+        // walk the whole tree and pick up every `call` node.
+        let enclosing_class = enclosing_class_qname(&sym.qname, &module_prefix, &known);
+        collect_calls(
+            tree.root_node(),
+            src_bytes,
+            sym,
+            &module_prefix,
+            &by_simple,
+            &known,
+            enclosing_class.as_deref(),
+            &mut edges,
+        );
+    }
+
+    let mut out: Vec<CallEdge> = edges.into_iter().collect();
+    out.sort_by(|a, b| {
+        a.caller_qname
+            .cmp(&b.caller_qname)
+            .then_with(|| a.callee_qname.cmp(&b.callee_qname))
+    });
+    out
+}
+
+/// For a method qname like `mod.Class.m`, return `Some("mod.Class")` provided
+/// `mod.Class` is a known symbol in this file. Otherwise `None`.
+fn enclosing_class_qname(
+    qname: &str,
+    module_prefix: &str,
+    known: &HashSet<&str>,
+) -> Option<String> {
+    let parts: Vec<&str> = qname.split('.').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    // Drop the function/method name; look for the deepest ancestor that is a
+    // known symbol AND lives below `module_prefix`.
+    for end in (1..parts.len()).rev() {
+        let candidate = parts[..end].join(".");
+        if !module_prefix.is_empty() && !candidate.starts_with(module_prefix) {
+            continue;
+        }
+        if known.contains(candidate.as_str()) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_calls(
+    node: Node<'_>,
+    src: &[u8],
+    sym: &ParsedSymbol,
+    module_prefix: &str,
+    by_simple: &HashMap<String, String>,
+    known: &HashSet<&str>,
+    enclosing_class: Option<&str>,
+    out: &mut HashSet<CallEdge>,
+) {
+    if node.kind() == "call" {
+        if let Some(func) = node.child_by_field_name("function") {
+            if let Some(callee) =
+                resolve_callee(func, src, module_prefix, by_simple, known, enclosing_class)
+            {
+                out.insert(CallEdge {
+                    caller_qname: sym.qname.clone(),
+                    callee_qname: callee,
+                });
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_calls(
+            child,
+            src,
+            sym,
+            module_prefix,
+            by_simple,
+            known,
+            enclosing_class,
+            out,
+        );
+    }
+}
+
+/// Resolve the function-position node of a `call` to a fully-qualified name
+/// inside this module, when possible.
+fn resolve_callee(
+    func: Node<'_>,
+    src: &[u8],
+    module_prefix: &str,
+    by_simple: &HashMap<String, String>,
+    known: &HashSet<&str>,
+    enclosing_class: Option<&str>,
+) -> Option<String> {
+    match func.kind() {
+        "identifier" => {
+            let name = node_text(func, src)?;
+            by_simple.get(&name).cloned()
+        }
+        "attribute" => {
+            // `<object>.<attribute>` — we resolve `self.X` and `Class.X`.
+            let object = func.child_by_field_name("object")?;
+            let attr = func.child_by_field_name("attribute")?;
+            let attr_name = node_text(attr, src)?;
+
+            match object.kind() {
+                "identifier" => {
+                    let obj_name = node_text(object, src)?;
+                    if obj_name == "self" {
+                        let class = enclosing_class?;
+                        let candidate = format!("{class}.{attr_name}");
+                        if known.contains(candidate.as_str()) {
+                            return Some(candidate);
+                        }
+                        None
+                    } else {
+                        // Treat `Foo.bar` as `<module>.Foo.bar` if we know it.
+                        let class_qname = if module_prefix.is_empty() {
+                            obj_name.clone()
+                        } else {
+                            format!("{module_prefix}.{obj_name}")
+                        };
+                        if known.contains(class_qname.as_str()) {
+                            let candidate = format!("{class_qname}.{attr_name}");
+                            if known.contains(candidate.as_str()) {
+                                return Some(candidate);
+                            }
+                        }
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,5 +900,62 @@ mod tests {
     fn empty_when_no_patterns() {
         let body = "def f(x):\n    return x + 1\n";
         assert!(infer_effects_from_body(body).is_empty());
+    }
+
+    #[test]
+    fn extracts_intra_module_call_edges() {
+        let src = r#"
+def helper(x):
+    return x
+
+def caller():
+    return helper(1)
+
+class C:
+    def __init__(self):
+        self.x = helper(2)
+
+    def m(self):
+        return self.__init__()
+"#;
+        let a = PythonAdapter::new();
+        let syms = a.parse_symbols("m.py", src).unwrap();
+        let edges = a.extract_call_edges("m.py", src, &syms);
+        let pairs: Vec<(String, String)> = edges
+            .iter()
+            .map(|e| (e.caller_qname.clone(), e.callee_qname.clone()))
+            .collect();
+        assert!(
+            pairs.contains(&("m.caller".to_string(), "m.helper".to_string())),
+            "missing caller -> helper edge; got {pairs:?}",
+        );
+        assert!(
+            pairs.contains(&("m.C.__init__".to_string(), "m.helper".to_string())),
+            "missing C.__init__ -> helper edge; got {pairs:?}",
+        );
+        assert!(
+            pairs.contains(&("m.C.m".to_string(), "m.C.__init__".to_string())),
+            "missing C.m -> C.__init__ edge; got {pairs:?}",
+        );
+    }
+
+    #[test]
+    fn default_extract_call_edges_returns_empty_for_unrelated_adapter() {
+        // Sanity: ensure the trait method exists and the default returns empty.
+        // This pins the behavior so callers can rely on it.
+        struct Dummy;
+        impl LanguageAdapter for Dummy {
+            fn language(&self) -> &str {
+                "dummy"
+            }
+            fn parse_symbols(&self, _f: &str, _s: &str) -> Result<Vec<ParsedSymbol>> {
+                Ok(Vec::new())
+            }
+            fn infer_effects(&self, _s: &str, _p: &ParsedSymbol) -> Vec<Effect> {
+                Vec::new()
+            }
+        }
+        let d = Dummy;
+        assert!(d.extract_call_edges("x", "", &[]).is_empty());
     }
 }
