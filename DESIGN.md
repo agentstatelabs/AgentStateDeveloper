@@ -1,12 +1,12 @@
-# ASD — Design Sketch (non-policy pieces)
+# ASC — Design Sketch (non-policy pieces)
 
-Sketch of the parts of Agent StateDeveloper (ASD) that we can commit to
+Sketch of the parts of AgentStateCode (ASC) that we can commit to
 independently of the policy crate. When the policy discussion lands, we
 integrate against the hooks listed in [Deferred to policy](#deferred-to-policy).
 
 ## Scope of this doc
 
-- ASG path convention ASD uses
+- ASG path convention ASC uses
 - Symbol identity model (how ledger entries survive edits/renames)
 - Decision ledger schema
 - Effect declaration schema
@@ -17,10 +17,10 @@ Out of scope: per-language adapter internals, verifier implementations, UI.
 
 ## Relationship to CTXone and ASG
 
-- **ASG** = substrate. ASD stores everything in ASG repos. No new storage.
+- **ASG** = substrate. ASC stores everything in ASG repos. No new storage.
 - **CTXone** = project/session memory (code-agnostic). Peer, not parent.
-- **ASD** = code-level context. New MCP tool family. Can cross-cite CTXone
-  facts; CTXone's `why_did_we` can cite ASD ledger entries.
+- **ASC** = code-level context. New MCP tool family. Can cross-cite CTXone
+  facts; CTXone's `why_did_we` can cite ASC ledger entries.
 
 ## Solo vs. enterprise
 
@@ -34,7 +34,7 @@ The core is designed so policy attaches via hooks, not rewrites.
 One ASG repo per target codebase. Paths under that repo:
 
 ```
-/asd/v1/
+/asc/v1/
   code/<lang>/<canonical-path>/<symbol-fp>        # symbol node (current content)
   index/
     by-qname/<qualified-name>                      # qname  → symbol-id
@@ -263,11 +263,11 @@ losing the load-bearing context.
 
 **In git (travels with the code):**
 - Source code
-- `.asd/v1/effects/<qname>.json` — declared effects per symbol
-- `.asd/v1/ledger/<qname>/<entry-id>.json` — non-superseded ledger entries
-- `.asd/v1/rebinds/<timestamp>-<id>.json` — rename/move records that
+- `.asc/v1/effects/<qname>.json` — declared effects per symbol
+- `.asc/v1/ledger/<qname>/<entry-id>.json` — non-superseded ledger entries
+- `.asc/v1/rebinds/<timestamp>-<id>.json` — rename/move records that
   preserve canonical `symbol-id` across git's text-diff view
-- `.asd/v1/meta/schema-version`
+- `.asc/v1/meta/schema-version`
 
 **In ASG (local, or pulled from registry):**
 - Live authoring state (speculative branches, per-edit intent/confidence/authority)
@@ -281,11 +281,11 @@ losing the load-bearing context.
 
 ### Reconstruction contract
 
-A fresh clone running `asd init && asd reindex` with no registry access
+A fresh clone running `asc init && asc reindex` with no registry access
 rebuilds:
 
 1. Reparse source → fresh semantic index + symbol fingerprints
-2. Read `.asd/` → hydrate effect declarations + ledger entries
+2. Read `.asc/` → hydrate effect declarations + ledger entries
 3. Replay `rebinds/` in commit order → preserve canonical `symbol-id` across renames
 4. Rerun verifier → fresh effect verification status
 
@@ -295,13 +295,13 @@ Lost without a registry:
 - Supersede chains prior to their summarization into ledger entries
 
 With an opt-in ASG registry:
-- Commits carry an `ASD-Commit: <asg-commit-id>` trailer
-- `asd pull-meta` fetches the associated ASG commit(s) for full fidelity
+- Commits carry an `ASC-Commit: <asg-commit-id>` trailer
+- `asc pull-meta` fetches the associated ASG commit(s) for full fidelity
 - Full authoring history restored
 
 ### Merge semantics
 
-`.asd/` is structured as one-file-per-entry deliberately: concurrent
+`.asc/` is structured as one-file-per-entry deliberately: concurrent
 agent work on different symbols produces zero conflicts, and supersede
 never mutates existing files (only writes new ones). Ledger and effect
 merges collapse to "union the files"; only same-symbol same-field
@@ -309,14 +309,14 @@ effect edits can conflict, and those are rare and resolvable.
 
 ### Rename handling
 
-- **ASD-aware rename** (agent uses an ASD tool to rename): rebind record
+- **ASC-aware rename** (agent uses an ASC tool to rename): rebind record
   is written and committed, canonical id flows through git cleanly.
-- **Out-of-band rename** (someone edits text directly): next `asd reindex`
+- **Out-of-band rename** (someone edits text directly): next `asc reindex`
   sees a new qname with no rebind record. Heuristic matcher (file
   identity + signature + content similarity) proposes a rebind and asks
   agent/human to confirm. Unconfirmed → new canonical id, old marked orphaned.
 
-The honest trade: **structure survives git if ASD is in the loop on
+The honest trade: **structure survives git if ASC is in the loop on
 structural edits.** Non-structural edits (body changes, docstring fixes)
 always preserve canonical id via the fingerprint formula. Only
 out-of-band renames/moves degrade — and they degrade gracefully (data
@@ -325,10 +325,10 @@ isn't lost, linkage is).
 ### Why this matters for positioning
 
 This is the "overlay on git, not replacement" strategy made concrete.
-Nothing ASD does requires the team to stop using git, GitHub, or their
-existing review tooling. The `.asd/` directory becomes just another set
+Nothing ASC does requires the team to stop using git, GitHub, or their
+existing review tooling. The `.asc/` directory becomes just another set
 of tracked files; agents see ASG's full fidelity; humans reviewing on
-GitHub get a semantic summary via commit trailers and the `.asd/` diff.
+GitHub get a semantic summary via commit trailers and the `.asc/` diff.
 
 ## Deferred to policy
 
@@ -359,7 +359,7 @@ when policy lands, only enforcement code.
 3. Are merge gates enforced in the ASG commit path or at a higher-level
    review step? (Branching model suggests the former.)
 4. Does the policy crate model *code* policy specifically, or is it
-   generic ASG policy that we map onto ASD's schema?
+   generic ASG policy that we map onto ASC's schema?
 
 ## What to build first
 
