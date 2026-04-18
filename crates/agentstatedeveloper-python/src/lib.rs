@@ -6,7 +6,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use agentstatedeveloper_core::adapter::{CallEdge, LanguageAdapter, ParsedSymbol};
+use agentstatedeveloper_core::adapter::{
+    CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols,
+};
 use agentstatedeveloper_core::error::{AsdError, Result};
 use agentstatedeveloper_core::schema::{Effect, EffectCategory, SymbolKind};
 use serde_json::json;
@@ -52,10 +54,11 @@ impl LanguageAdapter for PythonAdapter {
     fn extract_call_edges(
         &self,
         file: &str,
-        _source: &str,
+        source: &str,
         symbols: &[ParsedSymbol],
+        workspace: &WorkspaceSymbols,
     ) -> Vec<CallEdge> {
-        extract_call_edges_impl(file, symbols)
+        extract_call_edges_impl(file, source, symbols, workspace)
     }
 }
 
@@ -658,19 +661,29 @@ fn has_raise_statement(body: &str) -> bool {
 }
 
 // -----------------------------------------------------------------------------
-// Call-edge extraction (intra-module)
+// Call-edge extraction (intra- and cross-module)
 // -----------------------------------------------------------------------------
 
 /// Build the (caller_qname -> callee_qname) edge set for one file. Resolution
-/// is intra-module only and best-effort:
+/// is best-effort and covers:
 ///
-/// - `identifier()` -> resolve via the module's `simple_name -> qname` map.
+/// - `identifier()` -> intra-module `simple_name -> qname`, then imports
+///   (`from foo import bar` / `import foo as f`).
 /// - `Class.method()` -> resolve `<module>.Class.method`.
 /// - `self.method()` inside `<module>.Class.<fn>` -> resolve to `<module>.Class.method`.
+/// - `foo.bar()` where `foo` is an imported module -> resolve via the import
+///   map to `<foo_prefix>.bar`, and emit only if that qname exists in the
+///   workspace. This is how we capture cross-module calls like
+///   `logger.write_log` from `_driver.py`.
 ///
-/// Anything we can't resolve (subscripts, lambdas, cross-module calls, dynamic
-/// dispatch) is silently skipped.
-fn extract_call_edges_impl(file: &str, symbols: &[ParsedSymbol]) -> Vec<CallEdge> {
+/// Anything we can't resolve (subscripts, lambdas, star imports, relative
+/// imports, dynamic dispatch) is silently skipped.
+fn extract_call_edges_impl(
+    file: &str,
+    source: &str,
+    symbols: &[ParsedSymbol],
+    workspace: &WorkspaceSymbols,
+) -> Vec<CallEdge> {
     let module_prefix = module_qname_prefix(file);
 
     // All known qnames in this file.
@@ -704,6 +717,11 @@ fn extract_call_edges_impl(file: &str, symbols: &[ParsedSymbol]) -> Vec<CallEdge
         return Vec::new();
     }
 
+    // Parse the full source once to extract top-level imports. We need the
+    // file-level tree (not individual symbol bodies) so we can pick up
+    // `import foo` / `from foo import bar` at module scope.
+    let imports = parse_imports(source, &mut parser);
+
     let mut edges: HashSet<CallEdge> = HashSet::new();
 
     for sym in symbols {
@@ -730,6 +748,8 @@ fn extract_call_edges_impl(file: &str, symbols: &[ParsedSymbol]) -> Vec<CallEdge
             &module_prefix,
             &by_simple,
             &known,
+            &imports,
+            workspace,
             enclosing_class.as_deref(),
             &mut edges,
         );
@@ -742,6 +762,207 @@ fn extract_call_edges_impl(file: &str, symbols: &[ParsedSymbol]) -> Vec<CallEdge
             .then_with(|| a.callee_qname.cmp(&b.callee_qname))
     });
     out
+}
+
+/// Imports discovered at module scope, keyed by the local binding.
+///
+/// Each entry records:
+/// - `qname_prefix`: the qname (or qname prefix) the local name resolves to.
+/// - `is_module`: whether the local name refers to a *module* (resolve
+///   `local.attr` -> `qname_prefix.attr`) vs. a single imported symbol
+///   (resolve `local.attr` -> `qname_prefix.attr` as well, but `local()`
+///   resolves to `qname_prefix` directly).
+#[derive(Debug, Clone)]
+struct ImportBinding {
+    qname_prefix: String,
+    /// `true` for `import foo` / `import foo as f`; `false` for
+    /// `from foo import bar`. Currently both forms resolve attribute access
+    /// via the same path (`qname_prefix` + `.` + `attr`), but we keep the
+    /// distinction so future resolvers (e.g., re-exports) can tell apart
+    /// module handles from direct symbol bindings.
+    #[allow(dead_code)]
+    is_module: bool,
+}
+
+/// Walk the file's top-level statements and collect import bindings.
+///
+/// Supports:
+/// - `import foo` -> `foo -> ("foo", module)`
+/// - `import foo.bar` -> `foo -> ("foo", module)` (only the first segment binds)
+/// - `import foo as f` -> `f -> ("foo", module)`
+/// - `from foo import bar` -> `bar -> ("foo.bar", symbol)`
+/// - `from foo import bar as b` -> `b -> ("foo.bar", symbol)`
+/// - `from foo import (a, b, c)` -> each as above
+///
+/// Skips (M5 limitation):
+/// - `from foo import *` — can't statically resolve members.
+/// - Relative imports (`from . import x`, `from .foo import y`).
+fn parse_imports(source: &str, parser: &mut Parser) -> HashMap<String, ImportBinding> {
+    let mut out: HashMap<String, ImportBinding> = HashMap::new();
+    let src_bytes = source.as_bytes();
+    let tree = match parser.parse(src_bytes, None) {
+        Some(t) => t,
+        None => return out,
+    };
+    let root = tree.root_node();
+    // Only iterate direct children of the module node — we deliberately do
+    // NOT follow imports inside function bodies or conditional blocks, which
+    // would complicate per-callee scoping. Top-level only.
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        match child.kind() {
+            "import_statement" => collect_import_statement(child, src_bytes, &mut out),
+            "import_from_statement" => collect_import_from_statement(child, src_bytes, &mut out),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Handle `import a, b as c, d.e`.
+fn collect_import_statement(
+    node: Node<'_>,
+    src: &[u8],
+    out: &mut HashMap<String, ImportBinding>,
+) {
+    // Tree-sitter-python emits each imported name as a `name` field (which
+    // may appear multiple times), each being either `dotted_name` or
+    // `aliased_import`.
+    let mut cursor = node.walk();
+    for child in node.children_by_field_name("name", &mut cursor) {
+        match child.kind() {
+            "dotted_name" => {
+                // `import foo.bar.baz` -> local binding is the first segment,
+                // but resolves to just that first segment (not the tail —
+                // Python only binds the top package name).
+                let full = node_text(child, src).unwrap_or_default();
+                let full = full.trim().to_string();
+                if full.is_empty() {
+                    continue;
+                }
+                let first = full.split('.').next().unwrap_or(&full).to_string();
+                out.insert(
+                    first.clone(),
+                    ImportBinding {
+                        qname_prefix: first,
+                        is_module: true,
+                    },
+                );
+                // Also register the fully-dotted form so `foo.bar.baz(...)`
+                // written explicitly can resolve to a module qname prefix.
+                if full.contains('.') {
+                    out.insert(
+                        full.clone(),
+                        ImportBinding {
+                            qname_prefix: full,
+                            is_module: true,
+                        },
+                    );
+                }
+            }
+            "aliased_import" => {
+                // `import foo as f` / `import foo.bar as fb`
+                let name = child
+                    .child_by_field_name("name")
+                    .and_then(|n| node_text(n, src))
+                    .unwrap_or_default();
+                let alias = child
+                    .child_by_field_name("alias")
+                    .and_then(|n| node_text(n, src))
+                    .unwrap_or_default();
+                let name = name.trim().to_string();
+                let alias = alias.trim().to_string();
+                if name.is_empty() || alias.is_empty() {
+                    continue;
+                }
+                out.insert(
+                    alias,
+                    ImportBinding {
+                        qname_prefix: name,
+                        is_module: true,
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Handle `from foo import a, b as c` and `from foo import (a, b)`.
+fn collect_import_from_statement(
+    node: Node<'_>,
+    src: &[u8],
+    out: &mut HashMap<String, ImportBinding>,
+) {
+    // `module_name` field holds a `dotted_name` or `relative_import`.
+    let module_node = node.child_by_field_name("module_name");
+    let module_kind = module_node.map(|n| n.kind()).unwrap_or("");
+    if module_kind == "relative_import" {
+        // Skip: `from . import x` / `from .foo import y` would need the
+        // importing module's package path to resolve. M5 limitation.
+        return;
+    }
+    let module = module_node
+        .and_then(|n| node_text(n, src))
+        .unwrap_or_default();
+    let module = module.trim().to_string();
+    if module.is_empty() {
+        return;
+    }
+
+    // Detect `from foo import *` — tree-sitter-python represents the `*` as
+    // a `wildcard_import` child (not a `name` field). Skip in that case.
+    let mut cursor_all = node.walk();
+    for child in node.children(&mut cursor_all) {
+        if child.kind() == "wildcard_import" {
+            return;
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children_by_field_name("name", &mut cursor) {
+        match child.kind() {
+            "dotted_name" => {
+                let name = node_text(child, src).unwrap_or_default();
+                let name = name.trim().to_string();
+                if name.is_empty() {
+                    continue;
+                }
+                let qname = format!("{module}.{name}");
+                out.insert(
+                    name,
+                    ImportBinding {
+                        qname_prefix: qname,
+                        is_module: false,
+                    },
+                );
+            }
+            "aliased_import" => {
+                let name = child
+                    .child_by_field_name("name")
+                    .and_then(|n| node_text(n, src))
+                    .unwrap_or_default();
+                let alias = child
+                    .child_by_field_name("alias")
+                    .and_then(|n| node_text(n, src))
+                    .unwrap_or_default();
+                let name = name.trim().to_string();
+                let alias = alias.trim().to_string();
+                if name.is_empty() || alias.is_empty() {
+                    continue;
+                }
+                let qname = format!("{module}.{name}");
+                out.insert(
+                    alias,
+                    ImportBinding {
+                        qname_prefix: qname,
+                        is_module: false,
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
 }
 
 /// For a method qname like `mod.Class.m`, return `Some("mod.Class")` provided
@@ -777,14 +998,23 @@ fn collect_calls(
     module_prefix: &str,
     by_simple: &HashMap<String, String>,
     known: &HashSet<&str>,
+    imports: &HashMap<String, ImportBinding>,
+    workspace: &WorkspaceSymbols,
     enclosing_class: Option<&str>,
     out: &mut HashSet<CallEdge>,
 ) {
     if node.kind() == "call" {
         if let Some(func) = node.child_by_field_name("function") {
-            if let Some(callee) =
-                resolve_callee(func, src, module_prefix, by_simple, known, enclosing_class)
-            {
+            if let Some(callee) = resolve_callee(
+                func,
+                src,
+                module_prefix,
+                by_simple,
+                known,
+                imports,
+                workspace,
+                enclosing_class,
+            ) {
                 out.insert(CallEdge {
                     caller_qname: sym.qname.clone(),
                     callee_qname: callee,
@@ -801,29 +1031,53 @@ fn collect_calls(
             module_prefix,
             by_simple,
             known,
+            imports,
+            workspace,
             enclosing_class,
             out,
         );
     }
 }
 
-/// Resolve the function-position node of a `call` to a fully-qualified name
-/// inside this module, when possible.
+/// Resolve the function-position node of a `call` to a fully-qualified name,
+/// when possible. Precedence (LEGB-ish, for our purposes):
+///
+/// 1. Intra-module `simple_name -> qname` (local definitions shadow imports).
+/// 2. Import map (`from foo import bar` / `import foo as f`).
+/// 3. For attribute calls, try intra-module class resolution, then imports.
+///
+/// Cross-module resolutions are only emitted when the resolved qname is
+/// present in `workspace.qnames`. This drops stdlib / third-party calls
+/// whose symbols we didn't index.
+#[allow(clippy::too_many_arguments)]
 fn resolve_callee(
     func: Node<'_>,
     src: &[u8],
     module_prefix: &str,
     by_simple: &HashMap<String, String>,
     known: &HashSet<&str>,
+    imports: &HashMap<String, ImportBinding>,
+    workspace: &WorkspaceSymbols,
     enclosing_class: Option<&str>,
 ) -> Option<String> {
     match func.kind() {
         "identifier" => {
             let name = node_text(func, src)?;
-            by_simple.get(&name).cloned()
+            // 1) intra-module first (shadows imports)
+            if let Some(q) = by_simple.get(&name) {
+                return Some(q.clone());
+            }
+            // 2) import map (e.g., `from logger import write_log`)
+            if let Some(binding) = imports.get(&name) {
+                if workspace.contains(&binding.qname_prefix) {
+                    return Some(binding.qname_prefix.clone());
+                }
+            }
+            None
         }
         "attribute" => {
-            // `<object>.<attribute>` — we resolve `self.X` and `Class.X`.
+            // `<object>.<attribute>` — resolve `self.X`, `Class.X`, and
+            // `<imported_module>.X`.
             let object = func.child_by_field_name("object")?;
             let attr = func.child_by_field_name("attribute")?;
             let attr_name = node_text(attr, src)?;
@@ -837,25 +1091,62 @@ fn resolve_callee(
                         if known.contains(candidate.as_str()) {
                             return Some(candidate);
                         }
-                        None
-                    } else {
-                        // Treat `Foo.bar` as `<module>.Foo.bar` if we know it.
-                        let class_qname = if module_prefix.is_empty() {
-                            obj_name.clone()
-                        } else {
-                            format!("{module_prefix}.{obj_name}")
-                        };
-                        if known.contains(class_qname.as_str()) {
-                            let candidate = format!("{class_qname}.{attr_name}");
-                            if known.contains(candidate.as_str()) {
-                                return Some(candidate);
-                            }
-                        }
-                        None
+                        return None;
                     }
+
+                    // Intra-module class attribute: `Foo.bar` -> `mod.Foo.bar`
+                    let class_qname = if module_prefix.is_empty() {
+                        obj_name.clone()
+                    } else {
+                        format!("{module_prefix}.{obj_name}")
+                    };
+                    if known.contains(class_qname.as_str()) {
+                        let candidate = format!("{class_qname}.{attr_name}");
+                        if known.contains(candidate.as_str()) {
+                            return Some(candidate);
+                        }
+                    }
+
+                    // Imported module or symbol: `logger.write_log` ->
+                    // `<prefix>.write_log`, validated against workspace.
+                    if let Some(binding) = imports.get(&obj_name) {
+                        let candidate = format!("{}.{}", binding.qname_prefix, attr_name);
+                        if workspace.contains(&candidate) {
+                            return Some(candidate);
+                        }
+                    }
+                    None
+                }
+                "attribute" => {
+                    // Chained attribute like `foo.bar.baz(...)`. Try to
+                    // flatten into a dotted path and match against imports.
+                    let chain = flatten_attribute(object, src)?;
+                    if let Some(binding) = imports.get(&chain) {
+                        let candidate = format!("{}.{}", binding.qname_prefix, attr_name);
+                        if workspace.contains(&candidate) {
+                            return Some(candidate);
+                        }
+                    }
+                    None
                 }
                 _ => None,
             }
+        }
+        _ => None,
+    }
+}
+
+/// Flatten a nested `attribute` node back into its dotted text form.
+/// Returns `None` if any inner node isn't an identifier/attribute chain.
+fn flatten_attribute(node: Node<'_>, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "identifier" => node_text(node, src),
+        "attribute" => {
+            let object = node.child_by_field_name("object")?;
+            let attr = node.child_by_field_name("attribute")?;
+            let head = flatten_attribute(object, src)?;
+            let tail = node_text(attr, src)?;
+            Some(format!("{head}.{tail}"))
         }
         _ => None,
     }
@@ -902,6 +1193,17 @@ mod tests {
         assert!(infer_effects_from_body(body).is_empty());
     }
 
+    /// Build a WorkspaceSymbols with just a set of qnames (kinds defaulted
+    /// to Function). Tests don't currently exercise the kinds map.
+    fn workspace_with(qnames: &[&str]) -> WorkspaceSymbols {
+        let mut ws = WorkspaceSymbols::default();
+        for q in qnames {
+            ws.qnames.insert((*q).to_string());
+            ws.kinds.insert((*q).to_string(), SymbolKind::Function);
+        }
+        ws
+    }
+
     #[test]
     fn extracts_intra_module_call_edges() {
         let src = r#"
@@ -920,7 +1222,14 @@ class C:
 "#;
         let a = PythonAdapter::new();
         let syms = a.parse_symbols("m.py", src).unwrap();
-        let edges = a.extract_call_edges("m.py", src, &syms);
+        let ws = workspace_with(&[
+            "m.helper",
+            "m.caller",
+            "m.C",
+            "m.C.__init__",
+            "m.C.m",
+        ]);
+        let edges = a.extract_call_edges("m.py", src, &syms, &ws);
         let pairs: Vec<(String, String)> = edges
             .iter()
             .map(|e| (e.caller_qname.clone(), e.callee_qname.clone()))
@@ -936,6 +1245,138 @@ class C:
         assert!(
             pairs.contains(&("m.C.m".to_string(), "m.C.__init__".to_string())),
             "missing C.m -> C.__init__ edge; got {pairs:?}",
+        );
+    }
+
+    #[test]
+    fn extracts_cross_module_edges_via_from_import() {
+        // `from logger import write_log` — `write_log(...)` should resolve
+        // to `logger.write_log`.
+        let src = r#"
+from logger import write_log
+
+def foo():
+    write_log("/tmp/x", "hi")
+"#;
+        let a = PythonAdapter::new();
+        let syms = a.parse_symbols("caller.py", src).unwrap();
+        let ws = workspace_with(&["logger.write_log", "caller.foo"]);
+        let edges = a.extract_call_edges("caller.py", src, &syms, &ws);
+        let pairs: Vec<(String, String)> = edges
+            .iter()
+            .map(|e| (e.caller_qname.clone(), e.callee_qname.clone()))
+            .collect();
+        assert!(
+            pairs.contains(&("caller.foo".to_string(), "logger.write_log".to_string())),
+            "missing foo -> logger.write_log edge; got {pairs:?}",
+        );
+    }
+
+    #[test]
+    fn extracts_cross_module_edges_via_module_import() {
+        // `import logger` — `logger.write_log(...)` should resolve.
+        let src = r#"
+import logger
+
+def foo():
+    logger.write_log("/tmp/x", "hi")
+"#;
+        let a = PythonAdapter::new();
+        let syms = a.parse_symbols("caller.py", src).unwrap();
+        let ws = workspace_with(&["logger.write_log", "caller.foo"]);
+        let edges = a.extract_call_edges("caller.py", src, &syms, &ws);
+        let pairs: Vec<(String, String)> = edges
+            .iter()
+            .map(|e| (e.caller_qname.clone(), e.callee_qname.clone()))
+            .collect();
+        assert!(
+            pairs.contains(&("caller.foo".to_string(), "logger.write_log".to_string())),
+            "missing foo -> logger.write_log edge; got {pairs:?}",
+        );
+    }
+
+    #[test]
+    fn drops_unknown_imports() {
+        // Workspace doesn't know about `stdlib_mod.thing` — no edge emitted.
+        let src = r#"
+import stdlib_mod
+
+def foo():
+    stdlib_mod.thing()
+"#;
+        let a = PythonAdapter::new();
+        let syms = a.parse_symbols("caller.py", src).unwrap();
+        let ws = workspace_with(&["caller.foo"]);
+        let edges = a.extract_call_edges("caller.py", src, &syms, &ws);
+        let pairs: Vec<(String, String)> = edges
+            .iter()
+            .map(|e| (e.caller_qname.clone(), e.callee_qname.clone()))
+            .collect();
+        assert!(
+            pairs.is_empty(),
+            "expected no edges for unknown imports; got {pairs:?}",
+        );
+    }
+
+    #[test]
+    fn import_alias_and_from_import_with_alias() {
+        let src = r#"
+import logger as lg
+from greetings import hello as h
+
+def foo():
+    lg.write_log("/tmp/x", "hi")
+    h("world")
+"#;
+        let a = PythonAdapter::new();
+        let syms = a.parse_symbols("caller.py", src).unwrap();
+        let ws = workspace_with(&[
+            "logger.write_log",
+            "greetings.hello",
+            "caller.foo",
+        ]);
+        let edges = a.extract_call_edges("caller.py", src, &syms, &ws);
+        let pairs: Vec<(String, String)> = edges
+            .iter()
+            .map(|e| (e.caller_qname.clone(), e.callee_qname.clone()))
+            .collect();
+        assert!(
+            pairs.contains(&("caller.foo".to_string(), "logger.write_log".to_string())),
+            "missing lg.write_log edge; got {pairs:?}",
+        );
+        assert!(
+            pairs.contains(&("caller.foo".to_string(), "greetings.hello".to_string())),
+            "missing h() edge; got {pairs:?}",
+        );
+    }
+
+    #[test]
+    fn local_definition_shadows_import() {
+        // `helper` defined locally should win over `from x import helper`.
+        let src = r#"
+from other import helper
+
+def helper(x):
+    return x
+
+def foo():
+    helper(1)
+"#;
+        let a = PythonAdapter::new();
+        let syms = a.parse_symbols("m.py", src).unwrap();
+        let ws = workspace_with(&["other.helper", "m.helper", "m.foo"]);
+        let edges = a.extract_call_edges("m.py", src, &syms, &ws);
+        let pairs: Vec<(String, String)> = edges
+            .iter()
+            .map(|e| (e.caller_qname.clone(), e.callee_qname.clone()))
+            .collect();
+        assert!(
+            pairs.contains(&("m.foo".to_string(), "m.helper".to_string())),
+            "expected local helper to shadow import; got {pairs:?}",
+        );
+        assert!(
+            !pairs.contains(&("m.foo".to_string(), "other.helper".to_string())),
+            "expected imported helper to be shadowed; got {pairs:?}",
         );
     }
 
@@ -956,6 +1397,7 @@ class C:
             }
         }
         let d = Dummy;
-        assert!(d.extract_call_edges("x", "", &[]).is_empty());
+        let ws = WorkspaceSymbols::default();
+        assert!(d.extract_call_edges("x", "", &[], &ws).is_empty());
     }
 }

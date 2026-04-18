@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use crate::error::Result;
 use crate::schema::{Effect, SymbolKind};
 
@@ -23,6 +25,23 @@ pub struct CallEdge {
     pub callee_qname: String,
 }
 
+/// Workspace-wide context passed to adapters when resolving call edges
+/// across module boundaries.
+#[derive(Debug, Clone, Default)]
+pub struct WorkspaceSymbols {
+    /// All qnames known to the indexer, flat.
+    pub qnames: HashSet<String>,
+    /// Map from qname to its kind, so adapters can distinguish
+    /// class-level methods from module-level functions during resolution.
+    pub kinds: HashMap<String, SymbolKind>,
+}
+
+impl WorkspaceSymbols {
+    pub fn contains(&self, qname: &str) -> bool {
+        self.qnames.contains(qname)
+    }
+}
+
 /// Language-specific parsing + effect inference. Implementations live in
 /// sibling crates: `agentstatedeveloper-python`, `-typescript`, etc.
 pub trait LanguageAdapter: Send + Sync {
@@ -39,11 +58,16 @@ pub trait LanguageAdapter: Send + Sync {
     /// Extract call edges from a file's parsed symbols. Returned pairs are
     /// (caller_qname, callee_qname). The adapter is free to use heuristics;
     /// resolution quality is best-effort.
+    ///
+    /// `workspace` carries workspace-wide qname/kind context so adapters
+    /// can resolve cross-module calls (via imports). Adapters that only
+    /// care about intra-module edges may safely ignore it.
     fn extract_call_edges(
         &self,
         _file: &str,
         _source: &str,
         _symbols: &[ParsedSymbol],
+        _workspace: &WorkspaceSymbols,
     ) -> Vec<CallEdge> {
         Vec::new()
     }

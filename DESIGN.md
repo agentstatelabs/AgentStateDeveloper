@@ -466,11 +466,23 @@ Follows the same pattern as `/Apps/stategraph/` and `/Apps/CTXone/`.
 
 ### Milestones
 
-- **M1** — core + python adapter + CLI (`asd init`, `index`, `read`,
-  `ledger append`, `verify-effects`) + MCP server stub + sample Python
-  repo. Solo-complete end-to-end read/write of effects and ledger.
-- **M2** — Lens solo viewer (Svelte, read-only at first). HTTP API on
-  MCP server gets Lens as its first consumer.
-- **M3** — TypeScript adapter, traces, contract layer.
-- Enterprise features scaffold throughout M1/M2 (stubs, no-op impls) so
-  the commercial repo has clean trait seams to consume.
+- **M1** (shipped) — core + Python adapter + CLI (`asd init`, `index`,
+  `read`, `ledger append`, `verify-effects`) + MCP server stub + sample
+  Python repo. Solo-complete end-to-end read/write of effects and ledger.
+- **M2** (shipped) — Lens solo viewer (SvelteKit + adapter-static) + HTTP
+  server (`asd-serve`, axum). Lens consumes the same API ASD-MCP does.
+- **M3** (shipped) — real MCP stdio server via `rmcp` (replaces the M1
+  stub; 10 tools total now) + Python runtime effect tracer (`asd trace`)
+  that ingests observed effects and flips `EffectDecl.verification` to
+  `runtime-tracer` with real ok/mismatch signal.
+- **M4** (shipped) — intra-module call graph (Python adapter extracts
+  `identifier`/`self.X`/`Class.X` call edges) + transitive effect
+  propagator (cycle-safe DFS, deterministic, idempotent). HTTP + MCP +
+  Lens all expose `callers_of` / `callees_of`.
+- **M5** — cross-module edge resolution: parse Python imports, resolve
+  calls through `from X import Y` / `import X.Y` / aliases. Drops
+  M4's single-file boundary so the call graph reflects real codebases.
+- **Future** — TypeScript adapter, contract layer (refinement
+  types/invariants), `agentstategraph-policy` consumer wiring, Lens
+  ratification surface, enterprise repo scaffold (registry server,
+  audit export connectors, SSO/RBAC).

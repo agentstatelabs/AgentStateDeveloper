@@ -17,7 +17,8 @@ use agentstategraph_core::IntentCategory;
 use agentstatedeveloper_core::{
     canonical_symbol_id, paths, propagate_transitive, symbol_fingerprint, AsgEffectStore,
     AsgIndexStore, CallEdge, EffectDecl, EffectStore, Engine, IndexStore, LanguageAdapter,
-    Position, Symbol, Verification, VerificationSource, VerificationStatus,
+    ParsedSymbol, Position, Symbol, Verification, VerificationSource, VerificationStatus,
+    WorkspaceSymbols,
 };
 use agentstatedeveloper_python::PythonAdapter;
 
@@ -49,6 +50,16 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
     let mut effect_count: usize = 0;
     let mut all_symbol_ids: Vec<String> = Vec::new();
     let mut all_edges: Vec<CallEdge> = Vec::new();
+
+    // Pass 1: per-file parse + persist symbols/effects. We also stash the
+    // parsed symbols and file source so pass 2 can resolve cross-module
+    // calls against a workspace-wide qname set.
+    struct FileCtx {
+        file_str: String,
+        source: String,
+        parsed: Vec<ParsedSymbol>,
+    }
+    let mut file_ctxs: Vec<FileCtx> = Vec::with_capacity(files.len());
 
     for file in &files {
         let source = std::fs::read_to_string(file)
@@ -101,16 +112,36 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
             effect_count += 1;
         }
 
-        let edges = adapter.extract_call_edges(&file_str, &source, &parsed);
+        file_ctxs.push(FileCtx {
+            file_str,
+            source,
+            parsed,
+        });
+    }
+
+    // Build WorkspaceSymbols from every parsed qname across every file.
+    let mut workspace = WorkspaceSymbols::default();
+    for ctx in &file_ctxs {
+        for p in &ctx.parsed {
+            workspace.qnames.insert(p.qname.clone());
+            workspace.kinds.insert(p.qname.clone(), p.kind);
+        }
+    }
+
+    // Pass 2: resolve call edges with full workspace context.
+    for ctx in &file_ctxs {
+        let edges =
+            adapter.extract_call_edges(&ctx.file_str, &ctx.source, &ctx.parsed, &workspace);
         all_edges.extend(edges);
     }
 
     // Resolve qname -> symbol_id for both ends of each edge and aggregate
     // into per-symbol callees / callers maps. Edges where either side can't
-    // be resolved (cross-module, unknown name, etc.) are silently dropped.
+    // be resolved (unknown name, etc.) are silently dropped.
     let mut callees_of: HashMap<String, Vec<String>> = HashMap::new();
     let mut callers_of: HashMap<String, Vec<String>> = HashMap::new();
     let mut resolved_edge_count: usize = 0;
+    let mut cross_module_edges: usize = 0;
     for edge in &all_edges {
         let caller_sym = match index_store
             .get_symbol_by_qname(&engine.ref_name, &edge.caller_qname)?
@@ -133,7 +164,11 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
             rs.push(caller_sym);
         }
         resolved_edge_count += 1;
+        if !same_module(&edge.caller_qname, &edge.callee_qname) {
+            cross_module_edges += 1;
+        }
     }
+    let intra_module_edges = resolved_edge_count.saturating_sub(cross_module_edges);
 
     // Sort each list for deterministic on-disk content (and friendlier diffs).
     for v in callees_of.values_mut() {
@@ -178,10 +213,21 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
         "symbols": symbol_count,
         "effects": effect_count,
         "edges": resolved_edge_count,
+        "intra_module_edges": intra_module_edges,
+        "cross_module_edges": cross_module_edges,
         "transitive_updates": transitive_updates,
     });
     println!("{}", serde_json::to_string_pretty(&summary)?);
     Ok(())
+}
+
+/// Two qnames share a module when their dotted prefixes before the final
+/// segment match. Qnames like `mod.fn` and `mod.Class.m` share module
+/// `mod`; `a.f` vs `b.f` do not.
+fn same_module(caller: &str, callee: &str) -> bool {
+    let caller_mod = caller.split('.').next().unwrap_or("");
+    let callee_mod = callee.split('.').next().unwrap_or("");
+    !caller_mod.is_empty() && caller_mod == callee_mod
 }
 
 /// Recursively collect `*.py` files under `root`. If `root` is itself a

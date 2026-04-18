@@ -16,7 +16,7 @@ pub mod schema;
 pub mod symbol;
 pub mod transitive;
 
-pub use adapter::{CallEdge, LanguageAdapter, ParsedSymbol};
+pub use adapter::{CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols};
 pub use effects::{AsgEffectStore, EffectStore};
 pub use engine::Engine;
 pub use error::{AsdError, Result};
