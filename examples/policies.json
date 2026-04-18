@@ -1,0 +1,41 @@
+{
+  "strict": false,
+  "policies": [
+    {
+      "path": "/policies/code/hazard-requires-human",
+      "version": 1,
+      "description": "Hazard ledger entries record load-bearing warnings. A human must approve before they land so an agent can't silently escalate risk.",
+      "match_action": "asd.ledger.append.hazard",
+      "deny": false,
+      "require_approval": ["human"],
+      "reason": "hazard entries are load-bearing; a human must attest"
+    },
+    {
+      "path": "/policies/code/supersede-requires-senior-review",
+      "version": 1,
+      "description": "Superseding existing ledger entries can erase institutional context. Requires a senior-agent or human attestation.",
+      "match_action": "asd.ledger.supersede",
+      "deny": false,
+      "require_approval": ["senior_agent", "human"],
+      "reason": "supersede can drop context; needs second reviewer"
+    },
+    {
+      "path": "/policies/code/broaden-net-effects",
+      "version": 1,
+      "description": "Declaring new outbound network effects widens the attack surface. Approval required.",
+      "match_action": "asd.effect.declare.broadens",
+      "deny": false,
+      "require_approval": ["human"],
+      "reason": "net surface widening must be reviewed"
+    },
+    {
+      "path": "/policies/code/no-tradeoffs-without-body",
+      "version": 1,
+      "description": "Example hard-deny: agent nick 'experimental-bot' isn't allowed to write tradeoff entries at all.",
+      "match_action": "asd.ledger.append.tradeoff",
+      "deny": true,
+      "reason": "experimental-bot has not earned tradeoff-write authority",
+      "agent_id": "experimental-bot"
+    }
+  ]
+}

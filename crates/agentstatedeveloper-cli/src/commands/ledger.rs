@@ -6,9 +6,10 @@ use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
 
 use agentstatedeveloper_core::{
-    AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, IndexStore, LedgerEntry, LedgerKind,
-    LedgerStore,
+    actions, AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Decision, Engine, IndexStore,
+    LedgerEntry, LedgerKind, LedgerStore, Situation,
 };
+use serde_json::json;
 
 use crate::config::Config;
 
@@ -89,27 +90,85 @@ pub fn run(cfg: &Config, cmd: LedgerCmd) -> Result<()> {
 }
 
 fn append(cfg: &Config, args: AppendArgs) -> Result<()> {
-    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let mut engine = Engine::open_sqlite(&cfg.db_path)?;
+    if let Some(ref p) = cfg.policy_path {
+        engine
+            .load_policy_file(p)
+            .map_err(|e| anyhow::anyhow!("failed to load policy file {}: {e}", p.display()))?;
+    }
 
     let index_store = AsgIndexStore { repo: &engine.repo };
     let symbol = index_store
         .get_symbol_by_qname(&engine.ref_name, &args.qname)?
         .ok_or_else(|| anyhow::anyhow!("symbol not found: {}", args.qname))?;
 
+    let ledger_kind: LedgerKind = args.kind.into();
+    let action = actions::ledger_append_action(ledger_kind.as_str());
+    let situation = Situation {
+        description: format!("ledger.append for {}", args.qname),
+        qualifiers: json!({ "qname": &args.qname, "kind": ledger_kind.as_str() }),
+    };
+    let decision = engine
+        .policy
+        .evaluate(&situation, &action, &args.author_id)?;
+
+    match &decision {
+        Decision::Deny {
+            matched_policy,
+            reason,
+        } => {
+            let err = json!({
+                "status": "denied",
+                "action": action,
+                "matched_policy": matched_policy,
+                "reason": reason,
+            });
+            println!("{}", serde_json::to_string_pretty(&err)?);
+            return Err(anyhow::anyhow!("policy denied: {}", reason));
+        }
+        _ => {}
+    }
+
     let author = Author {
         kind: args.author_kind.into(),
-        id: args.author_id,
+        id: args.author_id.clone(),
     };
-
-    let mut entry = LedgerEntry::new(&symbol.symbol_id, args.kind.into(), args.summary, author);
+    let mut entry = LedgerEntry::new(&symbol.symbol_id, ledger_kind, args.summary, author);
     if let Some(body_path) = args.body {
         let text = std::fs::read_to_string(&body_path)?;
         entry.body = Some(text);
+    }
+    entry.matched_policy = decision.matched_policy();
+
+    // RequireApproval: tag the entry so downstream reviewers see it.
+    if let Decision::RequireApproval {
+        approvers, reason, ..
+    } = &decision
+    {
+        entry.tags.push("awaiting-approval".to_string());
+        for a in approvers {
+            entry.tags.push(format!("approver:{}", a));
+        }
+        if let Some(r) = reason {
+            if entry.body.is_none() {
+                entry.body = Some(format!("Approval reason: {}", r));
+            }
+        }
     }
 
     let ledger_store = AsgLedgerStore { repo: &engine.repo };
     ledger_store.append_entry(&engine.ref_name, &entry, &cfg.agent_id)?;
 
-    println!("{}", entry.entry_id);
+    let out = json!({
+        "entry_id": entry.entry_id,
+        "matched_policy": entry.matched_policy,
+        "status": match &decision {
+            Decision::Allow { .. } => "allowed",
+            Decision::RequireApproval { .. } => "awaiting-approval",
+            Decision::Deny { .. } => "denied",
+            Decision::NoPolicyMatch => "no-policy-match",
+        },
+    });
+    println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
 }

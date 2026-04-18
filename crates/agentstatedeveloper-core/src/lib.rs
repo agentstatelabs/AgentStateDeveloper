@@ -22,7 +22,10 @@ pub use engine::Engine;
 pub use error::{AsdError, Result};
 pub use index::{AsgIndexStore, IndexStore};
 pub use ledger::{AsgLedgerStore, LedgerStore};
-pub use policy::{Decision, PermissivePolicyGate, PolicyGate, Situation, actions};
+pub use policy::{
+    Decision, FilePolicyGate, PermissivePolicyGate, PolicyFile, PolicyGate, PolicyRule, Situation,
+    actions,
+};
 pub use schema::{
     ASD_PATH_PREFIX, ASD_SCHEMA_VERSION, Author, AuthorKind, Effect, EffectCategory, EffectDecl,
     Evidence, LedgerEntry, LedgerKind, Mismatch, Position, Symbol, SymbolKind, TransitiveEffect,

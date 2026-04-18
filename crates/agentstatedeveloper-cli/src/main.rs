@@ -18,6 +18,12 @@ struct Cli {
     #[arg(long, global = true)]
     db: Option<PathBuf>,
 
+    /// Path to a JSON policy file evaluated against ledger/effect writes.
+    /// Overrides `ASD_POLICY` env var. When absent, solo-dev default is
+    /// permissive (everything Allow).
+    #[arg(long, global = true)]
+    policy: Option<PathBuf>,
+
     #[command(subcommand)]
     cmd: Command,
 }
@@ -47,7 +53,7 @@ enum Command {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let cfg = config::Config::resolve(cli.db.clone());
+    let cfg = config::Config::resolve(cli.db.clone(), cli.policy.clone());
 
     match cli.cmd {
         Command::Init(args) => init::run(&cfg, args),

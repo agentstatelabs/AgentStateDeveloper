@@ -7,7 +7,7 @@ use agentstategraph_storage::SqliteStorage;
 
 use crate::adapter::LanguageAdapter;
 use crate::error::{AsdError, Result};
-use crate::policy::{PermissivePolicyGate, PolicyGate};
+use crate::policy::{FilePolicyGate, PermissivePolicyGate, PolicyGate};
 
 /// The top-level ASD engine. Owns an ASG repository, registered language
 /// adapters, and a policy gate. Cheap to construct; shared across CLI,
@@ -61,5 +61,12 @@ impl Engine {
 
     pub fn set_policy(&mut self, policy: Arc<dyn PolicyGate>) {
         self.policy = policy;
+    }
+
+    /// Convenience: load a file-based policy gate from disk and swap it in.
+    pub fn load_policy_file(&mut self, path: &Path) -> Result<()> {
+        let gate = FilePolicyGate::from_file(path)?;
+        self.policy = Arc::new(gate);
+        Ok(())
     }
 }
