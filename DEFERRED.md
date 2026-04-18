@@ -5,7 +5,7 @@ wasn't picked up in the current milestone. Not a roadmap — these are
 things I'd want a future maintainer (or future me) to see *before*
 assuming something's missing on accident.
 
-Last synced: M5 landed (2026-04-18).
+Last synced: M7 landed (2026-04-18).
 
 ## Tracer (`tools/asd_tracer.py`)
 
@@ -48,12 +48,34 @@ M5 scope exclusions, in order of likely user-facing impact:
 
 ## Policy
 
-- `agentstategraph-policy` crate not yet built (design in
+M7 shipped `FilePolicyGate` + `--policy` wiring on `asd ledger
+append`. Remaining gaps:
+
+- `agentstategraph-policy` crate still not built (design in
   [POLICY_V1.md](/Users/user/Documents/AgentStateLabs/strategy/POLICY_V1.md)).
-  Until it ships, all ASD policy call sites return `Allow` via
-  `PermissivePolicyGate`; `matched_policy` is always `None`.
-- ASD publishes an action taxonomy (`asd.ledger.append.hazard`,
-  `asd.merge.branch_to_main`, etc.) but nothing enforces it yet.
+  Our `FilePolicyGate` is interim; schema is a subset so migration is
+  a rename.
+- **MCP parity** — MCP `ledger_append` and `effect_declare` don't yet
+  route through the gate. Only the CLI does. M8 target.
+- **Effect-declare routing** even in the CLI — `asd effect` (no such
+  command yet; effect_declare is only via MCP). Once MCP is plumbed,
+  CLI should grow it for parity.
+- **No selector DSL** — `match_action` is exact or prefix-`.*` match,
+  plus optional `agent_id` equality. POLICY_V1 envisions richer
+  conditions (paths, timestamps, qualifiers). Expand when real use
+  cases arrive.
+- **No policy introspection CLI yet** — POLICY_V1 §7 has `ctx policy
+  list / show / evaluate`. Planned for M8 as `asd policy …`.
+- **Approval is advisory** — entries land with `tags:
+  [awaiting-approval, approver:human]` but nothing prevents a later
+  reader from acting on them before a human flips the tag. No
+  ratification workflow yet.
+- **Hot reload** — policy file is loaded once at engine open. Changes
+  require restart.
+- **No policy coverage over**: traces (`asd trace` ingest), index
+  (`asd index` writes), merge (no merge surface yet), rename.
+- **Lens surface** — matched_policy is in the data but not yet
+  rendered, and there's no filter for `awaiting-approval`. M8 target.
 
 ## HTTP / MCP
 

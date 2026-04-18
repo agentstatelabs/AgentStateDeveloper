@@ -32,3 +32,18 @@ class SymbolsStore {
 }
 
 export const symbols = new SymbolsStore();
+
+/// Tracks the count of ledger entries awaiting approval. The layout polls
+/// this once on mount so the sidebar badge stays cheap; the /approvals
+/// route fetches the full list separately.
+class ApprovalsStore {
+	count = $state(0);
+	loaded = $state(false);
+
+	set(n: number) {
+		this.count = n;
+		this.loaded = true;
+	}
+}
+
+export const approvals = new ApprovalsStore();

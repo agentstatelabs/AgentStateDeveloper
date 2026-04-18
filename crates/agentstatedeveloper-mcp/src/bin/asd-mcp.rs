@@ -5,6 +5,9 @@
 //!
 //! Env:
 //! - `ASD_DB` — path to SQLite db (default: `./.asd-state.db`)
+//! - `ASD_POLICY` — optional path to a policy JSON file. When set, the
+//!   engine's `PolicyGate` is swapped to a `FilePolicyGate` loaded from that
+//!   file. Matches the `asd` CLI contract.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,8 +35,19 @@ async fn main() -> Result<()> {
 
     tracing::info!(?db_path, "starting asd-mcp stdio server");
 
-    let engine = Engine::open_sqlite(&db_path)
+    let mut engine = Engine::open_sqlite(&db_path)
         .with_context(|| format!("failed to open ASD db at {}", db_path.display()))?;
+
+    // Optional policy file. Fail loudly if set but unloadable — we never want
+    // a configured-but-silent permissive gate.
+    if let Ok(policy_path) = std::env::var("ASD_POLICY") {
+        let path = PathBuf::from(&policy_path);
+        engine
+            .load_policy_file(&path)
+            .with_context(|| format!("failed to load ASD_POLICY policy file at {}", path.display()))?;
+        tracing::info!(policy = %path.display(), "loaded ASD policy file");
+    }
+
     let shared = Arc::new(Mutex::new(engine));
 
     let server = AsdMcpServer::new(shared, db_path.clone());

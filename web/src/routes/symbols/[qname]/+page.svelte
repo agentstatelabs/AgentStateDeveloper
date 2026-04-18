@@ -196,18 +196,34 @@
 		{:else}
 			<ul class="ledger">
 				{#each detail.ledger as le}
-					<li>
+					{@const tags = le.tags ?? []}
+					{@const awaiting = tags.includes('awaiting-approval')}
+					{@const approvers = tags
+						.filter((t) => t.startsWith('approver:'))
+						.map((t) => t.slice('approver:'.length))}
+					<li class:awaiting>
 						<div class="le-head">
 							<span class="le-kind kind-{le.kind}">{le.kind}</span>
+							{#if awaiting}
+								<span class="le-awaiting" title="policy requires approval before this entry lands">
+									AWAITING APPROVAL
+								</span>
+							{/if}
 							<span class="le-summary">{le.summary}</span>
 						</div>
 						<div class="le-meta">
 							<span>{le.author.kind}:{le.author.id}</span>
 							<span>· {ts(le.created_at)}</span>
-							{#if le.matched_policy}
-								<span>· policy: <code>{le.matched_policy}</code></span>
-							{/if}
 						</div>
+						{#if le.matched_policy}
+							<div class="le-policy">
+								<span class="le-policy-label">policy</span>
+								<code class="le-policy-path">{le.matched_policy}</code>
+							</div>
+						{/if}
+						{#if approvers.length > 0}
+							<div class="le-approvers">approvers: {approvers.join(', ')}</div>
+						{/if}
 						{#if le.body}
 							<pre class="le-body">{le.body}</pre>
 						{/if}
@@ -386,6 +402,49 @@
 		border-radius: 3px;
 		font-size: 11px;
 		white-space: pre-wrap;
+	}
+	.ledger li.awaiting {
+		border-left-color: #ebcb8b;
+	}
+	.le-awaiting {
+		font-size: 10px;
+		font-weight: 700;
+		letter-spacing: 0.1em;
+		padding: 2px 7px;
+		border-radius: 3px;
+		background: rgba(235, 203, 139, 0.2);
+		color: #ebcb8b;
+		border: 1px solid rgba(235, 203, 139, 0.45);
+	}
+	.le-policy {
+		margin-top: 6px;
+		display: inline-flex;
+		align-items: baseline;
+		gap: 6px;
+		padding: 3px 8px;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		font-size: 11px;
+	}
+	.le-policy-label {
+		color: var(--fg-dim);
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		font-size: 9px;
+	}
+	.le-policy-path {
+		color: var(--fg-dim);
+		font-family: "SF Mono", ui-monospace, monospace;
+		font-size: 11px;
+		background: transparent;
+		padding: 0;
+	}
+	.le-approvers {
+		margin-top: 4px;
+		color: var(--fg-dim);
+		font-size: 11px;
+		font-style: italic;
 	}
 	.kind.function { color: var(--kind-function); }
 	.kind.method { color: var(--kind-method); }

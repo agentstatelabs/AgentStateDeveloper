@@ -39,3 +39,14 @@ export function getCallers(qname: string): Promise<SymbolSummary[]> {
 export function getCallees(qname: string): Promise<SymbolSummary[]> {
 	return getJson<SymbolSummary[]>(`/api/v1/symbols/${encodeURIComponent(qname)}/callees`);
 }
+
+/// Flat cross-symbol ledger listing. Optional tag filter (e.g. "awaiting-approval").
+export function getLedgerByTag(tag?: string): Promise<LedgerEntry[]> {
+	const q = tag ? `?tag=${encodeURIComponent(tag)}` : '';
+	return getJson<LedgerEntry[]>(`/api/v1/ledger${q}`);
+}
+
+/// Convenience wrapper for the common "awaiting approval" queue view.
+export function getAwaitingApproval(): Promise<LedgerEntry[]> {
+	return getLedgerByTag('awaiting-approval');
+}

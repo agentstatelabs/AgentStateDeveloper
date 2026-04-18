@@ -19,12 +19,12 @@ use agentstatedeveloper_core::{
 };
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
@@ -61,7 +61,8 @@ pub fn build_router(
         .route("/symbols/{qname}/ledger", get(get_symbol_ledger))
         .route("/symbols/{qname}/effects", get(get_symbol_effects))
         .route("/symbols/{qname}/callers", get(get_symbol_callers))
-        .route("/symbols/{qname}/callees", get(get_symbol_callees));
+        .route("/symbols/{qname}/callees", get(get_symbol_callees))
+        .route("/ledger", get(list_ledger));
 
     let mut router = Router::new().nest("/api/v1", api);
 
@@ -286,6 +287,51 @@ fn resolve_symbols_by_ids(
     }
     out.sort_by(|a, b| a.qname.cmp(&b.qname));
     Ok(out)
+}
+
+#[derive(Debug, Deserialize)]
+struct LedgerQuery {
+    tag: Option<String>,
+}
+
+/// Flat cross-symbol ledger listing. Optional `?tag=<name>` filters to entries
+/// carrying that tag (e.g. `awaiting-approval`). Walks the `/asd/v1/ledger`
+/// subtree directly so we don't have to re-resolve every symbol_id.
+async fn list_ledger(
+    State(state): State<AppState>,
+    Query(q): Query<LedgerQuery>,
+) -> Result<Json<Vec<agentstatedeveloper_core::LedgerEntry>>, ApiError> {
+    let engine = state.engine.lock().await;
+    let ref_name = engine.ref_name.clone();
+    let prefix = format!("{}/ledger", agentstatedeveloper_core::ASD_PATH_PREFIX);
+
+    let tree = match engine.repo.get_tree(&ref_name, &prefix) {
+        Ok(t) => t,
+        Err(_) => return Ok(Json(Vec::new())),
+    };
+
+    let mut entries: Vec<agentstatedeveloper_core::LedgerEntry> = Vec::new();
+    if let serde_json::Value::Object(by_symbol) = tree {
+        for (_symbol_id, symbol_bucket) in by_symbol {
+            if let serde_json::Value::Object(entry_map) = symbol_bucket {
+                for (_entry_id, entry_val) in entry_map {
+                    if let Ok(e) = serde_json::from_value::<
+                        agentstatedeveloper_core::LedgerEntry,
+                    >(entry_val)
+                    {
+                        entries.push(e);
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(tag) = q.tag.as_deref() {
+        entries.retain(|e| e.tags.iter().any(|t| t == tag));
+    }
+
+    entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(Json(entries))
 }
 
 async fn get_symbol_effects(

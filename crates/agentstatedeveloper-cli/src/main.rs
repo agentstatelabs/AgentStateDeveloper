@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 mod config;
 mod commands;
 
-use commands::{init, index, ledger, read, trace, verify_effects};
+use commands::{init, index, ledger, policy, read, trace, verify_effects};
 
 /// AgentStateDeveloper — code-level context and audit overlay.
 #[derive(Debug, Parser)]
@@ -43,6 +43,10 @@ enum Command {
     #[command(subcommand)]
     Ledger(ledger::LedgerCmd),
 
+    /// Policy introspection (requires --policy / ASD_POLICY).
+    #[command(subcommand)]
+    Policy(policy::PolicyCmd),
+
     /// Verify declared effects for a symbol (M1: prints declared as unverified).
     VerifyEffects(verify_effects::VerifyEffectsArgs),
 
@@ -60,6 +64,7 @@ fn main() -> Result<()> {
         Command::Index(args) => index::run(&cfg, args),
         Command::Read(args) => read::run(&cfg, args),
         Command::Ledger(sub) => ledger::run(&cfg, sub),
+        Command::Policy(sub) => policy::run(&cfg, sub),
         Command::VerifyEffects(args) => verify_effects::run(&cfg, args),
         Command::Trace(args) => trace::run(&cfg, args),
     }

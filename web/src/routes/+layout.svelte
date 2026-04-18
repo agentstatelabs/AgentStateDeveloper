@@ -1,7 +1,7 @@
 <script lang="ts">
-	import { getHealth, getSymbols } from '$lib/api';
+	import { getHealth, getSymbols, getAwaitingApproval } from '$lib/api';
 	import type { Health } from '$lib/types';
-	import { symbols } from '$lib/stores';
+	import { symbols, approvals } from '$lib/stores';
 	import { page } from '$app/state';
 
 	let { children } = $props();
@@ -16,6 +16,9 @@
 		getSymbols()
 			.then((s) => symbols.set(s))
 			.catch((e) => symbols.setError(String(e)));
+		getAwaitingApproval()
+			.then((list) => approvals.set(list.length))
+			.catch(() => approvals.set(0));
 	});
 
 	let filter = $state('');
@@ -37,7 +40,15 @@
 
 <div class="app">
 	<header>
-		<div class="brand">ASD Lens</div>
+		<div class="brand">
+			<a href="/">ASD Lens</a>
+			{#if approvals.count > 0}
+				<span class="brand-sep">·</span>
+				<a class="approvals-badge" href="/approvals" title="Ledger entries awaiting approval">
+					{approvals.count} awaiting approval
+				</a>
+			{/if}
+		</div>
 		<div class="health">
 			{#if healthError}
 				<span class="bad">offline</span>
@@ -52,6 +63,13 @@
 
 	<div class="body">
 		<aside>
+			{#if approvals.count > 0}
+				<a class="side-approvals" href="/approvals">
+					<span class="dot"></span>
+					<span class="lbl">awaiting approval</span>
+					<span class="num">{approvals.count}</span>
+				</a>
+			{/if}
 			<input
 				type="text"
 				placeholder="filter symbols…"
@@ -135,6 +153,59 @@
 	.brand {
 		font-weight: 700;
 		letter-spacing: 0.04em;
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+	}
+	.brand a {
+		color: inherit;
+	}
+	.brand-sep {
+		color: var(--fg-dim);
+		font-weight: 400;
+	}
+	.approvals-badge {
+		font-weight: 600;
+		letter-spacing: 0;
+		font-size: 11px;
+		padding: 2px 8px;
+		border-radius: 10px;
+		background: rgba(235, 203, 139, 0.15);
+		color: #ebcb8b;
+		border: 1px solid rgba(235, 203, 139, 0.35);
+	}
+	.approvals-badge:hover {
+		background: rgba(235, 203, 139, 0.25);
+	}
+	.side-approvals {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin: 10px 12px 0 12px;
+		padding: 6px 10px;
+		background: rgba(235, 203, 139, 0.08);
+		border: 1px solid rgba(235, 203, 139, 0.3);
+		border-radius: 4px;
+		color: #ebcb8b;
+		font-size: 11px;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+	}
+	.side-approvals:hover {
+		background: rgba(235, 203, 139, 0.15);
+	}
+	.side-approvals .dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: #ebcb8b;
+	}
+	.side-approvals .lbl {
+		flex: 1;
+	}
+	.side-approvals .num {
+		font-weight: 700;
+		font-size: 12px;
 	}
 	.health .ok {
 		color: var(--ok);

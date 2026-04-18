@@ -14,8 +14,9 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use agentstatedeveloper_core::{
-    ASD_PATH_PREFIX, AsgEffectStore, AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Effect,
-    EffectDecl, EffectStore, Engine, IndexStore, LedgerEntry, LedgerKind, LedgerStore,
+    ASD_PATH_PREFIX, AsgEffectStore, AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Decision,
+    Effect, EffectCategory, EffectDecl, EffectStore, Engine, IndexStore, LedgerEntry, LedgerKind,
+    LedgerStore, Situation, actions,
 };
 
 /// The AgentStateDeveloper MCP server.
@@ -114,6 +115,10 @@ pub struct EffectDeclareParams {
     /// List of declared effects. Each element is a JSON object matching the
     /// `Effect` schema: `{ "effect": "<category>", "qualifiers": ..., "note": ... }`.
     pub declared: Vec<serde_json::Value>,
+    /// Author id (default: "asd-mcp"). Surfaced to the policy gate so rules
+    /// can scope by agent identity.
+    #[serde(default = "default_author_id")]
+    pub author_id: String,
 }
 
 fn default_limit() -> u32 {
@@ -433,7 +438,7 @@ impl AsdMcpServer {
     // -- Write tools --
 
     #[tool(
-        description = "Append a ledger entry to a symbol (resolved via qname). Returns { entry_id, symbol_id }."
+        description = "Append a ledger entry to a symbol (resolved via qname). Routes through the configured policy gate — may deny, allow, or flag the entry as awaiting-approval. Returns { entry_id, matched_policy, status }."
     )]
     async fn ledger_append(&self, params: Parameters<LedgerAppendParams>) -> String {
         let p = params.0;
@@ -456,6 +461,31 @@ impl AsdMcpServer {
             Err(e) => return err_json(&e.to_string()),
         };
 
+        // Evaluate policy before doing any write.
+        let action = actions::ledger_append_action(kind.as_str());
+        let situation = Situation {
+            description: format!("ledger.append for {}", p.qname),
+            qualifiers: serde_json::json!({
+                "qname": &p.qname,
+                "kind": kind.as_str(),
+            }),
+        };
+        let decision = match engine.policy.evaluate(&situation, &action, &p.author_id) {
+            Ok(d) => d,
+            Err(e) => return err_json(&format!("policy evaluation failed: {}", e)),
+        };
+
+        if let Decision::Deny {
+            matched_policy,
+            reason,
+        } = &decision
+        {
+            return err_json(&format!(
+                "policy denied: {} (matched {})",
+                reason, matched_policy
+            ));
+        }
+
         let author = Author {
             kind: author_kind,
             id: p.author_id.clone(),
@@ -465,21 +495,47 @@ impl AsdMcpServer {
         if let Some(tags) = p.tags {
             entry.tags = tags;
         }
+        entry.matched_policy = decision.matched_policy();
+
+        // RequireApproval: tag the entry so downstream reviewers see it.
+        if let Decision::RequireApproval {
+            approvers, reason, ..
+        } = &decision
+        {
+            entry.tags.push("awaiting-approval".to_string());
+            for a in approvers {
+                entry.tags.push(format!("approver:{}", a));
+            }
+            if let Some(r) = reason {
+                if entry.body.is_none() {
+                    entry.body = Some(format!("Approval reason: {}", r));
+                }
+            }
+        }
 
         let ledger_store = AsgLedgerStore { repo: &engine.repo };
         if let Err(e) = ledger_store.append_entry(&ref_name, &entry, &p.author_id) {
             return err_json(&e.to_string());
         }
 
+        let status = match &decision {
+            Decision::Allow { .. } => "allowed",
+            Decision::RequireApproval { .. } => "awaiting-approval",
+            Decision::Deny { .. } => "denied",
+            Decision::NoPolicyMatch => "no-policy-match",
+        };
+
         serde_json::to_string(&serde_json::json!({
             "entry_id": entry.entry_id,
             "symbol_id": symbol.symbol_id,
+            "matched_policy": entry.matched_policy,
+            "status": status,
         }))
         .unwrap_or_else(|_| "{}".to_string())
     }
 
     #[tool(
-        description = "Overwrite the `declared` effects list for a symbol. Returns the updated EffectDecl."
+        description = "Overwrite the `declared` effects list for a symbol. Routes through the configured policy gate. Uses `asd.effect.declare.broadens` as the action when the new list introduces effect categories not already present; otherwise `asd.effect.declare`. Returns the updated EffectDecl plus a `status` string."
     )]
     async fn effect_declare(&self, params: Parameters<EffectDeclareParams>) -> String {
         let p = params.0;
@@ -509,21 +565,76 @@ impl AsdMcpServer {
             Err(e) => return err_json(&e.to_string()),
         };
 
+        // Broadening check: if any new effect category is not already present
+        // in the existing declared list, this call is broadening.
+        let existing_set: std::collections::HashSet<EffectCategory> = existing
+            .as_ref()
+            .map(|d| d.declared.iter().map(|e| e.effect).collect())
+            .unwrap_or_default();
+        let new_categories: Vec<String> =
+            declared.iter().map(|e| e.effect.as_str().to_string()).collect();
+        let broadens = declared.iter().any(|e| !existing_set.contains(&e.effect));
+        let action = if broadens {
+            actions::EFFECT_DECLARE_BROADENS
+        } else {
+            actions::EFFECT_DECLARE
+        };
+
+        let situation = Situation {
+            description: format!("effect.declare for {}", p.qname),
+            qualifiers: serde_json::json!({
+                "qname": &p.qname,
+                "declared": new_categories,
+                "broadens": broadens,
+            }),
+        };
+        let decision = match engine.policy.evaluate(&situation, action, &p.author_id) {
+            Ok(d) => d,
+            Err(e) => return err_json(&format!("policy evaluation failed: {}", e)),
+        };
+
+        if let Decision::Deny {
+            matched_policy,
+            reason,
+        } = &decision
+        {
+            return err_json(&format!(
+                "policy denied: {} (matched {})",
+                reason, matched_policy
+            ));
+        }
+
+        let matched_policy = decision.matched_policy();
+
         let updated = EffectDecl {
             symbol_id: symbol.symbol_id.clone(),
             declared,
             transitive: existing.as_ref().map(|d| d.transitive.clone()).unwrap_or_default(),
             verification: existing.as_ref().and_then(|d| d.verification.clone()),
             confidence: existing.as_ref().and_then(|d| d.confidence),
-            matched_policy: existing.as_ref().and_then(|d| d.matched_policy.clone()),
+            matched_policy: matched_policy.clone(),
         };
 
-        if let Err(e) = effects_store.put_effects(&ref_name, &symbol.symbol_id, &updated, "asd-mcp")
+        if let Err(e) =
+            effects_store.put_effects(&ref_name, &symbol.symbol_id, &updated, &p.author_id)
         {
             return err_json(&e.to_string());
         }
 
-        serde_json::to_string(&updated).unwrap_or_else(|_| "{}".to_string())
+        let status = match &decision {
+            Decision::Allow { .. } => "allowed",
+            Decision::RequireApproval { .. } => "awaiting-approval",
+            Decision::Deny { .. } => "denied",
+            Decision::NoPolicyMatch => "no-policy-match",
+        };
+
+        serde_json::to_string(&serde_json::json!({
+            "effect_decl": updated,
+            "matched_policy": matched_policy,
+            "status": status,
+            "action": action,
+        }))
+        .unwrap_or_else(|_| "{}".to_string())
     }
 }
 
