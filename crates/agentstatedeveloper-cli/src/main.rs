@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 mod config;
 mod commands;
 
-use commands::{init, index, ledger, policy, read, trace, verify_effects};
+use commands::{hydrate, index, init, ledger, policy, read, sync, trace, verify_effects};
 
 /// AgentStateDeveloper — code-level context and audit overlay.
 #[derive(Debug, Parser)]
@@ -53,6 +53,14 @@ enum Command {
     /// Run a Python program under the ASD runtime tracer and ingest the
     /// observed effects into ASG.
     Trace(trace::TraceArgs),
+
+    /// Mirror ASG state into the `.asd/v1/` on-disk sidecar so it can
+    /// travel with `git commit`.
+    Sync(sync::SyncArgs),
+
+    /// Read the `.asd/v1/` sidecar back into ASG. Inverse of `sync`.
+    /// Used to restore state after a fresh `git clone`.
+    Hydrate(hydrate::HydrateArgs),
 }
 
 fn main() -> Result<()> {
@@ -67,5 +75,7 @@ fn main() -> Result<()> {
         Command::Policy(sub) => policy::run(&cfg, sub),
         Command::VerifyEffects(args) => verify_effects::run(&cfg, args),
         Command::Trace(args) => trace::run(&cfg, args),
+        Command::Sync(args) => sync::run(&cfg, args),
+        Command::Hydrate(args) => hydrate::run(&cfg, args),
     }
 }

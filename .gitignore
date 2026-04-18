@@ -10,8 +10,9 @@ build/
 target/
 Cargo.lock
 examples/sample-py-repo/.asd-state.db
-examples/sample-py-repo/.asd/
 .asd-state.db
+# NOTE: do NOT ignore `.asd/` — the sidecar is designed to travel with
+# the git repo so a fresh clone can `asd hydrate` without a registry.
 web/node_modules/
 web/build/
 web/.svelte-kit/

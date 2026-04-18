@@ -1,7 +1,9 @@
+pub mod hydrate;
 pub mod index;
 pub mod init;
 pub mod ledger;
 pub mod policy;
 pub mod read;
+pub mod sync;
 pub mod trace;
 pub mod verify_effects;

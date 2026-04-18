@@ -5,7 +5,7 @@ wasn't picked up in the current milestone. Not a roadmap — these are
 things I'd want a future maintainer (or future me) to see *before*
 assuming something's missing on accident.
 
-Last synced: M7 landed (2026-04-18).
+Last synced: M9 landed (2026-04-18).
 
 ## Tracer (`tools/asd_tracer.py`)
 
@@ -48,34 +48,40 @@ M5 scope exclusions, in order of likely user-facing impact:
 
 ## Policy
 
-M7 shipped `FilePolicyGate` + `--policy` wiring on `asd ledger
-append`. Remaining gaps:
+M7 shipped `FilePolicyGate` + `--policy` wiring. M8 extended coverage
+across MCP, HTTP, Lens. M9 closed the loop with ratification. Status:
 
 - `agentstategraph-policy` crate still not built (design in
   [POLICY_V1.md](/Users/user/Documents/AgentStateLabs/strategy/POLICY_V1.md)).
   Our `FilePolicyGate` is interim; schema is a subset so migration is
   a rename.
-- **MCP parity** — MCP `ledger_append` and `effect_declare` don't yet
-  route through the gate. Only the CLI does. M8 target.
-- **Effect-declare routing** even in the CLI — `asd effect` (no such
-  command yet; effect_declare is only via MCP). Once MCP is plumbed,
-  CLI should grow it for parity.
 - **No selector DSL** — `match_action` is exact or prefix-`.*` match,
   plus optional `agent_id` equality. POLICY_V1 envisions richer
   conditions (paths, timestamps, qualifiers). Expand when real use
   cases arrive.
-- **No policy introspection CLI yet** — POLICY_V1 §7 has `ctx policy
-  list / show / evaluate`. Planned for M8 as `asd policy …`.
-- **Approval is advisory** — entries land with `tags:
-  [awaiting-approval, approver:human]` but nothing prevents a later
-  reader from acting on them before a human flips the tag. No
-  ratification workflow yet.
 - **Hot reload** — policy file is loaded once at engine open. Changes
   require restart.
 - **No policy coverage over**: traces (`asd trace` ingest), index
-  (`asd index` writes), merge (no merge surface yet), rename.
-- **Lens surface** — matched_policy is in the data but not yet
-  rendered, and there's no filter for `awaiting-approval`. M8 target.
+  (`asd index` writes), merge (no merge surface yet), rename. Today
+  the gate fires on ledger append/approve and effect_declare only.
+
+### Ratification (M9) — remaining gaps
+
+- **No reject/deny action** — reviewers can approve awaiting entries
+  but can't explicitly reject them. Currently the workaround is "don't
+  approve" — the entry just sits in the queue forever.
+- **No revoke** — once approved, it stays approved. Security-adjacent
+  scenarios (approver credentials compromised) need a revocation path.
+- **No approval rationale** — `approved-by:alice` tells you who, not
+  why. Adding a `--message` on approve + a `approval-note:<text>` tag
+  or a dedicated field would close that.
+- **No cryptographic signing** — `approved-by:alice` is only as
+  trustworthy as the author_id on the commit. For enterprise, signed
+  approvals (ed25519 or similar) are table stakes.
+- **No supersede at any surface** — schema has `supersedes: [entry_id]`
+  but `asd ledger` only exposes `append` + `approve`. To retract/
+  replace a ledger entry you'd need to write a new one with
+  supersedes set manually. MCP/HTTP/CLI all lack this.
 
 ## HTTP / MCP
 
@@ -91,14 +97,25 @@ append`. Remaining gaps:
 
 ## UI (Lens)
 
-- Read-only. No ratification queue, no ledger writes from the web,
-  no effect-declaration edits. All mutations via CLI or MCP.
-- No cross-module graph visualization (edges are exposed via API
-  but rendered as flat lists, not a graph).
-- No effect-distribution overview route (e.g., "which 10 symbols
-  have the biggest transitive blast radius?").
-- `via` symbol_ids in transitive effects should be clickable/
-  resolvable to qnames. Planned for M6b.
+M6 added via-link resolution + mismatch banner. M8 added the
+awaiting-approval badge + matched_policy chip + `/approvals` queue.
+M9 added the Approve button on the queue. Remaining gaps:
+
+- **No reject / withdraw-approval buttons** on the queue — pairs with
+  the ratification gaps above.
+- **No cross-module graph visualization** — edges are exposed via API
+  but rendered as flat lists, not a graph.
+- **No effect-distribution overview route** (e.g., "which 10 symbols
+  have the biggest transitive blast radius?"). Top-N by declared +
+  transitive count, filterable by category.
+- **No effect_declare UI** — effect decls come from `asd index`'s
+  static inference or MCP writes only. Humans can't edit effects
+  without going through MCP tool calls manually.
+- **No policy authoring UI** — policy files are JSON edited by hand.
+  POLICY_V1 has a proposal/ratify UX; we've not surfaced anything.
+- **No "who approved what, when" timeline view** — approval history is
+  embedded in tags on each entry but not rendered as a flat reviewer
+  log anywhere.
 
 ## Languages
 
@@ -127,7 +144,15 @@ Explicitly out-of-repo, but we have nothing built:
 - `.asd/` on-disk committable sidecar was specified in DESIGN.md but
   never implemented — currently everything lives in the SQLite ASG
   repo only. Implementing `.asd/` would enable the git-roundtrip
-  promise for cold clones.
+  promise for cold clones. **M10 target.**
+- No audit-log export / event stream. Approvals + denials should be
+  stream-able to SIEM (Splunk, Datadog, etc.) for enterprise
+  compliance. Today they're observable via `get_tree` on the ledger
+  path only.
+- Traces carry a `started_at`/`finished_at` but no per-call timing or
+  call-depth info.
+- No schema migration story on disk. Everything lives under
+  `/asd/v1/` so a v2 can sit alongside, but there's no migration tool.
 
 ## Working-style
 

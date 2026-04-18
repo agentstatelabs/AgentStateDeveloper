@@ -13,6 +13,7 @@ pub mod ledger;
 pub mod paths;
 pub mod policy;
 pub mod schema;
+pub mod sidecar;
 pub mod symbol;
 pub mod transitive;
 
@@ -31,5 +32,6 @@ pub use schema::{
     Evidence, LedgerEntry, LedgerKind, Mismatch, Position, Symbol, SymbolKind, TransitiveEffect,
     Verification, VerificationSource, VerificationStatus,
 };
+pub use sidecar::{hydrate_from_dir, sync_to_dir, HydrateSummary, SyncSummary};
 pub use symbol::{REBIND_SIMILARITY_THRESHOLD, canonical_symbol_id, symbol_fingerprint};
 pub use transitive::propagate_transitive;
