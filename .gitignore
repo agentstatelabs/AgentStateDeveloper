@@ -7,3 +7,8 @@ __pycache__/
 .env.local
 dist/
 build/
+target/
+Cargo.lock
+examples/sample-py-repo/.asd-state.db
+examples/sample-py-repo/.asd/
+.asd-state.db

@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/agentstatedeveloper-core",
+    "crates/agentstatedeveloper-python",
+    "crates/agentstatedeveloper-cli",
+    "crates/agentstatedeveloper-mcp",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Craig Brown"]
+license = "BSL-1.1"
+description = "AgentStateDeveloper — code-level context and audit overlay for agent-authored code"
+repository = "https://github.com/agentstatelabs/AgentStateDeveloper"
+
+[workspace.dependencies]
+# ASG family — path deps until artifacts ship
+agentstategraph = { path = "../stategraph/crates/agentstategraph" }
+agentstategraph-core = { path = "../stategraph/crates/agentstategraph-core" }
+agentstategraph-storage = { path = "../stategraph/crates/agentstategraph-storage" }
+
+# Common
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+blake3 = "1"
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+
+# Parsing
+tree-sitter = "0.24"
+tree-sitter-python = "0.23"
+
+# CLI / terminal
+clap = { version = "4", features = ["derive"] }
+directories = "5"
+
+# Internal crates
+agentstatedeveloper-core = { path = "crates/agentstatedeveloper-core" }
+agentstatedeveloper-python = { path = "crates/agentstatedeveloper-python" }

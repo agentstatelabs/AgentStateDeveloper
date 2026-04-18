@@ -1,0 +1,140 @@
+//! `asd index <path>` — walk a directory for `*.py` files, parse them
+//! with the Python adapter, and write Symbol + EffectDecl records into
+//! the ASG.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use chrono::Utc;
+use clap::Args;
+use serde_json::json;
+
+use agentstatedeveloper_core::{
+    canonical_symbol_id, symbol_fingerprint, AsgEffectStore, AsgIndexStore, EffectDecl, EffectStore,
+    Engine, IndexStore, LanguageAdapter, Position, Symbol, Verification, VerificationSource, VerificationStatus,
+};
+use agentstatedeveloper_python::PythonAdapter;
+
+use crate::config::Config;
+
+#[derive(Debug, Args)]
+pub struct IndexArgs {
+    /// Directory (or file) to index. Recursively walks for `*.py`.
+    pub path: PathBuf,
+}
+
+pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
+    let mut engine = Engine::open_sqlite(&cfg.db_path)?;
+    let adapter = Arc::new(PythonAdapter::new());
+    let adapter_dyn: Arc<dyn agentstatedeveloper_core::LanguageAdapter> = adapter.clone();
+    engine.register_adapter(adapter_dyn);
+
+    let files = collect_py_files(&args.path)?;
+
+    let index_store = AsgIndexStore { repo: &engine.repo };
+    let effect_store = AsgEffectStore { repo: &engine.repo };
+
+    let mut symbol_count: usize = 0;
+    let mut effect_count: usize = 0;
+
+    for file in &files {
+        let source = std::fs::read_to_string(file)
+            .with_context(|| format!("read {}", file.display()))?;
+        let file_str = file.to_string_lossy().to_string();
+
+        let parsed = adapter.parse_symbols(&file_str, &source)?;
+
+        for p in &parsed {
+            let symbol_id = canonical_symbol_id(&p.qname, p.kind, &file_str);
+            let symbol_fp = symbol_fingerprint(&p.body);
+            let symbol = Symbol {
+                symbol_id: symbol_id.clone(),
+                symbol_fp,
+                qname: p.qname.clone(),
+                language: adapter.language().to_string(),
+                kind: p.kind,
+                file: file_str.clone(),
+                start: Position {
+                    line: p.start_line,
+                    col: p.start_col,
+                },
+                end: Position {
+                    line: p.end_line,
+                    col: p.end_col,
+                },
+                signature: p.signature.clone(),
+            };
+
+            index_store.put_symbol(&engine.ref_name, &symbol, &cfg.agent_id)?;
+            symbol_count += 1;
+
+            let declared = adapter.infer_effects(&source, p);
+            let decl = EffectDecl {
+                symbol_id: symbol_id.clone(),
+                declared,
+                transitive: Vec::new(),
+                verification: Some(Verification {
+                    by: VerificationSource::StaticChecker,
+                    at: Utc::now(),
+                    status: VerificationStatus::Unverified,
+                    mismatches: Vec::new(),
+                }),
+                confidence: None,
+                matched_policy: None,
+            };
+            effect_store.put_effects(&engine.ref_name, &symbol_id, &decl, &cfg.agent_id)?;
+            effect_count += 1;
+        }
+    }
+
+    let summary = json!({
+        "files": files.len(),
+        "symbols": symbol_count,
+        "effects": effect_count,
+    });
+    println!("{}", serde_json::to_string_pretty(&summary)?);
+    Ok(())
+}
+
+/// Recursively collect `*.py` files under `root`. If `root` is itself a
+/// `.py` file, return just that.
+fn collect_py_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    if root.is_file() {
+        if is_py(root) {
+            out.push(root.to_path_buf());
+        }
+        return Ok(out);
+    }
+    walk(root, &mut out)?;
+    Ok(out)
+}
+
+fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    let rd = std::fs::read_dir(dir)
+        .with_context(|| format!("read_dir {}", dir.display()))?;
+    for entry in rd {
+        let entry = entry?;
+        let path = entry.path();
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            // Skip common noise dirs.
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if matches!(
+                name,
+                ".git" | ".venv" | "venv" | "__pycache__" | "node_modules" | ".tox" | ".mypy_cache"
+            ) {
+                continue;
+            }
+            walk(&path, out)?;
+        } else if ft.is_file() && is_py(&path) {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn is_py(p: &Path) -> bool {
+    p.extension().and_then(|s| s.to_str()) == Some("py")
+}

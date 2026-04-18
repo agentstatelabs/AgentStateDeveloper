@@ -421,3 +421,56 @@ Ordering per MVP discussion (C5: context silos, work validation, blast radius):
    `code_query`, `code_read`, `callers_of`, `callees_of`.
 
 Contracts and execution traces are phase 2.
+
+## Build shape
+
+### Tiers
+
+**Solo dev (OSS):** local SQLite-backed ASG, permissive policy
+(`NoPolicyMatch → Allow`), single-user, `.asd/` in git, CLI + MCP +
+minimal Lens for local browsing. Everything in this repo.
+
+**Enterprise (commercial, separate repo):** Postgres-backed ASG with
+multi-tenancy, real policy enforcement via `agentstategraph-policy`,
+ratification + multi-agent attestation, registry for cross-machine
+authoring history, audit export (SIEM), enterprise SSO + RBAC, admin
+UI. Consumes the OSS crates as dependencies; never reaches into internals.
+
+Same binary; tier is selected by config (`ASD_MODE=solo|enterprise` or
+`~/.asd/config.toml`). MCP tool surface is identical across tiers —
+policy + scope determine per-call behavior, not feature flags.
+
+### License
+
+BSL-1.1, matching CTXone. Licensor: AgentStateLabs, LLC. Change License:
+Apache-2.0 after four years. Copy the CTXone LICENSE text verbatim,
+swapping "CTXone" for "AgentStateDeveloper."
+
+### Directory layout
+
+```
+agent-programming-layer/
+├── crates/
+│   ├── agentstatedeveloper-core/       # traits + ASG-backed default impls
+│   ├── agentstatedeveloper-python/     # Python language adapter
+│   ├── agentstatedeveloper-mcp/        # MCP server (stdio + HTTP)
+│   └── agentstatedeveloper-cli/        # `asd` binary
+├── bindings/python/                    # pyo3 bindings (phase 2)
+├── web/                                # Lens solo viewer (M2, Svelte)
+├── examples/sample-py-repo/
+├── spec/                               # formal spec once shape stabilizes
+└── Cargo.toml                          # workspace root
+```
+
+Follows the same pattern as `/Apps/stategraph/` and `/Apps/CTXone/`.
+
+### Milestones
+
+- **M1** — core + python adapter + CLI (`asd init`, `index`, `read`,
+  `ledger append`, `verify-effects`) + MCP server stub + sample Python
+  repo. Solo-complete end-to-end read/write of effects and ledger.
+- **M2** — Lens solo viewer (Svelte, read-only at first). HTTP API on
+  MCP server gets Lens as its first consumer.
+- **M3** — TypeScript adapter, traces, contract layer.
+- Enterprise features scaffold throughout M1/M2 (stubs, no-op impls) so
+  the commercial repo has clean trait seams to consume.

@@ -1,0 +1,17 @@
+[package]
+name = "agentstatedeveloper-mcp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MCP server for AgentStateDeveloper — exposes asd tools over stdio"
+
+[[bin]]
+name = "asd-mcp"
+path = "src/main.rs"
+
+[dependencies]
+agentstatedeveloper-core = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }

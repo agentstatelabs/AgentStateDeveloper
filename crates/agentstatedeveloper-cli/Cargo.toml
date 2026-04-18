@@ -1,0 +1,25 @@
+[package]
+name = "agentstatedeveloper-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "asd CLI — command-line interface for AgentStateDeveloper"
+
+[[bin]]
+name = "asd"
+path = "src/main.rs"
+
+[dependencies]
+agentstatedeveloper-core = { workspace = true }
+agentstatedeveloper-python = { workspace = true }
+agentstategraph = { workspace = true }
+agentstategraph-core = { workspace = true }
+
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+directories = { workspace = true }
