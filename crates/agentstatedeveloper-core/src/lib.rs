@@ -22,7 +22,7 @@ pub use effects::{AsgEffectStore, EffectStore};
 pub use engine::Engine;
 pub use error::{AsdError, Result};
 pub use index::{AsgIndexStore, IndexStore};
-pub use ledger::{ApprovalOutcome, AsgLedgerStore, LedgerStore};
+pub use ledger::{ApprovalOutcome, AsgLedgerStore, LedgerStore, ReviewOutcome};
 pub use policy::{
     Decision, FilePolicyGate, PermissivePolicyGate, PolicyFile, PolicyGate, PolicyRule, Situation,
     actions,

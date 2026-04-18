@@ -119,6 +119,52 @@ pub struct LedgerApproveParams {
     /// matches directly.
     #[serde(default = "default_approver_kind_mcp")]
     pub approver_kind: String,
+    /// Optional approver rationale — appended to the entry body as an
+    /// "Approver note" section.
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct LedgerRejectParams {
+    /// Entry id to reject.
+    pub entry_id: String,
+    /// Reviewer id — recorded as `rejected-by:<id>`.
+    pub reviewer: String,
+    /// Reviewer kind. Same approver-match rule as approve.
+    #[serde(default = "default_approver_kind_mcp")]
+    pub reviewer_kind: String,
+    /// Rejection reason (required). Appended to the entry body.
+    pub reason: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct LedgerWithdrawParams {
+    /// Entry id to withdraw.
+    pub entry_id: String,
+    /// Author id — must match the original `entry.author.id`.
+    pub author_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct LedgerSupersedeParams {
+    /// Qname the new entry attaches to.
+    pub qname: String,
+    /// Entry ids superseded by the new entry.
+    pub supersedes: Vec<String>,
+    /// Ledger kind for the new entry (decision, rationale, hazard, …).
+    pub kind: String,
+    /// One-line summary.
+    pub summary: String,
+    /// Optional body.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// Author kind (default: "agent").
+    #[serde(default = "default_author_kind")]
+    pub author_kind: String,
+    /// Author id (default: "asd-mcp").
+    #[serde(default = "default_author_id")]
+    pub author_id: String,
 }
 
 fn default_approver_kind_mcp() -> String {
@@ -564,6 +610,7 @@ impl AsdMcpServer {
             &p.entry_id,
             &p.approver,
             &p.approver_kind,
+            p.message.as_deref(),
             "asd-mcp",
         ) {
             Ok(outcome) => serde_json::to_string(&serde_json::json!({
@@ -573,6 +620,94 @@ impl AsdMcpServer {
             .unwrap_or_else(|_| "{}".to_string()),
             Err(e) => err_json(&e.to_string()),
         }
+    }
+
+    #[tool(
+        description = "Reject an awaiting-approval ledger entry. Flips tags to `rejected` + records `rejected-by:<reviewer>` and `rejected-at:<timestamp>`. `reason` is required and appended to the entry body. Same approver-match rule as `ledger_approve`."
+    )]
+    async fn ledger_reject(&self, params: Parameters<LedgerRejectParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        match ledger_store.reject_entry(
+            &ref_name,
+            &p.entry_id,
+            &p.reviewer,
+            &p.reviewer_kind,
+            &p.reason,
+            "asd-mcp",
+        ) {
+            Ok(outcome) => serde_json::to_string(&serde_json::json!({
+                "status": if outcome.already_resolved { "already-rejected" } else { "rejected" },
+                "entry": outcome.entry,
+            }))
+            .unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Withdraw an awaiting-approval entry. Must be called by the original author (author_id matching the entry's author.id). Flips `awaiting-approval` → `withdrawn`."
+    )]
+    async fn ledger_withdraw(&self, params: Parameters<LedgerWithdrawParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        match ledger_store.withdraw_entry(&ref_name, &p.entry_id, &p.author_id, "asd-mcp") {
+            Ok(outcome) => serde_json::to_string(&serde_json::json!({
+                "status": if outcome.already_resolved { "already-withdrawn" } else { "withdrawn" },
+                "entry": outcome.entry,
+            }))
+            .unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Append a new ledger entry that supersedes one or more existing entries for the given symbol. Non-superseded entries remain; superseded ones are filtered out of default `ledger_get` results."
+    )]
+    async fn ledger_supersede(&self, params: Parameters<LedgerSupersedeParams>) -> String {
+        let p = params.0;
+        let kind = match parse_ledger_kind(&p.kind) {
+            Ok(k) => k,
+            Err(e) => return err_json(&e),
+        };
+        let author_kind = match parse_author_kind(&p.author_kind) {
+            Ok(k) => k,
+            Err(e) => return err_json(&e),
+        };
+
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let index = AsgIndexStore { repo: &engine.repo };
+        let symbol = match index.get_symbol_by_qname(&ref_name, &p.qname) {
+            Ok(Some(s)) => s,
+            Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
+            Err(e) => return err_json(&e.to_string()),
+        };
+
+        let author = Author {
+            kind: author_kind,
+            id: p.author_id.clone(),
+        };
+        let mut entry = LedgerEntry::new(&symbol.symbol_id, kind, p.summary, author);
+        entry.body = p.body;
+        entry.supersedes = p.supersedes.clone();
+        entry.tags.push("supersedes".to_string());
+
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        if let Err(e) = ledger_store.append_entry(&ref_name, &entry, "asd-mcp") {
+            return err_json(&e.to_string());
+        }
+        serde_json::to_string(&serde_json::json!({
+            "status": "superseded",
+            "entry_id": entry.entry_id,
+            "symbol_id": entry.symbol_id,
+            "supersedes": entry.supersedes,
+        }))
+        .unwrap_or_else(|_| "{}".to_string())
     }
 
     #[tool(

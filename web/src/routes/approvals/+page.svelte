@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { getAwaitingApproval, approveEntry } from '$lib/api';
+	import { getAwaitingApproval, approveEntry, rejectEntry } from '$lib/api';
 	import type { LedgerEntry } from '$lib/types';
 	import { symbols, approvals } from '$lib/stores';
 
@@ -10,6 +10,8 @@
 	let approverKind = $state('human');
 	let pendingId = $state<string | null>(null);
 	let rowError = $state<Record<string, string>>({});
+	let rowMessage = $state<Record<string, string>>({});
+	let rowReason = $state<Record<string, string>>({});
 
 	async function refresh() {
 		const list = await getAwaitingApproval();
@@ -32,7 +34,25 @@
 		pendingId = entryId;
 		rowError = { ...rowError, [entryId]: '' };
 		try {
-			await approveEntry(entryId, approver, approverKind);
+			await approveEntry(entryId, approver, approverKind, rowMessage[entryId] || undefined);
+			await refresh();
+		} catch (e) {
+			rowError = { ...rowError, [entryId]: String(e) };
+		} finally {
+			pendingId = null;
+		}
+	}
+
+	async function reject(entryId: string) {
+		const reason = (rowReason[entryId] || '').trim();
+		if (!reason) {
+			rowError = { ...rowError, [entryId]: 'reason is required to reject' };
+			return;
+		}
+		pendingId = entryId;
+		rowError = { ...rowError, [entryId]: '' };
+		try {
+			await rejectEntry(entryId, approver, reason, approverKind);
 			await refresh();
 		} catch (e) {
 			rowError = { ...rowError, [entryId]: String(e) };
@@ -111,13 +131,36 @@
 				{#if approvers.length > 0}
 					<div class="row-approvers">approvers: {approvers.join(', ')}</div>
 				{/if}
+				<div class="row-inputs">
+					<input
+						type="text"
+						class="row-input"
+						placeholder="optional approval note"
+						bind:value={rowMessage[le.entry_id]}
+						disabled={pendingId === le.entry_id}
+					/>
+					<input
+						type="text"
+						class="row-input"
+						placeholder="rejection reason (required to reject)"
+						bind:value={rowReason[le.entry_id]}
+						disabled={pendingId === le.entry_id}
+					/>
+				</div>
 				<div class="row-actions">
 					<button
 						class="approve-btn"
 						disabled={pendingId === le.entry_id}
 						onclick={() => approve(le.entry_id)}
 					>
-						{pendingId === le.entry_id ? 'approving…' : 'approve'}
+						{pendingId === le.entry_id ? 'working…' : 'approve'}
+					</button>
+					<button
+						class="reject-btn"
+						disabled={pendingId === le.entry_id}
+						onclick={() => reject(le.entry_id)}
+					>
+						reject
 					</button>
 					{#if rowError[le.entry_id]}
 						<span class="row-err">{rowError[le.entry_id]}</span>
@@ -296,9 +339,43 @@
 	.approve-btn:hover:not(:disabled) {
 		background: rgba(111, 207, 151, 0.25);
 	}
-	.approve-btn:disabled {
+	.approve-btn:disabled,
+	.reject-btn:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
+	}
+	.reject-btn {
+		background: rgba(224, 108, 117, 0.15);
+		color: var(--bad);
+		border: 1px solid rgba(224, 108, 117, 0.4);
+		border-radius: 3px;
+		padding: 4px 12px;
+		font-size: 11px;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		font-weight: 600;
+		cursor: pointer;
+		font-family: inherit;
+	}
+	.reject-btn:hover:not(:disabled) {
+		background: rgba(224, 108, 117, 0.25);
+	}
+	.row-inputs {
+		margin-top: 8px;
+		display: flex;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+	.row-input {
+		flex: 1 1 220px;
+		min-width: 180px;
+		background: var(--bg);
+		color: var(--fg);
+		border: 1px solid var(--border);
+		border-radius: 3px;
+		padding: 4px 8px;
+		font-family: inherit;
+		font-size: 11px;
 	}
 	.row-err {
 		color: var(--bad);

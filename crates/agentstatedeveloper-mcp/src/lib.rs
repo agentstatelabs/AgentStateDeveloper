@@ -66,6 +66,14 @@ pub fn build_router(
         .route(
             "/approvals/{entry_id}/approve",
             axum::routing::post(approve_entry),
+        )
+        .route(
+            "/approvals/{entry_id}/reject",
+            axum::routing::post(reject_entry),
+        )
+        .route(
+            "/approvals/{entry_id}/withdraw",
+            axum::routing::post(withdraw_entry),
         );
 
     let mut router = Router::new().nest("/api/v1", api);
@@ -349,6 +357,26 @@ struct ApproveBody {
     /// Optional commit agent id. Defaults to "asd-http".
     #[serde(default = "default_http_agent_id")]
     agent_id: String,
+    /// Optional rationale appended to the entry body.
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RejectBody {
+    reviewer: String,
+    #[serde(default = "default_approver_kind")]
+    reviewer_kind: String,
+    reason: String,
+    #[serde(default = "default_http_agent_id")]
+    agent_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WithdrawBody {
+    author_id: String,
+    #[serde(default = "default_http_agent_id")]
+    agent_id: String,
 }
 
 fn default_approver_kind() -> String {
@@ -373,11 +401,53 @@ async fn approve_entry(
             &entry_id,
             &body.approver,
             &body.approver_kind,
+            body.message.as_deref(),
             &body.agent_id,
         )
         .map_err(ApiError::from)?;
     Ok(Json(json!({
         "status": if outcome.already_approved { "already-approved" } else { "approved" },
+        "entry": outcome.entry,
+    })))
+}
+
+async fn reject_entry(
+    State(state): State<AppState>,
+    Path(entry_id): Path<String>,
+    Json(body): Json<RejectBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let engine = state.engine.lock().await;
+    let ref_name = engine.ref_name.clone();
+    let ledger_store = AsgLedgerStore { repo: &engine.repo };
+    let outcome = ledger_store
+        .reject_entry(
+            &ref_name,
+            &entry_id,
+            &body.reviewer,
+            &body.reviewer_kind,
+            &body.reason,
+            &body.agent_id,
+        )
+        .map_err(ApiError::from)?;
+    Ok(Json(json!({
+        "status": if outcome.already_resolved { "already-rejected" } else { "rejected" },
+        "entry": outcome.entry,
+    })))
+}
+
+async fn withdraw_entry(
+    State(state): State<AppState>,
+    Path(entry_id): Path<String>,
+    Json(body): Json<WithdrawBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let engine = state.engine.lock().await;
+    let ref_name = engine.ref_name.clone();
+    let ledger_store = AsgLedgerStore { repo: &engine.repo };
+    let outcome = ledger_store
+        .withdraw_entry(&ref_name, &entry_id, &body.author_id, &body.agent_id)
+        .map_err(ApiError::from)?;
+    Ok(Json(json!({
+        "status": if outcome.already_resolved { "already-withdrawn" } else { "withdrawn" },
         "entry": outcome.entry,
     })))
 }

@@ -18,26 +18,99 @@ pub enum LedgerCmd {
     /// Append a new ledger entry for a symbol.
     Append(AppendArgs),
 
-    /// Approve an entry currently tagged `awaiting-approval`. Flips the
-    /// tag to `approved` and records approver + timestamp on the entry.
+    /// Approve an entry currently tagged `awaiting-approval`.
     Approve(ApproveArgs),
+
+    /// Reject an entry currently tagged `awaiting-approval`.
+    Reject(RejectArgs),
+
+    /// Withdraw an awaiting-approval entry — must be called by the
+    /// original author.
+    Withdraw(WithdrawArgs),
+
+    /// Write a new entry that supersedes one or more existing entries.
+    /// Non-superseded entries remain; superseded ones are filtered out
+    /// of the default `list_entries` view.
+    Supersede(SupersedeArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct ApproveArgs {
-    /// Entry id (e.g., `led_abc…`) to approve. Found by scanning the
-    /// ledger tree — no symbol qname needed.
+    /// Entry id (e.g., `led_abc…`) to approve.
     pub entry_id: String,
 
     /// Approver identifier. Recorded as `approved-by:<id>`.
     #[arg(long)]
     pub approver: String,
 
-    /// Approver kind (e.g., `human`, `senior_agent`). Must match one of
-    /// the `approver:*` tags the original entry was written with, unless
+    /// Approver kind. Must match one of the `approver:*` tags unless
     /// the id itself matches.
     #[arg(long, default_value = "human")]
     pub approver_kind: String,
+
+    /// Optional rationale — appended to the entry body as an
+    /// "Approver note" section.
+    #[arg(long)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct RejectArgs {
+    /// Entry id to reject.
+    pub entry_id: String,
+
+    /// Reviewer identifier. Recorded as `rejected-by:<id>`.
+    #[arg(long)]
+    pub reviewer: String,
+
+    /// Reviewer kind. Same approver-match rule as approve.
+    #[arg(long, default_value = "human")]
+    pub reviewer_kind: String,
+
+    /// Rejection reason (required). Appended to the entry body.
+    #[arg(long)]
+    pub reason: String,
+}
+
+#[derive(Debug, Args)]
+pub struct WithdrawArgs {
+    /// Entry id to withdraw.
+    pub entry_id: String,
+
+    /// Author id — must match `entry.author.id`.
+    #[arg(long)]
+    pub author_id: String,
+}
+
+#[derive(Debug, Args)]
+pub struct SupersedeArgs {
+    /// Qname the new entry attaches to.
+    pub qname: String,
+
+    /// One or more entry ids to supersede. All must belong to the same
+    /// symbol as `qname`.
+    #[arg(long = "supersede", required = true)]
+    pub supersedes: Vec<String>,
+
+    /// Ledger kind for the new entry.
+    #[arg(long, value_enum)]
+    pub kind: CliLedgerKind,
+
+    /// One-line summary for the new entry.
+    #[arg(long)]
+    pub summary: String,
+
+    /// Optional body file.
+    #[arg(long)]
+    pub body: Option<PathBuf>,
+
+    /// Author kind.
+    #[arg(long, value_enum, default_value_t = CliAuthorKind::Agent)]
+    pub author_kind: CliAuthorKind,
+
+    /// Author id.
+    #[arg(long, default_value = "asd-cli-user")]
+    pub author_id: String,
 }
 
 #[derive(Debug, Args)]
@@ -108,6 +181,9 @@ pub fn run(cfg: &Config, cmd: LedgerCmd) -> Result<()> {
     match cmd {
         LedgerCmd::Append(args) => append(cfg, args),
         LedgerCmd::Approve(args) => approve(cfg, args),
+        LedgerCmd::Reject(args) => reject(cfg, args),
+        LedgerCmd::Withdraw(args) => withdraw(cfg, args),
+        LedgerCmd::Supersede(args) => supersede(cfg, args),
     }
 }
 
@@ -119,6 +195,7 @@ fn approve(cfg: &Config, args: ApproveArgs) -> Result<()> {
         &args.entry_id,
         &args.approver,
         &args.approver_kind,
+        args.message.as_deref(),
         &cfg.agent_id,
     )?;
 
@@ -129,6 +206,83 @@ fn approve(cfg: &Config, args: ApproveArgs) -> Result<()> {
         "tags": outcome.entry.tags,
     });
     println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
+fn reject(cfg: &Config, args: RejectArgs) -> Result<()> {
+    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let ledger_store = AsgLedgerStore { repo: &engine.repo };
+    let outcome = ledger_store.reject_entry(
+        &engine.ref_name,
+        &args.entry_id,
+        &args.reviewer,
+        &args.reviewer_kind,
+        &args.reason,
+        &cfg.agent_id,
+    )?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "status": if outcome.already_resolved { "already-rejected" } else { "rejected" },
+            "entry_id": outcome.entry.entry_id,
+            "symbol_id": outcome.entry.symbol_id,
+            "tags": outcome.entry.tags,
+        }))?
+    );
+    Ok(())
+}
+
+fn withdraw(cfg: &Config, args: WithdrawArgs) -> Result<()> {
+    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let ledger_store = AsgLedgerStore { repo: &engine.repo };
+    let outcome = ledger_store.withdraw_entry(
+        &engine.ref_name,
+        &args.entry_id,
+        &args.author_id,
+        &cfg.agent_id,
+    )?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "status": if outcome.already_resolved { "already-withdrawn" } else { "withdrawn" },
+            "entry_id": outcome.entry.entry_id,
+            "symbol_id": outcome.entry.symbol_id,
+            "tags": outcome.entry.tags,
+        }))?
+    );
+    Ok(())
+}
+
+fn supersede(cfg: &Config, args: SupersedeArgs) -> Result<()> {
+    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let index_store = AsgIndexStore { repo: &engine.repo };
+    let symbol = index_store
+        .get_symbol_by_qname(&engine.ref_name, &args.qname)?
+        .ok_or_else(|| anyhow::anyhow!("symbol not found: {}", args.qname))?;
+
+    let author = Author {
+        kind: args.author_kind.into(),
+        id: args.author_id,
+    };
+    let mut entry = LedgerEntry::new(&symbol.symbol_id, args.kind.into(), args.summary, author);
+    if let Some(body_path) = args.body {
+        entry.body = Some(std::fs::read_to_string(body_path)?);
+    }
+    entry.supersedes = args.supersedes;
+    entry.tags.push("supersedes".to_string());
+
+    let ledger_store = AsgLedgerStore { repo: &engine.repo };
+    ledger_store.append_entry(&engine.ref_name, &entry, &cfg.agent_id)?;
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "status": "superseded",
+            "entry_id": entry.entry_id,
+            "symbol_id": entry.symbol_id,
+            "supersedes": entry.supersedes,
+        }))?
+    );
     Ok(())
 }
 

@@ -56,18 +56,29 @@ export interface ApproveResponse {
 	entry: LedgerEntry;
 }
 
+export interface RejectResponse {
+	status: 'rejected' | 'already-rejected';
+	entry: LedgerEntry;
+}
+
 /// Approve a ledger entry currently tagged `awaiting-approval`.
 export async function approveEntry(
 	entryId: string,
 	approver: string,
-	approverKind: string = 'human'
+	approverKind: string = 'human',
+	message?: string
 ): Promise<ApproveResponse> {
 	const res = await fetch(
 		`${API_BASE}/api/v1/approvals/${encodeURIComponent(entryId)}/approve`,
 		{
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ approver, approver_kind: approverKind, agent_id: 'asd-lens' })
+			body: JSON.stringify({
+				approver,
+				approver_kind: approverKind,
+				agent_id: 'asd-lens',
+				...(message ? { message } : {})
+			})
 		}
 	);
 	if (!res.ok) {
@@ -75,4 +86,31 @@ export async function approveEntry(
 		throw new Error(`${res.status} ${res.statusText} — ${text}`);
 	}
 	return (await res.json()) as ApproveResponse;
+}
+
+/// Reject an awaiting-approval ledger entry.
+export async function rejectEntry(
+	entryId: string,
+	reviewer: string,
+	reason: string,
+	reviewerKind: string = 'human'
+): Promise<RejectResponse> {
+	const res = await fetch(
+		`${API_BASE}/api/v1/approvals/${encodeURIComponent(entryId)}/reject`,
+		{
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				reviewer,
+				reviewer_kind: reviewerKind,
+				reason,
+				agent_id: 'asd-lens'
+			})
+		}
+	);
+	if (!res.ok) {
+		const text = await res.text();
+		throw new Error(`${res.status} ${res.statusText} — ${text}`);
+	}
+	return (await res.json()) as RejectResponse;
 }
