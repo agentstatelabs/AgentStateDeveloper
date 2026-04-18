@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 agentstatedeveloper-core = { workspace = true }
 agentstatedeveloper-python = { workspace = true }
+agentstatedeveloper-typescript = { workspace = true }
 agentstategraph = { workspace = true }
 agentstategraph-core = { workspace = true }
 

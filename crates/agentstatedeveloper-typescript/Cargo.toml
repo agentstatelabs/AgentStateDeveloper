@@ -1,0 +1,14 @@
+[package]
+name = "agentstatedeveloper-typescript"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "TypeScript / JavaScript language adapter for AgentStateDeveloper"
+
+[dependencies]
+agentstatedeveloper-core = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-typescript = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

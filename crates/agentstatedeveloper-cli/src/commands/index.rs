@@ -1,6 +1,12 @@
-//! `asd index <path>` — walk a directory for `*.py` files, parse them
-//! with the Python adapter, and write Symbol + EffectDecl records into
+//! `asd index <path>` — walk a directory for source files we have
+//! adapters for, parse them, and write Symbol + EffectDecl records into
 //! the ASG.
+//!
+//! Extension -> adapter dispatch:
+//! - `.py`                         -> Python
+//! - `.ts` / `.tsx` / `.mts` / `.cts` -> TypeScript
+//!
+//! Files with unknown extensions are skipped silently.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,22 +27,25 @@ use agentstatedeveloper_core::{
     WorkspaceSymbols,
 };
 use agentstatedeveloper_python::PythonAdapter;
+use agentstatedeveloper_typescript::TypeScriptAdapter;
 
 use crate::config::Config;
 
 #[derive(Debug, Args)]
 pub struct IndexArgs {
-    /// Directory (or file) to index. Recursively walks for `*.py`.
+    /// Directory (or file) to index. Recursively walks for known source
+    /// extensions (`.py`, `.ts`, `.tsx`, `.mts`, `.cts`).
     pub path: PathBuf,
 }
 
 pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
     let mut engine = Engine::open_sqlite(&cfg.db_path)?;
-    let adapter = Arc::new(PythonAdapter::new());
-    let adapter_dyn: Arc<dyn agentstatedeveloper_core::LanguageAdapter> = adapter.clone();
-    engine.register_adapter(adapter_dyn);
+    let python_adapter: Arc<dyn LanguageAdapter> = Arc::new(PythonAdapter::new());
+    let typescript_adapter: Arc<dyn LanguageAdapter> = Arc::new(TypeScriptAdapter::new());
+    engine.register_adapter(python_adapter.clone());
+    engine.register_adapter(typescript_adapter.clone());
 
-    let files = collect_py_files(&args.path)?;
+    let files = collect_source_files(&args.path, &python_adapter, &typescript_adapter)?;
     let index_root = if args.path.is_dir() {
         args.path.clone()
     } else {
@@ -58,10 +67,11 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
         file_str: String,
         source: String,
         parsed: Vec<ParsedSymbol>,
+        adapter: Arc<dyn LanguageAdapter>,
     }
     let mut file_ctxs: Vec<FileCtx> = Vec::with_capacity(files.len());
 
-    for file in &files {
+    for (file, adapter) in &files {
         let source = std::fs::read_to_string(file)
             .with_context(|| format!("read {}", file.display()))?;
         let rel = file.strip_prefix(&index_root).unwrap_or(file);
@@ -116,6 +126,7 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
             file_str,
             source,
             parsed,
+            adapter: adapter.clone(),
         });
     }
 
@@ -128,10 +139,13 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
         }
     }
 
-    // Pass 2: resolve call edges with full workspace context.
+    // Pass 2: resolve call edges with full workspace context. Each file
+    // uses the adapter that parsed it, so Python and TypeScript files
+    // resolve independently but share a workspace for qname lookups.
     for ctx in &file_ctxs {
         let edges =
-            adapter.extract_call_edges(&ctx.file_str, &ctx.source, &ctx.parsed, &workspace);
+            ctx.adapter
+                .extract_call_edges(&ctx.file_str, &ctx.source, &ctx.parsed, &workspace);
         all_edges.extend(edges);
     }
 
@@ -230,21 +244,45 @@ fn same_module(caller: &str, callee: &str) -> bool {
     !caller_mod.is_empty() && caller_mod == callee_mod
 }
 
-/// Recursively collect `*.py` files under `root`. If `root` is itself a
-/// `.py` file, return just that.
-fn collect_py_files(root: &Path) -> Result<Vec<PathBuf>> {
+/// Route a filesystem path to the adapter that owns it, if any.
+fn adapter_for_path(
+    p: &Path,
+    python: &Arc<dyn LanguageAdapter>,
+    typescript: &Arc<dyn LanguageAdapter>,
+) -> Option<Arc<dyn LanguageAdapter>> {
+    let ext = p.extension().and_then(|s| s.to_str())?;
+    match ext {
+        "py" => Some(python.clone()),
+        "ts" | "tsx" | "mts" | "cts" => Some(typescript.clone()),
+        _ => None,
+    }
+}
+
+/// Recursively collect source files under `root`, each paired with the
+/// adapter that owns it. If `root` is itself a recognized source file,
+/// return just that.
+fn collect_source_files(
+    root: &Path,
+    python: &Arc<dyn LanguageAdapter>,
+    typescript: &Arc<dyn LanguageAdapter>,
+) -> Result<Vec<(PathBuf, Arc<dyn LanguageAdapter>)>> {
     let mut out = Vec::new();
     if root.is_file() {
-        if is_py(root) {
-            out.push(root.to_path_buf());
+        if let Some(adapter) = adapter_for_path(root, python, typescript) {
+            out.push((root.to_path_buf(), adapter));
         }
         return Ok(out);
     }
-    walk(root, &mut out)?;
+    walk(root, python, typescript, &mut out)?;
     Ok(out)
 }
 
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+fn walk(
+    dir: &Path,
+    python: &Arc<dyn LanguageAdapter>,
+    typescript: &Arc<dyn LanguageAdapter>,
+    out: &mut Vec<(PathBuf, Arc<dyn LanguageAdapter>)>,
+) -> Result<()> {
     let rd = std::fs::read_dir(dir)
         .with_context(|| format!("read_dir {}", dir.display()))?;
     for entry in rd {
@@ -256,18 +294,25 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
             if matches!(
                 name,
-                ".git" | ".venv" | "venv" | "__pycache__" | "node_modules" | ".tox" | ".mypy_cache"
+                ".git"
+                    | ".venv"
+                    | "venv"
+                    | "__pycache__"
+                    | "node_modules"
+                    | ".tox"
+                    | ".mypy_cache"
+                    | "dist"
+                    | "build"
+                    | ".next"
             ) {
                 continue;
             }
-            walk(&path, out)?;
-        } else if ft.is_file() && is_py(&path) {
-            out.push(path);
+            walk(&path, python, typescript, out)?;
+        } else if ft.is_file() {
+            if let Some(adapter) = adapter_for_path(&path, python, typescript) {
+                out.push((path, adapter));
+            }
         }
     }
     Ok(())
-}
-
-fn is_py(p: &Path) -> bool {
-    p.extension().and_then(|s| s.to_str()) == Some("py")
 }

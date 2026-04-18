@@ -1,29 +1,28 @@
 <script lang="ts">
 	import { getHealth, getSymbols } from '$lib/api';
-	import type { Health, SymbolSummary } from '$lib/types';
+	import type { Health } from '$lib/types';
+	import { symbols } from '$lib/stores';
 	import { page } from '$app/state';
 
 	let { children } = $props();
 
 	let health = $state<Health | null>(null);
 	let healthError = $state<string | null>(null);
-	let symbols = $state<SymbolSummary[]>([]);
-	let listError = $state<string | null>(null);
 
 	$effect(() => {
 		getHealth()
 			.then((h) => (health = h))
 			.catch((e) => (healthError = String(e)));
 		getSymbols()
-			.then((s) => (symbols = s))
-			.catch((e) => (listError = String(e)));
+			.then((s) => symbols.set(s))
+			.catch((e) => symbols.setError(String(e)));
 	});
 
 	let filter = $state('');
 	let filtered = $derived(
 		filter.trim()
-			? symbols.filter((s) => s.qname.toLowerCase().includes(filter.toLowerCase()))
-			: symbols
+			? symbols.list.filter((s) => s.qname.toLowerCase().includes(filter.toLowerCase()))
+			: symbols.list
 	);
 
 	function kindBadge(k: string): string {
@@ -59,8 +58,8 @@
 				bind:value={filter}
 				class="filter"
 			/>
-			{#if listError}
-				<div class="error">{listError}</div>
+			{#if symbols.error}
+				<div class="error">{symbols.error}</div>
 			{:else}
 				<ul>
 					{#each filtered as s (s.symbol_id)}
@@ -73,9 +72,9 @@
 						</li>
 					{/each}
 				</ul>
-				{#if filtered.length === 0 && symbols.length > 0}
+				{#if filtered.length === 0 && symbols.list.length > 0}
 					<div class="muted empty">no match</div>
-				{:else if symbols.length === 0 && !listError}
+				{:else if symbols.list.length === 0 && !symbols.error}
 					<div class="muted empty">
 						no symbols indexed — run <code>asd index .</code>
 					</div>

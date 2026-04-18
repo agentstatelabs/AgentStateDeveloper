@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/agentstatedeveloper-core",
     "crates/agentstatedeveloper-python",
+    "crates/agentstatedeveloper-typescript",
     "crates/agentstatedeveloper-cli",
     "crates/agentstatedeveloper-mcp",
 ]
@@ -34,6 +35,7 @@ tokio = { version = "1", features = ["full"] }
 # Parsing
 tree-sitter = "0.24"
 tree-sitter-python = "0.23"
+tree-sitter-typescript = "0.23"
 
 # CLI / terminal
 clap = { version = "4", features = ["derive"] }
@@ -42,3 +44,4 @@ directories = "5"
 # Internal crates
 agentstatedeveloper-core = { path = "crates/agentstatedeveloper-core" }
 agentstatedeveloper-python = { path = "crates/agentstatedeveloper-python" }
+agentstatedeveloper-typescript = { path = "crates/agentstatedeveloper-typescript" }

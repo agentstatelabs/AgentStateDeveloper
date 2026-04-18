@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { getSymbolDetail, getCallers, getCallees } from '$lib/api';
 	import type { SymbolDetail, SymbolSummary } from '$lib/types';
+	import { symbols } from '$lib/stores';
 	import { page } from '$app/state';
 
 	let detail = $state<SymbolDetail | null>(null);
@@ -76,12 +77,33 @@
 		{#if detail.effects}
 			{@const ed = detail.effects}
 			{#if ed.verification}
-				<div class="verif status-{ed.verification.status}">
+				{@const v = ed.verification}
+				<div class="verif status-{v.status}">
 					<span class="label">verification</span>
-					<span class="by">{ed.verification.by}</span>
-					<span class="status">{ed.verification.status}</span>
-					<span class="at">{ts(ed.verification.at)}</span>
+					<span class="by">{v.by}</span>
+					<span class="status">{v.status}</span>
+					<span class="at">{ts(v.at)}</span>
 				</div>
+				{#if v.status === 'mismatch' && v.mismatches && v.mismatches.length > 0}
+					<div class="mismatch-banner">
+						<div class="mismatch-head">
+							<strong>{v.mismatches.length} mismatch{v.mismatches.length === 1 ? '' : 'es'}</strong>
+							<span class="muted"> — declared vs observed effects diverge</span>
+						</div>
+						<ul class="mismatch-list">
+							{#each v.mismatches as m (JSON.stringify(m))}
+								{@const mo = m as { effect: string; kind: string; note?: string | null; detected_in?: string | null }}
+								<li>
+									<span class="mm-effect">{mo.effect}</span>
+									<span class="mm-kind mm-kind-{mo.kind}">{mo.kind}</span>
+									{#if mo.note}
+										<span class="mm-note">{mo.note}</span>
+									{/if}
+								</li>
+							{/each}
+						</ul>
+					</div>
+				{/if}
 			{/if}
 			{#if ed.declared.length === 0}
 				<div class="muted">no declared effects</div>
@@ -106,7 +128,18 @@
 					{#each ed.transitive as t}
 						<li>
 							<span class="eff-cat">{t.effect}</span>
-							<span class="via">via {t.via.join(', ')}</span>
+							<span class="via">
+								via
+								{#each t.via as vId, i}
+									{@const vq = symbols.qnameOf(vId)}
+									{#if vq}
+										<a href="/symbols/{encodeURIComponent(vq)}">{vq}</a>
+									{:else}
+										<code>{vId}</code>
+									{/if}
+									{#if i < t.via.length - 1},{/if}
+								{/each}
+							</span>
 						</li>
 					{/each}
 				</ul>
@@ -393,5 +426,58 @@
 	}
 	.cg-list li a:hover {
 		background: var(--bg-hover);
+	}
+	.mismatch-banner {
+		margin: 8px 0 12px 0;
+		padding: 8px 12px;
+		background: rgba(224, 108, 117, 0.1);
+		border: 1px solid rgba(224, 108, 117, 0.4);
+		border-radius: 4px;
+	}
+	.mismatch-head {
+		margin-bottom: 6px;
+		color: var(--bad);
+	}
+	.mismatch-list {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+	}
+	.mismatch-list li {
+		display: grid;
+		grid-template-columns: 140px 110px 1fr;
+		gap: 8px;
+		padding: 3px 0;
+		font-size: 11px;
+		align-items: baseline;
+	}
+	.mm-effect {
+		color: var(--accent);
+	}
+	.mm-kind {
+		font-size: 10px;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		padding: 1px 6px;
+		border-radius: 3px;
+	}
+	.mm-kind-unobserved {
+		background: rgba(235, 203, 139, 0.18);
+		color: #ebcb8b;
+	}
+	.mm-kind-undeclared {
+		background: rgba(224, 108, 117, 0.18);
+		color: var(--bad);
+	}
+	.mm-note {
+		color: var(--fg-dim);
+	}
+	.via a {
+		color: var(--accent);
+		text-decoration: underline;
+		text-decoration-style: dotted;
+	}
+	.via a:hover {
+		text-decoration-style: solid;
 	}
 </style>
