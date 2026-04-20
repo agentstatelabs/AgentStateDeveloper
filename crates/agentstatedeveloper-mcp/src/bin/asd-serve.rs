@@ -41,17 +41,19 @@ async fn main() -> Result<()> {
 
     // Optional audit log — fail loudly if set but unloadable so a configured
     // forensic sink never silently falls back to NullSink.
+    let mut audit_log_path: Option<PathBuf> = None;
     if let Ok(audit_path) = std::env::var("ASD_AUDIT_LOG") {
         let path = PathBuf::from(&audit_path);
         engine
             .set_audit_log_file(&path)
             .with_context(|| format!("failed to open ASD_AUDIT_LOG audit log at {}", path.display()))?;
         tracing::info!(audit_log = %path.display(), "loaded ASD audit log");
+        audit_log_path = Some(path);
     }
 
     let shared = Arc::new(Mutex::new(engine));
 
-    let app = build_router(shared, db_path, lens_dir);
+    let app = build_router(shared, db_path, lens_dir, audit_log_path);
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await

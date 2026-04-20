@@ -114,3 +114,32 @@ export interface SymbolDetail {
 	effects: EffectDecl | null;
 	ledger: LedgerEntry[];
 }
+
+export interface AuditEvent {
+	event_id: string;
+	event_type: string;
+	subject_id?: string;
+	secondary_id?: string;
+	actor_id: string;
+	actor_kind: string;
+	timestamp: string;
+	outcome: string;
+	matched_policy?: string;
+	reason?: string;
+	payload?: unknown;
+}
+
+export interface AuditResponse {
+	configured: boolean;
+	path?: string;
+	count: number;
+	events: AuditEvent[];
+}
+
+export interface AuditFilters {
+	eventType?: string;
+	since?: string;
+	actor?: string;
+	outcome?: string;
+	limit?: number;
+}

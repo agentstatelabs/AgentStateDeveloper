@@ -1,4 +1,12 @@
-import type { Health, SymbolSummary, SymbolDetail, LedgerEntry, EffectDecl } from './types';
+import type {
+	Health,
+	SymbolSummary,
+	SymbolDetail,
+	LedgerEntry,
+	EffectDecl,
+	AuditResponse,
+	AuditFilters
+} from './types';
 
 // In dev we proxy /api/* via vite.config.ts → same-origin works.
 // In prod the Rust HTTP server serves both the API and the built Lens.
@@ -86,6 +94,17 @@ export async function approveEntry(
 		throw new Error(`${res.status} ${res.statusText} — ${text}`);
 	}
 	return (await res.json()) as ApproveResponse;
+}
+
+export function getAudit(filters: AuditFilters = {}): Promise<AuditResponse> {
+	const params = new URLSearchParams();
+	if (filters.eventType) params.set('event_type', filters.eventType);
+	if (filters.since) params.set('since', filters.since);
+	if (filters.actor) params.set('actor', filters.actor);
+	if (filters.outcome) params.set('outcome', filters.outcome);
+	if (filters.limit) params.set('limit', String(filters.limit));
+	const qs = params.toString();
+	return getJson<AuditResponse>(`/api/v1/audit${qs ? '?' + qs : ''}`);
 }
 
 /// Reject an awaiting-approval ledger entry.

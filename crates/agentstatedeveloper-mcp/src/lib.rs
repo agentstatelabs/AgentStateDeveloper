@@ -41,6 +41,10 @@ pub type SharedEngine = Arc<Mutex<Engine>>;
 pub struct AppState {
     pub engine: SharedEngine,
     pub db_path: PathBuf,
+    /// Optional audit log path. When Some, `/api/v1/audit` reads events
+    /// from this JSONL file; otherwise the endpoint returns an empty
+    /// list with a `configured: false` flag.
+    pub audit_log_path: Option<PathBuf>,
 }
 
 /// Build the axum router wired to the given engine + db path.
@@ -52,8 +56,13 @@ pub fn build_router(
     engine: SharedEngine,
     db_path: PathBuf,
     lens_dir: Option<PathBuf>,
+    audit_log_path: Option<PathBuf>,
 ) -> Router {
-    let state = AppState { engine, db_path };
+    let state = AppState {
+        engine,
+        db_path,
+        audit_log_path,
+    };
 
     let api = Router::new()
         .route("/health", get(health))
@@ -64,6 +73,7 @@ pub fn build_router(
         .route("/symbols/{qname}/callers", get(get_symbol_callers))
         .route("/symbols/{qname}/callees", get(get_symbol_callees))
         .route("/ledger", get(list_ledger))
+        .route("/audit", get(list_audit))
         .route(
             "/approvals/{entry_id}/approve",
             axum::routing::post(approve_entry),
@@ -345,6 +355,83 @@ async fn list_ledger(
 
     entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Ok(Json(entries))
+}
+
+// -----------------------------------------------------------------------------
+// Audit log
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct AuditQuery {
+    /// Substring match on event_type (e.g., `ledger.approve`, `ledger.`
+    /// for all ledger events).
+    event_type: Option<String>,
+    /// Return only events AFTER this `event_id` (exclusive).
+    since: Option<String>,
+    /// Exact match on actor_id.
+    actor: Option<String>,
+    /// Exact match on outcome.
+    outcome: Option<String>,
+    /// Max events to return (default 200, max 1000).
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn list_audit(
+    State(state): State<AppState>,
+    Query(q): Query<AuditQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Some(path) = state.audit_log_path.as_ref() else {
+        return Ok(Json(json!({
+            "configured": false,
+            "count": 0,
+            "events": [],
+        })));
+    };
+
+    let events = agentstatedeveloper_core::read_jsonl(path)
+        .map_err(|e| ApiError::Internal(format!("read audit log: {}", e)))?;
+
+    // Apply `since` cursor (drop up to and including the matching id).
+    let start_idx = match q.since {
+        Some(ref id) => events
+            .iter()
+            .position(|e| &e.event_id == id)
+            .map(|i| i + 1)
+            .unwrap_or(0),
+        None => 0,
+    };
+
+    let limit = q.limit.unwrap_or(200).min(1000);
+    let filtered: Vec<&agentstatedeveloper_core::AuditEvent> = events[start_idx..]
+        .iter()
+        .filter(|e| {
+            if let Some(ref t) = q.event_type {
+                if !e.event_type.contains(t) {
+                    return false;
+                }
+            }
+            if let Some(ref a) = q.actor {
+                if &e.actor_id != a {
+                    return false;
+                }
+            }
+            if let Some(ref o) = q.outcome {
+                if &e.outcome != o {
+                    return false;
+                }
+            }
+            true
+        })
+        .take(limit)
+        .collect();
+
+    Ok(Json(json!({
+        "configured": true,
+        "path": path.display().to_string(),
+        "count": filtered.len(),
+        "events": filtered,
+    })))
 }
 
 /// Body for POST /approvals/:entry_id/approve.

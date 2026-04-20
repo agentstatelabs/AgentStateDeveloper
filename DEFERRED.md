@@ -145,12 +145,11 @@ Explicitly out-of-repo, but we have nothing built:
   never implemented — currently everything lives in the SQLite ASG
   repo only. Implementing `.asd/` would enable the git-roundtrip
   promise for cold clones. **M10 target.**
-- **Audit-log event stream shipped in M12.** `--audit-log <path>` /
-  `ASD_AUDIT_LOG` env emits JSONL events for every ledger mutation,
-  effect_declare, and policy decision across CLI / HTTP / MCP. Remaining
-  gaps: no HTTP tail endpoint, no MCP `audit_tail` tool, no Lens
-  audit viewer, no rotation / retention story, no cryptographic
-  hash-chaining of the log (would give tamper evidence).
+- **Audit-log event stream** (M12) + **audit tail parity across CLI /
+  HTTP / MCP / Lens** (M14) shipped. Remaining gaps: log rotation /
+  retention policy, cryptographic hash-chaining of the event log
+  (would give tamper evidence), real-time streaming (current model is
+  poll via `since:<event_id>` cursor).
 - Traces carry a `started_at`/`finished_at` but no per-call timing or
   call-depth info.
 - No schema migration story on disk. Everything lives under

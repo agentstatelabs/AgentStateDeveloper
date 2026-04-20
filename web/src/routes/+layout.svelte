@@ -49,6 +49,10 @@
 				</a>
 			{/if}
 		</div>
+		<nav class="top-links">
+			<a href="/approvals">Approvals</a>
+			<a href="/audit">Audit</a>
+		</nav>
 		<div class="health">
 			{#if healthError}
 				<span class="bad">offline</span>
@@ -206,6 +210,18 @@
 	.side-approvals .num {
 		font-weight: 700;
 		font-size: 12px;
+	}
+	.top-links {
+		display: flex;
+		gap: 14px;
+		font-size: 12px;
+	}
+	.top-links a {
+		color: var(--fg-dim);
+		font-weight: 500;
+	}
+	.top-links a:hover {
+		color: var(--accent);
 	}
 	.health .ok {
 		color: var(--ok);

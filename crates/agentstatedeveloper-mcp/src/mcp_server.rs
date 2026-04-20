@@ -24,6 +24,7 @@ use agentstatedeveloper_core::{
 pub struct AsdMcpServer {
     engine: Arc<Mutex<Engine>>,
     db_path: PathBuf,
+    audit_log_path: Option<PathBuf>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -172,6 +173,27 @@ fn default_approver_kind_mcp() -> String {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct AuditTailParams {
+    /// Substring match on event_type (e.g., `ledger.approve`,
+    /// `ledger.` for all ledger events).
+    #[serde(default)]
+    pub event_type: Option<String>,
+    /// Return only events AFTER this `event_id` (exclusive). Use for
+    /// incremental polling.
+    #[serde(default)]
+    pub since: Option<String>,
+    /// Exact match on actor_id.
+    #[serde(default)]
+    pub actor: Option<String>,
+    /// Exact match on outcome.
+    #[serde(default)]
+    pub outcome: Option<String>,
+    /// Max events to return (default 200, max 1000).
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct EffectDeclareParams {
     /// Fully-qualified symbol name.
     pub qname: String,
@@ -199,9 +221,18 @@ fn default_author_id() -> String {
 #[tool_router]
 impl AsdMcpServer {
     pub fn new(engine: Arc<Mutex<Engine>>, db_path: PathBuf) -> Self {
+        Self::with_audit_log(engine, db_path, None)
+    }
+
+    pub fn with_audit_log(
+        engine: Arc<Mutex<Engine>>,
+        db_path: PathBuf,
+        audit_log_path: Option<PathBuf>,
+    ) -> Self {
         Self {
             engine,
             db_path,
+            audit_log_path,
             tool_router: Self::tool_router(),
         }
     }
@@ -1150,6 +1181,66 @@ impl AsdMcpServer {
             "matched_policy": matched_policy,
             "status": status,
             "action": action,
+        }))
+        .unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[tool(
+        description = "Read back audit events from the configured JSONL log. Supports filtering by event_type substring, exact actor_id, exact outcome, and a `since` cursor. Returns `configured: false` when ASD_AUDIT_LOG was not set at server startup."
+    )]
+    async fn audit_tail(&self, params: Parameters<AuditTailParams>) -> String {
+        let p = params.0;
+        let Some(path) = self.audit_log_path.as_ref() else {
+            return serde_json::to_string(&serde_json::json!({
+                "configured": false,
+                "count": 0,
+                "events": [],
+            }))
+            .unwrap_or_else(|_| "{}".to_string());
+        };
+        let events = match agentstatedeveloper_core::read_jsonl(path) {
+            Ok(v) => v,
+            Err(e) => return err_json(&format!("read audit log: {}", e)),
+        };
+
+        let start_idx = match p.since {
+            Some(ref id) => events
+                .iter()
+                .position(|e| &e.event_id == id)
+                .map(|i| i + 1)
+                .unwrap_or(0),
+            None => 0,
+        };
+
+        let limit = p.limit.unwrap_or(200).min(1000) as usize;
+        let filtered: Vec<&agentstatedeveloper_core::AuditEvent> = events[start_idx..]
+            .iter()
+            .filter(|e| {
+                if let Some(ref t) = p.event_type {
+                    if !e.event_type.contains(t) {
+                        return false;
+                    }
+                }
+                if let Some(ref a) = p.actor {
+                    if &e.actor_id != a {
+                        return false;
+                    }
+                }
+                if let Some(ref o) = p.outcome {
+                    if &e.outcome != o {
+                        return false;
+                    }
+                }
+                true
+            })
+            .take(limit)
+            .collect();
+
+        serde_json::to_string(&serde_json::json!({
+            "configured": true,
+            "path": path.display().to_string(),
+            "count": filtered.len(),
+            "events": filtered,
         }))
         .unwrap_or_else(|_| "{}".to_string())
     }

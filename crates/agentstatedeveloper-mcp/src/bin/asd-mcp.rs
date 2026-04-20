@@ -55,17 +55,19 @@ async fn main() -> Result<()> {
     // Optional audit log. Same fail-loudly semantics as ASD_POLICY — if the
     // operator configured a forensic sink, a silent fallback to NullSink
     // would be worse than crashing on startup.
+    let mut audit_log_path: Option<PathBuf> = None;
     if let Ok(audit_path) = std::env::var("ASD_AUDIT_LOG") {
         let path = PathBuf::from(&audit_path);
         engine
             .set_audit_log_file(&path)
             .with_context(|| format!("failed to open ASD_AUDIT_LOG audit log at {}", path.display()))?;
         tracing::info!(audit_log = %path.display(), "loaded ASD audit log");
+        audit_log_path = Some(path);
     }
 
     let shared = Arc::new(Mutex::new(engine));
 
-    let server = AsdMcpServer::new(shared, db_path.clone());
+    let server = AsdMcpServer::with_audit_log(shared, db_path.clone(), audit_log_path);
     let service = server
         .serve(rmcp::transport::stdio())
         .await
