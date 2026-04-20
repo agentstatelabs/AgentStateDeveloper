@@ -5,7 +5,8 @@ import type {
 	LedgerEntry,
 	EffectDecl,
 	AuditResponse,
-	AuditFilters
+	AuditFilters,
+	AuditVerifyReport
 } from './types';
 
 // In dev we proxy /api/* via vite.config.ts → same-origin works.
@@ -94,6 +95,10 @@ export async function approveEntry(
 		throw new Error(`${res.status} ${res.statusText} — ${text}`);
 	}
 	return (await res.json()) as ApproveResponse;
+}
+
+export function getAuditVerify(): Promise<AuditVerifyReport> {
+	return getJson<AuditVerifyReport>('/api/v1/audit/verify');
 }
 
 export function getAudit(filters: AuditFilters = {}): Promise<AuditResponse> {

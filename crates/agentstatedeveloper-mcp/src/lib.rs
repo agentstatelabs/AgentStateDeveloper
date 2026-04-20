@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 /// Engine is shared across handlers. The underlying `Repository` holds a
@@ -92,9 +92,14 @@ pub fn build_router(
 
     if let Some(dir) = lens_dir {
         if dir.exists() {
-            router = router.fallback_service(
-                ServeDir::new(&dir).fallback(ServeDir::new(dir.join("index.html"))),
-            );
+            // SPA fallback: ServeDir handles static assets; its own
+            // `.fallback()` takes a service, and `ServeFile` serves one
+            // specific file regardless of the request URL. So any path
+            // that doesn't resolve to a static asset falls through to
+            // index.html and client-side routing (e.g. /audit,
+            // /approvals) takes over.
+            let index = dir.join("index.html");
+            router = router.fallback_service(ServeDir::new(&dir).fallback(ServeFile::new(index)));
         }
     }
 

@@ -143,3 +143,19 @@ export interface AuditFilters {
 	outcome?: string;
 	limit?: number;
 }
+
+export interface ChainBreak {
+	index: number;
+	event_id: string;
+	reason: string;
+}
+
+export interface AuditVerifyReport {
+	configured: boolean;
+	path?: string;
+	total_events: number;
+	signed_events: number;
+	unsigned_events: number;
+	verified: boolean;
+	chain_breaks: ChainBreak[];
+}

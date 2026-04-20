@@ -1,8 +1,10 @@
 <script lang="ts">
-	import { getAudit } from '$lib/api';
-	import type { AuditEvent, AuditResponse } from '$lib/types';
+	import { getAudit, getAuditVerify } from '$lib/api';
+	import type { AuditEvent, AuditResponse, AuditVerifyReport } from '$lib/types';
+	import { onDestroy } from 'svelte';
 
 	let response = $state<AuditResponse | null>(null);
+	let verify = $state<AuditVerifyReport | null>(null);
 	let err = $state<string | null>(null);
 	let loading = $state(true);
 
@@ -13,16 +15,29 @@
 	let outcome = $state('');
 	let limit = $state(200);
 
+	// Live streaming — opt-in polling with a `since` cursor so only new
+	// events come over the wire.
+	let live = $state(false);
+	let intervalSec = $state(3);
+	let timer: ReturnType<typeof setInterval> | null = null;
+	let lastSeenId = $state<string | null>(null);
+
 	async function refresh() {
 		loading = true;
 		err = null;
 		try {
-			response = await getAudit({
-				eventType: eventType.trim() || undefined,
-				actor: actor.trim() || undefined,
-				outcome: outcome.trim() || undefined,
-				limit
-			});
+			const [r, v] = await Promise.all([
+				getAudit({
+					eventType: eventType.trim() || undefined,
+					actor: actor.trim() || undefined,
+					outcome: outcome.trim() || undefined,
+					limit
+				}),
+				getAuditVerify().catch(() => null)
+			]);
+			response = r;
+			verify = v;
+			lastSeenId = r.events.length > 0 ? r.events[r.events.length - 1].event_id : null;
 		} catch (e) {
 			err = String(e);
 		} finally {
@@ -30,8 +45,58 @@
 		}
 	}
 
+	async function tick() {
+		// Incremental poll: ask only for events after lastSeenId, then
+		// prepend or append (API returns newest... actually we sort
+		// ascending in the log order, so new events come after the
+		// cursor). Also re-verify occasionally so breaks surface fast.
+		if (!live) return;
+		try {
+			const [r, v] = await Promise.all([
+				getAudit({
+					eventType: eventType.trim() || undefined,
+					actor: actor.trim() || undefined,
+					outcome: outcome.trim() || undefined,
+					limit,
+					since: lastSeenId ?? undefined
+				}),
+				getAuditVerify().catch(() => null)
+			]);
+			if (v) verify = v;
+			if (r.events.length > 0 && response) {
+				response = {
+					...response,
+					count: response.count + r.events.length,
+					events: [...response.events, ...r.events]
+				};
+				lastSeenId = r.events[r.events.length - 1].event_id;
+			}
+		} catch (e) {
+			err = String(e);
+		}
+	}
+
 	$effect(() => {
+		// Non-reactive initial load — $effect re-runs when filters
+		// change, which is the desired behaviour for manual refresh.
 		refresh();
+	});
+
+	$effect(() => {
+		// Start / stop the polling timer whenever `live` or
+		// `intervalSec` changes.
+		if (timer) {
+			clearInterval(timer);
+			timer = null;
+		}
+		if (live) {
+			const ms = Math.max(1, intervalSec) * 1000;
+			timer = setInterval(tick, ms);
+		}
+	});
+
+	onDestroy(() => {
+		if (timer) clearInterval(timer);
 	});
 
 	function ts(s: string): string {
@@ -65,7 +130,7 @@
 <header class="a-header">
 	<h1>Audit log</h1>
 	<p class="muted">
-		Append-only JSONL event stream. Every ledger mutation, every policy evaluation, across CLI / MCP / HTTP.
+		Append-only, hash-chained JSONL event stream. Every ledger mutation and policy evaluation, across CLI / MCP / HTTP.
 	</p>
 	{#if response?.configured === false}
 		<div class="banner">
@@ -74,6 +139,41 @@
 				Start <code>asd-serve</code> with <code>ASD_AUDIT_LOG=/path/to/audit.jsonl</code> to begin capturing events.
 			</span>
 		</div>
+	{:else if verify}
+		{#if verify.verified}
+			<div class="verify ok">
+				<span class="dot"></span>
+				<strong>Chain verified</strong>
+				<span class="v-detail">
+					{verify.signed_events} signed{#if verify.unsigned_events > 0}, {verify.unsigned_events} unsigned{/if}
+				</span>
+			</div>
+		{:else if verify.chain_breaks.length > 0}
+			<div class="verify bad">
+				<span class="dot"></span>
+				<strong>{verify.chain_breaks.length} chain break{verify.chain_breaks.length === 1 ? '' : 's'}</strong>
+				<details class="breaks">
+					<summary>inspect</summary>
+					<ul>
+						{#each verify.chain_breaks as b (b.event_id)}
+							<li>
+								<code>#{b.index}</code>
+								<code>{b.event_id}</code>
+								<span class="reason">{b.reason}</span>
+							</li>
+						{/each}
+					</ul>
+				</details>
+			</div>
+		{:else if verify.signed_events === 0 && verify.total_events > 0}
+			<div class="verify warn">
+				<span class="dot"></span>
+				<strong>Unsigned log</strong>
+				<span class="v-detail">
+					{verify.unsigned_events} legacy event{verify.unsigned_events === 1 ? '' : 's'} — hash chain starts with the next emit
+				</span>
+			</div>
+		{/if}
 	{/if}
 </header>
 
@@ -95,6 +195,16 @@
 		<input type="number" min="1" max="1000" bind:value={limit} onchange={refresh} />
 	</label>
 	<button onclick={refresh} disabled={loading}>{loading ? 'loading…' : 'refresh'}</button>
+	<label class="live-toggle">
+		<input type="checkbox" bind:checked={live} />
+		live
+	</label>
+	{#if live}
+		<label>
+			every
+			<input type="number" min="1" max="60" bind:value={intervalSec} />s
+		</label>
+	{/if}
 </div>
 
 {#if err}
@@ -308,5 +418,68 @@
 	}
 	.empty {
 		padding: 24px 0;
+	}
+	.verify {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		margin-top: 10px;
+		padding: 8px 12px;
+		border-radius: 4px;
+		font-size: 12px;
+	}
+	.verify.ok {
+		background: rgba(111, 207, 151, 0.10);
+		border: 1px solid rgba(111, 207, 151, 0.4);
+		color: var(--ok);
+	}
+	.verify.bad {
+		background: rgba(224, 108, 117, 0.10);
+		border: 1px solid rgba(224, 108, 117, 0.4);
+		color: var(--bad);
+	}
+	.verify.warn {
+		background: rgba(235, 203, 139, 0.08);
+		border: 1px solid rgba(235, 203, 139, 0.35);
+		color: #ebcb8b;
+	}
+	.verify .dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: currentColor;
+	}
+	.verify .v-detail {
+		color: var(--fg-dim);
+		font-weight: 400;
+	}
+	.verify .breaks summary {
+		cursor: pointer;
+		color: inherit;
+	}
+	.verify .breaks ul {
+		list-style: none;
+		padding: 6px 0 0 0;
+		margin: 0;
+	}
+	.verify .breaks li {
+		display: flex;
+		gap: 8px;
+		padding: 3px 0;
+		font-size: 11px;
+	}
+	.verify .breaks .reason {
+		color: var(--bad);
+	}
+	.live-toggle {
+		display: flex;
+		gap: 4px;
+		align-items: center;
+		padding-left: 8px;
+		border-left: 1px solid var(--border);
+		margin-left: 4px;
+	}
+	.live-toggle input {
+		margin: 0;
 	}
 </style>
