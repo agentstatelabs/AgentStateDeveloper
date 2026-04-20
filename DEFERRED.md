@@ -5,7 +5,7 @@ wasn't picked up in the current milestone. Not a roadmap — these are
 things I'd want a future maintainer (or future me) to see *before*
 assuming something's missing on accident.
 
-Last synced: M9 landed (2026-04-18).
+Last synced: M12 landed (2026-04-20).
 
 ## Tracer (`tools/asd_tracer.py`)
 
@@ -145,10 +145,12 @@ Explicitly out-of-repo, but we have nothing built:
   never implemented — currently everything lives in the SQLite ASG
   repo only. Implementing `.asd/` would enable the git-roundtrip
   promise for cold clones. **M10 target.**
-- No audit-log export / event stream. Approvals + denials should be
-  stream-able to SIEM (Splunk, Datadog, etc.) for enterprise
-  compliance. Today they're observable via `get_tree` on the ledger
-  path only.
+- **Audit-log event stream shipped in M12.** `--audit-log <path>` /
+  `ASD_AUDIT_LOG` env emits JSONL events for every ledger mutation,
+  effect_declare, and policy decision across CLI / HTTP / MCP. Remaining
+  gaps: no HTTP tail endpoint, no MCP `audit_tail` tool, no Lens
+  audit viewer, no rotation / retention story, no cryptographic
+  hash-chaining of the log (would give tamper evidence).
 - Traces carry a `started_at`/`finished_at` but no per-call timing or
   call-depth info.
 - No schema migration story on disk. Everything lives under

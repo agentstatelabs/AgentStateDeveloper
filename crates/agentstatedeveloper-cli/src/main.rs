@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 mod config;
 mod commands;
 
-use commands::{hydrate, index, init, ledger, policy, read, sync, trace, verify_effects};
+use commands::{audit, hydrate, index, init, ledger, policy, read, sync, trace, verify_effects};
 
 /// AgentStateDeveloper — code-level context and audit overlay.
 #[derive(Debug, Parser)]
@@ -23,6 +23,12 @@ struct Cli {
     /// permissive (everything Allow).
     #[arg(long, global = true)]
     policy: Option<PathBuf>,
+
+    /// Path to an append-only JSONL audit log. Every ledger/effect
+    /// mutation emits one event. Overrides `ASD_AUDIT_LOG` env var.
+    /// When absent, the audit sink discards events.
+    #[arg(long, global = true)]
+    audit_log: Option<PathBuf>,
 
     #[command(subcommand)]
     cmd: Command,
@@ -61,11 +67,16 @@ enum Command {
     /// Read the `.asd/v1/` sidecar back into ASG. Inverse of `sync`.
     /// Used to restore state after a fresh `git clone`.
     Hydrate(hydrate::HydrateArgs),
+
+    /// Read back audit events (ledger mutations, policy evaluations,
+    /// effect declarations) emitted to the JSONL audit log.
+    #[command(subcommand)]
+    Audit(audit::AuditCmd),
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let cfg = config::Config::resolve(cli.db.clone(), cli.policy.clone());
+    let cfg = config::Config::resolve(cli.db.clone(), cli.policy.clone(), cli.audit_log.clone());
 
     match cli.cmd {
         Command::Init(args) => init::run(&cfg, args),
@@ -77,5 +88,6 @@ fn main() -> Result<()> {
         Command::Trace(args) => trace::run(&cfg, args),
         Command::Sync(args) => sync::run(&cfg, args),
         Command::Hydrate(args) => hydrate::run(&cfg, args),
+        Command::Audit(sub) => audit::run(&cfg, sub),
     }
 }

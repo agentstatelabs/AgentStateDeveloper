@@ -15,7 +15,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agentstatedeveloper_core::{
-    AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, IndexStore, LedgerStore,
+    AsgEffectStore, AsgIndexStore, AsgLedgerStore, AuditEvent, AuditSink, EffectStore, Engine,
+    IndexStore, LedgerStore, event_types,
 };
 use axum::{
     Json, Router,
@@ -387,6 +388,17 @@ fn default_http_agent_id() -> String {
     "asd-http".into()
 }
 
+/// Emit an audit event via the engine's configured sink. Mirrors the CLI's
+/// and MCP's `emit_audit` helpers: log sink failures to stderr but never
+/// propagate — audit issues must never block the user's operation. Called
+/// while `engine.lock().await` is held; sink impls are expected to be fast
+/// (JsonlFileSink does a single append-open + write).
+fn emit_audit(sink: &dyn AuditSink, event: AuditEvent) {
+    if let Err(e) = sink.emit(&event) {
+        eprintln!("warning: audit emit failed: {}", e);
+    }
+}
+
 async fn approve_entry(
     State(state): State<AppState>,
     Path(entry_id): Path<String>,
@@ -395,20 +407,50 @@ async fn approve_entry(
     let engine = state.engine.lock().await;
     let ref_name = engine.ref_name.clone();
     let ledger_store = AsgLedgerStore { repo: &engine.repo };
-    let outcome = ledger_store
-        .approve_entry(
-            &ref_name,
-            &entry_id,
-            &body.approver,
-            &body.approver_kind,
-            body.message.as_deref(),
-            &body.agent_id,
-        )
-        .map_err(ApiError::from)?;
-    Ok(Json(json!({
-        "status": if outcome.already_approved { "already-approved" } else { "approved" },
-        "entry": outcome.entry,
-    })))
+    match ledger_store.approve_entry(
+        &ref_name,
+        &entry_id,
+        &body.approver,
+        &body.approver_kind,
+        body.message.as_deref(),
+        &body.agent_id,
+    ) {
+        Ok(outcome) => {
+            let status = if outcome.already_approved {
+                "already-approved"
+            } else {
+                "approved"
+            };
+            let event = AuditEvent::new(
+                event_types::LEDGER_APPROVE,
+                &body.approver,
+                &body.approver_kind,
+                status,
+            )
+            .with_subject(&outcome.entry.entry_id)
+            .with_secondary(&outcome.entry.symbol_id)
+            .with_matched_policy(outcome.entry.matched_policy.clone())
+            .with_payload(json!({ "tags": outcome.entry.tags }));
+            emit_audit(engine.audit.as_ref(), event);
+
+            Ok(Json(json!({
+                "status": status,
+                "entry": outcome.entry,
+            })))
+        }
+        Err(e) => {
+            let event = AuditEvent::new(
+                event_types::LEDGER_APPROVE,
+                &body.approver,
+                &body.approver_kind,
+                "error",
+            )
+            .with_subject(&entry_id)
+            .with_reason(e.to_string());
+            emit_audit(engine.audit.as_ref(), event);
+            Err(ApiError::from(e))
+        }
+    }
 }
 
 async fn reject_entry(
@@ -419,20 +461,51 @@ async fn reject_entry(
     let engine = state.engine.lock().await;
     let ref_name = engine.ref_name.clone();
     let ledger_store = AsgLedgerStore { repo: &engine.repo };
-    let outcome = ledger_store
-        .reject_entry(
-            &ref_name,
-            &entry_id,
-            &body.reviewer,
-            &body.reviewer_kind,
-            &body.reason,
-            &body.agent_id,
-        )
-        .map_err(ApiError::from)?;
-    Ok(Json(json!({
-        "status": if outcome.already_resolved { "already-rejected" } else { "rejected" },
-        "entry": outcome.entry,
-    })))
+    match ledger_store.reject_entry(
+        &ref_name,
+        &entry_id,
+        &body.reviewer,
+        &body.reviewer_kind,
+        &body.reason,
+        &body.agent_id,
+    ) {
+        Ok(outcome) => {
+            let status = if outcome.already_resolved {
+                "already-rejected"
+            } else {
+                "rejected"
+            };
+            let event = AuditEvent::new(
+                event_types::LEDGER_REJECT,
+                &body.reviewer,
+                &body.reviewer_kind,
+                status,
+            )
+            .with_subject(&outcome.entry.entry_id)
+            .with_secondary(&outcome.entry.symbol_id)
+            .with_matched_policy(outcome.entry.matched_policy.clone())
+            .with_reason(&body.reason)
+            .with_payload(json!({ "tags": outcome.entry.tags }));
+            emit_audit(engine.audit.as_ref(), event);
+
+            Ok(Json(json!({
+                "status": status,
+                "entry": outcome.entry,
+            })))
+        }
+        Err(e) => {
+            let event = AuditEvent::new(
+                event_types::LEDGER_REJECT,
+                &body.reviewer,
+                &body.reviewer_kind,
+                "error",
+            )
+            .with_subject(&entry_id)
+            .with_reason(e.to_string());
+            emit_audit(engine.audit.as_ref(), event);
+            Err(ApiError::from(e))
+        }
+    }
 }
 
 async fn withdraw_entry(
@@ -443,13 +516,42 @@ async fn withdraw_entry(
     let engine = state.engine.lock().await;
     let ref_name = engine.ref_name.clone();
     let ledger_store = AsgLedgerStore { repo: &engine.repo };
-    let outcome = ledger_store
-        .withdraw_entry(&ref_name, &entry_id, &body.author_id, &body.agent_id)
-        .map_err(ApiError::from)?;
-    Ok(Json(json!({
-        "status": if outcome.already_resolved { "already-withdrawn" } else { "withdrawn" },
-        "entry": outcome.entry,
-    })))
+    match ledger_store.withdraw_entry(&ref_name, &entry_id, &body.author_id, &body.agent_id) {
+        Ok(outcome) => {
+            let status = if outcome.already_resolved {
+                "already-withdrawn"
+            } else {
+                "withdrawn"
+            };
+            let event = AuditEvent::new(
+                event_types::LEDGER_WITHDRAW,
+                &body.author_id,
+                "agent",
+                status,
+            )
+            .with_subject(&outcome.entry.entry_id)
+            .with_secondary(&outcome.entry.symbol_id)
+            .with_payload(json!({ "tags": outcome.entry.tags }));
+            emit_audit(engine.audit.as_ref(), event);
+
+            Ok(Json(json!({
+                "status": status,
+                "entry": outcome.entry,
+            })))
+        }
+        Err(e) => {
+            let event = AuditEvent::new(
+                event_types::LEDGER_WITHDRAW,
+                &body.author_id,
+                "agent",
+                "error",
+            )
+            .with_subject(&entry_id)
+            .with_reason(e.to_string());
+            emit_audit(engine.audit.as_ref(), event);
+            Err(ApiError::from(e))
+        }
+    }
 }
 
 async fn get_symbol_effects(

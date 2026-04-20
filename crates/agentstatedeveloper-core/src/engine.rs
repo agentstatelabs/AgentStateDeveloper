@@ -6,6 +6,7 @@ use agentstategraph::Repository;
 use agentstategraph_storage::SqliteStorage;
 
 use crate::adapter::LanguageAdapter;
+use crate::audit::{AuditSink, JsonlFileSink, NullSink};
 use crate::error::{AsdError, Result};
 use crate::policy::{FilePolicyGate, PermissivePolicyGate, PolicyGate};
 
@@ -16,6 +17,7 @@ pub struct Engine {
     pub repo: Repository,
     pub adapters: HashMap<String, Arc<dyn LanguageAdapter>>,
     pub policy: Arc<dyn PolicyGate>,
+    pub audit: Arc<dyn AuditSink>,
     pub ref_name: String,
 }
 
@@ -29,6 +31,7 @@ impl Engine {
             repo,
             adapters: HashMap::new(),
             policy: Arc::new(PermissivePolicyGate),
+            audit: Arc::new(NullSink),
             ref_name: "main".to_string(),
         })
     }
@@ -43,6 +46,7 @@ impl Engine {
             repo,
             adapters: HashMap::new(),
             policy: Arc::new(PermissivePolicyGate),
+            audit: Arc::new(NullSink),
             ref_name: "main".to_string(),
         })
     }
@@ -67,6 +71,16 @@ impl Engine {
     pub fn load_policy_file(&mut self, path: &Path) -> Result<()> {
         let gate = FilePolicyGate::from_file(path)?;
         self.policy = Arc::new(gate);
+        Ok(())
+    }
+
+    pub fn set_audit_sink(&mut self, sink: Arc<dyn AuditSink>) {
+        self.audit = sink;
+    }
+
+    /// Convenience: wire a JSONL-file audit sink at `path`.
+    pub fn set_audit_log_file(&mut self, path: &Path) -> Result<()> {
+        self.audit = Arc::new(JsonlFileSink::new(path.to_path_buf()));
         Ok(())
     }
 }

@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod hydrate;
 pub mod index;
 pub mod init;

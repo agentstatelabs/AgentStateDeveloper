@@ -12,20 +12,28 @@ pub struct Config {
     pub db_path: PathBuf,
     pub agent_id: String,
     pub policy_path: Option<PathBuf>,
+    pub audit_log_path: Option<PathBuf>,
 }
 
 impl Config {
     /// Resolve config from optional explicit paths.
-    pub fn resolve(explicit_db: Option<PathBuf>, explicit_policy: Option<PathBuf>) -> Self {
+    pub fn resolve(
+        explicit_db: Option<PathBuf>,
+        explicit_policy: Option<PathBuf>,
+        explicit_audit_log: Option<PathBuf>,
+    ) -> Self {
         let db_path = explicit_db
             .or_else(|| std::env::var_os("ASD_DB").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("./.asd-state.db"));
         let policy_path = explicit_policy
             .or_else(|| std::env::var_os("ASD_POLICY").map(PathBuf::from));
+        let audit_log_path = explicit_audit_log
+            .or_else(|| std::env::var_os("ASD_AUDIT_LOG").map(PathBuf::from));
         Self {
             db_path,
             agent_id: DEFAULT_AGENT_ID.to_string(),
             policy_path,
+            audit_log_path,
         }
     }
 }

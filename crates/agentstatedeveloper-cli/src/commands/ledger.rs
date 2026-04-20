@@ -6,12 +6,36 @@ use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
 
 use agentstatedeveloper_core::{
-    actions, AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Decision, Engine, IndexStore,
-    LedgerEntry, LedgerKind, LedgerStore, Situation,
+    actions, event_types, AsgIndexStore, AsgLedgerStore, AuditEvent, AuditSink, Author, AuthorKind,
+    Decision, Engine, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Situation,
 };
 use serde_json::json;
 
 use crate::config::Config;
+
+/// Open the engine with optional policy + audit wiring based on cfg.
+fn open_engine(cfg: &Config) -> anyhow::Result<Engine> {
+    let mut engine = Engine::open_sqlite(&cfg.db_path)?;
+    if let Some(ref p) = cfg.policy_path {
+        engine
+            .load_policy_file(p)
+            .map_err(|e| anyhow::anyhow!("failed to load policy file {}: {e}", p.display()))?;
+    }
+    if let Some(ref p) = cfg.audit_log_path {
+        engine
+            .set_audit_log_file(p)
+            .map_err(|e| anyhow::anyhow!("failed to open audit log {}: {e}", p.display()))?;
+    }
+    Ok(engine)
+}
+
+/// Emit an audit event, logging any sink failure to stderr but never
+/// propagating — audit issues must never block the user's operation.
+fn emit_audit(sink: &dyn AuditSink, event: AuditEvent) {
+    if let Err(e) = sink.emit(&event) {
+        eprintln!("warning: audit emit failed: {}", e);
+    }
+}
 
 #[derive(Debug, Subcommand)]
 pub enum LedgerCmd {
@@ -188,111 +212,240 @@ pub fn run(cfg: &Config, cmd: LedgerCmd) -> Result<()> {
 }
 
 fn approve(cfg: &Config, args: ApproveArgs) -> Result<()> {
-    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let engine = open_engine(cfg)?;
     let ledger_store = AsgLedgerStore { repo: &engine.repo };
-    let outcome = ledger_store.approve_entry(
+    let result = ledger_store.approve_entry(
         &engine.ref_name,
         &args.entry_id,
         &args.approver,
         &args.approver_kind,
         args.message.as_deref(),
         &cfg.agent_id,
-    )?;
+    );
 
-    let out = json!({
-        "status": if outcome.already_approved { "already-approved" } else { "approved" },
-        "entry_id": outcome.entry.entry_id,
-        "symbol_id": outcome.entry.symbol_id,
-        "tags": outcome.entry.tags,
-    });
-    println!("{}", serde_json::to_string_pretty(&out)?);
-    Ok(())
+    match result {
+        Ok(outcome) => {
+            let status = if outcome.already_approved {
+                "already-approved"
+            } else {
+                "approved"
+            };
+            let event = AuditEvent::new(
+                event_types::LEDGER_APPROVE,
+                &args.approver,
+                &args.approver_kind,
+                status,
+            )
+            .with_subject(&outcome.entry.entry_id)
+            .with_secondary(&outcome.entry.symbol_id)
+            .with_matched_policy(outcome.entry.matched_policy.clone())
+            .with_payload(json!({ "tags": outcome.entry.tags }));
+            emit_audit(engine.audit.as_ref(), event);
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "status": status,
+                    "entry_id": outcome.entry.entry_id,
+                    "symbol_id": outcome.entry.symbol_id,
+                    "tags": outcome.entry.tags,
+                }))?
+            );
+            Ok(())
+        }
+        Err(e) => {
+            let event = AuditEvent::new(
+                event_types::LEDGER_APPROVE,
+                &args.approver,
+                &args.approver_kind,
+                "error",
+            )
+            .with_subject(&args.entry_id)
+            .with_reason(e.to_string());
+            emit_audit(engine.audit.as_ref(), event);
+            Err(e.into())
+        }
+    }
 }
 
 fn reject(cfg: &Config, args: RejectArgs) -> Result<()> {
-    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let engine = open_engine(cfg)?;
     let ledger_store = AsgLedgerStore { repo: &engine.repo };
-    let outcome = ledger_store.reject_entry(
+    let result = ledger_store.reject_entry(
         &engine.ref_name,
         &args.entry_id,
         &args.reviewer,
         &args.reviewer_kind,
         &args.reason,
         &cfg.agent_id,
-    )?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "status": if outcome.already_resolved { "already-rejected" } else { "rejected" },
-            "entry_id": outcome.entry.entry_id,
-            "symbol_id": outcome.entry.symbol_id,
-            "tags": outcome.entry.tags,
-        }))?
     );
-    Ok(())
+    match result {
+        Ok(outcome) => {
+            let status = if outcome.already_resolved {
+                "already-rejected"
+            } else {
+                "rejected"
+            };
+            let event = AuditEvent::new(
+                event_types::LEDGER_REJECT,
+                &args.reviewer,
+                &args.reviewer_kind,
+                status,
+            )
+            .with_subject(&outcome.entry.entry_id)
+            .with_secondary(&outcome.entry.symbol_id)
+            .with_matched_policy(outcome.entry.matched_policy.clone())
+            .with_reason(&args.reason)
+            .with_payload(json!({ "tags": outcome.entry.tags }));
+            emit_audit(engine.audit.as_ref(), event);
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "status": status,
+                    "entry_id": outcome.entry.entry_id,
+                    "symbol_id": outcome.entry.symbol_id,
+                    "tags": outcome.entry.tags,
+                }))?
+            );
+            Ok(())
+        }
+        Err(e) => {
+            let event = AuditEvent::new(
+                event_types::LEDGER_REJECT,
+                &args.reviewer,
+                &args.reviewer_kind,
+                "error",
+            )
+            .with_subject(&args.entry_id)
+            .with_reason(e.to_string());
+            emit_audit(engine.audit.as_ref(), event);
+            Err(e.into())
+        }
+    }
 }
 
 fn withdraw(cfg: &Config, args: WithdrawArgs) -> Result<()> {
-    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let engine = open_engine(cfg)?;
     let ledger_store = AsgLedgerStore { repo: &engine.repo };
-    let outcome = ledger_store.withdraw_entry(
+    let result = ledger_store.withdraw_entry(
         &engine.ref_name,
         &args.entry_id,
         &args.author_id,
         &cfg.agent_id,
-    )?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "status": if outcome.already_resolved { "already-withdrawn" } else { "withdrawn" },
-            "entry_id": outcome.entry.entry_id,
-            "symbol_id": outcome.entry.symbol_id,
-            "tags": outcome.entry.tags,
-        }))?
     );
-    Ok(())
+    match result {
+        Ok(outcome) => {
+            let status = if outcome.already_resolved {
+                "already-withdrawn"
+            } else {
+                "withdrawn"
+            };
+            let event = AuditEvent::new(
+                event_types::LEDGER_WITHDRAW,
+                &args.author_id,
+                "agent",
+                status,
+            )
+            .with_subject(&outcome.entry.entry_id)
+            .with_secondary(&outcome.entry.symbol_id)
+            .with_payload(json!({ "tags": outcome.entry.tags }));
+            emit_audit(engine.audit.as_ref(), event);
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "status": status,
+                    "entry_id": outcome.entry.entry_id,
+                    "symbol_id": outcome.entry.symbol_id,
+                    "tags": outcome.entry.tags,
+                }))?
+            );
+            Ok(())
+        }
+        Err(e) => {
+            let event = AuditEvent::new(
+                event_types::LEDGER_WITHDRAW,
+                &args.author_id,
+                "agent",
+                "error",
+            )
+            .with_subject(&args.entry_id)
+            .with_reason(e.to_string());
+            emit_audit(engine.audit.as_ref(), event);
+            Err(e.into())
+        }
+    }
 }
 
 fn supersede(cfg: &Config, args: SupersedeArgs) -> Result<()> {
-    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let engine = open_engine(cfg)?;
     let index_store = AsgIndexStore { repo: &engine.repo };
     let symbol = index_store
         .get_symbol_by_qname(&engine.ref_name, &args.qname)?
         .ok_or_else(|| anyhow::anyhow!("symbol not found: {}", args.qname))?;
 
+    let author_kind_str: AuthorKind = args.author_kind.into();
+    let author_kind_label = match author_kind_str {
+        AuthorKind::Agent => "agent",
+        AuthorKind::Human => "human",
+    };
     let author = Author {
-        kind: args.author_kind.into(),
-        id: args.author_id,
+        kind: author_kind_str,
+        id: args.author_id.clone(),
     };
     let mut entry = LedgerEntry::new(&symbol.symbol_id, args.kind.into(), args.summary, author);
     if let Some(body_path) = args.body {
         entry.body = Some(std::fs::read_to_string(body_path)?);
     }
-    entry.supersedes = args.supersedes;
+    entry.supersedes = args.supersedes.clone();
     entry.tags.push("supersedes".to_string());
 
     let ledger_store = AsgLedgerStore { repo: &engine.repo };
-    ledger_store.append_entry(&engine.ref_name, &entry, &cfg.agent_id)?;
+    match ledger_store.append_entry(&engine.ref_name, &entry, &cfg.agent_id) {
+        Ok(()) => {
+            let event = AuditEvent::new(
+                event_types::LEDGER_SUPERSEDE,
+                &args.author_id,
+                author_kind_label,
+                "success",
+            )
+            .with_subject(&entry.entry_id)
+            .with_secondary(&entry.symbol_id)
+            .with_payload(json!({
+                "supersedes": entry.supersedes,
+                "qname": args.qname,
+            }));
+            emit_audit(engine.audit.as_ref(), event);
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "status": "superseded",
-            "entry_id": entry.entry_id,
-            "symbol_id": entry.symbol_id,
-            "supersedes": entry.supersedes,
-        }))?
-    );
-    Ok(())
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "status": "superseded",
+                    "entry_id": entry.entry_id,
+                    "symbol_id": entry.symbol_id,
+                    "supersedes": entry.supersedes,
+                }))?
+            );
+            Ok(())
+        }
+        Err(e) => {
+            let event = AuditEvent::new(
+                event_types::LEDGER_SUPERSEDE,
+                &args.author_id,
+                author_kind_label,
+                "error",
+            )
+            .with_secondary(&symbol.symbol_id)
+            .with_reason(e.to_string());
+            emit_audit(engine.audit.as_ref(), event);
+            Err(e.into())
+        }
+    }
 }
 
 fn append(cfg: &Config, args: AppendArgs) -> Result<()> {
-    let mut engine = Engine::open_sqlite(&cfg.db_path)?;
-    if let Some(ref p) = cfg.policy_path {
-        engine
-            .load_policy_file(p)
-            .map_err(|e| anyhow::anyhow!("failed to load policy file {}: {e}", p.display()))?;
-    }
+    let engine = open_engine(cfg)?;
 
     let index_store = AsgIndexStore { repo: &engine.repo };
     let symbol = index_store
@@ -300,6 +453,11 @@ fn append(cfg: &Config, args: AppendArgs) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("symbol not found: {}", args.qname))?;
 
     let ledger_kind: LedgerKind = args.kind.into();
+    let author_kind_str: AuthorKind = args.author_kind.into();
+    let author_kind_label = match author_kind_str {
+        AuthorKind::Agent => "agent",
+        AuthorKind::Human => "human",
+    };
     let action = actions::ledger_append_action(ledger_kind.as_str());
     let situation = Situation {
         description: format!("ledger.append for {}", args.qname),
@@ -309,25 +467,36 @@ fn append(cfg: &Config, args: AppendArgs) -> Result<()> {
         .policy
         .evaluate(&situation, &action, &args.author_id)?;
 
-    match &decision {
-        Decision::Deny {
-            matched_policy,
-            reason,
-        } => {
-            let err = json!({
-                "status": "denied",
-                "action": action,
-                "matched_policy": matched_policy,
-                "reason": reason,
-            });
-            println!("{}", serde_json::to_string_pretty(&err)?);
-            return Err(anyhow::anyhow!("policy denied: {}", reason));
-        }
-        _ => {}
+    if let Decision::Deny {
+        matched_policy,
+        reason,
+    } = &decision
+    {
+        // Emit a denied audit event even though no entry is written.
+        let event = AuditEvent::new(
+            event_types::LEDGER_APPEND,
+            &args.author_id,
+            author_kind_label,
+            "denied",
+        )
+        .with_secondary(&symbol.symbol_id)
+        .with_matched_policy(Some(matched_policy.clone()))
+        .with_reason(reason.clone())
+        .with_payload(json!({ "qname": &args.qname, "kind": ledger_kind.as_str() }));
+        emit_audit(engine.audit.as_ref(), event);
+
+        let err = json!({
+            "status": "denied",
+            "action": action,
+            "matched_policy": matched_policy,
+            "reason": reason,
+        });
+        println!("{}", serde_json::to_string_pretty(&err)?);
+        return Err(anyhow::anyhow!("policy denied: {}", reason));
     }
 
     let author = Author {
-        kind: args.author_kind.into(),
+        kind: author_kind_str,
         id: args.author_id.clone(),
     };
     let mut entry = LedgerEntry::new(&symbol.symbol_id, ledger_kind, args.summary, author);
@@ -337,7 +506,6 @@ fn append(cfg: &Config, args: AppendArgs) -> Result<()> {
     }
     entry.matched_policy = decision.matched_policy();
 
-    // RequireApproval: tag the entry so downstream reviewers see it.
     if let Decision::RequireApproval {
         approvers, reason, ..
     } = &decision
@@ -356,16 +524,35 @@ fn append(cfg: &Config, args: AppendArgs) -> Result<()> {
     let ledger_store = AsgLedgerStore { repo: &engine.repo };
     ledger_store.append_entry(&engine.ref_name, &entry, &cfg.agent_id)?;
 
-    let out = json!({
-        "entry_id": entry.entry_id,
-        "matched_policy": entry.matched_policy,
-        "status": match &decision {
-            Decision::Allow { .. } => "allowed",
-            Decision::RequireApproval { .. } => "awaiting-approval",
-            Decision::Deny { .. } => "denied",
-            Decision::NoPolicyMatch => "no-policy-match",
-        },
-    });
-    println!("{}", serde_json::to_string_pretty(&out)?);
+    let status = match &decision {
+        Decision::Allow { .. } => "allowed",
+        Decision::RequireApproval { .. } => "awaiting-approval",
+        Decision::Deny { .. } => "denied",
+        Decision::NoPolicyMatch => "no-policy-match",
+    };
+    let event = AuditEvent::new(
+        event_types::LEDGER_APPEND,
+        &args.author_id,
+        author_kind_label,
+        status,
+    )
+    .with_subject(&entry.entry_id)
+    .with_secondary(&entry.symbol_id)
+    .with_matched_policy(entry.matched_policy.clone())
+    .with_payload(json!({
+        "qname": &args.qname,
+        "kind": ledger_kind.as_str(),
+        "tags": &entry.tags,
+    }));
+    emit_audit(engine.audit.as_ref(), event);
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "entry_id": entry.entry_id,
+            "matched_policy": entry.matched_policy,
+            "status": status,
+        }))?
+    );
     Ok(())
 }

@@ -6,6 +6,10 @@
 //! Env:
 //! - `ASD_DB` — path to SQLite db (default: `./.asd-state.db`)
 //! - `ASD_SERVE_ADDR` — bind address (default: `0.0.0.0:4120`)
+//! - `ASD_AUDIT_LOG` — optional path to a JSONL audit log file. When set,
+//!   the engine's `AuditSink` is swapped from `NullSink` to a
+//!   `JsonlFileSink` appending one event per line. Matches the `asd` CLI
+//!   `--audit-log` / `ASD_AUDIT_LOG` contract.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,8 +36,19 @@ async fn main() -> Result<()> {
 
     tracing::info!(?db_path, %addr, ?lens_dir, "starting asd-serve");
 
-    let engine = Engine::open_sqlite(&db_path)
+    let mut engine = Engine::open_sqlite(&db_path)
         .with_context(|| format!("failed to open ASD db at {}", db_path.display()))?;
+
+    // Optional audit log — fail loudly if set but unloadable so a configured
+    // forensic sink never silently falls back to NullSink.
+    if let Ok(audit_path) = std::env::var("ASD_AUDIT_LOG") {
+        let path = PathBuf::from(&audit_path);
+        engine
+            .set_audit_log_file(&path)
+            .with_context(|| format!("failed to open ASD_AUDIT_LOG audit log at {}", path.display()))?;
+        tracing::info!(audit_log = %path.display(), "loaded ASD audit log");
+    }
+
     let shared = Arc::new(Mutex::new(engine));
 
     let app = build_router(shared, db_path, lens_dir);

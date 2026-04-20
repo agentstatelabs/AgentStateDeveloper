@@ -14,9 +14,9 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use agentstatedeveloper_core::{
-    ASD_PATH_PREFIX, AsgEffectStore, AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Decision,
-    Effect, EffectCategory, EffectDecl, EffectStore, Engine, IndexStore, LedgerEntry, LedgerKind,
-    LedgerStore, Situation, actions,
+    ASD_PATH_PREFIX, AsgEffectStore, AsgIndexStore, AsgLedgerStore, AuditEvent, AuditSink, Author,
+    AuthorKind, Decision, Effect, EffectCategory, EffectDecl, EffectStore, Engine, IndexStore,
+    LedgerEntry, LedgerKind, LedgerStore, Situation, actions, event_types,
 };
 
 /// The AgentStateDeveloper MCP server.
@@ -513,6 +513,10 @@ impl AsdMcpServer {
             Ok(k) => k,
             Err(e) => return err_json(&e),
         };
+        let author_kind_label = match author_kind {
+            AuthorKind::Agent => "agent",
+            AuthorKind::Human => "human",
+        };
 
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
@@ -520,8 +524,36 @@ impl AsdMcpServer {
         let index = AsgIndexStore { repo: &engine.repo };
         let symbol = match index.get_symbol_by_qname(&ref_name, &p.qname) {
             Ok(Some(s)) => s,
-            Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
-            Err(e) => return err_json(&e.to_string()),
+            Ok(None) => {
+                let event = AuditEvent::new(
+                    event_types::LEDGER_APPEND,
+                    &p.author_id,
+                    author_kind_label,
+                    "error",
+                )
+                .with_reason(format!("symbol not found: {}", p.qname))
+                .with_payload(serde_json::json!({
+                    "qname": &p.qname,
+                    "kind": kind.as_str(),
+                }));
+                emit_audit(engine.audit.as_ref(), event);
+                return err_json(&format!("symbol not found: {}", p.qname));
+            }
+            Err(e) => {
+                let event = AuditEvent::new(
+                    event_types::LEDGER_APPEND,
+                    &p.author_id,
+                    author_kind_label,
+                    "error",
+                )
+                .with_reason(e.to_string())
+                .with_payload(serde_json::json!({
+                    "qname": &p.qname,
+                    "kind": kind.as_str(),
+                }));
+                emit_audit(engine.audit.as_ref(), event);
+                return err_json(&e.to_string());
+            }
         };
 
         // Evaluate policy before doing any write.
@@ -535,7 +567,22 @@ impl AsdMcpServer {
         };
         let decision = match engine.policy.evaluate(&situation, &action, &p.author_id) {
             Ok(d) => d,
-            Err(e) => return err_json(&format!("policy evaluation failed: {}", e)),
+            Err(e) => {
+                let event = AuditEvent::new(
+                    event_types::LEDGER_APPEND,
+                    &p.author_id,
+                    author_kind_label,
+                    "error",
+                )
+                .with_secondary(&symbol.symbol_id)
+                .with_reason(format!("policy evaluation failed: {}", e))
+                .with_payload(serde_json::json!({
+                    "qname": &p.qname,
+                    "kind": kind.as_str(),
+                }));
+                emit_audit(engine.audit.as_ref(), event);
+                return err_json(&format!("policy evaluation failed: {}", e));
+            }
         };
 
         if let Decision::Deny {
@@ -543,6 +590,20 @@ impl AsdMcpServer {
             reason,
         } = &decision
         {
+            let event = AuditEvent::new(
+                event_types::LEDGER_APPEND,
+                &p.author_id,
+                author_kind_label,
+                "denied",
+            )
+            .with_secondary(&symbol.symbol_id)
+            .with_matched_policy(Some(matched_policy.clone()))
+            .with_reason(reason.clone())
+            .with_payload(serde_json::json!({
+                "qname": &p.qname,
+                "kind": kind.as_str(),
+            }));
+            emit_audit(engine.audit.as_ref(), event);
             return err_json(&format!(
                 "policy denied: {} (matched {})",
                 reason, matched_policy
@@ -578,6 +639,21 @@ impl AsdMcpServer {
 
         let ledger_store = AsgLedgerStore { repo: &engine.repo };
         if let Err(e) = ledger_store.append_entry(&ref_name, &entry, &p.author_id) {
+            let event = AuditEvent::new(
+                event_types::LEDGER_APPEND,
+                &p.author_id,
+                author_kind_label,
+                "error",
+            )
+            .with_subject(&entry.entry_id)
+            .with_secondary(&symbol.symbol_id)
+            .with_matched_policy(entry.matched_policy.clone())
+            .with_reason(e.to_string())
+            .with_payload(serde_json::json!({
+                "qname": &p.qname,
+                "kind": kind.as_str(),
+            }));
+            emit_audit(engine.audit.as_ref(), event);
             return err_json(&e.to_string());
         }
 
@@ -587,6 +663,22 @@ impl AsdMcpServer {
             Decision::Deny { .. } => "denied",
             Decision::NoPolicyMatch => "no-policy-match",
         };
+
+        let event = AuditEvent::new(
+            event_types::LEDGER_APPEND,
+            &p.author_id,
+            author_kind_label,
+            status,
+        )
+        .with_subject(&entry.entry_id)
+        .with_secondary(&entry.symbol_id)
+        .with_matched_policy(entry.matched_policy.clone())
+        .with_payload(serde_json::json!({
+            "qname": &p.qname,
+            "kind": kind.as_str(),
+            "tags": &entry.tags,
+        }));
+        emit_audit(engine.audit.as_ref(), event);
 
         serde_json::to_string(&serde_json::json!({
             "entry_id": entry.entry_id,
@@ -613,12 +705,42 @@ impl AsdMcpServer {
             p.message.as_deref(),
             "asd-mcp",
         ) {
-            Ok(outcome) => serde_json::to_string(&serde_json::json!({
-                "status": if outcome.already_approved { "already-approved" } else { "approved" },
-                "entry": outcome.entry,
-            }))
-            .unwrap_or_else(|_| "{}".to_string()),
-            Err(e) => err_json(&e.to_string()),
+            Ok(outcome) => {
+                let status = if outcome.already_approved {
+                    "already-approved"
+                } else {
+                    "approved"
+                };
+                let event = AuditEvent::new(
+                    event_types::LEDGER_APPROVE,
+                    &p.approver,
+                    &p.approver_kind,
+                    status,
+                )
+                .with_subject(&outcome.entry.entry_id)
+                .with_secondary(&outcome.entry.symbol_id)
+                .with_matched_policy(outcome.entry.matched_policy.clone())
+                .with_payload(serde_json::json!({ "tags": outcome.entry.tags }));
+                emit_audit(engine.audit.as_ref(), event);
+
+                serde_json::to_string(&serde_json::json!({
+                    "status": status,
+                    "entry": outcome.entry,
+                }))
+                .unwrap_or_else(|_| "{}".to_string())
+            }
+            Err(e) => {
+                let event = AuditEvent::new(
+                    event_types::LEDGER_APPROVE,
+                    &p.approver,
+                    &p.approver_kind,
+                    "error",
+                )
+                .with_subject(&p.entry_id)
+                .with_reason(e.to_string());
+                emit_audit(engine.audit.as_ref(), event);
+                err_json(&e.to_string())
+            }
         }
     }
 
@@ -638,12 +760,43 @@ impl AsdMcpServer {
             &p.reason,
             "asd-mcp",
         ) {
-            Ok(outcome) => serde_json::to_string(&serde_json::json!({
-                "status": if outcome.already_resolved { "already-rejected" } else { "rejected" },
-                "entry": outcome.entry,
-            }))
-            .unwrap_or_else(|_| "{}".to_string()),
-            Err(e) => err_json(&e.to_string()),
+            Ok(outcome) => {
+                let status = if outcome.already_resolved {
+                    "already-rejected"
+                } else {
+                    "rejected"
+                };
+                let event = AuditEvent::new(
+                    event_types::LEDGER_REJECT,
+                    &p.reviewer,
+                    &p.reviewer_kind,
+                    status,
+                )
+                .with_subject(&outcome.entry.entry_id)
+                .with_secondary(&outcome.entry.symbol_id)
+                .with_matched_policy(outcome.entry.matched_policy.clone())
+                .with_reason(&p.reason)
+                .with_payload(serde_json::json!({ "tags": outcome.entry.tags }));
+                emit_audit(engine.audit.as_ref(), event);
+
+                serde_json::to_string(&serde_json::json!({
+                    "status": status,
+                    "entry": outcome.entry,
+                }))
+                .unwrap_or_else(|_| "{}".to_string())
+            }
+            Err(e) => {
+                let event = AuditEvent::new(
+                    event_types::LEDGER_REJECT,
+                    &p.reviewer,
+                    &p.reviewer_kind,
+                    "error",
+                )
+                .with_subject(&p.entry_id)
+                .with_reason(e.to_string());
+                emit_audit(engine.audit.as_ref(), event);
+                err_json(&e.to_string())
+            }
         }
     }
 
@@ -656,12 +809,41 @@ impl AsdMcpServer {
         let ref_name = engine.ref_name.clone();
         let ledger_store = AsgLedgerStore { repo: &engine.repo };
         match ledger_store.withdraw_entry(&ref_name, &p.entry_id, &p.author_id, "asd-mcp") {
-            Ok(outcome) => serde_json::to_string(&serde_json::json!({
-                "status": if outcome.already_resolved { "already-withdrawn" } else { "withdrawn" },
-                "entry": outcome.entry,
-            }))
-            .unwrap_or_else(|_| "{}".to_string()),
-            Err(e) => err_json(&e.to_string()),
+            Ok(outcome) => {
+                let status = if outcome.already_resolved {
+                    "already-withdrawn"
+                } else {
+                    "withdrawn"
+                };
+                let event = AuditEvent::new(
+                    event_types::LEDGER_WITHDRAW,
+                    &p.author_id,
+                    "agent",
+                    status,
+                )
+                .with_subject(&outcome.entry.entry_id)
+                .with_secondary(&outcome.entry.symbol_id)
+                .with_payload(serde_json::json!({ "tags": outcome.entry.tags }));
+                emit_audit(engine.audit.as_ref(), event);
+
+                serde_json::to_string(&serde_json::json!({
+                    "status": status,
+                    "entry": outcome.entry,
+                }))
+                .unwrap_or_else(|_| "{}".to_string())
+            }
+            Err(e) => {
+                let event = AuditEvent::new(
+                    event_types::LEDGER_WITHDRAW,
+                    &p.author_id,
+                    "agent",
+                    "error",
+                )
+                .with_subject(&p.entry_id)
+                .with_reason(e.to_string());
+                emit_audit(engine.audit.as_ref(), event);
+                err_json(&e.to_string())
+            }
         }
     }
 
@@ -678,14 +860,43 @@ impl AsdMcpServer {
             Ok(k) => k,
             Err(e) => return err_json(&e),
         };
+        let author_kind_label = match author_kind {
+            AuthorKind::Agent => "agent",
+            AuthorKind::Human => "human",
+        };
 
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
         let index = AsgIndexStore { repo: &engine.repo };
         let symbol = match index.get_symbol_by_qname(&ref_name, &p.qname) {
             Ok(Some(s)) => s,
-            Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
-            Err(e) => return err_json(&e.to_string()),
+            Ok(None) => {
+                let event = AuditEvent::new(
+                    event_types::LEDGER_SUPERSEDE,
+                    &p.author_id,
+                    author_kind_label,
+                    "error",
+                )
+                .with_reason(format!("symbol not found: {}", p.qname))
+                .with_payload(serde_json::json!({
+                    "qname": &p.qname,
+                    "supersedes": &p.supersedes,
+                }));
+                emit_audit(engine.audit.as_ref(), event);
+                return err_json(&format!("symbol not found: {}", p.qname));
+            }
+            Err(e) => {
+                let event = AuditEvent::new(
+                    event_types::LEDGER_SUPERSEDE,
+                    &p.author_id,
+                    author_kind_label,
+                    "error",
+                )
+                .with_reason(e.to_string())
+                .with_payload(serde_json::json!({ "qname": &p.qname }));
+                emit_audit(engine.audit.as_ref(), event);
+                return err_json(&e.to_string());
+            }
         };
 
         let author = Author {
@@ -698,16 +909,47 @@ impl AsdMcpServer {
         entry.tags.push("supersedes".to_string());
 
         let ledger_store = AsgLedgerStore { repo: &engine.repo };
-        if let Err(e) = ledger_store.append_entry(&ref_name, &entry, "asd-mcp") {
-            return err_json(&e.to_string());
+        match ledger_store.append_entry(&ref_name, &entry, "asd-mcp") {
+            Ok(()) => {
+                let event = AuditEvent::new(
+                    event_types::LEDGER_SUPERSEDE,
+                    &p.author_id,
+                    author_kind_label,
+                    "success",
+                )
+                .with_subject(&entry.entry_id)
+                .with_secondary(&entry.symbol_id)
+                .with_payload(serde_json::json!({
+                    "supersedes": entry.supersedes,
+                    "qname": &p.qname,
+                }));
+                emit_audit(engine.audit.as_ref(), event);
+
+                serde_json::to_string(&serde_json::json!({
+                    "status": "superseded",
+                    "entry_id": entry.entry_id,
+                    "symbol_id": entry.symbol_id,
+                    "supersedes": entry.supersedes,
+                }))
+                .unwrap_or_else(|_| "{}".to_string())
+            }
+            Err(e) => {
+                let event = AuditEvent::new(
+                    event_types::LEDGER_SUPERSEDE,
+                    &p.author_id,
+                    author_kind_label,
+                    "error",
+                )
+                .with_secondary(&symbol.symbol_id)
+                .with_reason(e.to_string())
+                .with_payload(serde_json::json!({
+                    "supersedes": &p.supersedes,
+                    "qname": &p.qname,
+                }));
+                emit_audit(engine.audit.as_ref(), event);
+                err_json(&e.to_string())
+            }
         }
-        serde_json::to_string(&serde_json::json!({
-            "status": "superseded",
-            "entry_id": entry.entry_id,
-            "symbol_id": entry.symbol_id,
-            "supersedes": entry.supersedes,
-        }))
-        .unwrap_or_else(|_| "{}".to_string())
     }
 
     #[tool(
@@ -731,14 +973,48 @@ impl AsdMcpServer {
         let index = AsgIndexStore { repo: &engine.repo };
         let symbol = match index.get_symbol_by_qname(&ref_name, &p.qname) {
             Ok(Some(s)) => s,
-            Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
-            Err(e) => return err_json(&e.to_string()),
+            Ok(None) => {
+                let event = AuditEvent::new(
+                    event_types::EFFECT_DECLARE,
+                    &p.author_id,
+                    "agent",
+                    "error",
+                )
+                .with_reason(format!("symbol not found: {}", p.qname))
+                .with_payload(serde_json::json!({ "qname": &p.qname }));
+                emit_audit(engine.audit.as_ref(), event);
+                return err_json(&format!("symbol not found: {}", p.qname));
+            }
+            Err(e) => {
+                let event = AuditEvent::new(
+                    event_types::EFFECT_DECLARE,
+                    &p.author_id,
+                    "agent",
+                    "error",
+                )
+                .with_reason(e.to_string())
+                .with_payload(serde_json::json!({ "qname": &p.qname }));
+                emit_audit(engine.audit.as_ref(), event);
+                return err_json(&e.to_string());
+            }
         };
 
         let effects_store = AsgEffectStore { repo: &engine.repo };
         let existing = match effects_store.get_effects(&ref_name, &symbol.symbol_id) {
             Ok(e) => e,
-            Err(e) => return err_json(&e.to_string()),
+            Err(e) => {
+                let event = AuditEvent::new(
+                    event_types::EFFECT_DECLARE,
+                    &p.author_id,
+                    "agent",
+                    "error",
+                )
+                .with_subject(&symbol.symbol_id)
+                .with_reason(e.to_string())
+                .with_payload(serde_json::json!({ "qname": &p.qname }));
+                emit_audit(engine.audit.as_ref(), event);
+                return err_json(&e.to_string());
+            }
         };
 
         // Broadening check: if any new effect category is not already present
@@ -766,7 +1042,24 @@ impl AsdMcpServer {
         };
         let decision = match engine.policy.evaluate(&situation, action, &p.author_id) {
             Ok(d) => d,
-            Err(e) => return err_json(&format!("policy evaluation failed: {}", e)),
+            Err(e) => {
+                let event = AuditEvent::new(
+                    event_types::EFFECT_DECLARE,
+                    &p.author_id,
+                    "agent",
+                    "error",
+                )
+                .with_subject(&symbol.symbol_id)
+                .with_reason(format!("policy evaluation failed: {}", e))
+                .with_payload(serde_json::json!({
+                    "qname": &p.qname,
+                    "declared": &new_categories,
+                    "broadens": broadens,
+                    "action": action,
+                }));
+                emit_audit(engine.audit.as_ref(), event);
+                return err_json(&format!("policy evaluation failed: {}", e));
+            }
         };
 
         if let Decision::Deny {
@@ -774,6 +1067,22 @@ impl AsdMcpServer {
             reason,
         } = &decision
         {
+            let event = AuditEvent::new(
+                event_types::EFFECT_DECLARE,
+                &p.author_id,
+                "agent",
+                "denied",
+            )
+            .with_subject(&symbol.symbol_id)
+            .with_matched_policy(Some(matched_policy.clone()))
+            .with_reason(reason.clone())
+            .with_payload(serde_json::json!({
+                "qname": &p.qname,
+                "declared": &new_categories,
+                "broadens": broadens,
+                "action": action,
+            }));
+            emit_audit(engine.audit.as_ref(), event);
             return err_json(&format!(
                 "policy denied: {} (matched {})",
                 reason, matched_policy
@@ -794,6 +1103,22 @@ impl AsdMcpServer {
         if let Err(e) =
             effects_store.put_effects(&ref_name, &symbol.symbol_id, &updated, &p.author_id)
         {
+            let event = AuditEvent::new(
+                event_types::EFFECT_DECLARE,
+                &p.author_id,
+                "agent",
+                "error",
+            )
+            .with_subject(&symbol.symbol_id)
+            .with_matched_policy(matched_policy.clone())
+            .with_reason(e.to_string())
+            .with_payload(serde_json::json!({
+                "qname": &p.qname,
+                "declared": &new_categories,
+                "broadens": broadens,
+                "action": action,
+            }));
+            emit_audit(engine.audit.as_ref(), event);
             return err_json(&e.to_string());
         }
 
@@ -803,6 +1128,22 @@ impl AsdMcpServer {
             Decision::Deny { .. } => "denied",
             Decision::NoPolicyMatch => "no-policy-match",
         };
+
+        let event = AuditEvent::new(
+            event_types::EFFECT_DECLARE,
+            &p.author_id,
+            "agent",
+            status,
+        )
+        .with_subject(&symbol.symbol_id)
+        .with_matched_policy(matched_policy.clone())
+        .with_payload(serde_json::json!({
+            "qname": &p.qname,
+            "declared": &new_categories,
+            "broadens": broadens,
+            "action": action,
+        }));
+        emit_audit(engine.audit.as_ref(), event);
 
         serde_json::to_string(&serde_json::json!({
             "effect_decl": updated,
@@ -822,6 +1163,17 @@ impl ServerHandler for AsdMcpServer {}
 fn err_json(msg: &str) -> String {
     serde_json::to_string(&serde_json::json!({ "error": msg }))
         .unwrap_or_else(|_| "{\"error\":\"unknown\"}".to_string())
+}
+
+/// Emit an audit event via the engine's configured sink. Mirrors the CLI's
+/// `emit_audit` helper: log sink failures to stderr but never propagate —
+/// audit issues must never block the user's operation. Called while
+/// `engine.lock().await` is held; sink impls are expected to be fast
+/// (JsonlFileSink does a single append-open + write).
+fn emit_audit(sink: &dyn AuditSink, event: AuditEvent) {
+    if let Err(e) = sink.emit(&event) {
+        eprintln!("warning: audit emit failed: {}", e);
+    }
 }
 
 fn parse_ledger_kind(s: &str) -> Result<LedgerKind, String> {

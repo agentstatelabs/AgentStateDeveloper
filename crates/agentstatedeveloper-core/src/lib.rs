@@ -5,6 +5,7 @@
 //! crates (e.g., `agentstatedeveloper-python`).
 
 pub mod adapter;
+pub mod audit;
 pub mod effects;
 pub mod engine;
 pub mod error;
@@ -18,6 +19,7 @@ pub mod symbol;
 pub mod transitive;
 
 pub use adapter::{CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols};
+pub use audit::{AuditEvent, AuditSink, JsonlFileSink, NullSink, event_types, read_jsonl};
 pub use effects::{AsgEffectStore, EffectStore};
 pub use engine::Engine;
 pub use error::{AsdError, Result};
