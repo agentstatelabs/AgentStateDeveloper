@@ -145,11 +145,14 @@ Explicitly out-of-repo, but we have nothing built:
   never implemented — currently everything lives in the SQLite ASG
   repo only. Implementing `.asd/` would enable the git-roundtrip
   promise for cold clones. **M10 target.**
-- **Audit-log event stream** (M12) + **audit tail parity across CLI /
-  HTTP / MCP / Lens** (M14) shipped. Remaining gaps: log rotation /
-  retention policy, cryptographic hash-chaining of the event log
-  (would give tamper evidence), real-time streaming (current model is
-  poll via `since:<event_id>` cursor).
+- **Audit-log event stream** (M12) + **audit tail parity** across CLI
+  / HTTP / MCP / Lens (M14) + **hash-chained tamper evidence** (M15)
+  shipped. Every event carries a blake3 hash of its own canonical
+  bytes plus the previous event's hash; `asd audit verify` (and the
+  HTTP/MCP equivalents) walks the log and reports any break. Remaining
+  gaps: log rotation / retention policy, real-time streaming (current
+  model is poll via `since:<event_id>` cursor), Lens verify-badge UI
+  (backend works, just not surfaced).
 - Traces carry a `started_at`/`finished_at` but no per-call timing or
   call-depth info.
 - No schema migration story on disk. Everything lives under

@@ -74,6 +74,7 @@ pub fn build_router(
         .route("/symbols/{qname}/callees", get(get_symbol_callees))
         .route("/ledger", get(list_ledger))
         .route("/audit", get(list_audit))
+        .route("/audit/verify", get(verify_audit))
         .route(
             "/approvals/{entry_id}/approve",
             axum::routing::post(approve_entry),
@@ -431,6 +432,33 @@ async fn list_audit(
         "path": path.display().to_string(),
         "count": filtered.len(),
         "events": filtered,
+    })))
+}
+
+async fn verify_audit(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Some(path) = state.audit_log_path.as_ref() else {
+        return Ok(Json(json!({
+            "configured": false,
+            "verified": false,
+            "total_events": 0,
+            "signed_events": 0,
+            "unsigned_events": 0,
+            "chain_breaks": [],
+        })));
+    };
+    let events = agentstatedeveloper_core::read_jsonl(path)
+        .map_err(|e| ApiError::Internal(format!("read audit log: {}", e)))?;
+    let report = agentstatedeveloper_core::verify_chain(&events);
+    Ok(Json(json!({
+        "configured": true,
+        "path": path.display().to_string(),
+        "total_events": report.total_events,
+        "signed_events": report.signed_events,
+        "unsigned_events": report.unsigned_events,
+        "verified": report.verified,
+        "chain_breaks": report.chain_breaks,
     })))
 }
 

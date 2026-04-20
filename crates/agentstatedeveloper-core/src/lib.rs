@@ -19,7 +19,10 @@ pub mod symbol;
 pub mod transitive;
 
 pub use adapter::{CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols};
-pub use audit::{AuditEvent, AuditSink, JsonlFileSink, NullSink, event_types, read_jsonl};
+pub use audit::{
+    AuditEvent, AuditSink, ChainBreak, HASH_PREFIX, JsonlFileSink, NullSink, VerifyReport,
+    event_types, read_jsonl, verify_chain,
+};
 pub use effects::{AsgEffectStore, EffectStore};
 pub use engine::Engine;
 pub use error::{AsdError, Result};

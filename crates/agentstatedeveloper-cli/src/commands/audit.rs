@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 
-use agentstatedeveloper_core::{read_jsonl, AuditEvent};
+use agentstatedeveloper_core::{read_jsonl, verify_chain, AuditEvent};
 
 use crate::config::Config;
 
@@ -14,6 +14,19 @@ pub enum AuditCmd {
     /// Print audit events from the configured audit log. Supports
     /// filtering by event type and by "since" event id (exclusive).
     Tail(TailArgs),
+
+    /// Verify the hash-chain integrity of the audit log. Reports any
+    /// detected tampering (mutated content, deleted entries, reordered
+    /// entries). Exits non-zero when the chain is broken.
+    Verify(VerifyArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct VerifyArgs {
+    /// Override the audit log path. Defaults to `--audit-log` /
+    /// `ASD_AUDIT_LOG` from config.
+    #[arg(long)]
+    pub log: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -50,7 +63,43 @@ pub struct TailArgs {
 pub fn run(cfg: &Config, cmd: AuditCmd) -> Result<()> {
     match cmd {
         AuditCmd::Tail(args) => tail(cfg, args),
+        AuditCmd::Verify(args) => verify(cfg, args),
     }
+}
+
+fn verify(cfg: &Config, args: VerifyArgs) -> Result<()> {
+    let path = args
+        .log
+        .as_ref()
+        .or(cfg.audit_log_path.as_ref())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no audit log configured — pass --log <path>, \
+                 set --audit-log <path> globally, or export ASD_AUDIT_LOG"
+            )
+        })?;
+
+    let events = read_jsonl(path)
+        .with_context(|| format!("read audit log {}", path.display()))?;
+    let report = verify_chain(&events);
+
+    let out = serde_json::json!({
+        "path": path.display().to_string(),
+        "total_events": report.total_events,
+        "signed_events": report.signed_events,
+        "unsigned_events": report.unsigned_events,
+        "verified": report.verified,
+        "chain_breaks": report.chain_breaks,
+    });
+    println!("{}", serde_json::to_string_pretty(&out)?);
+
+    if !report.verified && !report.chain_breaks.is_empty() {
+        anyhow::bail!(
+            "audit log chain broken: {} break(s)",
+            report.chain_breaks.len()
+        );
+    }
+    Ok(())
 }
 
 fn tail(cfg: &Config, args: TailArgs) -> Result<()> {
