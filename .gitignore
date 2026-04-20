@@ -22,3 +22,7 @@ examples/sample-py-repo/.asd-trace.json
 examples/**/.asd-trace.json
 examples/sample-ts-repo/.asd-state.db
 examples/sample-ts-repo/.asd-trace.json
+site/node_modules/
+site/dist/
+site/.astro/
+site/package-lock.json

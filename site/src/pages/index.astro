@@ -1,0 +1,227 @@
+---
+// Custom landing page — overrides the Starlight splash for agentstatedeveloper.dev
+// Paired dark/mono brand; same positioning in the repo's DESIGN.md.
+// The demoHtml is composed in the frontmatter because raw `{` / `}` in
+// Astro template markup would be parsed as JSX expressions.
+const demoHtml = `<span class="c"># 1. Index a repo — parses symbols, infers effects, builds the call graph.</span>
+<span class="p">$</span> asd init
+<span class="p">$</span> asd index .
+<span class="out">{"files": 4, "symbols": 16, "edges": 8, "intra_module_edges": 5, "cross_module_edges": 3,
+ "effects": 16, "transitive_updates": 1}</span>
+
+<span class="c"># 2. Read a symbol — declared effects, ledger entries, call graph neighbours.</span>
+<span class="p">$</span> asd read driver.main
+{
+  "symbol": {"qname": "driver.main", "file": "src/driver.ts", ...},
+  "effects": {
+    "declared": [],
+    "transitive": [
+      {"effect": "io.db.write", "via": ["payments.chargeCard"]},
+      {"effect": "io.fs.write", "via": ["logger.writeLog"]},
+      {"effect": "log",         "via": ["payments.chargeCard"]},
+      {"effect": "throw",       "via": ["payments.chargeCard"]}
+    ]
+  },
+  "ledger": []
+}
+
+<span class="c"># 3. Append a hazard under a policy — entry lands awaiting approval, audit event emitted.</span>
+<span class="p">$</span> asd --policy policies.json --audit-log audit.jsonl ledger append \\
+       payments.chargeCard --kind hazard --summary "fails on amounts &gt;10k" \\
+       --author-id alice --author-kind human
+<span class="warn">{"status": "awaiting-approval",
+ "entry_id": "led_d4b...",
+ "matched_policy": "/policies/code/hazard-requires-human@1"}</span>
+
+<span class="c"># ...and the audit log catches every action, deny, approval, supersede.</span>
+<span class="p">$</span> asd audit tail --event-type ledger --limit 3
+<span class="out">ledger.append   awaiting-approval   actor=alice              policy=/policies/code/hazard-requires-human@1
+ledger.approve  approved            actor=alice              policy=/policies/code/hazard-requires-human@1
+ledger.append   denied              actor=experimental-bot   policy=/policies/code/no-tradeoffs-without-body@1</span>`;
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<title>AgentStateDeveloper — The audit layer for agent-authored code</title>
+	<meta name="description" content="Code-level context and audit overlay for agent-authored code. Semantic index, decision ledger, effect declarations, call graph, policy gate, ratification workflow, and an append-only event stream — overlaying git, not replacing it." />
+	<meta property="og:title" content="AgentStateDeveloper" />
+	<meta property="og:description" content="The audit layer for agent-authored code. Overlays git; doesn't replace it." />
+	<meta property="og:url" content="https://agentstatedeveloper.dev" />
+	<meta property="og:type" content="website" />
+	<link rel="icon" href="/favicon.svg" />
+	<link rel="stylesheet" href="/landing.css" />
+</head>
+<body>
+
+<nav class="top">
+	<div class="container nav-inner">
+		<div class="brand">AgentStateDeveloper <span class="suffix">· asd</span></div>
+		<div class="nav-links">
+			<a href="/guides/introduction">Docs</a>
+			<a href="/reference/cli">CLI</a>
+			<a href="/reference/mcp-tools">MCP</a>
+			<a href="/guides/ecosystem">Ecosystem</a>
+			<a href="https://github.com/agentstatelabs/AgentStateDeveloper">GitHub</a>
+		</div>
+	</div>
+</nav>
+
+<div class="container">
+	<section class="hero">
+		<div class="tagline-tiny">the audit layer for agent-authored code</div>
+		<h1>When agents write faster than humans can <span class="accent">review</span>, you need a new layer.</h1>
+		<p class="lede">
+			<strong>AgentStateDeveloper</strong> overlays git with structured, queryable, agent-authored
+			context — a decision ledger, declared + observed effects, an intra- and cross-module call graph,
+			and an append-only audit stream — so code written by agents stays auditable at agent speed.
+		</p>
+		<p class="lede-sub">
+			Ships with a CLI, an MCP stdio server (14 tools), an HTTP API, a SvelteKit review UI, a
+			file-backed policy gate with ratification workflow, and a <code>.asd/</code> sidecar so the
+			audit layer travels in your git repo.
+		</p>
+		<div class="cta-row">
+			<a class="btn btn-primary" href="/guides/quickstart">Quick start →</a>
+			<a class="btn btn-ghost" href="/guides/introduction">Why this exists</a>
+			<a class="btn btn-ghost" href="https://github.com/agentstatelabs/AgentStateDeveloper">GitHub</a>
+		</div>
+	</section>
+
+	<section>
+		<div class="section-eyebrow">The problem</div>
+		<h2 class="section-h">Diffs were the wrong unit the moment agents started writing code.</h2>
+		<p class="section-p">
+			Git stores text deltas. Humans reviewed minutes-to-hours of work per author per day.
+			Agents author hundreds of changes, most through tools that can't surface
+			<em>why</em> they did it, which effects widened, what decisions got superseded,
+			or which claims a later author made. That gap is the audit gap.
+		</p>
+		<div class="ps">
+			<div class="card problem">
+				<h3>What breaks at agent speed</h3>
+				<p>Review bandwidth doesn't scale — humans can't read 500 PRs/day.</p>
+				<p>Diffs don't carry intent — a rename refactor is 200 deletes + 200 adds.</p>
+				<p>Commit messages rot like <code>.md</code> files — unverified prose.</p>
+				<p>Blame is line-based — not <em>decision-based</em>.</p>
+				<p>No intent→verification linkage — claims and tests float independently.</p>
+			</div>
+			<div class="card solution">
+				<h3>What ASD adds — as an overlay, not a replacement</h3>
+				<p>A symbol-level semantic index (functions, methods, classes) kept fresh on every index pass.</p>
+				<p>A structured decision ledger keyed to symbols, with supersede, approve, reject, withdraw.</p>
+				<p>Declared + observed (runtime-traced) effects with transitive propagation across call edges.</p>
+				<p>A policy gate + ratification workflow for entries that require human attestation.</p>
+				<p>An append-only JSONL audit event stream, SIEM-ingest-ready.</p>
+			</div>
+		</div>
+	</section>
+
+	<section>
+		<div class="section-eyebrow">What you get</div>
+		<h2 class="section-h">Seven primitives. One coherent audit surface.</h2>
+		<div class="features">
+			<div class="feature">
+				<div class="feature-title">Semantic index <span class="tag">py · ts</span></div>
+				<p>tree-sitter parses every function, method, class across your repo. Symbols are canonical-id'd and survive content edits.</p>
+			</div>
+			<div class="feature">
+				<div class="feature-title">Decision ledger <span class="tag">append-only</span></div>
+				<p>Structured notes keyed to symbols: decision, assumption, constraint, rationale, hazard, tradeoff. Supersede, approve, reject, withdraw.</p>
+			</div>
+			<div class="feature">
+				<div class="feature-title">Effect declarations <span class="tag">17 categories</span></div>
+				<p>io.fs.&#123;read,write&#125;, io.net.out, io.db.&#123;read,write&#125;, proc.spawn, env.read, time.read, random, throw, log, pure — declared + transitive.</p>
+			</div>
+			<div class="feature">
+				<div class="feature-title">Call graph <span class="tag">intra + cross-module</span></div>
+				<p>Python + TypeScript adapters extract call edges through imports. Transitive effects propagate automatically.</p>
+			</div>
+			<div class="feature">
+				<div class="feature-title">Runtime tracer <span class="tag">python</span></div>
+				<p>Wrap a python run with <code>asd trace</code>. Observed syscalls update verification from <code>unverified</code> to <code>ok</code>/<code>mismatch</code>.</p>
+			</div>
+			<div class="feature">
+				<div class="feature-title">Policy gate <span class="tag">JSON rules</span></div>
+				<p>File-backed allow/deny/require-approval rules with agent-id scoping. Every write stamps <code>matched_policy</code>.</p>
+			</div>
+			<div class="feature">
+				<div class="feature-title">Ratification workflow <span class="tag">awaiting → approved</span></div>
+				<p>Pending entries carry <code>awaiting-approval</code>. Four terminal verbs: approve, reject, withdraw, supersede — all audited.</p>
+			</div>
+			<div class="feature">
+				<div class="feature-title">Audit event stream <span class="tag">JSONL</span></div>
+				<p>Every mutation emits one structured event. Ingest directly into Splunk, Datadog, Loki — no transformation needed.</p>
+			</div>
+			<div class="feature">
+				<div class="feature-title"><code>.asd/</code> git sidecar <span class="tag">roundtrip</span></div>
+				<p>Effects, ledger entries, rebind records committed alongside your code. Fresh clones hydrate in one command.</p>
+			</div>
+		</div>
+	</section>
+
+	<section>
+		<div class="section-eyebrow">How it feels</div>
+		<h2 class="section-h">Three commands on a real Python repo.</h2>
+		<p class="section-p muted">
+			The interaction model is CLI-first for scripting, MCP for agent consumption,
+			HTTP for dashboards. All three surfaces share the same policy gate, the
+			same audit stream, the same ledger semantics.
+		</p>
+		<div class="demo-wrap">
+			<pre class="demo" set:html={demoHtml}></pre>
+		</div>
+	</section>
+
+	<section>
+		<div class="section-eyebrow">Ecosystem</div>
+		<h2 class="section-h">A layer in the AgentStateLabs stack — not a standalone tool.</h2>
+		<p class="section-p">
+			ASD is a peer to CTXone on top of the AgentStateGraph (ASG) substrate.
+			Three products, one consistent mental model.
+		</p>
+		<div class="eco">
+			<div class="eco-card">
+				<h4>AgentStateGraph <span class="kind">substrate</span></h4>
+				<div class="url">agentstategraph.dev</div>
+				<p>Content-addressed, versioned, branchable state store. The Merkle DAG, intent chains, authority + confidence metadata — ASD persists everything there.</p>
+			</div>
+			<div class="eco-card">
+				<h4>CTXone <span class="kind">project memory</span></h4>
+				<div class="url">ctxone.dev</div>
+				<p>Session memory, recall, project-level context for agents. Code-agnostic. ASD's code-level <code>matched_policy</code> and <code>why_did_we</code> queries cross-reference naturally.</p>
+			</div>
+			<div class="eco-card self">
+				<h4>AgentStateDeveloper <span class="kind">you are here</span></h4>
+				<div class="url">agentstatedeveloper.dev</div>
+				<p>Code-level context + audit overlay. Semantic index, ledger, effects, call graph, policy, ratification, audit stream — keyed to symbols in your source tree.</p>
+			</div>
+		</div>
+	</section>
+
+	<section>
+		<div class="status-strip">
+			<div><strong>License:</strong> BSL-1.1 (Apache-2.0 after 4 years)</div>
+			<div><strong>Core:</strong> Rust · edition 2024</div>
+			<div><strong>Adapters:</strong> Python · TypeScript</div>
+			<div><strong>Storage:</strong> SQLite-backed ASG (solo) · Postgres-ready</div>
+			<div><strong>Status:</strong> v0.1 — M1–M12 shipped</div>
+		</div>
+	</section>
+
+	<footer>
+		<div class="foot-row">
+			<div>© 2026 AgentStateLabs, LLC</div>
+			<div>
+				<a href="/guides/introduction">Docs</a> ·
+				<a href="/reference/cli">CLI</a> ·
+				<a href="/reference/mcp-tools">MCP</a> ·
+				<a href="https://github.com/agentstatelabs/AgentStateDeveloper">GitHub</a>
+			</div>
+		</div>
+	</footer>
+</div>
+
+</body>
+</html>
