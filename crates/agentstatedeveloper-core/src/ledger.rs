@@ -6,6 +6,49 @@ use crate::error::{AsdError, Result};
 use crate::paths;
 use crate::schema::LedgerEntry;
 
+// ---------------------------------------------------------------------------
+// RatifyOps — narrower trait for the approve/reject/withdraw operations.
+// Lives in core so Engine can hold an Arc<dyn RatifyOps> without depending
+// on the commercial ratify crate. agentstatedeveloper-ratify implements this.
+// ---------------------------------------------------------------------------
+
+/// The three ledger review operations. Implemented by `RatifyOpsImpl`
+/// in `agentstatedeveloper-ratify` (Team tier). Methods take an explicit
+/// `repo: &Repository` so the impl can be a zero-sized struct — no lifetime
+/// or clone needed when stored as `Arc<dyn RatifyOps>` in `Engine`.
+pub trait RatifyOps: Send + Sync {
+    fn approve_entry(
+        &self,
+        repo: &Repository,
+        ref_name: &str,
+        entry_id: &str,
+        approver_id: &str,
+        approver_kind: &str,
+        message: Option<&str>,
+        agent_id: &str,
+    ) -> Result<ApprovalOutcome>;
+
+    fn reject_entry(
+        &self,
+        repo: &Repository,
+        ref_name: &str,
+        entry_id: &str,
+        reviewer_id: &str,
+        reviewer_kind: &str,
+        reason: &str,
+        agent_id: &str,
+    ) -> Result<ReviewOutcome>;
+
+    fn withdraw_entry(
+        &self,
+        repo: &Repository,
+        ref_name: &str,
+        entry_id: &str,
+        author_id: &str,
+        agent_id: &str,
+    ) -> Result<ReviewOutcome>;
+}
+
 /// Outcome of [`LedgerStore::approve_entry`]. Carries the updated entry
 /// and whether it was already approved (caller idempotency hint).
 #[derive(Debug, Clone)]

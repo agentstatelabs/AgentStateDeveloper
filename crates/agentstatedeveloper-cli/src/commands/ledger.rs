@@ -36,6 +36,9 @@ fn open_engine(cfg: &Config) -> anyhow::Result<Engine> {
              NullSink."
         );
     }
+    if let Some(ratify) = crate::ratify_ops_override() {
+        engine.set_ratify_ops(ratify);
+    }
     Ok(engine)
 }
 
@@ -230,15 +233,27 @@ pub fn run(cfg: &Config, cmd: LedgerCmd) -> Result<()> {
 
 fn approve(cfg: &Config, args: ApproveArgs) -> Result<()> {
     let engine = open_engine(cfg)?;
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
-    let result = ledger_store.approve_entry(
-        &engine.ref_name,
-        &args.entry_id,
-        &args.approver,
-        &args.approver_kind,
-        args.message.as_deref(),
-        &cfg.agent_id,
-    );
+    let result = if let Some(ref ratify) = engine.ratify {
+        ratify.approve_entry(
+            &engine.repo,
+            &engine.ref_name,
+            &args.entry_id,
+            &args.approver,
+            &args.approver_kind,
+            args.message.as_deref(),
+            &cfg.agent_id,
+        )
+    } else {
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        ledger_store.approve_entry(
+            &engine.ref_name,
+            &args.entry_id,
+            &args.approver,
+            &args.approver_kind,
+            args.message.as_deref(),
+            &cfg.agent_id,
+        )
+    };
 
     match result {
         Ok(outcome) => {
@@ -287,15 +302,27 @@ fn approve(cfg: &Config, args: ApproveArgs) -> Result<()> {
 
 fn reject(cfg: &Config, args: RejectArgs) -> Result<()> {
     let engine = open_engine(cfg)?;
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
-    let result = ledger_store.reject_entry(
-        &engine.ref_name,
-        &args.entry_id,
-        &args.reviewer,
-        &args.reviewer_kind,
-        &args.reason,
-        &cfg.agent_id,
-    );
+    let result = if let Some(ref ratify) = engine.ratify {
+        ratify.reject_entry(
+            &engine.repo,
+            &engine.ref_name,
+            &args.entry_id,
+            &args.reviewer,
+            &args.reviewer_kind,
+            &args.reason,
+            &cfg.agent_id,
+        )
+    } else {
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        ledger_store.reject_entry(
+            &engine.ref_name,
+            &args.entry_id,
+            &args.reviewer,
+            &args.reviewer_kind,
+            &args.reason,
+            &cfg.agent_id,
+        )
+    };
     match result {
         Ok(outcome) => {
             let status = if outcome.already_resolved {
@@ -344,13 +371,23 @@ fn reject(cfg: &Config, args: RejectArgs) -> Result<()> {
 
 fn withdraw(cfg: &Config, args: WithdrawArgs) -> Result<()> {
     let engine = open_engine(cfg)?;
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
-    let result = ledger_store.withdraw_entry(
-        &engine.ref_name,
-        &args.entry_id,
-        &args.author_id,
-        &cfg.agent_id,
-    );
+    let result = if let Some(ref ratify) = engine.ratify {
+        ratify.withdraw_entry(
+            &engine.repo,
+            &engine.ref_name,
+            &args.entry_id,
+            &args.author_id,
+            &cfg.agent_id,
+        )
+    } else {
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        ledger_store.withdraw_entry(
+            &engine.ref_name,
+            &args.entry_id,
+            &args.author_id,
+            &cfg.agent_id,
+        )
+    };
     match result {
         Ok(outcome) => {
             let status = if outcome.already_resolved {

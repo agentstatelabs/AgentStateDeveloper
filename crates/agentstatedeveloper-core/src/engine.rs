@@ -8,6 +8,7 @@ use agentstategraph_storage::SqliteStorage;
 use crate::adapter::LanguageAdapter;
 use crate::audit::{AuditSink, NullSink};
 use crate::error::{AsdError, Result};
+use crate::ledger::RatifyOps;
 use crate::policy::{FilePolicyGate, PermissivePolicyGate, PolicyGate};
 
 /// The top-level ASD engine. Owns an ASG repository, registered language
@@ -19,6 +20,10 @@ pub struct Engine {
     pub policy: Arc<dyn PolicyGate>,
     pub audit: Arc<dyn AuditSink>,
     pub ref_name: String,
+    /// Commercial ratify operations (Team tier). `None` in the OSS binary —
+    /// ledger approve/reject/withdraw return a commercial-feature error.
+    /// Set by `asd-pro` at startup via [`Engine::set_ratify_ops`].
+    pub ratify: Option<Arc<dyn RatifyOps>>,
 }
 
 impl Engine {
@@ -33,6 +38,7 @@ impl Engine {
             policy: Arc::new(PermissivePolicyGate),
             audit: Arc::new(NullSink),
             ref_name: "main".to_string(),
+            ratify: None,
         })
     }
 
@@ -48,6 +54,7 @@ impl Engine {
             policy: Arc::new(PermissivePolicyGate),
             audit: Arc::new(NullSink),
             ref_name: "main".to_string(),
+            ratify: None,
         })
     }
 
@@ -76,5 +83,11 @@ impl Engine {
 
     pub fn set_audit_sink(&mut self, sink: Arc<dyn AuditSink>) {
         self.audit = sink;
+    }
+
+    /// Install the commercial ratify implementation (Team tier).
+    /// Called by `asd-pro` at startup before any subcommand dispatch.
+    pub fn set_ratify_ops(&mut self, ratify: Arc<dyn RatifyOps>) {
+        self.ratify = Some(ratify);
     }
 }

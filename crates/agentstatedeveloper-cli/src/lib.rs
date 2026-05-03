@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use agentstatedeveloper_core::AuditSink;
+use agentstatedeveloper_core::{AuditSink, RatifyOps};
 
 pub mod config;
 pub mod commands;
@@ -22,19 +22,27 @@ pub use config::Config;
 /// Process-wide audit sink override. `asd-pro` sets this at startup
 /// to swap in `JsonlFileSink` when `--audit-log` / `ASD_AUDIT_LOG` is
 /// configured. OSS `asd` leaves it unset, so subcommands fall back to
-/// the default `NullSink` (with a warning if a log path was
-/// configured).
+/// the default `NullSink` (with a warning if a log path was configured).
 static AUDIT_SINK_OVERRIDE: OnceLock<Arc<dyn AuditSink>> = OnceLock::new();
 
-/// Install a custom audit sink. Call once per process, before any
-/// subcommand dispatches. Subsequent calls are no-ops.
 pub fn set_audit_sink_override(sink: Arc<dyn AuditSink>) {
     let _ = AUDIT_SINK_OVERRIDE.set(sink);
 }
 
-/// Internal helper: fetch the installed override, if any.
 pub(crate) fn audit_sink_override() -> Option<Arc<dyn AuditSink>> {
     AUDIT_SINK_OVERRIDE.get().cloned()
+}
+
+/// Process-wide ratify ops override. `asd-pro` installs `RatifyOpsImpl`
+/// here before dispatch. `open_engine` wires it into every Engine instance.
+static RATIFY_OVERRIDE: OnceLock<Arc<dyn RatifyOps>> = OnceLock::new();
+
+pub fn set_ratify_ops_override(ratify: Arc<dyn RatifyOps>) {
+    let _ = RATIFY_OVERRIDE.set(ratify);
+}
+
+pub(crate) fn ratify_ops_override() -> Option<Arc<dyn RatifyOps>> {
+    RATIFY_OVERRIDE.get().cloned()
 }
 
 /// AgentStateDeveloper — code-level context and audit overlay.
