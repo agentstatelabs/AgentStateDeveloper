@@ -139,3 +139,56 @@ impl<'a> LedgerStore for AsgLedgerStore<'a> {
         Ok(entries)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NopStore;
+
+    impl LedgerStore for NopStore {
+        fn append_entry(&self, _: &str, _: &LedgerEntry, _: &str) -> crate::error::Result<()> {
+            Ok(())
+        }
+        fn list_entries_with_superseded(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> crate::error::Result<Vec<LedgerEntry>> {
+            Ok(vec![])
+        }
+    }
+
+    #[test]
+    fn oss_approve_returns_commercial_error_with_url() {
+        let store = NopStore;
+        let err = store
+            .approve_entry("main", "e1", "alice", "human", None, "agent")
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("commercial feature"), "msg: {}", msg);
+        assert!(msg.contains("agentstatedeveloper.dev/pricing"), "msg: {}", msg);
+    }
+
+    #[test]
+    fn oss_reject_returns_commercial_error_with_url() {
+        let store = NopStore;
+        let err = store
+            .reject_entry("main", "e1", "alice", "human", "reason", "agent")
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("commercial feature"), "msg: {}", msg);
+        assert!(msg.contains("agentstatedeveloper.dev/pricing"), "msg: {}", msg);
+    }
+
+    #[test]
+    fn oss_withdraw_returns_commercial_error_with_url() {
+        let store = NopStore;
+        let err = store
+            .withdraw_entry("main", "e1", "alice", "agent")
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("commercial feature"), "msg: {}", msg);
+        assert!(msg.contains("agentstatedeveloper.dev/pricing"), "msg: {}", msg);
+    }
+}
