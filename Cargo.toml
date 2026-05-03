@@ -8,6 +8,7 @@ members = [
     "crates/agentstatedeveloper-mcp",
     "crates/agentstatedeveloper-audit-pro",
     "crates/agentstatedeveloper-ratify",
+    "crates/agentstatedeveloper-pro",
 ]
 
 [workspace.package]
@@ -47,5 +48,7 @@ directories = "5"
 agentstatedeveloper-core = { path = "crates/agentstatedeveloper-core" }
 agentstatedeveloper-python = { path = "crates/agentstatedeveloper-python" }
 agentstatedeveloper-typescript = { path = "crates/agentstatedeveloper-typescript" }
+agentstatedeveloper-cli = { path = "crates/agentstatedeveloper-cli" }
 agentstatedeveloper-audit-pro = { path = "crates/agentstatedeveloper-audit-pro" }
 agentstatedeveloper-ratify = { path = "crates/agentstatedeveloper-ratify" }
+agentstatedeveloper-pro = { path = "crates/agentstatedeveloper-pro" }

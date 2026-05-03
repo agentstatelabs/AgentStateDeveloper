@@ -59,7 +59,9 @@ pub trait LedgerStore {
         _agent_id: &str,
     ) -> Result<ApprovalOutcome> {
         Err(AsdError::Other(
-            "ledger approve is a commercial feature — install asd-pro (Team tier) to enable".into(),
+            "ledger approve is a commercial feature (Team tier) — \
+             install asd-pro to enable. See https://agentstatedeveloper.dev/pricing"
+                .into(),
         ))
     }
 
@@ -75,7 +77,9 @@ pub trait LedgerStore {
         _agent_id: &str,
     ) -> Result<ReviewOutcome> {
         Err(AsdError::Other(
-            "ledger reject is a commercial feature — install asd-pro (Team tier) to enable".into(),
+            "ledger reject is a commercial feature (Team tier) — \
+             install asd-pro to enable. See https://agentstatedeveloper.dev/pricing"
+                .into(),
         ))
     }
 
@@ -89,7 +93,8 @@ pub trait LedgerStore {
         _agent_id: &str,
     ) -> Result<ReviewOutcome> {
         Err(AsdError::Other(
-            "ledger withdraw is a commercial feature — install asd-pro (Team tier) to enable"
+            "ledger withdraw is a commercial feature (Team tier) — \
+             install asd-pro to enable. See https://agentstatedeveloper.dev/pricing"
                 .into(),
         ))
     }

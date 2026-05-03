@@ -1,0 +1,19 @@
+[package]
+name = "agentstatedeveloper-pro"
+description = "AgentStateDeveloper — asd-pro commercial binary (Team + Enterprise tier)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "asd-pro"
+path = "src/main.rs"
+
+[dependencies]
+agentstatedeveloper-cli = { workspace = true }
+agentstatedeveloper-core = { workspace = true }
+agentstatedeveloper-audit-pro = { workspace = true }
+agentstatedeveloper-ratify = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
