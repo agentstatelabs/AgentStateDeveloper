@@ -14,6 +14,11 @@ use serde_json::json;
 use crate::config::Config;
 
 /// Open the engine with optional policy + audit wiring based on cfg.
+/// If the process has installed a sink override (see
+/// `crate::set_audit_sink_override`), that sink is used. Otherwise
+/// events are swallowed by the default `NullSink`; when a log path
+/// was configured we surface a warning so the OSS user knows their
+/// `--audit-log` was a no-op.
 fn open_engine(cfg: &Config) -> anyhow::Result<Engine> {
     let mut engine = Engine::open_sqlite(&cfg.db_path)?;
     if let Some(ref p) = cfg.policy_path {
@@ -21,17 +26,29 @@ fn open_engine(cfg: &Config) -> anyhow::Result<Engine> {
             .load_policy_file(p)
             .map_err(|e| anyhow::anyhow!("failed to load policy file {}: {e}", p.display()))?;
     }
-    if let Some(ref p) = cfg.audit_log_path {
-        engine
-            .set_audit_log_file(p)
-            .map_err(|e| anyhow::anyhow!("failed to open audit log {}: {e}", p.display()))?;
+    if let Some(sink) = crate::audit_sink_override() {
+        engine.set_audit_sink(sink);
+    } else if cfg.audit_log_path.is_some() {
+        eprintln!(
+            "warning: audit log path configured but tamper-evident \
+             logging is a commercial feature — install asd-pro \
+             (Enterprise tier) to enable. Running with in-memory \
+             NullSink."
+        );
     }
     Ok(engine)
 }
 
+/// Public variant of [`open_engine`] for downstream crates that want
+/// to reuse the same policy + audit wiring. Used by `asd-pro`'s
+/// commercial subcommand handlers.
+pub fn open_engine_public(cfg: &Config) -> anyhow::Result<Engine> {
+    open_engine(cfg)
+}
+
 /// Emit an audit event, logging any sink failure to stderr but never
 /// propagating — audit issues must never block the user's operation.
-fn emit_audit(sink: &dyn AuditSink, event: AuditEvent) {
+pub fn emit_audit(sink: &dyn AuditSink, event: AuditEvent) {
     if let Err(e) = sink.emit(&event) {
         eprintln!("warning: audit emit failed: {}", e);
     }

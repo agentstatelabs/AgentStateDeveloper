@@ -8,10 +8,9 @@
 //! - `ASD_POLICY` — optional path to a policy JSON file. When set, the
 //!   engine's `PolicyGate` is swapped to a `FilePolicyGate` loaded from that
 //!   file. Matches the `asd` CLI contract.
-//! - `ASD_AUDIT_LOG` — optional path to a JSONL audit log file. When set,
-//!   the engine's `AuditSink` is swapped from `NullSink` to a
-//!   `JsonlFileSink` appending one event per line. Matches the `asd` CLI
-//!   `--audit-log` / `ASD_AUDIT_LOG` contract.
+//! - `ASD_AUDIT_LOG` — commercial feature (Enterprise tier). In the
+//!   OSS `asd-mcp` binary this is recognized for read-only `audit_tail`
+//!   over logs produced by `asd-pro`, but no new events are written.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -52,17 +51,18 @@ async fn main() -> Result<()> {
         tracing::info!(policy = %path.display(), "loaded ASD policy file");
     }
 
-    // Optional audit log. Same fail-loudly semantics as ASD_POLICY — if the
-    // operator configured a forensic sink, a silent fallback to NullSink
-    // would be worse than crashing on startup.
-    let mut audit_log_path: Option<PathBuf> = None;
-    if let Ok(audit_path) = std::env::var("ASD_AUDIT_LOG") {
-        let path = PathBuf::from(&audit_path);
-        engine
-            .set_audit_log_file(&path)
-            .with_context(|| format!("failed to open ASD_AUDIT_LOG audit log at {}", path.display()))?;
-        tracing::info!(audit_log = %path.display(), "loaded ASD audit log");
-        audit_log_path = Some(path);
+    // ASD_AUDIT_LOG is recognized for read-only tailing of logs
+    // produced by asd-pro. OSS asd-mcp does not write new chain-signed
+    // events — the engine stays on NullSink.
+    let audit_log_path: Option<PathBuf> = std::env::var("ASD_AUDIT_LOG")
+        .ok()
+        .map(PathBuf::from);
+    if audit_log_path.is_some() {
+        tracing::warn!(
+            "ASD_AUDIT_LOG set but asd-mcp is OSS — no new events \
+             will be written (tamper-evident sink is commercial). \
+             Existing logs are readable via audit_tail."
+        );
     }
 
     let shared = Arc::new(Mutex::new(engine));

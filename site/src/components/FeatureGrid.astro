@@ -1,0 +1,239 @@
+---
+/**
+ * Feature grid — the seven primitives ASD ships.
+ * Three cards get accent colors (ledger=orange, effects=green, audit=amber)
+ * matching the problem section pillars. The rest are neutral.
+ */
+---
+
+<section class="section features">
+	<div class="container">
+		<div class="eyebrow">
+			<span class="eyebrow-text">SEVEN_PRIMITIVES //</span>
+		</div>
+		<h2 class="section-title">Seven primitives. One audit surface.</h2>
+		<p class="section-lede">
+			ASD ships as a coherent stack, not a collection of scripts. Every
+			primitive is available through the same CLI, MCP server, and HTTP API —
+			with the same policy gate and the same audit event stream on every write.
+		</p>
+
+		<div class="grid">
+			<article class="card card-orange">
+				<div class="card-label">01 // LEDGER</div>
+				<h3>Decision ledger</h3>
+				<p>
+					Append structured notes to any symbol — decisions, assumptions,
+					constraints, hazards, tradeoffs. Entries survive renames.
+					Supersede, approve, reject, or withdraw. Every action is audited.
+				</p>
+				<pre><code><span class="prompt">$</span> asd ledger append payments.chargeCard \
+    --kind hazard \
+    --summary "fails silently above 10k" \
+    --author-id alice
+
+<span class="comment"># MCP tool:</span>
+ledger_append(symbol_id="...", kind="hazard",
+              summary="fails silently above 10k")</code></pre>
+			</article>
+
+			<article class="card card-green">
+				<div class="card-label">02 // EFFECTS</div>
+				<h3>Effect declarations</h3>
+				<p>
+					17 categories: io.fs.&#123;read,write&#125;, io.net.out,
+					io.db.&#123;read,write&#125;, proc.spawn, env.read, time.read,
+					random, throw, log, pure. Declared per symbol; propagated
+					transitively through the call graph.
+				</p>
+				<pre><code><span class="prompt">$</span> asd read payments.chargeCard
+&#123;
+  "effects": &#123;
+    "declared": ["io.net.out", "io.db.write"],
+    "transitive": [
+      &#123;"effect": "io.fs.write", "via": ["logger.write"]&#125;,
+      &#123;"effect": "log", "via": ["logger.write"]&#125;
+    ]
+  &#125;
+&#125;</code></pre>
+			</article>
+
+			<article class="card card-amber">
+				<div class="card-label">03 // AUDIT STREAM</div>
+				<h3>Append-only audit log</h3>
+				<p>
+					Every ledger mutation, effect declaration, and policy decision
+					emits one structured JSONL event. Direct SIEM ingest — Splunk,
+					Datadog, Loki — no transformation. Enterprise: hash-chained
+					tamper-evident verification.
+				</p>
+				<pre><code><span class="prompt">$</span> asd audit tail --limit 3
+<span class="out">ledger.append   awaiting-approval   actor=alice
+ledger.approve  approved            actor=bob
+ledger.append   denied              actor=bot-1   policy=hazard-gate</span></code></pre>
+			</article>
+
+			<article class="card">
+				<div class="card-label">04 // SEMANTIC INDEX</div>
+				<h3>Semantic index</h3>
+				<p>
+					tree-sitter parses every function, method, and class across
+					your repo. Symbols are fingerprinted and carry a stable
+					canonical ID that survives content edits and file moves.
+				</p>
+				<pre><code><span class="prompt">$</span> asd index src/
+<span class="out">&#123;"files": 12, "symbols": 84, "edges": 156,
+ "effects": 84, "cross_module_edges": 23&#125;</span></code></pre>
+			</article>
+
+			<article class="card">
+				<div class="card-label">05 // CALL GRAPH</div>
+				<h3>Call graph</h3>
+				<p>
+					Intra- and cross-module edges extracted from Python and
+					TypeScript via import resolution. Transitive effects propagate
+					automatically through the graph on every index pass.
+				</p>
+			</article>
+
+			<article class="card">
+				<div class="card-label">06 // POLICY GATE</div>
+				<h3>Policy gate</h3>
+				<p>
+					File-backed JSON rules: allow, deny, or require-approval per
+					action + actor kind. Every write stamps <code>matched_policy</code>.
+					Entries that need human attestation land as
+					<code>awaiting-approval</code>.
+				</p>
+				<pre><code><span class="comment">// policies.json</span>
+&#123;"rules": [
+  &#123;"action": "ledger.append",
+   "kind": "hazard",
+   "agent_kind": "agent",
+   "effect": "require-approval"&#125;
+]&#125;</code></pre>
+			</article>
+
+			<article class="card">
+				<div class="card-label">07 // RUNTIME TRACER</div>
+				<h3>Runtime tracer</h3>
+				<p>
+					Wrap a Python run with <code>asd trace</code>. Observed
+					syscalls update effect verification from <code>unverified</code>
+					to <code>ok</code> or <code>mismatch</code> — closing the
+					loop between declared and observed behavior.
+				</p>
+				<pre><code><span class="prompt">$</span> asd trace -- python my_script.py
+<span class="out">effects verified: 6 ok, 1 mismatch
+mismatch: io.net.out declared but not observed
+          in payments.sendWebhook</span></code></pre>
+			</article>
+		</div>
+	</div>
+</section>
+
+<style>
+	.features {
+		padding: 5rem 0;
+	}
+
+	.eyebrow {
+		font-family: var(--asd-font-mono);
+		font-size: 0.7rem;
+		letter-spacing: 0.1em;
+		color: var(--asd-accent-text);
+		text-transform: uppercase;
+		margin-bottom: 1rem;
+	}
+
+	.grid {
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+		gap: 1rem;
+		margin-top: 2rem;
+	}
+
+	.card {
+		background: var(--asd-panel);
+		border: 1px solid var(--asd-border);
+		border-radius: var(--asd-radius-lg);
+		padding: 1.5rem;
+	}
+
+	.card-orange { border-top: 2px solid var(--asd-accent); }
+	.card-green  { border-top: 2px solid var(--asd-success); }
+	.card-amber  { border-top: 2px solid var(--asd-warn); }
+
+	.card-label {
+		font-family: var(--asd-font-mono);
+		font-size: 0.65rem;
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+		margin-bottom: 0.6rem;
+		font-weight: 700;
+	}
+
+	.card-orange .card-label { color: var(--asd-accent-text); }
+	.card-green  .card-label { color: var(--asd-success); }
+	.card-amber  .card-label { color: var(--asd-warn); }
+	.card:not(.card-orange):not(.card-green):not(.card-amber) .card-label {
+		color: var(--asd-text-dim);
+	}
+
+	h3 {
+		font-size: 1rem;
+		font-weight: 700;
+		color: #ffffff;
+		margin: 0 0 0.5rem 0;
+	}
+
+	p {
+		font-size: 0.875rem;
+		color: var(--asd-text-dim);
+		line-height: 1.6;
+		margin: 0 0 1rem 0;
+	}
+
+	p:last-of-type {
+		margin-bottom: 0;
+	}
+
+	p code {
+		background: var(--asd-panel-hi);
+		border: 1px solid var(--asd-border);
+		padding: 0.1rem 0.35rem;
+		border-radius: var(--asd-radius-sm);
+		font-size: 0.82em;
+		color: var(--asd-accent-text);
+		font-family: var(--asd-font-mono);
+	}
+
+	pre {
+		background: #050505;
+		border: 1px solid var(--asd-border);
+		border-radius: var(--asd-radius-md);
+		padding: 0.85rem 1rem;
+		overflow-x: auto;
+		font-size: 0.78rem;
+		color: var(--asd-text-code);
+		font-family: var(--asd-font-mono);
+		margin-top: 0.75rem;
+		line-height: 1.5;
+	}
+
+	.prompt { color: var(--asd-accent); }
+	.comment { color: var(--asd-text-faint); }
+	.out { color: var(--asd-success); }
+
+	@media (max-width: 960px) {
+		.grid {
+			grid-template-columns: repeat(2, 1fr);
+		}
+	}
+
+	@media (max-width: 600px) {
+		.grid {
+			grid-template-columns: 1fr;
+		}
+	}
+</style>

@@ -6,7 +6,7 @@ use agentstategraph::Repository;
 use agentstategraph_storage::SqliteStorage;
 
 use crate::adapter::LanguageAdapter;
-use crate::audit::{AuditSink, JsonlFileSink, NullSink};
+use crate::audit::{AuditSink, NullSink};
 use crate::error::{AsdError, Result};
 use crate::policy::{FilePolicyGate, PermissivePolicyGate, PolicyGate};
 
@@ -76,11 +76,5 @@ impl Engine {
 
     pub fn set_audit_sink(&mut self, sink: Arc<dyn AuditSink>) {
         self.audit = sink;
-    }
-
-    /// Convenience: wire a JSONL-file audit sink at `path`.
-    pub fn set_audit_log_file(&mut self, path: &Path) -> Result<()> {
-        self.audit = Arc::new(JsonlFileSink::new(path.to_path_buf()));
-        Ok(())
     }
 }

@@ -1246,33 +1246,14 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Verify the hash-chain integrity of the configured audit log. Recomputes each event's blake3 hash + back-link and reports any breaks (tampered content, deletions, reorderings). Returns `{configured, verified, total_events, signed_events, unsigned_events, chain_breaks}`."
+        description = "Verify the hash-chain integrity of the configured audit log. Commercial feature (Enterprise tier) — requires asd-pro."
     )]
     async fn audit_verify(&self) -> String {
-        let Some(path) = self.audit_log_path.as_ref() else {
-            return serde_json::to_string(&serde_json::json!({
-                "configured": false,
-                "verified": false,
-                "total_events": 0,
-                "signed_events": 0,
-                "unsigned_events": 0,
-                "chain_breaks": [],
-            }))
-            .unwrap_or_else(|_| "{}".to_string());
-        };
-        let events = match agentstatedeveloper_core::read_jsonl(path) {
-            Ok(v) => v,
-            Err(e) => return err_json(&format!("read audit log: {}", e)),
-        };
-        let report = agentstatedeveloper_core::verify_chain(&events);
         serde_json::to_string(&serde_json::json!({
-            "configured": true,
-            "path": path.display().to_string(),
-            "total_events": report.total_events,
-            "signed_events": report.signed_events,
-            "unsigned_events": report.unsigned_events,
-            "verified": report.verified,
-            "chain_breaks": report.chain_breaks,
+            "configured": self.audit_log_path.is_some(),
+            "verified": false,
+            "error": "audit verify is a commercial feature (Enterprise tier) — install asd-pro",
+            "upgrade_url": "https://agentstatedeveloper.dev/pricing",
         }))
         .unwrap_or_else(|_| "{}".to_string())
     }

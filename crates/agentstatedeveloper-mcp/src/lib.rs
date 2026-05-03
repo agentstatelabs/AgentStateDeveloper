@@ -443,27 +443,15 @@ async fn list_audit(
 async fn verify_audit(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let Some(path) = state.audit_log_path.as_ref() else {
-        return Ok(Json(json!({
-            "configured": false,
-            "verified": false,
-            "total_events": 0,
-            "signed_events": 0,
-            "unsigned_events": 0,
-            "chain_breaks": [],
-        })));
-    };
-    let events = agentstatedeveloper_core::read_jsonl(path)
-        .map_err(|e| ApiError::Internal(format!("read audit log: {}", e)))?;
-    let report = agentstatedeveloper_core::verify_chain(&events);
+    // Chain verification is a commercial feature (Enterprise tier).
+    // OSS asd-serve returns a consistent shape so the Lens can detect
+    // edition and render an upgrade CTA without 500-ing.
     Ok(Json(json!({
-        "configured": true,
-        "path": path.display().to_string(),
-        "total_events": report.total_events,
-        "signed_events": report.signed_events,
-        "unsigned_events": report.unsigned_events,
-        "verified": report.verified,
-        "chain_breaks": report.chain_breaks,
+        "configured": state.audit_log_path.is_some(),
+        "edition": "oss",
+        "verified": false,
+        "error": "audit verify is a commercial feature (Enterprise tier) — install asd-pro",
+        "upgrade_url": "https://agentstatedeveloper.dev/pricing",
     })))
 }
 

@@ -71,6 +71,7 @@ fn prime_db(db_path: &std::path::Path) {
 }
 
 #[test]
+#[ignore = "exercises commercial tamper-evident audit sink — runs against asd-pro in the enterprise workspace"]
 fn mcp_ledger_append_emits_audit_event() {
     let unique = format!(
         "asd-mcp-audit-{}-{}",

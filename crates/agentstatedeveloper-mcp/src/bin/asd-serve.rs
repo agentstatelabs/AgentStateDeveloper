@@ -6,10 +6,10 @@
 //! Env:
 //! - `ASD_DB` — path to SQLite db (default: `./.asd-state.db`)
 //! - `ASD_SERVE_ADDR` — bind address (default: `0.0.0.0:4120`)
-//! - `ASD_AUDIT_LOG` — optional path to a JSONL audit log file. When set,
-//!   the engine's `AuditSink` is swapped from `NullSink` to a
-//!   `JsonlFileSink` appending one event per line. Matches the `asd` CLI
-//!   `--audit-log` / `ASD_AUDIT_LOG` contract.
+//! - `ASD_AUDIT_LOG` — commercial feature (Enterprise tier). In the
+//!   OSS `asd-serve` binary this path is recorded for read-only tail
+//!   of logs produced by `asd-pro`, but no new events are written —
+//!   the engine stays on `NullSink`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,19 +36,22 @@ async fn main() -> Result<()> {
 
     tracing::info!(?db_path, %addr, ?lens_dir, "starting asd-serve");
 
-    let mut engine = Engine::open_sqlite(&db_path)
+    let engine = Engine::open_sqlite(&db_path)
         .with_context(|| format!("failed to open ASD db at {}", db_path.display()))?;
 
-    // Optional audit log — fail loudly if set but unloadable so a configured
-    // forensic sink never silently falls back to NullSink.
-    let mut audit_log_path: Option<PathBuf> = None;
-    if let Ok(audit_path) = std::env::var("ASD_AUDIT_LOG") {
-        let path = PathBuf::from(&audit_path);
-        engine
-            .set_audit_log_file(&path)
-            .with_context(|| format!("failed to open ASD_AUDIT_LOG audit log at {}", path.display()))?;
-        tracing::info!(audit_log = %path.display(), "loaded ASD audit log");
-        audit_log_path = Some(path);
+    // ASD_AUDIT_LOG is recognized for read-only /audit tailing so OSS
+    // `asd-serve` can display logs produced by asd-pro. Writing new
+    // chained events requires asd-pro.
+    let audit_log_path: Option<PathBuf> = std::env::var("ASD_AUDIT_LOG")
+        .ok()
+        .map(PathBuf::from);
+    if audit_log_path.is_some() {
+        tracing::warn!(
+            "ASD_AUDIT_LOG set but asd-serve is OSS — no new events \
+             will be written (tamper-evident sink is a commercial \
+             feature; install asd-pro). Existing logs are readable \
+             via /audit."
+        );
     }
 
     let shared = Arc::new(Mutex::new(engine));
