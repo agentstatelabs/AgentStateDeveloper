@@ -5,7 +5,28 @@ wasn't picked up in the current milestone. Not a roadmap — these are
 things I'd want a future maintainer (or future me) to see *before*
 assuming something's missing on accident.
 
-Last synced: M12 landed (2026-04-20).
+Last synced: M17 landed (2026-05-02).
+
+## OSS / commercial tier split (M17)
+
+- **`RatifyLedgerStore` not yet wired through `Engine`** — `asd-pro` currently
+  dispatches all ledger operations through the OSS `AsgLedgerStore` stub, which
+  returns a commercial-feature error for approve/reject/withdraw. To fix: add a
+  ledger-store override hook to `Engine` so `asd-pro`'s `main.rs` can swap in
+  `RatifyLedgerStore`. The two integration tests (`#[ignore]`) will move to the
+  enterprise workspace once this is done.
+
+- **No license-key / billing enforcement** — `asd-pro` is gated only by having
+  the binary. Real license-key enforcement (API check, seat limits) is deferred
+  until there are paying customers to design around.
+
+- **`asd-pro` MCP / HTTP servers not yet wired** — the MCP (`asd-mcp`) and HTTP
+  (`asd-serve`) binaries are OSS-only. Pro versions that install `JsonlFileSink`
+  and `RatifyLedgerStore` at startup are a natural M18 follow-on.
+
+- **`agentstatedeveloper-ratify` has no unit tests** — the approve/reject/
+  withdraw logic requires an in-process ASG repo; deferred until the test
+  harness can stand one up cheaply (or until the enterprise workspace is set up).
 
 ## Tracer (`tools/asd_tracer.py`)
 
