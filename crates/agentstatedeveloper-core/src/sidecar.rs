@@ -321,6 +321,16 @@ pub fn hydrate_from_dir(
                     .map_err(|e| AsdError::Other(e.to_string()))
                     .is_ok()
                 {
+                    // Update the reverse index to point to the new symbol_id.
+                    let idx_path = paths::ledger_entry_index_path(&entry.entry_id);
+                    let idx_val = serde_json::Value::String(rebind.to_symbol_id.clone());
+                    let idx_opts = CommitOptions::new(
+                        agent_id,
+                        IntentCategory::Refine,
+                        format!("ledger-idx reparent {} → {}", entry.entry_id, rebind.to_symbol_id),
+                    );
+                    let _ = repo.set_json(ref_name, &idx_path, &idx_val, idx_opts);
+
                     let old_path = paths::ledger_entry_path(&rebind.from_symbol_id, &entry.entry_id);
                     let opts = CommitOptions::new(
                         agent_id,

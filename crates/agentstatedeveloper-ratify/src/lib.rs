@@ -189,9 +189,13 @@ fn list_entries_impl(
     };
     let mut entries = Vec::new();
     if let serde_json::Value::Object(map) = json {
-        for (_k, v) in map {
-            if let Ok(e) = serde_json::from_value::<LedgerEntry>(v) {
-                entries.push(e);
+        for (k, v) in map {
+            match serde_json::from_value::<LedgerEntry>(v) {
+                Ok(e) => entries.push(e),
+                Err(err) => eprintln!(
+                    "warning: skipping malformed ledger entry {}/{}: {}",
+                    symbol_id, k, err
+                ),
             }
         }
     }

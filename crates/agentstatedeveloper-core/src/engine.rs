@@ -99,10 +99,10 @@ impl Engine {
             .with_qualifier("symbol_id", &entry.symbol_id)
             .with_qualifier("kind", entry.kind.as_str());
         let decision = self.policy.evaluate(&situation, actions::LEDGER_APPEND, agent_id)?;
-        let matched_policy = match &decision {
-            Decision::Allow { matched_policy } => matched_policy.clone(),
-            Decision::RequireApproval { matched_policy, .. } => Some(matched_policy.clone()),
-            Decision::NoPolicyMatch => None,
+        let (matched_policy, audit_outcome) = match &decision {
+            Decision::Allow { matched_policy } => (matched_policy.clone(), "allowed"),
+            Decision::RequireApproval { matched_policy, .. } => (Some(matched_policy.clone()), "awaiting-approval"),
+            Decision::NoPolicyMatch => (None, "allowed"),
             Decision::Deny { matched_policy, reason } => {
                 return Err(AsdError::Other(format!(
                     "policy denied by {matched_policy}: {reason}"
@@ -117,7 +117,7 @@ impl Engine {
             event_types::LEDGER_APPEND,
             agent_id,
             "agent",
-            "awaiting-approval",
+            audit_outcome,
         )
         .with_subject(&entry.entry_id)
         .with_secondary(&entry.symbol_id)
