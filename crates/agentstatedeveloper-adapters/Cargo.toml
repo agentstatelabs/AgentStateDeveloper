@@ -15,3 +15,5 @@ agentstatedeveloper-go = { workspace = true }
 agentstatedeveloper-java = { workspace = true }
 agentstatedeveloper-csharp = { workspace = true }
 agentstatedeveloper-ruby = { workspace = true }
+agentstatedeveloper-kotlin = { workspace = true }
+agentstatedeveloper-swift = { workspace = true }

@@ -9,6 +9,8 @@ members = [
     "crates/agentstatedeveloper-java",
     "crates/agentstatedeveloper-csharp",
     "crates/agentstatedeveloper-ruby",
+    "crates/agentstatedeveloper-kotlin",
+    "crates/agentstatedeveloper-swift",
     "crates/agentstatedeveloper-adapters",
     "crates/agentstatedeveloper-cli",
     "crates/agentstatedeveloper-mcp",
@@ -60,6 +62,8 @@ agentstatedeveloper-go = { path = "crates/agentstatedeveloper-go" }
 agentstatedeveloper-java = { path = "crates/agentstatedeveloper-java" }
 agentstatedeveloper-csharp = { path = "crates/agentstatedeveloper-csharp" }
 agentstatedeveloper-ruby = { path = "crates/agentstatedeveloper-ruby" }
+agentstatedeveloper-kotlin = { path = "crates/agentstatedeveloper-kotlin" }
+agentstatedeveloper-swift = { path = "crates/agentstatedeveloper-swift" }
 agentstatedeveloper-adapters = { path = "crates/agentstatedeveloper-adapters" }
 agentstatedeveloper-cli = { path = "crates/agentstatedeveloper-cli" }
 agentstatedeveloper-mcp = { path = "crates/agentstatedeveloper-mcp" }
