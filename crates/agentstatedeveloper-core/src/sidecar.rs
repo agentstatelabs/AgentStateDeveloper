@@ -66,6 +66,8 @@ pub struct SyncSummary {
     pub symbols_written: usize,
     pub rebinds_synced: usize,
     pub schema_version: String,
+    /// Files removed by `--prune` (0 when prune was not requested).
+    pub pruned: usize,
 }
 
 /// Result of [`hydrate_from_dir`]. `missing_schema_version` is true when
@@ -183,7 +185,149 @@ pub fn sync_to_dir(
         symbols_written,
         rebinds_synced,
         schema_version: ASD_SCHEMA_VERSION.to_string(),
+        pruned: 0,
     })
+}
+
+/// Remove orphaned `.asd/v1/` sidecar files — files whose keys no longer
+/// exist in the live ASG index. Returns the number of files/dirs removed.
+///
+/// Orphans accumulate when symbols are renamed or deleted. Run via
+/// `asd sync --prune` (also invoked by the pre-commit hook).
+pub fn prune_sidecar(
+    repo: &Repository,
+    ref_name: &str,
+    dir: &Path,
+) -> Result<usize> {
+    let root = dir.join(SIDECAR_REL_ROOT);
+    if !root.exists() {
+        return Ok(0);
+    }
+
+    let mut pruned = 0usize;
+
+    // Build live key sets from ASG.
+    let live_symbol_ids: std::collections::HashSet<String> = {
+        let prefix = format!("{}/effects", paths::ASD_ROOT);
+        match repo.get_tree(ref_name, &prefix) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().map(|(k, _)| k).collect(),
+            _ => std::collections::HashSet::new(),
+        }
+    };
+
+    let live_qnames: std::collections::HashSet<String> = {
+        let prefix = format!("{}/index/by-qname", paths::ASD_ROOT);
+        match repo.get_tree(ref_name, &prefix) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().map(|(k, _)| k).collect(),
+            _ => std::collections::HashSet::new(),
+        }
+    };
+
+    let live_ledger_symbol_ids: std::collections::HashSet<String> = {
+        let prefix = format!("{}/ledger", paths::ASD_ROOT);
+        match repo.get_tree(ref_name, &prefix) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().map(|(k, _)| k).collect(),
+            _ => std::collections::HashSet::new(),
+        }
+    };
+
+    let live_rebind_ids: std::collections::HashSet<String> = {
+        let prefix = format!("{}/rebinds", paths::ASD_ROOT);
+        match repo.get_tree(ref_name, &prefix) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().map(|(k, _)| k).collect(),
+            _ => std::collections::HashSet::new(),
+        }
+    };
+
+    // Prune effects/<symbol_id>.json
+    pruned += prune_flat_dir(&root.join("effects"), &live_symbol_ids)?;
+
+    // Prune symbols/<qname>.json
+    pruned += prune_flat_dir(&root.join("symbols"), &live_qnames)?;
+
+    // Prune rebinds/<from_symbol_id>.json
+    pruned += prune_flat_dir(&root.join("rebinds"), &live_rebind_ids)?;
+
+    // Prune ledger/<symbol_id>/ directories — remove the whole dir if the
+    // symbol is gone, otherwise remove individual entry files that are no
+    // longer in ASG.
+    let ledger_dir = root.join("ledger");
+    if ledger_dir.is_dir() {
+        for entry in fs::read_dir(&ledger_dir)? {
+            let entry = entry?;
+            let sym_dir = entry.path();
+            if !sym_dir.is_dir() {
+                continue;
+            }
+            let sym_id = sym_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            if !live_ledger_symbol_ids.contains(&sym_id) {
+                // Entire symbol gone — remove the directory tree.
+                fs::remove_dir_all(&sym_dir)?;
+                pruned += 1;
+            } else {
+                // Symbol still live — check individual entry files against ASG.
+                let live_entries: std::collections::HashSet<String> = {
+                    let prefix = format!("{}/ledger/{}", paths::ASD_ROOT, sym_id);
+                    match repo.get_tree(ref_name, &prefix) {
+                        Ok(serde_json::Value::Object(m)) => m.into_iter().map(|(k, _)| k).collect(),
+                        _ => std::collections::HashSet::new(),
+                    }
+                };
+                for file_entry in fs::read_dir(&sym_dir)? {
+                    let file_entry = file_entry?;
+                    let file_path = file_entry.path();
+                    if !is_json_file(&file_path) {
+                        continue;
+                    }
+                    let stem = file_path
+                        .file_stem()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if !live_entries.contains(&stem) {
+                        fs::remove_file(&file_path)?;
+                        pruned += 1;
+                    }
+                }
+                // Remove the now-empty symbol dir if all entries were pruned.
+                if fs::read_dir(&sym_dir)?.next().is_none() {
+                    fs::remove_dir(&sym_dir)?;
+                }
+            }
+        }
+    }
+
+    Ok(pruned)
+}
+
+/// Remove `.json` files from `dir` whose stem is not in `live_keys`.
+fn prune_flat_dir(dir: &Path, live_keys: &std::collections::HashSet<String>) -> Result<usize> {
+    if !dir.is_dir() {
+        return Ok(0);
+    }
+    let mut removed = 0usize;
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !is_json_file(&path) {
+            continue;
+        }
+        let stem = path
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        if !live_keys.contains(&stem) {
+            fs::remove_file(&path)?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 /// Read a `.asd/v1/` sidecar under `dir` and write its contents back

@@ -150,6 +150,44 @@ The `v1` prefix means a later version can sit alongside without corruption.
 Every ASG path is stable, which is what makes `.asd/` sidecar sync a direct
 file-per-node mirror.
 
+## Git-native sidecar
+
+ASD's live state lives in a local SQLite database (`.asd-state.db`,
+gitignored). The sidecar mirrors the human-authored subset of that state
+— ledger entries, declared effects, symbol records — into `.asd/v1/` so
+it travels with `git commit`.
+
+```
+.asd/
+  v1/             ← checked in; travels with the repo
+    effects/      one JSON file per symbol's declared effects
+    ledger/       one JSON file per ledger entry, grouped by symbol_id
+    symbols/      one JSON file per indexed symbol
+    meta/         schema-version stamp
+  hooks/          ← checked in; git hook scripts
+    pre-commit    runs `asd sync --prune` before every commit
+    post-merge    runs `asd hydrate && asd index .` after pull/merge
+    post-checkout runs `asd hydrate && asd index .` after branch switch
+.asd-state.db     ← gitignored; local SQLite, rebuilt from sidecar
+```
+
+`asd init` writes the hook scripts, sets `git config core.hooksPath
+.asd/hooks`, and updates `.gitignore`. After that, **the sidecar stays
+in sync automatically** — contributors never have to think about it.
+
+A fresh contributor workflow:
+
+```bash
+git clone <repo>
+asd init          # installs hooks, updates .gitignore
+asd hydrate       # loads .asd/v1/ → local SQLite
+asd index .       # rebuilds derived index
+```
+
+The result: everyone who clones gets the full decision history, effect
+graph, and call graph that was built up before them — no extra server,
+no onboarding step.
+
 ## Why a single workspace
 
 The CLI, MCP server, HTTP server, tracer, and SvelteKit reviewer all share

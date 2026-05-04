@@ -1,9 +1,11 @@
-//! `asd sync [--dir <path>]` — mirror live ASG state into the `.asd/v1/`
-//! on-disk sidecar. The sidecar travels with `git commit`, letting a
-//! fresh `git clone` hydrate an ASD repo without a network registry.
+//! `asd sync [--dir <path>] [--prune]` — mirror live ASG state into the
+//! `.asd/v1/` on-disk sidecar. The sidecar travels with `git commit`,
+//! letting a fresh `git clone` hydrate an ASD repo without a network
+//! registry.
 //!
-//! See `DESIGN.md` § "Git roundtrip & reconstruction" and
-//! `agentstatedeveloper_core::sidecar` for the on-disk layout.
+//! `--prune` removes orphaned sidecar files for symbols that no longer
+//! exist in the index (renamed or deleted). The pre-commit hook runs
+//! `asd sync --prune` automatically.
 
 use std::path::PathBuf;
 
@@ -11,7 +13,7 @@ use anyhow::Result;
 use clap::Args;
 use serde_json::json;
 
-use agentstatedeveloper_core::{sync_to_dir, Engine};
+use agentstatedeveloper_core::{prune_sidecar, sync_to_dir, Engine};
 
 use crate::config::Config;
 
@@ -21,13 +23,22 @@ pub struct SyncArgs {
     /// Defaults to the current working directory.
     #[arg(long)]
     pub dir: Option<PathBuf>,
+
+    /// Remove orphaned `.asd/v1/` files for symbols that no longer exist
+    /// in the index. Safe to use on every commit via the pre-commit hook.
+    #[arg(long, default_value_t = false)]
+    pub prune: bool,
 }
 
 pub fn run(cfg: &Config, args: SyncArgs) -> Result<()> {
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let dir = resolve_dir(args.dir)?;
 
-    let summary = sync_to_dir(&engine.repo, &engine.ref_name, &dir)?;
+    let mut summary = sync_to_dir(&engine.repo, &engine.ref_name, &dir)?;
+
+    if args.prune {
+        summary.pruned = prune_sidecar(&engine.repo, &engine.ref_name, &dir)?;
+    }
 
     let out = json!({
         "dir": dir.join(".asd/v1").display().to_string(),
@@ -35,7 +46,7 @@ pub fn run(cfg: &Config, args: SyncArgs) -> Result<()> {
         "ledger_entries_written": summary.ledger_entries_written,
         "symbols_written": summary.symbols_written,
         "schema_version": summary.schema_version,
-        // Surface the design constraint so consumers know what's missing.
+        "pruned": summary.pruned,
         "note": "current-state only; ASG commit history is not carried in the sidecar",
     });
     println!("{}", serde_json::to_string_pretty(&out)?);

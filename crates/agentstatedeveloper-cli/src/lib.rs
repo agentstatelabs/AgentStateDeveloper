@@ -71,8 +71,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Initialize an ASD repository.
+    /// Initialize an ASD repository and install git hooks.
     Init(commands::init::InitArgs),
+
+    /// Show installed ASD git hooks and their current status.
+    Hooks(commands::hooks::HooksArgs),
 
     /// Index Python source files under a directory.
     Index(commands::index::IndexArgs),
@@ -127,6 +130,7 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
     use commands::*;
     match cmd {
         Command::Init(args) => init::run(cfg, args),
+        Command::Hooks(args) => hooks::run(cfg, args),
         Command::Index(args) => index::run(cfg, args),
         Command::Read(args) => read::run(cfg, args),
         Command::Ledger(sub) => ledger::run(cfg, sub),

@@ -11,7 +11,7 @@
 		<div class="eyebrow">
 			<span class="eyebrow-text">SEVEN_PRIMITIVES //</span>
 		</div>
-		<h2 class="section-title">Seven primitives. One audit surface.</h2>
+		<h2 class="section-title">Eight primitives. One audit surface.</h2>
 		<p class="section-lede">
 			ASD ships as a coherent stack, not a collection of scripts. Every
 			primitive is available through the same CLI, MCP server, and HTTP API —
@@ -127,6 +127,29 @@ ledger.append   denied              actor=bot-1   policy=hazard-gate</span></cod
 <span class="out">effects verified: 6 ok, 1 mismatch
 mismatch: io.net.out declared but not observed
           in payments.sendWebhook</span></code></pre>
+			</article>
+
+			<article class="card">
+				<div class="card-label">08 // GIT-NATIVE SIDECAR</div>
+				<h3>Git-native sidecar</h3>
+				<p>
+					Ledger entries and effect declarations live in <code>.asd/v1/</code>
+					— checked into git, traveling with every clone. Anyone who runs
+					<code>asd init</code> gets git hooks that keep the sidecar in sync
+					automatically. No server required.
+				</p>
+				<pre><code><span class="comment"># one-time setup</span>
+<span class="prompt">$</span> asd init
+<span class="out">initialized at ./.asd-state.db
+.gitignore: updated
+ASD git hooks installed (.asd/hooks/):
+
+  pre-commit    → asd sync --prune
+  post-merge    → asd hydrate &amp;&amp; asd index .
+  post-checkout → asd hydrate &amp;&amp; asd index .</span>
+
+<span class="comment"># clone onboarding — three commands</span>
+<span class="prompt">$</span> asd init &amp;&amp; asd hydrate &amp;&amp; asd index .</code></pre>
 			</article>
 		</div>
 	</div>

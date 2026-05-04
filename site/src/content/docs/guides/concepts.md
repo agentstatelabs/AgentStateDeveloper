@@ -16,7 +16,9 @@ Each symbol gets a `symbol_id` (canonical, stable across content edits) and a
 
 **Why.** Ledger entries, effects, traces, and call edges all hang off
 `symbol_id` rather than line numbers, so they survive refactors without
-re-linking.
+re-linking. The index itself is derived and not checked in — only the
+human-authored data (ledger, effects) travels with the repo via the
+`.asd/v1/` sidecar.
 
 **Where.**
 - `/asd/v1/index/by-qname/<qname>` — fast qname lookup

@@ -208,6 +208,29 @@ asd --audit-log ./audit.jsonl audit tail --limit 5
 Pipe that file into Splunk, Loki, or Datadog — one line per event, no
 transformation required.
 
+## 8. Share your ASD context via git
+
+Run `asd sync` to flush the live state into `.asd/v1/`, then commit it:
+
+```bash
+asd sync --prune
+git add .asd/v1/
+git commit -m "chore: sync ASD sidecar"
+```
+
+Anyone who clones the repo gets the full ledger history and effect
+declarations. They just run:
+
+```bash
+asd init        # creates .asd-state.db and installs git hooks
+asd hydrate     # loads .asd/v1/ into the local db
+asd index .     # rebuilds the derived semantic index
+```
+
+After `asd init`, the **pre-commit hook** runs `asd sync --prune`
+automatically on every commit, so the sidecar stays in sync without
+any manual steps.
+
 ## Next
 
 - [Core Concepts](/guides/concepts) — the seven primitives in detail.

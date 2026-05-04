@@ -1326,7 +1326,7 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Re-parse a source file or directory and refresh the ASD symbol index, effects, and call graph. Accepts absolute or relative paths. Equivalent to running `asd index <path>` from the CLI."
+        description = "Re-parse a source file or directory and refresh the ASD symbol index, effects, and call graph. Accepts absolute or relative paths. Equivalent to running `asd index <path>` from the CLI. After indexing, run `asd sync --prune` (or the pre-commit hook does it automatically) to flush the updated state into the .asd/v1/ sidecar so it travels with the next git commit."
     )]
     async fn reindex(&self, params: Parameters<ReindexParams>) -> String {
         let p = params.0;

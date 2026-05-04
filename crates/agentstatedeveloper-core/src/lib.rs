@@ -36,6 +36,6 @@ pub use schema::{
     Evidence, LedgerEntry, LedgerKind, Mismatch, Position, Rebind, Symbol, SymbolKind,
     TransitiveEffect, Verification, VerificationSource, VerificationStatus,
 };
-pub use sidecar::{hydrate_from_dir, sync_to_dir, HydrateSummary, SyncSummary};
+pub use sidecar::{hydrate_from_dir, prune_sidecar, sync_to_dir, HydrateSummary, SyncSummary};
 pub use symbol::{canonical_symbol_id, symbol_fingerprint};
 pub use transitive::propagate_transitive;
