@@ -14,3 +14,4 @@ agentstatedeveloper-rust = { workspace = true }
 agentstatedeveloper-go = { workspace = true }
 agentstatedeveloper-java = { workspace = true }
 agentstatedeveloper-csharp = { workspace = true }
+agentstatedeveloper-ruby = { workspace = true }
