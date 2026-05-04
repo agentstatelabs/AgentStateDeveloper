@@ -9,6 +9,9 @@ description = "Swift language adapter for AgentStateDeveloper (tree-sitter-swift
 [dependencies]
 agentstatedeveloper-core = { workspace = true }
 tree-sitter = { workspace = true }
-tree-sitter-swift = "=0.4.3"
+tree-sitter-language = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+[build-dependencies]
+cc = "1"

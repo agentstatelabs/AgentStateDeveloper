@@ -46,6 +46,7 @@ tokio = { version = "1", features = ["full"] }
 
 # Parsing
 tree-sitter = "0.24"
+tree-sitter-language = "0.1"
 tree-sitter-python = "0.23"
 tree-sitter-typescript = "0.23"
 

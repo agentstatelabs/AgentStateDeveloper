@@ -13,16 +13,14 @@ use agentstatedeveloper_core::adapter::{
 use agentstatedeveloper_core::error::{AsdError, Result};
 use agentstatedeveloper_core::schema::{Effect, EffectCategory, SymbolKind};
 use serde_json::json;
-use tree_sitter::{Language, Node, Parser};
+use tree_sitter::{Node, Parser};
+use tree_sitter_language::LanguageFn;
 
-/// Bridge tree-sitter-kotlin's 0.20-era Language to our workspace 0.24 Language.
-/// Both types are `repr(transparent)` wrappers over the same `*const TSLanguage`
-/// pointer, so transmuting is safe in practice.
-fn kotlin_language() -> Language {
-    let old = tree_sitter_kotlin::language();
-    // SAFETY: same single-pointer layout in both tree-sitter 0.20 and 0.24.
-    unsafe { std::mem::transmute(old) }
+unsafe extern "C" {
+    fn tree_sitter_kotlin() -> *const ();
 }
+
+const KOTLIN: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_kotlin) };
 
 /// Kotlin language adapter.
 #[derive(Debug, Default, Clone, Copy)]
@@ -46,7 +44,7 @@ impl LanguageAdapter for KotlinAdapter {
     fn parse_symbols(&self, file: &str, source: &str) -> Result<Vec<ParsedSymbol>> {
         let mut parser = Parser::new();
         parser
-            .set_language(&kotlin_language())
+            .set_language(&KOTLIN.into())
             .map_err(|e| AsdError::Parse(format!("failed to set kotlin language: {e}")))?;
 
         let src_bytes = source.as_bytes();
@@ -653,7 +651,7 @@ fn extract_call_edges_impl(
     }
 
     let mut parser = Parser::new();
-    if parser.set_language(&kotlin_language()).is_err() {
+    if parser.set_language(&KOTLIN.into()).is_err() {
         return Vec::new();
     }
 

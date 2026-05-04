@@ -12,14 +12,13 @@ use agentstatedeveloper_core::adapter::{
 use agentstatedeveloper_core::error::{AsdError, Result};
 use agentstatedeveloper_core::schema::{Effect, EffectCategory, SymbolKind};
 use serde_json::json;
-use tree_sitter::{Language, Node, Parser};
+use tree_sitter::{Node, Parser};
+use tree_sitter_language::LanguageFn;
 
-/// Bridge tree-sitter-swift 0.5.0's older Language type to our workspace 0.24 Language.
-fn swift_language() -> Language {
-    let old = tree_sitter_swift::language();
-    // SAFETY: both types are single-pointer wrappers over the same C struct.
-    unsafe { std::mem::transmute(old) }
+unsafe extern "C" {
+    fn tree_sitter_swift() -> *const ();
 }
+const SWIFT: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_swift) };
 
 /// Swift language adapter.
 #[derive(Debug, Default, Clone, Copy)]
@@ -43,7 +42,7 @@ impl LanguageAdapter for SwiftAdapter {
     fn parse_symbols(&self, file: &str, source: &str) -> Result<Vec<ParsedSymbol>> {
         let mut parser = Parser::new();
         parser
-            .set_language(&swift_language())
+            .set_language(&SWIFT.into())
             .map_err(|e| AsdError::Parse(format!("failed to set swift language: {e}")))?;
 
         let src_bytes = source.as_bytes();
@@ -617,7 +616,7 @@ fn collect_calls(
 
 fn extract_call_edges_impl(
     file: &str,
-    source: &str,
+    _source: &str,
     symbols: &[ParsedSymbol],
     workspace: &WorkspaceSymbols,
 ) -> Vec<CallEdge> {
@@ -631,7 +630,7 @@ fn extract_call_edges_impl(
     }
 
     let mut parser = Parser::new();
-    if parser.set_language(&swift_language()).is_err() {
+    if parser.set_language(&SWIFT.into()).is_err() {
         return Vec::new();
     }
 
