@@ -16,8 +16,7 @@ path = "src/bin/asd-serve.rs"
 
 [dependencies]
 agentstatedeveloper-core = { workspace = true }
-agentstatedeveloper-python = { workspace = true }
-agentstatedeveloper-typescript = { workspace = true }
+agentstatedeveloper-adapters = { workspace = true }
 agentstategraph = { workspace = true }
 agentstategraph-core = { workspace = true }
 
@@ -37,5 +36,6 @@ schemars = "1"
 chrono = { workspace = true }
 
 [dev-dependencies]
+agentstatedeveloper-python = { workspace = true }
 http-body-util = "0.1"
 chrono = { workspace = true }

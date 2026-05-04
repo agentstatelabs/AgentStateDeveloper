@@ -3,14 +3,12 @@
 //! the ASG.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::Result;
 use clap::Args;
 
-use agentstatedeveloper_core::{run_index, Engine, LanguageAdapter};
-use agentstatedeveloper_python::PythonAdapter;
-use agentstatedeveloper_typescript::TypeScriptAdapter;
+use agentstatedeveloper_adapters::default_adapters;
+use agentstatedeveloper_core::{run_index, Engine};
 
 use crate::config::Config;
 
@@ -23,10 +21,7 @@ pub struct IndexArgs {
 
 pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let adapters: Vec<Arc<dyn LanguageAdapter>> = vec![
-        Arc::new(PythonAdapter::new()),
-        Arc::new(TypeScriptAdapter::new()),
-    ];
+    let adapters = default_adapters();
 
     let summary = run_index(&engine.repo, &engine.ref_name, &args.path, &cfg.agent_id, &adapters, Some(engine.audit.as_ref()))?;
 

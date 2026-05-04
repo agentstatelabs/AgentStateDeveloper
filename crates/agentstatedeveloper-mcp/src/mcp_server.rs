@@ -13,14 +13,13 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
+use agentstatedeveloper_adapters::default_adapters;
 use agentstatedeveloper_core::{
     ASD_PATH_PREFIX, AsgEffectStore, AsgIndexStore, AsgLedgerStore, AuditEvent, Author,
     AuthorKind, Decision, Effect, EffectCategory, EffectDecl, EffectStore, Engine, IndexStore,
-    LedgerEntry, LedgerKind, LanguageAdapter, LedgerStore, Rebind, Situation,
+    LedgerEntry, LedgerKind, LedgerStore, Rebind, Situation,
     actions, emit_audit, event_types, paths,
 };
-use agentstatedeveloper_python::PythonAdapter;
-use agentstatedeveloper_typescript::TypeScriptAdapter;
 
 /// The AgentStateDeveloper MCP server.
 #[derive(Clone)]
@@ -1335,10 +1334,7 @@ impl AsdMcpServer {
         if !root.exists() {
             return err_json(&format!("path does not exist: {}", p.path));
         }
-        let adapters: Vec<Arc<dyn LanguageAdapter>> = vec![
-            Arc::new(PythonAdapter::new()),
-            Arc::new(TypeScriptAdapter::new()),
-        ];
+        let adapters = default_adapters();
         let engine = self.engine.lock().await;
         match agentstatedeveloper_core::run_index(
             &engine.repo,

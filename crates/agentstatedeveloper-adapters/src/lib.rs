@@ -1,0 +1,23 @@
+//! Default language adapter bundle for AgentStateDeveloper.
+//!
+//! Call [`default_adapters`] to get the full set of built-in adapters.
+//! To add a new language: add its crate as a dependency here, instantiate
+//! it in `default_adapters`, and add the crate to the workspace.
+
+use std::sync::Arc;
+
+use agentstatedeveloper_core::LanguageAdapter;
+use agentstatedeveloper_python::PythonAdapter;
+use agentstatedeveloper_typescript::TypeScriptAdapter;
+
+/// Return one instance of every built-in language adapter.
+///
+/// Both the CLI (`asd index`) and the MCP server (`reindex` tool) call this
+/// to get a consistent adapter set. Adding a new language means adding one
+/// line here — callers need no changes.
+pub fn default_adapters() -> Vec<Arc<dyn LanguageAdapter>> {
+    vec![
+        Arc::new(PythonAdapter::new()),
+        Arc::new(TypeScriptAdapter::new()),
+    ]
+}
