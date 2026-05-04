@@ -4,6 +4,7 @@ members = [
     "crates/agentstatedeveloper-core",
     "crates/agentstatedeveloper-python",
     "crates/agentstatedeveloper-typescript",
+    "crates/agentstatedeveloper-rust",
     "crates/agentstatedeveloper-adapters",
     "crates/agentstatedeveloper-cli",
     "crates/agentstatedeveloper-mcp",
@@ -50,6 +51,7 @@ directories = "5"
 agentstatedeveloper-core = { path = "crates/agentstatedeveloper-core" }
 agentstatedeveloper-python = { path = "crates/agentstatedeveloper-python" }
 agentstatedeveloper-typescript = { path = "crates/agentstatedeveloper-typescript" }
+agentstatedeveloper-rust = { path = "crates/agentstatedeveloper-rust" }
 agentstatedeveloper-adapters = { path = "crates/agentstatedeveloper-adapters" }
 agentstatedeveloper-cli = { path = "crates/agentstatedeveloper-cli" }
 agentstatedeveloper-mcp = { path = "crates/agentstatedeveloper-mcp" }

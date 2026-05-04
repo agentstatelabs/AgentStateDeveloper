@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use agentstatedeveloper_core::LanguageAdapter;
 use agentstatedeveloper_python::PythonAdapter;
+use agentstatedeveloper_rust::RustAdapter;
 use agentstatedeveloper_typescript::TypeScriptAdapter;
 
 /// Return one instance of every built-in language adapter.
@@ -19,5 +20,6 @@ pub fn default_adapters() -> Vec<Arc<dyn LanguageAdapter>> {
     vec![
         Arc::new(PythonAdapter::new()),
         Arc::new(TypeScriptAdapter::new()),
+        Arc::new(RustAdapter::new()),
     ]
 }

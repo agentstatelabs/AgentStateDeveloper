@@ -10,3 +10,4 @@ description = "Default language adapter bundle for AgentStateDeveloper"
 agentstatedeveloper-core = { workspace = true }
 agentstatedeveloper-python = { workspace = true }
 agentstatedeveloper-typescript = { workspace = true }
+agentstatedeveloper-rust = { workspace = true }
