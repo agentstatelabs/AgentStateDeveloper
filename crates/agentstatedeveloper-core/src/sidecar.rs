@@ -44,14 +44,15 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use agentstategraph::Repository;
+use agentstategraph::{CommitOptions, Repository};
+use agentstategraph_core::IntentCategory;
 
 use crate::effects::{AsgEffectStore, EffectStore};
 use crate::error::{AsdError, Result};
 use crate::index::{AsgIndexStore, IndexStore};
 use crate::ledger::{AsgLedgerStore, LedgerStore};
 use crate::paths;
-use crate::schema::{ASD_SCHEMA_VERSION, EffectDecl, LedgerEntry, Symbol};
+use crate::schema::{ASD_SCHEMA_VERSION, EffectDecl, LedgerEntry, Rebind, Symbol};
 
 /// Relative path (from project root) to the sidecar root.
 const SIDECAR_REL_ROOT: &str = ".asd/v1";
@@ -63,6 +64,7 @@ pub struct SyncSummary {
     pub effects_written: usize,
     pub ledger_entries_written: usize,
     pub symbols_written: usize,
+    pub rebinds_synced: usize,
     pub schema_version: String,
 }
 
@@ -74,6 +76,7 @@ pub struct HydrateSummary {
     pub effects_loaded: usize,
     pub ledger_entries_loaded: usize,
     pub symbols_loaded: usize,
+    pub rebinds_replayed: usize,
     pub missing_schema_version: bool,
 }
 
@@ -92,11 +95,13 @@ pub fn sync_to_dir(
     let effects_dir = root.join("effects");
     let ledger_dir = root.join("ledger");
     let symbols_dir = root.join("symbols");
+    let rebinds_dir = root.join("rebinds");
     let meta_dir = root.join("meta");
 
     fs::create_dir_all(&effects_dir)?;
     fs::create_dir_all(&ledger_dir)?;
     fs::create_dir_all(&symbols_dir)?;
+    fs::create_dir_all(&rebinds_dir)?;
     fs::create_dir_all(&meta_dir)?;
 
     // Effects: one file per EffectDecl at /asd/v1/effects/<symbol_id>.
@@ -155,6 +160,19 @@ pub fn sync_to_dir(
         }
     }
 
+    // Rebind records: one file per record at /asd/v1/rebinds/<from_symbol_id>.
+    let mut rebinds_synced = 0usize;
+    let rebinds_prefix = format!("{}/rebinds", paths::ASD_ROOT);
+    if let Ok(serde_json::Value::Object(map)) = repo.get_tree(ref_name, &rebinds_prefix) {
+        let sorted: BTreeMap<_, _> = map.into_iter().collect();
+        for (from_symbol_id, value) in sorted {
+            let rebind: Rebind = serde_json::from_value(value)?;
+            let out = rebinds_dir.join(format!("{from_symbol_id}.json"));
+            write_json_atomic(&out, &rebind)?;
+            rebinds_synced += 1;
+        }
+    }
+
     // Schema version: plain text, single line, for easy git diffing.
     let sv_path = meta_dir.join("schema-version");
     write_text_atomic(&sv_path, &format!("{ASD_SCHEMA_VERSION}\n"))?;
@@ -163,6 +181,7 @@ pub fn sync_to_dir(
         effects_written,
         ledger_entries_written,
         symbols_written,
+        rebinds_synced,
         schema_version: ASD_SCHEMA_VERSION.to_string(),
     })
 }
@@ -190,6 +209,7 @@ pub fn hydrate_from_dir(
     let effects_dir = root.join("effects");
     let ledger_dir = root.join("ledger");
     let symbols_dir = root.join("symbols");
+    let rebinds_dir = root.join("rebinds");
     let meta_dir = root.join("meta");
 
     let index_store = AsgIndexStore { repo };
@@ -252,12 +272,75 @@ pub fn hydrate_from_dir(
         }
     }
 
+    // Rebind records: restore to ASG repo for provenance, then defensively
+    // re-parent any ledger entries still stored under old symbol_ids.
+    // Sort by `at` timestamp (ascending) so chained rebinds (A→B→C) replay
+    // in commit order.
+    let mut rebinds_replayed = 0usize;
+    if rebinds_dir.is_dir() {
+        let mut rebinds: Vec<Rebind> = Vec::new();
+        for entry in fs::read_dir(&rebinds_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !is_json_file(&path) { continue; }
+            let text = fs::read_to_string(&path)?;
+            let rebind: Rebind = serde_json::from_str(&text)?;
+            rebinds.push(rebind);
+        }
+        // Sort by timestamp so chained rebinds apply in correct order.
+        rebinds.sort_by_key(|r| r.at);
+
+        for rebind in &rebinds {
+            // Restore the rebind record itself for provenance.
+            let rebind_path = paths::rebind_path(&rebind.from_symbol_id);
+            let val = serde_json::to_value(rebind)?;
+            let opts = CommitOptions::new(
+                agent_id,
+                IntentCategory::Refine,
+                format!("hydrate rebind {} → {}", rebind.from_symbol_id, rebind.to_symbol_id),
+            );
+            repo.set_json(ref_name, &rebind_path, &val, opts)
+                .map_err(|e| AsdError::Other(e.to_string()))?;
+
+            // Defensively re-parent any entries still under from_symbol_id.
+            // This handles the case where the sidecar was last synced before
+            // the rebind occurred.
+            let stale_entries = ledger_store
+                .list_entries_with_superseded(ref_name, &rebind.from_symbol_id)
+                .unwrap_or_default();
+            for mut entry in stale_entries {
+                entry.symbol_id = rebind.to_symbol_id.clone();
+                let new_path = paths::ledger_entry_path(&rebind.to_symbol_id, &entry.entry_id);
+                let entry_val = serde_json::to_value(&entry)?;
+                let opts = CommitOptions::new(
+                    agent_id,
+                    IntentCategory::Refine,
+                    format!("reparent entry {} during rebind replay", entry.entry_id),
+                );
+                if repo.set_json(ref_name, &new_path, &entry_val, opts)
+                    .map_err(|e| AsdError::Other(e.to_string()))
+                    .is_ok()
+                {
+                    let old_path = paths::ledger_entry_path(&rebind.from_symbol_id, &entry.entry_id);
+                    let opts = CommitOptions::new(
+                        agent_id,
+                        IntentCategory::Refine,
+                        format!("remove stale entry {} after rebind replay", entry.entry_id),
+                    );
+                    let _ = repo.delete(ref_name, &old_path, opts);
+                }
+            }
+            rebinds_replayed += 1;
+        }
+    }
+
     let missing_schema_version = !meta_dir.join("schema-version").is_file();
 
     Ok(HydrateSummary {
         effects_loaded,
         ledger_entries_loaded,
         symbols_loaded,
+        rebinds_replayed,
         missing_schema_version,
     })
 }

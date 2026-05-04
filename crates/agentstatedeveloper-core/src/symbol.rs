@@ -15,5 +15,3 @@ pub fn symbol_fingerprint(body: &str) -> String {
     format!("fp_{}", &hash.to_hex()[..16])
 }
 
-/// Minimum similarity below which a proposed rename rebind needs confirmation.
-pub const REBIND_SIMILARITY_THRESHOLD: f64 = 0.8;

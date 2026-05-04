@@ -164,6 +164,16 @@ fn append_entry_impl(
         format!("ledger {} for {}", entry.kind.as_str(), entry.symbol_id),
     );
     repo.set_json(ref_name, &path, &value, opts)?;
+
+    // Write reverse index: entry_id → symbol_id for O(1) find_entry.
+    let idx_path = paths::ledger_entry_index_path(&entry.entry_id);
+    let idx_val = serde_json::Value::String(entry.symbol_id.clone());
+    let idx_opts = CommitOptions::new(
+        agent_id,
+        IntentCategory::Refine,
+        format!("ledger-idx {}", entry.entry_id),
+    );
+    repo.set_json(ref_name, &idx_path, &idx_val, idx_opts)?;
     Ok(())
 }
 
@@ -307,6 +317,20 @@ fn find_entry(
     ref_name: &str,
     entry_id: &str,
 ) -> Result<Option<(String, LedgerEntry)>> {
+    // Fast path: use the reverse index written by append_entry_impl.
+    let idx_path = paths::ledger_entry_index_path(entry_id);
+    if let Ok(val) = repo.get_json(ref_name, &idx_path) {
+        if let Some(symbol_id) = val.as_str() {
+            let entry_path = paths::ledger_entry_path(symbol_id, entry_id);
+            if let Ok(ev) = repo.get_json(ref_name, &entry_path) {
+                if let Ok(entry) = serde_json::from_value::<LedgerEntry>(ev) {
+                    return Ok(Some((symbol_id.to_string(), entry)));
+                }
+            }
+        }
+    }
+
+    // Fallback: full scan for entries written before the index existed.
     let root = format!("{}/ledger", paths::ASD_ROOT);
     let tree = match repo.get_tree(ref_name, &root) {
         Ok(v) => v,

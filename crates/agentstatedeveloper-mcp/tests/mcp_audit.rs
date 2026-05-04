@@ -25,10 +25,8 @@ fn prime_db(db_path: &std::path::Path) {
     };
     use agentstatedeveloper_python::PythonAdapter;
 
-    let mut engine = Engine::open_sqlite(db_path).expect("open engine");
+    let engine = Engine::open_sqlite(db_path).expect("open engine");
     let adapter = Arc::new(PythonAdapter::new());
-    let adapter_dyn: Arc<dyn agentstatedeveloper_core::LanguageAdapter> = adapter.clone();
-    engine.register_adapter(adapter_dyn);
 
     let sample_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/sample-py-repo")

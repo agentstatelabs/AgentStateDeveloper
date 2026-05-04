@@ -51,3 +51,14 @@ pub fn file_meta_path(file: &str) -> String {
 pub fn schema_version_path() -> String {
     format!("{}/meta/schema-version", ASD_ROOT)
 }
+
+pub fn rebind_path(from_symbol_id: &str) -> String {
+    format!("{}/rebinds/{}", ASD_ROOT, from_symbol_id)
+}
+
+/// Reverse index: maps entry_id → symbol_id for O(1) find_entry in ratify.
+/// Kept under a separate prefix (ledger-idx/) to avoid polluting tree walks
+/// over the main ledger/ subtree.
+pub fn ledger_entry_index_path(entry_id: &str) -> String {
+    format!("{}/ledger-idx/{}", ASD_ROOT, entry_id)
+}

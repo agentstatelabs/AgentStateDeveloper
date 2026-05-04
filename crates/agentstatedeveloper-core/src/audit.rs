@@ -34,7 +34,9 @@ pub mod event_types {
     pub const LEDGER_REJECT: &str = "ledger.reject";
     pub const LEDGER_WITHDRAW: &str = "ledger.withdraw";
     pub const LEDGER_SUPERSEDE: &str = "ledger.supersede";
+    pub const LEDGER_REBIND: &str = "ledger.rebind";
     pub const EFFECT_DECLARE: &str = "effect.declare";
+    pub const INDEX_RUN: &str = "index.run";
 }
 
 /// One audit entry. Flat, JSON-serializable. Shared data format —
@@ -139,6 +141,14 @@ pub trait AuditSink: Send + Sync {
             self.emit(e)?;
         }
         Ok(())
+    }
+}
+
+/// Fire-and-forget audit emit. Logs sink failures to stderr but never
+/// propagates — audit issues must never block the user's operation.
+pub fn emit_audit(sink: &dyn AuditSink, event: AuditEvent) {
+    if let Err(e) = sink.emit(&event) {
+        eprintln!("warning: audit emit failed: {e}");
     }
 }
 

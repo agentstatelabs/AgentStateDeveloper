@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["Craig Brown"]
 license = "BSL-1.1"
@@ -24,6 +24,7 @@ repository = "https://github.com/agentstatelabs/AgentStateDeveloper"
 agentstategraph = { path = "../stategraph/crates/agentstategraph" }
 agentstategraph-core = { path = "../stategraph/crates/agentstategraph-core" }
 agentstategraph-storage = { path = "../stategraph/crates/agentstategraph-storage" }
+agentstategraph-policy = { path = "../stategraph/crates/agentstategraph-policy" }
 
 # Common
 serde = { version = "1", features = ["derive"] }

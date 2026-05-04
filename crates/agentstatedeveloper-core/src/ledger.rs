@@ -157,6 +157,16 @@ impl<'a> LedgerStore for AsgLedgerStore<'a> {
             format!("ledger {} for {}", entry.kind.as_str(), entry.symbol_id),
         );
         self.repo.set_json(ref_name, &path, &value, opts)?;
+
+        // Write reverse index: entry_id → symbol_id for O(1) find_entry.
+        let idx_path = paths::ledger_entry_index_path(&entry.entry_id);
+        let idx_val = serde_json::Value::String(entry.symbol_id.clone());
+        let idx_opts = CommitOptions::new(
+            agent_id,
+            IntentCategory::Refine,
+            format!("ledger-idx {}", entry.entry_id),
+        );
+        self.repo.set_json(ref_name, &idx_path, &idx_val, idx_opts)?;
         Ok(())
     }
 
@@ -172,15 +182,83 @@ impl<'a> LedgerStore for AsgLedgerStore<'a> {
         };
         let mut entries = Vec::new();
         if let serde_json::Value::Object(map) = json {
-            for (_k, v) in map {
-                if let Ok(e) = serde_json::from_value::<LedgerEntry>(v) {
-                    entries.push(e);
+            for (k, v) in map {
+                match serde_json::from_value::<LedgerEntry>(v) {
+                    Ok(e) => entries.push(e),
+                    Err(err) => eprintln!(
+                        "warning: skipping malformed ledger entry {}/{}: {}",
+                        symbol_id, k, err
+                    ),
                 }
             }
         }
         entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(entries)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Orphan detection
+// ---------------------------------------------------------------------------
+
+/// Walk every ledger entry and tag those whose `symbol_id` is no longer
+/// present in the qname index as `"orphaned"` and `"orphaned-at:<timestamp>"`.
+///
+/// Returns the number of entries newly tagged. Already-orphaned entries
+/// (already carrying the `"orphaned"` tag) are skipped. Runs in O(symbols +
+/// ledger_entries) — safe to call at the end of `asd index` or from `health`.
+pub fn detect_orphaned_entries(repo: &Repository, ref_name: &str, agent_id: &str) -> Result<usize> {
+    use chrono::Utc;
+
+    // Build set of all symbol_ids currently in the index.
+    let qname_prefix = format!("{}/index/by-qname", paths::ASD_ROOT);
+    let indexed: HashSet<String> = match repo.get_tree(ref_name, &qname_prefix) {
+        Ok(serde_json::Value::Object(map)) => map
+            .values()
+            .filter_map(|v| v.get("symbol_id")?.as_str().map(|s| s.to_string()))
+            .collect(),
+        _ => HashSet::new(),
+    };
+
+    // Walk every ledger entry.
+    let ledger_prefix = format!("{}/ledger", paths::ASD_ROOT);
+    let ledger_tree = match repo.get_tree(ref_name, &ledger_prefix) {
+        Ok(v) => v,
+        Err(_) => return Ok(0),
+    };
+
+    let mut tagged = 0usize;
+    let now_tag = format!("orphaned-at:{}", Utc::now().format("%Y-%m-%dT%H:%M:%SZ"));
+
+    if let serde_json::Value::Object(by_symbol) = ledger_tree {
+        for (sym_id, per_symbol) in by_symbol {
+            if indexed.contains(&sym_id) {
+                continue;
+            }
+            if let serde_json::Value::Object(entries_map) = per_symbol {
+                for (entry_id, v) in entries_map {
+                    if let Ok(mut entry) = serde_json::from_value::<LedgerEntry>(v) {
+                        if entry.tags.iter().any(|t| t == "orphaned") {
+                            continue;
+                        }
+                        entry.tags.push("orphaned".to_string());
+                        entry.tags.push(now_tag.clone());
+                        let path = paths::ledger_entry_path(&sym_id, &entry_id);
+                        let value = serde_json::to_value(&entry)?;
+                        let opts = CommitOptions::new(
+                            agent_id,
+                            IntentCategory::Refine,
+                            format!("tag orphaned entry {}", entry_id),
+                        );
+                        repo.set_json(ref_name, &path, &value, opts)
+                            .map_err(|e| AsdError::Other(e.to_string()))?;
+                        tagged += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(tagged)
 }
 
 #[cfg(test)]

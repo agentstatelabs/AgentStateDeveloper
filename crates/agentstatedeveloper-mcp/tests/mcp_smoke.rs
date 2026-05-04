@@ -15,17 +15,15 @@ fn prime_db(db_path: &std::path::Path) {
     use std::sync::Arc;
 
     use agentstatedeveloper_core::{
-        AsgEffectStore, AsgIndexStore, EffectDecl, EffectStore, Engine, IndexStore,
-        LanguageAdapter, Position, Symbol, Verification, VerificationSource, VerificationStatus,
+        AsgEffectStore, AsgIndexStore, EffectDecl, EffectStore, Engine, IndexStore, LanguageAdapter,
+        Position, Symbol, Verification, VerificationSource, VerificationStatus,
         canonical_symbol_id, symbol_fingerprint,
     };
     use agentstatedeveloper_python::PythonAdapter;
     use chrono::Utc;
 
-    let mut engine = Engine::open_sqlite(db_path).expect("open engine");
+    let engine = Engine::open_sqlite(db_path).expect("open engine");
     let adapter = Arc::new(PythonAdapter::new());
-    let adapter_dyn: Arc<dyn agentstatedeveloper_core::LanguageAdapter> = adapter.clone();
-    engine.register_adapter(adapter_dyn);
 
     let sample_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/sample-py-repo")

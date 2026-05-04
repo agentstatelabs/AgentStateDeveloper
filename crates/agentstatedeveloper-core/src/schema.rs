@@ -255,3 +255,14 @@ impl LedgerKind {
         }
     }
 }
+
+/// Record that a symbol was renamed/moved so its ledger history follows it.
+/// Written to `/asd/v1/rebinds/<from_symbol_id>` at rename time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Rebind {
+    pub from_symbol_id: String,
+    pub to_symbol_id: String,
+    pub to_qname: String,
+    pub at: DateTime<Utc>,
+    pub by: String,
+}

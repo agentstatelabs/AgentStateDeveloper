@@ -14,10 +14,13 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use agentstatedeveloper_core::{
-    ASD_PATH_PREFIX, AsgEffectStore, AsgIndexStore, AsgLedgerStore, AuditEvent, AuditSink, Author,
+    ASD_PATH_PREFIX, AsgEffectStore, AsgIndexStore, AsgLedgerStore, AuditEvent, Author,
     AuthorKind, Decision, Effect, EffectCategory, EffectDecl, EffectStore, Engine, IndexStore,
-    LedgerEntry, LedgerKind, LedgerStore, Situation, actions, event_types,
+    LedgerEntry, LedgerKind, LanguageAdapter, LedgerStore, Rebind, Situation,
+    actions, emit_audit, event_types, paths,
 };
+use agentstatedeveloper_python::PythonAdapter;
+use agentstatedeveloper_typescript::TypeScriptAdapter;
 
 /// The AgentStateDeveloper MCP server.
 #[derive(Clone)]
@@ -173,6 +176,33 @@ fn default_approver_kind_mcp() -> String {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct TracesOfParams {
+    /// Fully-qualified symbol name.
+    pub qname: String,
+    /// Maximum number of trace records to return (default 20).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ReindexParams {
+    /// Absolute or relative path to a source file or directory to reindex.
+    /// Relative paths are resolved from the process working directory.
+    pub path: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct LedgerRebindParams {
+    /// symbol_id of the old symbol whose ledger entries should be re-parented.
+    pub from_symbol_id: String,
+    /// Fully-qualified name of the new symbol to resolve and bind to.
+    pub to_qname: String,
+    /// Agent or user performing the rebind.
+    #[serde(default = "default_author_id")]
+    pub agent_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct AuditTailParams {
     /// Substring match on event_type (e.g., `ledger.approve`,
     /// `ledger.` for all ledger events).
@@ -256,10 +286,25 @@ impl AsdMcpServer {
             .unwrap_or_else(|_| self.db_path.clone())
             .to_string_lossy()
             .to_string();
+        let ledger_prefix = format!("{}/ledger", ASD_PATH_PREFIX);
+        let orphan_count = match engine.repo.get_tree(&ref_name, &ledger_prefix) {
+            Ok(serde_json::Value::Object(by_symbol)) => {
+                let indexed_prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+                let indexed: std::collections::HashSet<String> = match engine.repo.get_tree(&ref_name, &indexed_prefix) {
+                    Ok(serde_json::Value::Object(m)) => m.values()
+                        .filter_map(|v| v.get("symbol_id")?.as_str().map(|s| s.to_string()))
+                        .collect(),
+                    _ => std::collections::HashSet::new(),
+                };
+                by_symbol.keys().filter(|sym_id| !indexed.contains(*sym_id)).count()
+            }
+            _ => 0,
+        };
         let payload = serde_json::json!({
             "status": "ok",
             "db_path": db_path,
             "symbol_count": symbol_count,
+            "orphaned_symbol_count": orphan_count,
         });
         serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())
     }
@@ -594,6 +639,9 @@ impl AsdMcpServer {
             qualifiers: serde_json::json!({
                 "qname": &p.qname,
                 "kind": kind.as_str(),
+                "symbol_id": &symbol.symbol_id,
+                "file": &symbol.file,
+                "language": &symbol.language,
             }),
         };
         let decision = match engine.policy.evaluate(&situation, &action, &p.author_id) {
@@ -727,6 +775,18 @@ impl AsdMcpServer {
         let p = params.0;
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
+        let situation = Situation {
+            description: format!("ledger.approve {}", p.entry_id),
+            qualifiers: serde_json::json!({ "entry_id": &p.entry_id }),
+        };
+        if let Ok(Decision::Deny { matched_policy, reason }) =
+            engine.policy.evaluate(&situation, actions::LEDGER_APPROVE, &p.approver)
+        {
+            return err_json(&format!(
+                "policy denied: {} (matched {})",
+                reason, matched_policy
+            ));
+        }
         let ledger_store = AsgLedgerStore { repo: &engine.repo };
         match ledger_store.approve_entry(
             &ref_name,
@@ -782,6 +842,18 @@ impl AsdMcpServer {
         let p = params.0;
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
+        let situation = Situation {
+            description: format!("ledger.reject {}", p.entry_id),
+            qualifiers: serde_json::json!({ "entry_id": &p.entry_id }),
+        };
+        if let Ok(Decision::Deny { matched_policy, reason }) =
+            engine.policy.evaluate(&situation, actions::LEDGER_REJECT, &p.reviewer)
+        {
+            return err_json(&format!(
+                "policy denied: {} (matched {})",
+                reason, matched_policy
+            ));
+        }
         let ledger_store = AsgLedgerStore { repo: &engine.repo };
         match ledger_store.reject_entry(
             &ref_name,
@@ -838,6 +910,18 @@ impl AsdMcpServer {
         let p = params.0;
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
+        let situation = Situation {
+            description: format!("ledger.withdraw {}", p.entry_id),
+            qualifiers: serde_json::json!({ "entry_id": &p.entry_id }),
+        };
+        if let Ok(Decision::Deny { matched_policy, reason }) =
+            engine.policy.evaluate(&situation, actions::LEDGER_WITHDRAW, &p.author_id)
+        {
+            return err_json(&format!(
+                "policy denied: {} (matched {})",
+                reason, matched_policy
+            ));
+        }
         let ledger_store = AsgLedgerStore { repo: &engine.repo };
         match ledger_store.withdraw_entry(&ref_name, &p.entry_id, &p.author_id, "asd-mcp") {
             Ok(outcome) => {
@@ -929,6 +1013,24 @@ impl AsdMcpServer {
                 return err_json(&e.to_string());
             }
         };
+
+        let situation = Situation {
+            description: format!("ledger.supersede for {}", p.qname),
+            qualifiers: serde_json::json!({
+                "qname": &p.qname,
+                "symbol_id": &symbol.symbol_id,
+                "file": &symbol.file,
+                "language": &symbol.language,
+            }),
+        };
+        if let Ok(Decision::Deny { matched_policy, reason }) =
+            engine.policy.evaluate(&situation, actions::LEDGER_SUPERSEDE, &p.author_id)
+        {
+            return err_json(&format!(
+                "policy denied: {} (matched {})",
+                reason, matched_policy
+            ));
+        }
 
         let author = Author {
             kind: author_kind,
@@ -1069,6 +1171,9 @@ impl AsdMcpServer {
                 "qname": &p.qname,
                 "declared": new_categories,
                 "broadens": broadens,
+                "symbol_id": &symbol.symbol_id,
+                "file": &symbol.file,
+                "language": &symbol.language,
             }),
         };
         let decision = match engine.policy.evaluate(&situation, action, &p.author_id) {
@@ -1186,6 +1291,199 @@ impl AsdMcpServer {
     }
 
     #[tool(
+        description = "Return execution trace records stored for a symbol (written by `asd trace`). Returns newest-first, up to `limit` (default 20)."
+    )]
+    async fn traces_of(&self, params: Parameters<TracesOfParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let index = AsgIndexStore { repo: &engine.repo };
+        let symbol = match index.get_symbol_by_qname(&ref_name, &p.qname) {
+            Ok(Some(s)) => s,
+            Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
+            Err(e) => return err_json(&e.to_string()),
+        };
+        let prefix = format!("{}/traces/{}", paths::ASD_ROOT, symbol.symbol_id);
+        let limit = p.limit.unwrap_or(20).min(200);
+        let leaf_paths = match engine.repo.list_paths(&ref_name, &prefix, None) {
+            Ok(v) => v,
+            Err(_) => Vec::new(),
+        };
+        let mut traces: Vec<serde_json::Value> = Vec::new();
+        for path in leaf_paths.iter().take(limit * 4) {
+            if let Ok(v) = engine.repo.get_json(&ref_name, path) {
+                if traces.len() < limit {
+                    traces.push(v);
+                }
+            }
+        }
+        serde_json::to_string(&serde_json::json!({
+            "symbol_id": symbol.symbol_id,
+            "qname": p.qname,
+            "count": traces.len(),
+            "traces": traces,
+        }))
+        .unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[tool(
+        description = "Re-parse a source file or directory and refresh the ASD symbol index, effects, and call graph. Accepts absolute or relative paths. Equivalent to running `asd index <path>` from the CLI."
+    )]
+    async fn reindex(&self, params: Parameters<ReindexParams>) -> String {
+        let p = params.0;
+        let root = std::path::PathBuf::from(&p.path);
+        if !root.exists() {
+            return err_json(&format!("path does not exist: {}", p.path));
+        }
+        let adapters: Vec<Arc<dyn LanguageAdapter>> = vec![
+            Arc::new(PythonAdapter::new()),
+            Arc::new(TypeScriptAdapter::new()),
+        ];
+        let engine = self.engine.lock().await;
+        match agentstatedeveloper_core::run_index(
+            &engine.repo,
+            &engine.ref_name,
+            &root,
+            "asd-mcp",
+            &adapters,
+            Some(engine.audit.as_ref()),
+        ) {
+            Ok(s) => serde_json::json!({
+                "path": p.path,
+                "files": s.files,
+                "symbols": s.symbols,
+                "edges": s.edges,
+                "intra_module_edges": s.intra_module_edges,
+                "cross_module_edges": s.cross_module_edges,
+                "transitive_updates": s.transitive_updates,
+                "orphaned_tagged": s.orphaned_tagged,
+            })
+            .to_string(),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Record that a symbol was renamed or moved. Writes a rebind record so the old symbol_id maps to the new one, then re-parents all ledger entries from the old symbol_id to the new one. Use this whenever an agent or human renames a function, class, or method so its ledger history follows the rename."
+    )]
+    async fn ledger_rebind(&self, params: Parameters<LedgerRebindParams>) -> String {
+        use agentstategraph::CommitOptions;
+        use agentstategraph_core::IntentCategory;
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = &engine.ref_name;
+
+        // Policy gate — evaluate before any writes
+        let situation = Situation::new("rebind symbol")
+            .with_qualifier("from_symbol_id", &p.from_symbol_id)
+            .with_qualifier("to_qname", &p.to_qname);
+        match engine.policy.evaluate(&situation, actions::LEDGER_REBIND, &p.agent_id) {
+            Ok(Decision::Deny { matched_policy, reason }) => {
+                return serde_json::json!({
+                    "policy_denied": true,
+                    "matched_policy": matched_policy,
+                    "reason": reason,
+                })
+                .to_string();
+            }
+            Ok(_) => {}
+            Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+
+        // Resolve new qname → Symbol via index
+        let index_store = AsgIndexStore { repo: &engine.repo };
+        let new_symbol = match index_store.get_symbol_by_qname(ref_name, &p.to_qname) {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                return serde_json::json!({
+                    "error": format!("symbol not found for qname '{}'", p.to_qname)
+                })
+                .to_string();
+            }
+            Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
+        };
+
+        // Write rebind record
+        let rebind = Rebind {
+            from_symbol_id: p.from_symbol_id.clone(),
+            to_symbol_id: new_symbol.symbol_id.clone(),
+            to_qname: new_symbol.qname.clone(),
+            at: chrono::Utc::now(),
+            by: p.agent_id.clone(),
+        };
+        let rebind_path = paths::rebind_path(&p.from_symbol_id);
+        let rebind_val = match serde_json::to_value(&rebind) {
+            Ok(v) => v,
+            Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
+        };
+        if let Err(e) = engine.repo.set_json(
+            ref_name,
+            &rebind_path,
+            &rebind_val,
+            CommitOptions::new(
+                &p.agent_id,
+                IntentCategory::Refine,
+                format!("rebind {} → {}", p.from_symbol_id, new_symbol.symbol_id),
+            ),
+        ) {
+            return serde_json::json!({ "error": e.to_string() }).to_string();
+        }
+
+        // Re-parent ledger entries
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let entries = match ledger_store.list_entries_with_superseded(ref_name, &p.from_symbol_id) {
+            Ok(v) => v,
+            Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
+        };
+        let mut reparented = 0usize;
+        for mut entry in entries {
+            entry.symbol_id = new_symbol.symbol_id.clone();
+            let new_path = paths::ledger_entry_path(&new_symbol.symbol_id, &entry.entry_id);
+            let val = match serde_json::to_value(&entry) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if engine.repo.set_json(
+                ref_name,
+                &new_path,
+                &val,
+                CommitOptions::new(
+                    &p.agent_id,
+                    IntentCategory::Refine,
+                    format!("reparent ledger entry {} after rebind", entry.entry_id),
+                ),
+            ).is_ok() {
+                let old_path = paths::ledger_entry_path(&p.from_symbol_id, &entry.entry_id);
+                let _ = engine.repo.delete(ref_name, &old_path, CommitOptions::new(
+                    &p.agent_id,
+                    IntentCategory::Refine,
+                    format!("remove old ledger entry {} after rebind", entry.entry_id),
+                ));
+                reparented += 1;
+            }
+        }
+
+        let audit_event = AuditEvent::new(event_types::LEDGER_REBIND, &p.agent_id, "agent", "allow")
+            .with_subject(p.from_symbol_id.clone())
+            .with_secondary(new_symbol.symbol_id.clone())
+            .with_payload(serde_json::json!({
+                "from_symbol_id": p.from_symbol_id,
+                "to_symbol_id": new_symbol.symbol_id,
+                "to_qname": new_symbol.qname,
+                "entries_reparented": reparented,
+            }));
+        emit_audit(engine.audit.as_ref(), audit_event);
+
+        serde_json::json!({
+            "from_symbol_id": p.from_symbol_id,
+            "to_symbol_id": new_symbol.symbol_id,
+            "to_qname": new_symbol.qname,
+            "entries_reparented": reparented,
+        })
+        .to_string()
+    }
+
+    #[tool(
         description = "Read back audit events from the configured JSONL log. Supports filtering by event_type substring, exact actor_id, exact outcome, and a `since` cursor. Returns `configured: false` when ASD_AUDIT_LOG was not set at server startup."
     )]
     async fn audit_tail(&self, params: Parameters<AuditTailParams>) -> String {
@@ -1269,16 +1567,6 @@ fn err_json(msg: &str) -> String {
         .unwrap_or_else(|_| "{\"error\":\"unknown\"}".to_string())
 }
 
-/// Emit an audit event via the engine's configured sink. Mirrors the CLI's
-/// `emit_audit` helper: log sink failures to stderr but never propagate —
-/// audit issues must never block the user's operation. Called while
-/// `engine.lock().await` is held; sink impls are expected to be fast
-/// (JsonlFileSink does a single append-open + write).
-fn emit_audit(sink: &dyn AuditSink, event: AuditEvent) {
-    if let Err(e) = sink.emit(&event) {
-        eprintln!("warning: audit emit failed: {}", e);
-    }
-}
 
 fn parse_ledger_kind(s: &str) -> Result<LedgerKind, String> {
     match s.to_lowercase().as_str() {
@@ -1328,3 +1616,4 @@ fn resolve_symbols_by_ids(
     out.sort_by(|a, b| a.qname.cmp(&b.qname));
     Ok(out)
 }
+

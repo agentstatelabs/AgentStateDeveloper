@@ -22,7 +22,7 @@ fn sample_db() -> PathBuf {
 async fn router() -> axum::Router {
     let db = sample_db();
     let engine = Engine::open_sqlite(&db).expect("open sqlite");
-    build_router(Arc::new(Mutex::new(engine)), db, None, None)
+    build_router(Arc::new(Mutex::new(engine)), db, None, None, true)
 }
 
 async fn get_body(app: axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {

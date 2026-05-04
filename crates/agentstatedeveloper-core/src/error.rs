@@ -23,9 +23,6 @@ pub enum AsdError {
     #[error("symbol not found: {0}")]
     SymbolNotFound(String),
 
-    #[error("policy denied: {0}")]
-    PolicyDenied(String),
-
     #[error("{0}")]
     Other(String),
 }

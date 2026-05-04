@@ -22,12 +22,27 @@ Out of scope: per-language adapter internals, verifier implementations, UI.
 - **ASD** = code-level context. New MCP tool family. Can cross-cite CTXone
   facts; CTXone's `why_did_we` can cite ASD ledger entries.
 
-## Solo vs. enterprise
+## OSS / Team / Enterprise
 
 Everything in this doc is the **core** layer — works for a solo dev on a
 laptop. Policy (who can write, what requires attestation, merge gates) is
 an overlay that enterprises adopt without changing the schemas below.
 The core is designed so policy attaches via hooks, not rewrites.
+
+- **OSS** — `asd`, `asd-mcp`, `asd-serve` binaries. SQLite-backed, permissive
+  policy (`NoPolicyMatch → Allow`), full ledger/effects/index, audit log tailing.
+  Audit log verification and ratification (approve/reject/withdraw) return
+  upgrade prompts at runtime.
+- **Team** — `asd-pro`, `asd-pro-mcp`, `asd-pro-serve` binaries (commercial).
+  Adds hash-chained JSONL audit log (`JsonlFileSink`), `audit verify`, and the
+  ratification tier (approve/reject/withdraw via `agentstategraph-tasks`).
+- **Enterprise** — Team + Postgres-backed ASG, multi-tenancy, registry for
+  cross-machine authoring history, SIEM audit export, SSO/RBAC.
+
+**Dual-binary model:** OSS and commercial features ship in separate binaries.
+This prevents paid features from being extracted from the open binary at rest —
+the OSS binary has no code paths for Team/Enterprise behavior; it only has
+runtime stubs that surface upgrade messages.
 
 ## ASG path convention
 
@@ -332,11 +347,13 @@ GitHub get a semantic summary via commit trailers and the `.asd/` diff.
 
 ## Policy integration (via `agentstategraph-policy`)
 
-The policy layer ships as a separate sibling crate, `agentstategraph-policy`,
-designed at [POLICY_V1.md](/Users/user/Documents/AgentStateLabs/strategy/POLICY_V1.md)
-(2026-04-16). ASD is a **consumer** of that crate, not a definer — same
-relationship CTXone and ThreadWeaver have. Crate is designed, not built;
-rollout is gated on plans shipping first.
+The policy layer ships as the sibling crate `agentstategraph-policy`.
+ASD is a **consumer** of that crate, not a definer. As of M18 this
+integration is live: `PolicyStoreGate` (in `agentstatedeveloper-core::policy`)
+wraps `PolicyStore`, imports JSON policy rules into an isolated in-memory
+ASG repo at startup, and delegates all evaluation to the real policy engine.
+`FilePolicyGate` is retained for unit tests and backward compatibility but
+is no longer the production path.
 
 ### Call-site pattern
 
@@ -354,18 +371,19 @@ proposed_action, agent_id)` and branch on the returned `Decision`:
 
 ### ASD action taxonomy
 
-Per POLICY_V1 §17 (open question on action taxonomy), ASD uses a per-domain
-namespace. Draft vocabulary:
+Formalized in `agentstatedeveloper-core::policy::actions`. Constants used by
+every `PolicyGate::evaluate` call site:
 
-- `asd.ledger.append.<kind>` — e.g., `asd.ledger.append.hazard`
+- `asd.ledger.append.<kind>` — e.g., `asd.ledger.append.hazard` (via `ledger_append_action(kind)`)
 - `asd.ledger.supersede`
+- `asd.ledger.approve` / `asd.ledger.reject` / `asd.ledger.withdraw`
 - `asd.effect.declare` / `asd.effect.declare.broadens` (when declared set widens)
-- `asd.code.read` / `asd.code.read.redacted` (when hit on a gated symbol)
-- `asd.merge.branch_to_main` / `asd.merge.branch_to_branch`
+- `asd.code.read` / `asd.code.commit`
+- `asd.merge.branch_to_main`
 - `asd.rename.symbol` / `asd.rename.file`
 
-Each action can carry a structured `situation` (symbol path, effect set,
-branch names) for the selector to evaluate.
+`Situation.qualifiers` is populated per call site so policy selectors can key
+on `symbol_id`, `file`, `language`, `kind`, `qname`, and `entry_id`.
 
 ### Which ASD concerns map to which policy fields
 
@@ -377,15 +395,15 @@ branch names) for the selector to evaluate.
 | Second-agent attestation | `require_approval` with `approvers: ["senior_agent", "human"]` + multi-agent ratification (POLICY_V1 §10.1) |
 | Sensitive-symbol redaction | `deny` on `asd.code.read` for specific path prefixes, keyed to requester's agent_id |
 
-### What ASD can do now, without the crate
+### What is live as of M18
 
-- Define the call-sites (stubs that return Allow unconditionally)
-- Implement the action taxonomy as constants
-- Emit `matched_policy` as `None` in ledger/effect records
-- Ship solo-dev tier fully functional
-
-When `agentstategraph-policy` lands, the stubs become real `policy_evaluate`
-calls with no schema change on the ASD side.
+- `PolicyStoreGate` is the production path; `--policy` / `ASD_POLICY` loads
+  it at startup via `Engine::load_policy_file`.
+- Action taxonomy is formalized and wired at all write call sites.
+- `Situation.qualifiers` carries `symbol_id`, `file`, `language`, `kind`,
+  `qname`, and `entry_id` where available.
+- `approve`, `reject`, and `withdraw` evaluate `LEDGER_APPROVE` /
+  `LEDGER_REJECT` / `LEDGER_WITHDRAW` before touching the store.
 
 ### Enforcement honesty (per POLICY_V1 §11)
 
@@ -426,19 +444,10 @@ Contracts and execution traces are phase 2.
 
 ### Tiers
 
-**Solo dev (OSS):** local SQLite-backed ASG, permissive policy
-(`NoPolicyMatch → Allow`), single-user, `.asd/` in git, CLI + MCP +
-minimal Lens for local browsing. Everything in this repo.
-
-**Enterprise (commercial, separate repo):** Postgres-backed ASG with
-multi-tenancy, real policy enforcement via `agentstategraph-policy`,
-ratification + multi-agent attestation, registry for cross-machine
-authoring history, audit export (SIEM), enterprise SSO + RBAC, admin
-UI. Consumes the OSS crates as dependencies; never reaches into internals.
-
-Same binary; tier is selected by config (`ASD_MODE=solo|enterprise` or
-`~/.asd/config.toml`). MCP tool surface is identical across tiers —
-policy + scope determine per-call behavior, not feature flags.
+See [OSS / Team / Enterprise](#oss--team--enterprise) above for the full
+tier breakdown. The MCP tool surface is identical across tiers — policy
+and the installed sink/ratify implementation determine per-call behavior,
+not feature flags.
 
 ### License
 
@@ -449,40 +458,41 @@ swapping "CTXone" for "AgentStateDeveloper."
 ### Directory layout
 
 ```
-agent-programming-layer/
+AgentStateDeveloper/
 ├── crates/
-│   ├── agentstatedeveloper-core/       # traits + ASG-backed default impls
+│   ├── agentstatedeveloper-core/       # traits + ASG-backed default impls, PolicyGate
 │   ├── agentstatedeveloper-python/     # Python language adapter
-│   ├── agentstatedeveloper-mcp/        # MCP server (stdio + HTTP)
-│   └── agentstatedeveloper-cli/        # `asd` binary
-├── bindings/python/                    # pyo3 bindings (phase 2)
-├── web/                                # Lens solo viewer (M2, Svelte)
+│   ├── agentstatedeveloper-typescript/ # TypeScript language adapter
+│   ├── agentstatedeveloper-mcp/        # OSS MCP + HTTP server (asd-mcp, asd-serve)
+│   ├── agentstatedeveloper-cli/        # OSS CLI (asd); also a library for asd-pro
+│   ├── agentstatedeveloper-audit-pro/  # Enterprise: JsonlFileSink + verify_chain
+│   ├── agentstatedeveloper-ratify/     # Team: RatifyOpsImpl (approve/reject/withdraw)
+│   └── agentstatedeveloper-pro/        # Commercial binaries: asd-pro, asd-pro-mcp, asd-pro-serve
+├── site/                               # agentstatedeveloper.dev (Astro)
 ├── examples/sample-py-repo/
-├── spec/                               # formal spec once shape stabilizes
 └── Cargo.toml                          # workspace root
 ```
 
 Follows the same pattern as `/Apps/stategraph/` and `/Apps/CTXone/`.
 
-### Milestones
+### Milestones (shipped through M17)
 
-- **M1** (shipped) — core + Python adapter + CLI (`asd init`, `index`,
-  `read`, `ledger append`, `verify-effects`) + MCP server stub + sample
-  Python repo. Solo-complete end-to-end read/write of effects and ledger.
-- **M2** (shipped) — Lens solo viewer (SvelteKit + adapter-static) + HTTP
-  server (`asd-serve`, axum). Lens consumes the same API ASD-MCP does.
-- **M3** (shipped) — real MCP stdio server via `rmcp` (replaces the M1
-  stub; 10 tools total now) + Python runtime effect tracer (`asd trace`)
-  that ingests observed effects and flips `EffectDecl.verification` to
-  `runtime-tracer` with real ok/mismatch signal.
-- **M4** (shipped) — intra-module call graph (Python adapter extracts
-  `identifier`/`self.X`/`Class.X` call edges) + transitive effect
-  propagator (cycle-safe DFS, deterministic, idempotent). HTTP + MCP +
-  Lens all expose `callers_of` / `callees_of`.
-- **M5** — cross-module edge resolution: parse Python imports, resolve
-  calls through `from X import Y` / `import X.Y` / aliases. Drops
-  M4's single-file boundary so the call graph reflects real codebases.
-- **Future** — TypeScript adapter, contract layer (refinement
-  types/invariants), `agentstategraph-policy` consumer wiring, Lens
-  ratification surface, enterprise repo scaffold (registry server,
-  audit export connectors, SSO/RBAC).
+- **M1–M4** — core + Python adapter + CLI + MCP stub, Lens + HTTP server,
+  real MCP server via `rmcp`, intra-module call graph + transitive effects.
+- **M5** — cross-module edge resolution (Python imports).
+- **M6–M9** — policy gate (FilePolicyGate), ledger supersede, ledger approve/
+  reject/withdraw (Team tier stubs).
+- **M10–M11** — sync/hydrate sidecar, TypeScript adapter.
+- **M12** — audit-log event stream (CLI + MCP + HTTP).
+- **M13** — marketing + docs site (agentstatedeveloper.dev, Astro).
+- **M14** — audit tail parity across HTTP, MCP, CLI.
+- **M15** — hash-chained audit log (blake3, prev_event_hash, tamper-evident).
+- **M16** — Lens verify badge + live audit streaming + SPA routing fix.
+- **M17** — OSS/commercial tier split: dual-binary model, `agentstatedeveloper-
+  audit-pro` (Enterprise), `agentstatedeveloper-ratify` (Team),
+  `agentstatedeveloper-pro` binaries; `RatifyOps` trait in core; upgrade
+  prompts in OSS binaries; `/pricing` page.
+- **M18 (in progress)** — `agentstategraph-policy` integration: `PolicyStoreGate`
+  replaces `FilePolicyGate` as production path; action taxonomy formalized;
+  `Situation` qualifiers enriched; policy evaluation wired into
+  approve/reject/withdraw.

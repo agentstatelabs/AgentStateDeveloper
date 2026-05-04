@@ -1,7 +1,7 @@
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
 
-use crate::error::Result;
+use crate::error::{AsdError, Result};
 use crate::paths;
 use crate::schema::Symbol;
 
@@ -54,7 +54,8 @@ impl<'a> IndexStore for AsgIndexStore<'a> {
         let path = paths::qname_index_path(qname);
         match self.repo.get_json(ref_name, &path) {
             Ok(v) => Ok(Some(serde_json::from_value(v)?)),
-            Err(_) => Ok(None),
+            Err(agentstategraph::RepoError::Tree(_)) => Ok(None),
+            Err(e) => Err(AsdError::Repo(e)),
         }
     }
 

@@ -48,6 +48,13 @@ pub trait LanguageAdapter: Send + Sync {
     /// Stable language identifier — "python", "typescript", ...
     fn language(&self) -> &str;
 
+    /// File extensions this adapter handles, without the leading dot.
+    /// Used by the shared index pipeline for file dispatch.
+    /// Default: empty (adapter is never auto-selected by extension).
+    fn file_extensions(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Parse a file and return declared symbols.
     fn parse_symbols(&self, file: &str, source: &str) -> Result<Vec<ParsedSymbol>>;
 

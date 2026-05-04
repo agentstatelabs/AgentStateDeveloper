@@ -33,6 +33,9 @@ async fn main() -> Result<()> {
     );
     let addr = std::env::var("ASD_SERVE_ADDR").unwrap_or_else(|_| "0.0.0.0:4120".to_string());
     let lens_dir = std::env::var("ASD_LENS_DIR").ok().map(PathBuf::from);
+    let cors_permissive = std::env::var("ASD_CORS_PERMISSIVE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
     tracing::info!(?db_path, %addr, ?lens_dir, "starting asd-serve");
 
@@ -56,7 +59,7 @@ async fn main() -> Result<()> {
 
     let shared = Arc::new(Mutex::new(engine));
 
-    let app = build_router(shared, db_path, lens_dir, audit_log_path);
+    let app = build_router(shared, db_path, lens_dir, audit_log_path, cors_permissive);
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await

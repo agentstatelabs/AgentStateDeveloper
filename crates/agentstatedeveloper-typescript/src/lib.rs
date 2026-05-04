@@ -47,6 +47,10 @@ impl LanguageAdapter for TypeScriptAdapter {
         "typescript"
     }
 
+    fn file_extensions(&self) -> &'static [&'static str] {
+        &["ts", "tsx", "mts", "cts"]
+    }
+
     fn parse_symbols(&self, file: &str, source: &str) -> Result<Vec<ParsedSymbol>> {
         let mut parser = Parser::new();
         parser

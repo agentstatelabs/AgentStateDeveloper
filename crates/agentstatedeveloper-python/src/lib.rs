@@ -29,6 +29,10 @@ impl LanguageAdapter for PythonAdapter {
         "python"
     }
 
+    fn file_extensions(&self) -> &'static [&'static str] {
+        &["py"]
+    }
+
     fn parse_symbols(&self, file: &str, source: &str) -> Result<Vec<ParsedSymbol>> {
         let mut parser = Parser::new();
         parser

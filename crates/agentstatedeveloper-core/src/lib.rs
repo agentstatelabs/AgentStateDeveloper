@@ -6,6 +6,7 @@
 
 pub mod adapter;
 pub mod audit;
+pub mod index_pipeline;
 pub mod effects;
 pub mod engine;
 pub mod error;
@@ -19,21 +20,22 @@ pub mod symbol;
 pub mod transitive;
 
 pub use adapter::{CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols};
-pub use audit::{AuditEvent, AuditSink, HASH_PREFIX, NullSink, event_types, read_jsonl};
+pub use index_pipeline::{IndexSummary, collect_source_files, run_index};
+pub use audit::{AuditEvent, AuditSink, HASH_PREFIX, NullSink, emit_audit, event_types, read_jsonl};
 pub use effects::{AsgEffectStore, EffectStore};
 pub use engine::Engine;
 pub use error::{AsdError, Result};
 pub use index::{AsgIndexStore, IndexStore};
-pub use ledger::{ApprovalOutcome, AsgLedgerStore, LedgerStore, RatifyOps, ReviewOutcome};
+pub use ledger::{ApprovalOutcome, AsgLedgerStore, LedgerStore, RatifyOps, ReviewOutcome, detect_orphaned_entries};
 pub use policy::{
     Decision, FilePolicyGate, PermissivePolicyGate, PolicyFile, PolicyGate, PolicyRule, Situation,
     actions,
 };
 pub use schema::{
     ASD_PATH_PREFIX, ASD_SCHEMA_VERSION, Author, AuthorKind, Effect, EffectCategory, EffectDecl,
-    Evidence, LedgerEntry, LedgerKind, Mismatch, Position, Symbol, SymbolKind, TransitiveEffect,
-    Verification, VerificationSource, VerificationStatus,
+    Evidence, LedgerEntry, LedgerKind, Mismatch, Position, Rebind, Symbol, SymbolKind,
+    TransitiveEffect, Verification, VerificationSource, VerificationStatus,
 };
 pub use sidecar::{hydrate_from_dir, sync_to_dir, HydrateSummary, SyncSummary};
-pub use symbol::{REBIND_SIMILARITY_THRESHOLD, canonical_symbol_id, symbol_fingerprint};
+pub use symbol::{canonical_symbol_id, symbol_fingerprint};
 pub use transitive::propagate_transitive;

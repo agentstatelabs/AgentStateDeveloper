@@ -21,10 +21,8 @@ fn prime_db(db_path: &std::path::Path) {
     };
     use agentstatedeveloper_python::PythonAdapter;
 
-    let mut engine = Engine::open_sqlite(db_path).expect("open engine");
+    let engine = Engine::open_sqlite(db_path).expect("open engine");
     let adapter = Arc::new(PythonAdapter::new());
-    let adapter_dyn: Arc<dyn agentstatedeveloper_core::LanguageAdapter> = adapter.clone();
-    engine.register_adapter(adapter_dyn);
 
     let sample_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/sample-py-repo")
@@ -145,7 +143,8 @@ fn mcp_ledger_append_denied_by_policy() {
     // The tool result comes back as a text-content string embedded in the
     // JSON-RPC response. It should mention the policy path and either an
     // error/denied shape.
-    let matched_policy_present = response_line.contains("/policies/test/no-tradeoffs");
+    // normalize() strips the leading slash, so match without it.
+    let matched_policy_present = response_line.contains("policies/test/no-tradeoffs");
     let denied_shape = response_line.contains("policy denied")
         || response_line.contains("\"status\":\"denied\"")
         || response_line.contains("\\\"status\\\":\\\"denied\\\"");

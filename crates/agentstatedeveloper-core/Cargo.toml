@@ -10,6 +10,7 @@ description = "Core types, traits, and ASG-backed implementations for AgentState
 agentstategraph = { workspace = true }
 agentstategraph-core = { workspace = true }
 agentstategraph-storage = { workspace = true }
+agentstategraph-policy = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -15,8 +15,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agentstatedeveloper_core::{
-    AsgEffectStore, AsgIndexStore, AsgLedgerStore, AuditEvent, AuditSink, EffectStore, Engine,
-    IndexStore, LedgerStore, event_types,
+    AsdError, AsgEffectStore, AsgIndexStore, AsgLedgerStore, AuditEvent, EffectStore, Engine,
+    IndexStore, LedgerStore, emit_audit, event_types,
 };
 use axum::{
     Json, Router,
@@ -28,7 +28,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::Mutex;
-use tower_http::cors::CorsLayer;
+use axum::http::HeaderValue;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
@@ -52,11 +53,16 @@ pub struct AppState {
 /// If `lens_dir` is Some and the directory exists, it's mounted as a static
 /// fallback so the Lens SPA can be served alongside the API. Otherwise
 /// unmatched non-API requests 404 gracefully.
+///
+/// `cors_permissive`: when true, allows any origin (dev convenience). When
+/// false (the default), only `http://localhost:*` and `http://127.0.0.1:*`
+/// are permitted. Set via `ASD_CORS_PERMISSIVE=1` or `--cors-permissive`.
 pub fn build_router(
     engine: SharedEngine,
     db_path: PathBuf,
     lens_dir: Option<PathBuf>,
     audit_log_path: Option<PathBuf>,
+    cors_permissive: bool,
 ) -> Router {
     let state = AppState {
         engine,
@@ -103,9 +109,18 @@ pub fn build_router(
         }
     }
 
+    let cors = if cors_permissive {
+        CorsLayer::permissive()
+    } else {
+        CorsLayer::new().allow_origin(AllowOrigin::predicate(|origin: &HeaderValue, _| {
+            let b = origin.as_bytes();
+            b.starts_with(b"http://localhost") || b.starts_with(b"http://127.0.0.1")
+        }))
+    };
+
     router
         .with_state(state)
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .layer(TraceLayer::new_for_http())
 }
 
@@ -166,8 +181,19 @@ async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse>, A
     }))
 }
 
+#[derive(Debug, Deserialize)]
+struct SymbolQuery {
+    /// Maximum symbols to return (default 500, max 2000).
+    #[serde(default)]
+    limit: Option<usize>,
+    /// Zero-based offset for pagination (default 0).
+    #[serde(default)]
+    offset: Option<usize>,
+}
+
 async fn list_symbols(
     State(state): State<AppState>,
+    Query(q): Query<SymbolQuery>,
 ) -> Result<Json<Vec<agentstatedeveloper_core::Symbol>>, ApiError> {
     let engine = state.engine.lock().await;
     let ref_name = engine.ref_name.clone();
@@ -190,7 +216,11 @@ async fn list_symbols(
     }
 
     symbols.sort_by(|a, b| a.qname.cmp(&b.qname));
-    Ok(Json(symbols))
+
+    let offset = q.offset.unwrap_or(0);
+    let limit = q.limit.unwrap_or(500).min(2000);
+    let page: Vec<_> = symbols.into_iter().skip(offset).take(limit).collect();
+    Ok(Json(page))
 }
 
 #[derive(Serialize)]
@@ -321,6 +351,12 @@ fn resolve_symbols_by_ids(
 #[derive(Debug, Deserialize)]
 struct LedgerQuery {
     tag: Option<String>,
+    /// Maximum entries to return (default 100, max 1000).
+    #[serde(default)]
+    limit: Option<usize>,
+    /// Zero-based offset for pagination (default 0).
+    #[serde(default)]
+    offset: Option<usize>,
 }
 
 /// Flat cross-symbol ledger listing. Optional `?tag=<name>` filters to entries
@@ -360,7 +396,11 @@ async fn list_ledger(
     }
 
     entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    Ok(Json(entries))
+
+    let offset = q.offset.unwrap_or(0);
+    let limit = q.limit.unwrap_or(100).min(1000);
+    let page: Vec<_> = entries.into_iter().skip(offset).take(limit).collect();
+    Ok(Json(page))
 }
 
 // -----------------------------------------------------------------------------
@@ -496,17 +536,6 @@ fn default_http_agent_id() -> String {
     "asd-http".into()
 }
 
-/// Emit an audit event via the engine's configured sink. Mirrors the CLI's
-/// and MCP's `emit_audit` helpers: log sink failures to stderr but never
-/// propagate — audit issues must never block the user's operation. Called
-/// while `engine.lock().await` is held; sink impls are expected to be fast
-/// (JsonlFileSink does a single append-open + write).
-fn emit_audit(sink: &dyn AuditSink, event: AuditEvent) {
-    if let Err(e) = sink.emit(&event) {
-        eprintln!("warning: audit emit failed: {}", e);
-    }
-}
-
 async fn approve_entry(
     State(state): State<AppState>,
     Path(entry_id): Path<String>,
@@ -514,15 +543,23 @@ async fn approve_entry(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let engine = state.engine.lock().await;
     let ref_name = engine.ref_name.clone();
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
-    match ledger_store.approve_entry(
-        &ref_name,
-        &entry_id,
-        &body.approver,
-        &body.approver_kind,
-        body.message.as_deref(),
-        &body.agent_id,
-    ) {
+    let result = match engine.ratify.as_ref() {
+        Some(ratify) => ratify.approve_entry(
+            &engine.repo,
+            &ref_name,
+            &entry_id,
+            &body.approver,
+            &body.approver_kind,
+            body.message.as_deref(),
+            &body.agent_id,
+        ),
+        None => Err(AsdError::Other(
+            "ledger approve is a commercial feature (Team tier) — \
+             install asd-pro to enable. See https://agentstatedeveloper.dev/pricing"
+                .into(),
+        )),
+    };
+    match result {
         Ok(outcome) => {
             let status = if outcome.already_approved {
                 "already-approved"
@@ -568,15 +605,23 @@ async fn reject_entry(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let engine = state.engine.lock().await;
     let ref_name = engine.ref_name.clone();
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
-    match ledger_store.reject_entry(
-        &ref_name,
-        &entry_id,
-        &body.reviewer,
-        &body.reviewer_kind,
-        &body.reason,
-        &body.agent_id,
-    ) {
+    let result = match engine.ratify.as_ref() {
+        Some(ratify) => ratify.reject_entry(
+            &engine.repo,
+            &ref_name,
+            &entry_id,
+            &body.reviewer,
+            &body.reviewer_kind,
+            &body.reason,
+            &body.agent_id,
+        ),
+        None => Err(AsdError::Other(
+            "ledger reject is a commercial feature (Team tier) — \
+             install asd-pro to enable. See https://agentstatedeveloper.dev/pricing"
+                .into(),
+        )),
+    };
+    match result {
         Ok(outcome) => {
             let status = if outcome.already_resolved {
                 "already-rejected"
@@ -623,8 +668,21 @@ async fn withdraw_entry(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let engine = state.engine.lock().await;
     let ref_name = engine.ref_name.clone();
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
-    match ledger_store.withdraw_entry(&ref_name, &entry_id, &body.author_id, &body.agent_id) {
+    let result = match engine.ratify.as_ref() {
+        Some(ratify) => ratify.withdraw_entry(
+            &engine.repo,
+            &ref_name,
+            &entry_id,
+            &body.author_id,
+            &body.agent_id,
+        ),
+        None => Err(AsdError::Other(
+            "ledger withdraw is a commercial feature (Team tier) — \
+             install asd-pro to enable. See https://agentstatedeveloper.dev/pricing"
+                .into(),
+        )),
+    };
+    match result {
         Ok(outcome) => {
             let status = if outcome.already_resolved {
                 "already-withdrawn"
