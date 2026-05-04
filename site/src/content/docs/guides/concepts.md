@@ -10,7 +10,7 @@ is enough to understand everything else.
 ## 1. Semantic index
 
 **What.** Symbol-level model of your codebase — every function, method, class
-parsed by a language adapter (tree-sitter-python, tree-sitter-typescript).
+parsed by a language adapter (tree-sitter based; nine languages supported).
 Each symbol gets a `symbol_id` (canonical, stable across content edits) and a
 `symbol_fp` (content fingerprint, changes on every edit).
 
@@ -115,10 +115,9 @@ asd read payments.charge_card
 ## 4. Call graph (intra + cross-module)
 
 **What.** For every symbol, the set of symbols it calls (`callees`) and the
-set that call it (`callers`). Python adapter follows `identifier`, `self.X`,
-`Class.X`, plus `from X import Y` / `import X` / aliases across modules.
-TypeScript handles `import { X } from 'mod'`, namespace imports (`import * as
-ns`), and default imports.
+set that call it (`callers`). Each language adapter resolves call sites using
+language-appropriate heuristics — import aliases, qualified names, method
+receivers, and intra-class dispatch.
 
 **Why.** Drives transitive effect propagation and lets reviewers walk a
 proposed change outward — who calls this? what does it call?
@@ -146,7 +145,7 @@ asd read driver.main
 }
 ```
 
-## 5. Runtime tracer (Python)
+## 5. Runtime tracer
 
 **What.** A `sys.settrace`-based Python tracer (`tools/asd_tracer.py`). It
 monkey-patches a pragmatic slice of stdlib entry points (open/print/logging/

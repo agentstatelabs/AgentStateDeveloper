@@ -81,7 +81,8 @@ A single Rust workspace ships:
   `trace`, `sync`, `hydrate`, `audit` subcommands.
 - `asd-mcp` — stdio MCP server exposing 14 tools to coding agents.
 - `asd-serve` — HTTP server (axum) hosting the JSON API and static Lens UI.
-- Python and TypeScript language adapters (tree-sitter based).
+- Nine language adapters (tree-sitter based): Python, TypeScript, Rust, Go,
+  Java, C#, Ruby, Kotlin, and Swift.
 - A Python runtime tracer (`tools/asd_tracer.py`) that ingests observed
   syscalls back into the graph.
 - A SvelteKit review UI (Lens) that reads the same HTTP API.

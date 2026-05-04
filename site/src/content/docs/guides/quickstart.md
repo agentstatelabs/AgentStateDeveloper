@@ -4,7 +4,9 @@ description: Clone, build, index a sample repository, and append your first ledg
 ---
 
 This walkthrough takes you from a fresh clone to a policy-gated ledger entry
-against the included Python sample repo.
+against the included Python sample repo. ASD supports nine languages out of
+the box (Python, TypeScript, Rust, Go, Java, C#, Ruby, Kotlin, Swift) — point
+`asd index` at any directory and it picks the right adapter automatically.
 
 ## 1. Build
 
@@ -57,7 +59,7 @@ asd index .
 }
 ```
 
-Every Python file under the directory is parsed. Symbols land at
+Every recognized source file under the directory is parsed. Symbols land at
 `/asd/v1/index/by-qname/<qname>`; inferred effects at
 `/asd/v1/effects/<symbol_id>`; call edges at `/asd/v1/index/callees/` and
 `/asd/v1/index/callers/`. `transitive_updates` reports how many symbols

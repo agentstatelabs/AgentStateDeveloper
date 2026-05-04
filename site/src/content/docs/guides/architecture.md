@@ -3,7 +3,7 @@ title: Architecture
 description: Three-tier storage model, the crate layout, and how CLI / MCP / HTTP / Lens share a single core.
 ---
 
-ASD is a Rust workspace with a clear split: a language-agnostic core, two
+ASD is a Rust workspace with a clear split: a language-agnostic core, nine
 language adapters, and three binary surfaces that wrap the core with different
 transports.
 
@@ -40,8 +40,16 @@ everything the repository needs to work without any network call.
 ```
 crates/
   agentstatedeveloper-core/       traits, schema, ASG-backed stores, policy, audit
-  agentstatedeveloper-python/     tree-sitter-python adapter + effect inference
-  agentstatedeveloper-typescript/ tree-sitter-typescript adapter + effect inference
+  agentstatedeveloper-adapters/   default_adapters() — registers all language adapters
+  agentstatedeveloper-python/     Python adapter (tree-sitter)
+  agentstatedeveloper-typescript/ TypeScript/JavaScript adapter (tree-sitter)
+  agentstatedeveloper-rust/       Rust adapter (tree-sitter)
+  agentstatedeveloper-go/         Go adapter (tree-sitter)
+  agentstatedeveloper-java/       Java adapter (tree-sitter)
+  agentstatedeveloper-csharp/     C# adapter (tree-sitter)
+  agentstatedeveloper-ruby/       Ruby adapter (tree-sitter)
+  agentstatedeveloper-kotlin/     Kotlin adapter (tree-sitter)
+  agentstatedeveloper-swift/      Swift adapter (tree-sitter)
   agentstatedeveloper-cli/        `asd` binary (clap)
   agentstatedeveloper-mcp/        `asd-mcp` stdio server + `asd-serve` HTTP server
 web/                              Lens SvelteKit review UI
@@ -73,12 +81,25 @@ Key modules:
 
 ### Language adapters
 
-`agentstatedeveloper-python` and `agentstatedeveloper-typescript` implement
-`LanguageAdapter` — three methods: `parse_symbols`, `infer_effects`,
-`extract_call_edges`. They are completely independent. A file's extension
-picks the adapter (`.py` → Python; `.ts`/`.tsx`/`.mts`/`.cts` → TypeScript).
+Each language crate implements `LanguageAdapter` — three methods:
+`parse_symbols`, `infer_effects`, `extract_call_edges`. All adapters are
+registered at startup via `default_adapters()` in `agentstatedeveloper-adapters`.
+A file's extension selects the adapter automatically:
+
+| Extension | Adapter |
+|---|---|
+| `.py` | Python |
+| `.ts` `.tsx` `.mts` `.cts` `.js` `.jsx` | TypeScript |
+| `.rs` | Rust |
+| `.go` | Go |
+| `.java` | Java |
+| `.cs` | C# |
+| `.rb` | Ruby |
+| `.kt` `.kts` | Kotlin |
+| `.swift` | Swift |
+
 See [the Python guide](/guides/python) and [the TypeScript guide](/guides/typescript)
-for what each adapter covers.
+for detailed adapter documentation.
 
 ### Surfaces
 
