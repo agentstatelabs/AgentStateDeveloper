@@ -12,3 +12,4 @@ agentstatedeveloper-python = { workspace = true }
 agentstatedeveloper-typescript = { workspace = true }
 agentstatedeveloper-rust = { workspace = true }
 agentstatedeveloper-go = { workspace = true }
+agentstatedeveloper-java = { workspace = true }

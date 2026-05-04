@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use agentstatedeveloper_core::LanguageAdapter;
 use agentstatedeveloper_go::GoAdapter;
+use agentstatedeveloper_java::JavaAdapter;
 use agentstatedeveloper_python::PythonAdapter;
 use agentstatedeveloper_rust::RustAdapter;
 use agentstatedeveloper_typescript::TypeScriptAdapter;
@@ -23,5 +24,6 @@ pub fn default_adapters() -> Vec<Arc<dyn LanguageAdapter>> {
         Arc::new(TypeScriptAdapter::new()),
         Arc::new(RustAdapter::new()),
         Arc::new(GoAdapter::new()),
+        Arc::new(JavaAdapter::new()),
     ]
 }
