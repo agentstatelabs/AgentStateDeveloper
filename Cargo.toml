@@ -7,6 +7,7 @@ members = [
     "crates/agentstatedeveloper-rust",
     "crates/agentstatedeveloper-go",
     "crates/agentstatedeveloper-java",
+    "crates/agentstatedeveloper-csharp",
     "crates/agentstatedeveloper-adapters",
     "crates/agentstatedeveloper-cli",
     "crates/agentstatedeveloper-mcp",
@@ -56,6 +57,7 @@ agentstatedeveloper-typescript = { path = "crates/agentstatedeveloper-typescript
 agentstatedeveloper-rust = { path = "crates/agentstatedeveloper-rust" }
 agentstatedeveloper-go = { path = "crates/agentstatedeveloper-go" }
 agentstatedeveloper-java = { path = "crates/agentstatedeveloper-java" }
+agentstatedeveloper-csharp = { path = "crates/agentstatedeveloper-csharp" }
 agentstatedeveloper-adapters = { path = "crates/agentstatedeveloper-adapters" }
 agentstatedeveloper-cli = { path = "crates/agentstatedeveloper-cli" }
 agentstatedeveloper-mcp = { path = "crates/agentstatedeveloper-mcp" }
