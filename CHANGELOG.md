@@ -5,6 +5,15 @@ Versions use semantic versioning; each milestone increments by 0.0.5.
 
 ---
 
+## [0.6.1] — 2026-05-05
+
+### Added
+- **Always-on index log** — every `asd index` run writes full per-file progress
+  and all skipped files to `.asd/index.log`; `--verbose` tees that same output
+  to stderr; skipped files capped at 100 on stderr with "…and N more" hint
+
+---
+
 ## [0.6.0] — 2026-05-05
 
 ### Added
