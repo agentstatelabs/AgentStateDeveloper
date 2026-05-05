@@ -1348,6 +1348,7 @@ impl AsdMcpServer {
             Ok(s) => serde_json::json!({
                 "path": p.path,
                 "files": s.files,
+                "skipped": s.skipped,
                 "symbols": s.symbols,
                 "edges": s.edges,
                 "intra_module_edges": s.intra_module_edges,

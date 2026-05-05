@@ -20,7 +20,7 @@ pub mod symbol;
 pub mod transitive;
 
 pub use adapter::{CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols};
-pub use index_pipeline::{IndexSummary, collect_source_files, run_index};
+pub use index_pipeline::{CollectResult, IndexSummary, collect_source_files, run_index};
 pub use audit::{AuditEvent, AuditSink, HASH_PREFIX, NullSink, emit_audit, event_types, read_jsonl};
 pub use effects::{AsgEffectStore, EffectStore};
 pub use engine::Engine;

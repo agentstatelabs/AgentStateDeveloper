@@ -31,6 +31,7 @@ use agentstategraph::Repository;
 #[derive(Debug, Clone, Default)]
 pub struct IndexSummary {
     pub files: usize,
+    pub skipped: usize,
     pub symbols: usize,
     pub effects: usize,
     pub edges: usize,
@@ -38,6 +39,14 @@ pub struct IndexSummary {
     pub cross_module_edges: usize,
     pub transitive_updates: usize,
     pub orphaned_tagged: usize,
+}
+
+/// Result of collecting source files under a path.
+pub struct CollectResult {
+    /// Files paired with the adapter that will handle them.
+    pub recognized: Vec<(PathBuf, Arc<dyn LanguageAdapter>)>,
+    /// Files that had no matching adapter.
+    pub skipped: Vec<PathBuf>,
 }
 
 /// Run the full index pipeline over `path` using the provided adapters.
@@ -59,7 +68,9 @@ pub fn run_index(
     audit: Option<&dyn AuditSink>,
     progress: Option<&dyn Fn(&Path, usize, usize)>,
 ) -> Result<IndexSummary> {
-    let files = collect_source_files(path, adapters)?;
+    let collected = collect_source_files(path, adapters)?;
+    let files = collected.recognized;
+    let skipped_files = collected.skipped;
     let index_root = if path.is_dir() {
         path.to_path_buf()
     } else {
@@ -217,6 +228,7 @@ pub fn run_index(
 
     Ok(IndexSummary {
         files: files.len(),
+        skipped: skipped_files.len(),
         symbols: symbol_count,
         effects: effect_count,
         edges: resolved_edge_count,
@@ -235,19 +247,23 @@ fn same_module(caller: &str, callee: &str) -> bool {
 
 /// Collect source files under `root`, pairing each with the first adapter
 /// whose [`LanguageAdapter::file_extensions`] includes the file's extension.
+/// Files with no matching adapter are collected into `CollectResult::skipped`.
 pub fn collect_source_files(
     root: &Path,
     adapters: &[Arc<dyn LanguageAdapter>],
-) -> Result<Vec<(PathBuf, Arc<dyn LanguageAdapter>)>> {
-    let mut out = Vec::new();
+) -> Result<CollectResult> {
+    let mut recognized = Vec::new();
+    let mut skipped = Vec::new();
     if root.is_file() {
         if let Some(adapter) = adapter_for_path(root, adapters) {
-            out.push((root.to_path_buf(), adapter));
+            recognized.push((root.to_path_buf(), adapter));
+        } else {
+            skipped.push(root.to_path_buf());
         }
-        return Ok(out);
+        return Ok(CollectResult { recognized, skipped });
     }
-    walk(root, adapters, &mut out)?;
-    Ok(out)
+    walk(root, adapters, &mut recognized, &mut skipped)?;
+    Ok(CollectResult { recognized, skipped })
 }
 
 fn adapter_for_path(
@@ -262,6 +278,7 @@ fn walk(
     dir: &Path,
     adapters: &[Arc<dyn LanguageAdapter>],
     out: &mut Vec<(PathBuf, Arc<dyn LanguageAdapter>)>,
+    skipped: &mut Vec<PathBuf>,
 ) -> Result<()> {
     let rd = std::fs::read_dir(dir)
         .map_err(|e| AsdError::Other(format!("read_dir {}: {}", dir.display(), e)))?;
@@ -278,10 +295,12 @@ fn walk(
             ) {
                 continue;
             }
-            walk(&path, adapters, out)?;
+            walk(&path, adapters, out, skipped)?;
         } else if ft.is_file() {
             if let Some(adapter) = adapter_for_path(&path, adapters) {
                 out.push((path, adapter));
+            } else {
+                skipped.push(path);
             }
         }
     }
