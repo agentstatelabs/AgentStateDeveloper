@@ -1,5 +1,5 @@
 //! `asd read <qname>` — look up a symbol by qname, pull its effect
-//! declaration, and the 5 most recent ledger entries.
+//! declaration, ledger entries, and direct callers/callees from the call graph.
 
 use anyhow::Result;
 use clap::Args;
@@ -9,6 +9,7 @@ use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, IndexStore, LedgerStore,
 };
 
+use crate::commands::graph::build_id_map;
 use crate::config::Config;
 
 #[derive(Debug, Args)]
@@ -32,8 +33,28 @@ pub fn run(cfg: &Config, args: ReadArgs) -> Result<()> {
     let mut ledger = ledger_store.list_entries(&engine.ref_name, &symbol.symbol_id)?;
     ledger.truncate(5);
 
+    // Call graph — resolve symbol IDs to qname + location.
+    let callee_ids = index_store.get_callees(&engine.ref_name, &symbol.symbol_id)?;
+    let caller_ids = index_store.get_callers(&engine.ref_name, &symbol.symbol_id)?;
+
+    let id_map = build_id_map(&engine);
+
+    let resolve = |ids: Vec<String>| -> Vec<serde_json::Value> {
+        ids.iter()
+            .map(|id| {
+                if let Some(s) = id_map.get(id) {
+                    json!({ "qname": s.qname, "file": s.file, "line": s.start.line })
+                } else {
+                    json!({ "symbol_id": id })
+                }
+            })
+            .collect()
+    };
+
     let out = json!({
         "symbol": symbol,
+        "callers": resolve(caller_ids),
+        "callees": resolve(callee_ids),
         "effects": effects,
         "ledger": ledger,
     });

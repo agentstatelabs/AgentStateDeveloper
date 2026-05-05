@@ -5,6 +5,28 @@ Versions use semantic versioning; each milestone increments by 0.0.5.
 
 ---
 
+## [0.8.0] — 2026-05-05
+
+### Added
+- **`asd callers <qname>`** — show direct or transitive callers of a symbol
+  (`--depth N` for BFS expansion); output includes qname, file, and line.
+- **`asd callees <qname>`** — same for callees.
+- **Callers + callees in `asd read`** — every symbol read now includes its
+  direct callers and callees resolved to qname + file:line.
+- **`asd list effects --file <substr>`** — filter effects output by source
+  file path substring (joins through symbol map).
+- **`.asdignore` support** — place one directory-name pattern per line at
+  the repo root to exclude custom paths from `asd index`.
+
+### Fixed
+- **Broken-pipe panic in `asd list`** — piping to `head` / `grep` now exits
+  cleanly (SIGPIPE handled via `BrokenPipe` error check at process exit).
+- **Stale `.claude/worktrees` symbols** — `.claude`, `.asd`, `.build`,
+  `DerivedData`, `target`, `xcuserdata`, and other build/tool directories
+  are now excluded from indexing by default.
+
+---
+
 ## [0.7.5] — 2026-05-05
 
 ### Fixed

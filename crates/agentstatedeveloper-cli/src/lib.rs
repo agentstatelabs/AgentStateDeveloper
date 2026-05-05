@@ -117,6 +117,12 @@ pub enum Command {
 
     /// List indexed symbols, effects, or ledger entries.
     List(commands::list::ListArgs),
+
+    /// Show symbols that call the given symbol (direct or transitive).
+    Callers(commands::graph::CallersArgs),
+
+    /// Show symbols called by the given symbol (direct or transitive).
+    Callees(commands::graph::CalleesArgs),
 }
 
 /// Resolve [`Config`] from the parsed CLI flags.
@@ -149,5 +155,7 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Audit(sub) => audit::run(cfg, sub),
         Command::Mcp(sub) => mcp::run(cfg, sub),
         Command::List(args) => list::run(cfg, args),
+        Command::Callers(args) => graph::run_callers(cfg, args),
+        Command::Callees(args) => graph::run_callees(cfg, args),
     }
 }

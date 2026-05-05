@@ -9,6 +9,8 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{EffectDecl, Engine, LedgerEntry, Symbol};
 
+use crate::commands::graph::build_id_map;
+
 use crate::config::Config;
 
 #[derive(Debug, Args)]
@@ -43,6 +45,10 @@ pub enum ListCmd {
         /// Filter by effect category (e.g. io.net.out, log, pure)
         #[arg(long)]
         category: Option<String>,
+
+        /// Filter by source file path substring (e.g. DriftSynthPool.swift)
+        #[arg(long)]
+        file: Option<String>,
     },
 
     /// List all ledger entries
@@ -106,7 +112,7 @@ pub fn run(cfg: &Config, args: ListArgs) -> Result<()> {
             );
         }
 
-        ListCmd::Effects { has_declared, category } => {
+        ListCmd::Effects { has_declared, category, file } => {
             let tree = tree_or_empty(&engine, "/asd/v1/effects");
             let mut decls: Vec<EffectDecl> = tree
                 .as_object()
@@ -124,6 +130,16 @@ pub fn run(cfg: &Config, args: ListArgs) -> Result<()> {
                 decls.retain(|d| {
                     d.declared.iter().any(|e| e.effect.as_str() == cat.as_str())
                         || d.transitive.iter().any(|t| t.effect.as_str() == cat.as_str())
+                });
+            }
+            if let Some(file_filter) = &file {
+                // Join through symbol map to filter by source file path.
+                let id_map = build_id_map(&engine);
+                decls.retain(|d| {
+                    id_map
+                        .get(&d.symbol_id)
+                        .map(|s| s.file.contains(file_filter.as_str()))
+                        .unwrap_or(false)
                 });
             }
 

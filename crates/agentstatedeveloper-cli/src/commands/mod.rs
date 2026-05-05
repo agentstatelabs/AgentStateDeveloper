@@ -1,4 +1,5 @@
 pub mod audit;
+pub mod graph;
 pub mod hooks;
 pub mod hydrate;
 pub mod index;

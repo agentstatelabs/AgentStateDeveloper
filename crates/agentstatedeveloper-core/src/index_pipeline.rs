@@ -512,7 +512,8 @@ fn same_module(caller: &str, callee: &str) -> bool {
     !cm.is_empty() && cm == ee
 }
 
-/// Collect source files under `root`.
+/// Collect source files under `root`, respecting built-in exclusions and an
+/// optional `.asdignore` file in `root` (one directory-name pattern per line).
 pub fn collect_source_files(
     root: &Path,
     adapters: &[Arc<dyn LanguageAdapter>],
@@ -527,8 +528,20 @@ pub fn collect_source_files(
         }
         return Ok(CollectResult { recognized, skipped });
     }
-    walk(root, adapters, &mut recognized, &mut skipped)?;
+    let extra_excludes = load_asdignore(root);
+    walk(root, adapters, &mut recognized, &mut skipped, &extra_excludes)?;
     Ok(CollectResult { recognized, skipped })
+}
+
+/// Read `.asdignore` from `root` and return non-empty, non-comment lines.
+fn load_asdignore(root: &Path) -> Vec<String> {
+    let path = root.join(".asdignore");
+    std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect()
 }
 
 fn adapter_for_path(
@@ -539,11 +552,35 @@ fn adapter_for_path(
     adapters.iter().find(|a| a.file_extensions().contains(&ext)).cloned()
 }
 
+/// Built-in directory names that are always excluded from indexing.
+fn is_builtin_excluded(name: &str) -> bool {
+    matches!(
+        name,
+        // VCS / tooling
+        ".git" | ".svn" | ".hg"
+        // Python
+        | ".venv" | "venv" | "__pycache__" | ".tox" | ".mypy_cache"
+        // JS / TS
+        | "node_modules" | "dist" | ".next" | ".turbo"
+        // Rust
+        | "target"
+        // Swift / Xcode
+        | ".build" | "DerivedData" | "xcuserdata" | ".xcodeproj"
+        // Generic build outputs
+        | "build" | "out" | ".cache"
+        // Claude / AI worktrees
+        | ".claude"
+        // ASD's own state dir
+        | ".asd"
+    )
+}
+
 fn walk(
     dir: &Path,
     adapters: &[Arc<dyn LanguageAdapter>],
     out: &mut Vec<(PathBuf, Arc<dyn LanguageAdapter>)>,
     skipped: &mut Vec<PathBuf>,
+    extra_excludes: &[String],
 ) -> Result<()> {
     let rd = std::fs::read_dir(dir)
         .map_err(|e| AsdError::Other(format!("read_dir {}: {}", dir.display(), e)))?;
@@ -553,14 +590,13 @@ fn walk(
         let ft = entry.file_type().map_err(|e| AsdError::Other(e.to_string()))?;
         if ft.is_dir() {
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if matches!(
-                name,
-                ".git" | ".venv" | "venv" | "__pycache__" | "node_modules"
-                    | ".tox" | ".mypy_cache" | "dist" | "build" | ".next"
-            ) {
+            if is_builtin_excluded(name) {
                 continue;
             }
-            walk(&path, adapters, out, skipped)?;
+            if extra_excludes.iter().any(|pat| name == pat.as_str()) {
+                continue;
+            }
+            walk(&path, adapters, out, skipped, extra_excludes)?;
         } else if ft.is_file() {
             if let Some(adapter) = adapter_for_path(&path, adapters) {
                 out.push((path, adapter));
