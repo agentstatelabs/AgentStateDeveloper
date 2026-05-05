@@ -5,6 +5,36 @@ Versions use semantic versioning; each milestone increments by 0.0.5.
 
 ---
 
+## [0.7.5] — 2026-05-05
+
+### Fixed
+- **O(N²) object storage in `asd index`** — `spec_set_json` per symbol created
+  a growing Map node copy at every shared prefix on each write; 1,341-file repo
+  produced a 59 GB DB. Now assembles complete subtree JSON in memory and writes
+  each prefix with a single `spec_set_json` call. O(N) objects regardless of
+  repo size.
+- **O(N²) object storage in `asd hydrate`** — same root cause; fixed with the
+  same bulk approach for symbols and effects.
+- **Transitive DFS now fully in-memory** — uses in-memory `callees_of` map from
+  Pass 2 instead of per-symbol `get_callees` repo reads.
+
+### Added
+- **Post-processing phase messages** — `asd index` prints phase markers to
+  stderr after file parsing completes so large repos show progress during
+  call graph and transitive propagation steps.
+- **`asd list symbols/effects/ledger`** — enumerate indexed objects with
+  optional filters.
+- **`asd list stats`** — aggregate graph metrics: symbols by language/kind,
+  effects by category and verification status, call graph edge counts, ledger totals.
+
+### Fixed
+- **`asd trace` help text** — clarified Python-only tracer constraint.
+- **Always-on index log** — every run writes full per-file progress to
+  `.asd/index.log`; `--verbose` tees to stderr; skipped files capped at 100
+  on stderr.
+
+---
+
 ## [0.6.2] — 2026-05-05
 
 ### Added
