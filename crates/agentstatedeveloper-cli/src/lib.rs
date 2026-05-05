@@ -110,6 +110,10 @@ pub enum Command {
     /// effect declarations) emitted to the JSONL audit log.
     #[command(subcommand)]
     Audit(commands::audit::AuditCmd),
+
+    /// Install, uninstall, or check asd-mcp registration in agent tools.
+    #[command(subcommand)]
+    Mcp(commands::mcp::McpCmd),
 }
 
 /// Resolve [`Config`] from the parsed CLI flags.
@@ -140,5 +144,6 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Sync(args) => sync::run(cfg, args),
         Command::Hydrate(args) => hydrate::run(cfg, args),
         Command::Audit(sub) => audit::run(cfg, sub),
+        Command::Mcp(sub) => mcp::run(cfg, sub),
     }
 }
