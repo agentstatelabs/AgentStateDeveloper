@@ -46,6 +46,7 @@ use std::path::{Path, PathBuf};
 
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
+use serde_json::Value;
 
 use crate::effects::{AsgEffectStore, EffectStore};
 use crate::error::{AsdError, Result};
@@ -356,44 +357,117 @@ pub fn hydrate_from_dir(
     let rebinds_dir = root.join("rebinds");
     let meta_dir = root.join("meta");
 
-    let index_store = AsgIndexStore { repo };
-    let effect_store = AsgEffectStore { repo };
     let ledger_store = AsgLedgerStore { repo };
 
-    // Symbols first — their qname index is what the CLI and other
-    // consumers look up by.
+    // -----------------------------------------------------------------------
+    // Symbols — bulk load: read all sidecar files into memory maps, then
+    // write each subtree in one spec_set_json call. O(N) objects vs the
+    // O(N²) that individual put_symbol calls produce.
+    // -----------------------------------------------------------------------
     let mut symbols_loaded = 0usize;
     if symbols_dir.is_dir() {
+        // Seed from existing state so partial hydrates merge cleanly.
+        let mut by_qname: serde_json::Map<String, Value> = repo
+            .get_tree(ref_name, "/asd/v1/index/by-qname")
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+
+        // code tree: lang → { "clean_file/symbol_fp" → Symbol }
+        let mut by_code: BTreeMap<String, serde_json::Map<String, Value>> = {
+            let existing = repo
+                .get_tree(ref_name, "/asd/v1/code")
+                .ok()
+                .and_then(|v| v.as_object().cloned())
+                .unwrap_or_default();
+            existing.into_iter().filter_map(|(lang, subtree)| {
+                subtree.as_object().cloned().map(|m| (lang, m))
+            }).collect()
+        };
+
         for entry in fs::read_dir(&symbols_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if !is_json_file(&path) {
-                continue;
-            }
+            if !is_json_file(&path) { continue; }
             let text = fs::read_to_string(&path)?;
             let sym: Symbol = serde_json::from_str(&text)?;
-            index_store.put_symbol(ref_name, &sym, agent_id)?;
+            let sym_val = serde_json::to_value(&sym)?;
+            let code_key = format!(
+                "{}/{}",
+                paths::clean(&sym.file),
+                sym.symbol_fp
+            );
+            by_qname.insert(sym.qname.clone(), sym_val.clone());
+            by_code.entry(sym.language.clone()).or_default().insert(code_key, sym_val);
             symbols_loaded += 1;
+        }
+
+        if symbols_loaded > 0 {
+            let code_tree: serde_json::Map<String, Value> = by_code
+                .into_iter()
+                .map(|(lang, subtree)| (lang, Value::Object(subtree)))
+                .collect();
+            let spec = repo
+                .speculate(ref_name, Some("asd-hydrate-symbols".into()))
+                .map_err(|e| AsdError::Other(e.to_string()))?;
+            repo.spec_set_json(spec, "/asd/v1/index/by-qname", &Value::Object(by_qname))
+                .map_err(|e| AsdError::Other(e.to_string()))?;
+            if !code_tree.is_empty() {
+                repo.spec_set_json(spec, "/asd/v1/code", &Value::Object(code_tree))
+                    .map_err(|e| AsdError::Other(e.to_string()))?;
+            }
+            let opts = CommitOptions::new(
+                agent_id,
+                IntentCategory::Checkpoint,
+                format!("asd hydrate: {} symbols", symbols_loaded),
+            );
+            repo.commit_speculation(spec, opts)
+                .map_err(|e| AsdError::Other(e.to_string()))?;
         }
     }
 
-    // Effects.
+    // -----------------------------------------------------------------------
+    // Effects — same bulk approach.
+    // -----------------------------------------------------------------------
     let mut effects_loaded = 0usize;
     if effects_dir.is_dir() {
+        let mut by_effects: serde_json::Map<String, Value> = repo
+            .get_tree(ref_name, "/asd/v1/effects")
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+
         for entry in fs::read_dir(&effects_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if !is_json_file(&path) {
-                continue;
-            }
+            if !is_json_file(&path) { continue; }
             let text = fs::read_to_string(&path)?;
             let decl: EffectDecl = serde_json::from_str(&text)?;
-            effect_store.put_effects(ref_name, &decl.symbol_id, &decl, agent_id)?;
+            let val = serde_json::to_value(&decl)?;
+            by_effects.insert(decl.symbol_id.clone(), val);
             effects_loaded += 1;
+        }
+
+        if effects_loaded > 0 {
+            let spec = repo
+                .speculate(ref_name, Some("asd-hydrate-effects".into()))
+                .map_err(|e| AsdError::Other(e.to_string()))?;
+            repo.spec_set_json(spec, "/asd/v1/effects", &Value::Object(by_effects))
+                .map_err(|e| AsdError::Other(e.to_string()))?;
+            let opts = CommitOptions::new(
+                agent_id,
+                IntentCategory::Checkpoint,
+                format!("asd hydrate: {} effects", effects_loaded),
+            );
+            repo.commit_speculation(spec, opts)
+                .map_err(|e| AsdError::Other(e.to_string()))?;
         }
     }
 
-    // Ledger entries.
+    // -----------------------------------------------------------------------
+    // Ledger entries — individual writes are fine here; ledger entries are
+    // rare and the nested per-symbol path structure makes bulk writes complex.
+    // -----------------------------------------------------------------------
     let mut ledger_entries_loaded = 0usize;
     if ledger_dir.is_dir() {
         for sym_entry in fs::read_dir(&ledger_dir)? {
