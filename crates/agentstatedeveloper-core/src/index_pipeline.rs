@@ -3,33 +3,41 @@
 //!
 //! # Performance design
 //!
-//! Each `repo.set_json` call creates one git-style commit (resolve HEAD,
-//! tree-copy, write commit, update ref). Naive per-symbol writes produce
-//! O(n) commits with O(n²) total cost on large repos.
+//! ## Old approach (O(N²) storage)
+//! Using `spec_set_json` per symbol caused structural sharing to work against
+//! us: every write rebuilt the growing `by-qname` Map node (1 entry, 2
+//! entries, … N entries). 13 000 symbols × 3 paths = 39 000 growing copies
+//! → 59 GB DB for a 1 341-file project.
 //!
-//! This pipeline batches every write phase via the stategraph speculation
-//! API: accumulate all changes in-memory, then flush as **one** commit per
-//! phase. Three commits are created regardless of repo size:
+//! ## New approach (O(N) storage)
+//! Each pass assembles the **complete** subtree JSON in memory, then writes
+//! it with a **single** `spec_set_json` call per prefix. `json_to_tree`
+//! creates the Map node exactly once with all N entries.
 //!
 //!   1. Pass 1 — symbols + effect declarations
+//!      • `/asd/v1/index/by-qname`  (merged with existing)
+//!      • `/asd/v1/effects`          (merged with existing)
+//!      • `/asd/v1/code`             (merged with existing)
 //!   2. Pass 2 — callee / caller edge lists
+//!      • `/asd/v1/index/callees`
+//!      • `/asd/v1/index/callers`
 //!   3. Transitive — updated EffectDecl.transitive fields
+//!      • `/asd/v1/effects`          (merged with Pass-1 state)
 //!
-//! Pass 2 edge resolution uses an in-memory qname→symbol_id map built
-//! during Pass 1, avoiding per-edge `get_symbol_by_qname` repo reads.
+//! Total object count is O(N) regardless of repo size.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
 use agentstategraph::CommitOptions;
 use agentstategraph_core::IntentCategory;
+use serde_json::Value;
 
 use crate::adapter::{CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols};
 use crate::audit::{AuditEvent, AuditSink, event_types};
 use crate::error::{AsdError, Result};
-use crate::index::AsgIndexStore;
 use crate::ledger::detect_orphaned_entries;
 use crate::paths;
 use crate::schema::{
@@ -63,7 +71,7 @@ pub struct CollectResult {
 /// Run the full index pipeline over `path`.
 ///
 /// All writes are batched into three commits (symbols, edges, transitive)
-/// regardless of repo size, keeping cost O(n) rather than O(n²).
+/// regardless of repo size, with O(N) total object cost.
 ///
 /// `progress` is called before each file: `(file, index, total)`.
 /// `on_phase` is called when post-processing phases begin, with a short
@@ -90,13 +98,43 @@ pub fn run_index(
             .unwrap_or_else(|| PathBuf::from("."))
     };
 
+    // -----------------------------------------------------------------------
+    // Pass 1: parse symbols + effects, assemble complete subtrees in memory,
+    // write as a single spec per prefix → O(N) objects, 1 commit.
+    // -----------------------------------------------------------------------
+    let total = files.len();
+
+    // Seed from existing state so incremental re-index preserves prior data.
+    let mut by_qname: serde_json::Map<String, Value> = repo
+        .get_tree(ref_name, "/asd/v1/index/by-qname")
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+
+    let mut by_effects: serde_json::Map<String, Value> = repo
+        .get_tree(ref_name, "/asd/v1/effects")
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+
+    // code tree: lang → { "clean_file/symbol_fp" → Symbol }
+    // Seed from existing state.
+    let mut by_code: BTreeMap<String, serde_json::Map<String, Value>> = {
+        let existing = repo
+            .get_tree(ref_name, "/asd/v1/code")
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+        existing.into_iter().filter_map(|(lang, subtree)| {
+            subtree.as_object().cloned().map(|m| (lang, m))
+        }).collect()
+    };
+
     let mut symbol_count = 0usize;
     let mut effect_count = 0usize;
-    let mut all_symbol_ids: Vec<String> = Vec::new();
-    let mut all_edges: Vec<CallEdge> = Vec::new();
-    // In-memory qname→symbol_id map built during Pass 1; used for O(1)
-    // edge resolution in Pass 2 instead of per-edge repo reads.
     let mut qname_to_sym_id: HashMap<String, String> = HashMap::new();
+    let mut all_edges: Vec<CallEdge> = Vec::new();
+    let mut all_symbol_ids: Vec<String> = Vec::new();
 
     struct FileCtx {
         file_str: String,
@@ -106,14 +144,6 @@ pub fn run_index(
     }
     let mut file_ctxs: Vec<FileCtx> = Vec::with_capacity(files.len());
 
-    // -----------------------------------------------------------------------
-    // Pass 1: parse symbols + effects, batch-write via speculation → 1 commit
-    // -----------------------------------------------------------------------
-    let spec1 = repo
-        .speculate(ref_name, Some("asd-index-pass1".into()))
-        .map_err(|e| AsdError::Other(e.to_string()))?;
-
-    let total = files.len();
     for (idx, (file, adapter)) in files.iter().enumerate() {
         if let Some(cb) = progress {
             cb(file, idx + 1, total);
@@ -130,7 +160,7 @@ pub fn run_index(
             let symbol_fp = symbol_fingerprint(&p.body);
             let sym = Symbol {
                 symbol_id: symbol_id.clone(),
-                symbol_fp,
+                symbol_fp: symbol_fp.clone(),
                 qname: p.qname.clone(),
                 language: adapter.language().to_string(),
                 kind: p.kind,
@@ -143,33 +173,35 @@ pub fn run_index(
             let sym_val = serde_json::to_value(&sym)
                 .map_err(|e| AsdError::Other(e.to_string()))?;
 
-            // Write symbol to both storage paths in the speculation.
-            let code_path = paths::code_path(&sym.language, &sym.file, &sym.symbol_fp);
-            let qname_path = paths::qname_index_path(&sym.qname);
-            repo.spec_set_json(spec1, &code_path, &sym_val)
-                .map_err(|e| AsdError::Other(e.to_string()))?;
-            repo.spec_set_json(spec1, &qname_path, &sym_val)
-                .map_err(|e| AsdError::Other(e.to_string()))?;
+            // Accumulate into in-memory maps — no repo writes yet.
+            by_qname.insert(p.qname.clone(), sym_val.clone());
+            by_effects.insert(
+                symbol_id.clone(),
+                serde_json::to_value(&EffectDecl {
+                    symbol_id: symbol_id.clone(),
+                    declared: adapter.infer_effects(&source, p),
+                    transitive: Vec::new(),
+                    verification: Some(Verification {
+                        by: VerificationSource::StaticChecker,
+                        at: Utc::now(),
+                        status: VerificationStatus::Unverified,
+                        mismatches: Vec::new(),
+                    }),
+                    confidence: None,
+                    matched_policy: None,
+                })
+                .map_err(|e| AsdError::Other(e.to_string()))?,
+            );
 
-            let declared = adapter.infer_effects(&source, p);
-            let decl = EffectDecl {
-                symbol_id: symbol_id.clone(),
-                declared,
-                transitive: Vec::new(),
-                verification: Some(Verification {
-                    by: VerificationSource::StaticChecker,
-                    at: Utc::now(),
-                    status: VerificationStatus::Unverified,
-                    mismatches: Vec::new(),
-                }),
-                confidence: None,
-                matched_policy: None,
-            };
-            let eff_val = serde_json::to_value(&decl)
-                .map_err(|e| AsdError::Other(e.to_string()))?;
-            let eff_path = paths::effects_path(&symbol_id);
-            repo.spec_set_json(spec1, &eff_path, &eff_val)
-                .map_err(|e| AsdError::Other(e.to_string()))?;
+            let code_key = format!(
+                "{}/{}",
+                paths::clean(&file_str),
+                symbol_fp
+            );
+            by_code
+                .entry(sym.language.clone())
+                .or_default()
+                .insert(code_key, sym_val);
 
             qname_to_sym_id.insert(p.qname.clone(), symbol_id.clone());
             all_symbol_ids.push(symbol_id);
@@ -184,7 +216,24 @@ pub fn run_index(
         f(&format!("  {} files parsed — committing symbols + effects…", symbol_count));
     }
 
-    // Flush Pass 1 as a single commit.
+    // Build the nested code tree JSON: { lang: { "file/fp": Symbol, … }, … }
+    let code_tree: serde_json::Map<String, Value> = by_code
+        .into_iter()
+        .map(|(lang, subtree)| (lang, Value::Object(subtree)))
+        .collect();
+
+    // Flush Pass 1: 3 spec_set_json calls (complete subtrees) → O(N) objects.
+    let spec1 = repo
+        .speculate(ref_name, Some("asd-index-pass1".into()))
+        .map_err(|e| AsdError::Other(e.to_string()))?;
+    repo.spec_set_json(spec1, "/asd/v1/index/by-qname", &Value::Object(by_qname))
+        .map_err(|e| AsdError::Other(e.to_string()))?;
+    repo.spec_set_json(spec1, "/asd/v1/effects", &Value::Object(by_effects))
+        .map_err(|e| AsdError::Other(e.to_string()))?;
+    if !code_tree.is_empty() {
+        repo.spec_set_json(spec1, "/asd/v1/code", &Value::Object(code_tree))
+            .map_err(|e| AsdError::Other(e.to_string()))?;
+    }
     let opts1 = CommitOptions::new(
         agent_id,
         IntentCategory::Checkpoint,
@@ -205,8 +254,8 @@ pub fn run_index(
     }
 
     // -----------------------------------------------------------------------
-    // Pass 2: extract call edges, resolve via in-memory map, batch-write
-    // callee/caller lists → 1 commit.
+    // Pass 2: extract call edges, resolve, write callees+callers as two
+    // complete subtree writes → O(N) objects, 1 commit.
     // -----------------------------------------------------------------------
     if let Some(f) = on_phase {
         f("  building call graph…");
@@ -224,7 +273,6 @@ pub fn run_index(
     let mut cross_module_edges = 0usize;
 
     for edge in &all_edges {
-        // Use the in-memory map — no repo reads needed.
         let Some(caller_sym) = qname_to_sym_id.get(&edge.caller_qname) else { continue; };
         let Some(callee_sym) = qname_to_sym_id.get(&edge.callee_qname) else { continue; };
         let cs = callees_of.entry(caller_sym.clone()).or_default();
@@ -241,21 +289,27 @@ pub fn run_index(
     for v in callees_of.values_mut() { v.sort(); }
     for v in callers_of.values_mut() { v.sort(); }
 
+    // Assemble complete callees / callers subtrees in memory.
+    let callees_tree: serde_json::Map<String, Value> = callees_of
+        .iter()
+        .map(|(sym_id, callees)| (sym_id.clone(), serde_json::json!({ "callees": callees })))
+        .collect();
+    let callers_tree: serde_json::Map<String, Value> = callers_of
+        .iter()
+        .map(|(sym_id, callers)| (sym_id.clone(), serde_json::json!({ "callers": callers })))
+        .collect();
+
     let spec2 = repo
         .speculate(ref_name, Some("asd-index-pass2-edges".into()))
         .map_err(|e| AsdError::Other(e.to_string()))?;
-
-    for (sym_id, callees) in &callees_of {
-        let path = paths::callees_path(sym_id);
-        repo.spec_set_json(spec2, &path, &serde_json::json!({ "callees": callees }))
+    if !callees_tree.is_empty() {
+        repo.spec_set_json(spec2, "/asd/v1/index/callees", &Value::Object(callees_tree))
             .map_err(|e| AsdError::Other(e.to_string()))?;
     }
-    for (sym_id, callers) in &callers_of {
-        let path = paths::callers_path(sym_id);
-        repo.spec_set_json(spec2, &path, &serde_json::json!({ "callers": callers }))
+    if !callers_tree.is_empty() {
+        repo.spec_set_json(spec2, "/asd/v1/index/callers", &Value::Object(callers_tree))
             .map_err(|e| AsdError::Other(e.to_string()))?;
     }
-
     let opts2 = CommitOptions::new(
         agent_id,
         IntentCategory::Refine,
@@ -265,15 +319,18 @@ pub fn run_index(
         .map_err(|e| AsdError::Other(e.to_string()))?;
 
     // -----------------------------------------------------------------------
-    // Transitive effect propagation: compute in-memory via DFS, then
-    // batch-write only changed EffectDecls → 1 commit.
+    // Transitive effect propagation — fully in-memory, then one bulk write.
     // -----------------------------------------------------------------------
     if let Some(f) = on_phase {
         f(&format!("  propagating transitive effects ({} edges)…", resolved_edge_count));
     }
-    let index_store = AsgIndexStore { repo };
-    let transitive_updates =
-        propagate_transitive_batched(repo, &index_store, ref_name, &all_symbol_ids, agent_id)?;
+    let transitive_updates = propagate_transitive_batched(
+        repo,
+        ref_name,
+        &all_symbol_ids,
+        &callees_of,
+        agent_id,
+    )?;
 
     let orphaned_tagged = detect_orphaned_entries(repo, ref_name, agent_id)?;
 
@@ -304,33 +361,42 @@ pub fn run_index(
     })
 }
 
-/// Compute transitive effects for all `symbol_ids`, then flush all changed
-/// `EffectDecl` records as a single speculation commit.
+/// Compute transitive effects entirely in memory, then flush changed
+/// EffectDecls as a single `spec_set_json` call → O(N) objects.
+///
+/// Takes `callees_of` from the in-memory Pass-2 map to avoid repo reads
+/// during the DFS.
 fn propagate_transitive_batched(
     repo: &Repository,
-    index: &AsgIndexStore,
     ref_name: &str,
     symbol_ids: &[String],
+    callees_of: &HashMap<String, Vec<String>>,
     agent_id: &str,
 ) -> Result<usize> {
-    use crate::effects::{AsgEffectStore, EffectStore};
+    // Read the complete effects tree once.
+    let effects_tree = repo
+        .get_tree(ref_name, "/asd/v1/effects")
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
 
-    let effect_store = AsgEffectStore { repo };
+    // Deserialize into a local cache for fast access.
+    let mut effects_cache: HashMap<String, EffectDecl> = effects_tree
+        .iter()
+        .filter_map(|(k, v)| {
+            serde_json::from_value::<EffectDecl>(v.clone()).ok().map(|d| (k.clone(), d))
+        })
+        .collect();
 
-    // --- DFS to compute all transitive maps (reads only) ---
     let mut memo: HashMap<String, HashMap<EffectCategory, BTreeSet<String>>> = HashMap::new();
-
-    // Collect (symbol_id, updated EffectDecl) pairs for changed symbols.
     let mut updates: Vec<(String, EffectDecl)> = Vec::new();
 
     for sym in symbol_ids {
         let mut stack: HashSet<String> = HashSet::new();
         let computed =
-            compute_transitive(index, &effect_store, ref_name, sym, &mut memo, &mut stack)?;
+            compute_transitive_mem(callees_of, &effects_cache, sym, &mut memo, &mut stack);
 
-        let Some(mut decl) = effect_store.get_effects(ref_name, sym)? else {
-            continue;
-        };
+        let Some(decl) = effects_cache.get(sym) else { continue; };
 
         let declared_cats: HashSet<EffectCategory> =
             decl.declared.iter().map(|e| e.effect).collect();
@@ -350,8 +416,9 @@ fn propagate_transitive_batched(
         });
 
         if !transitive_eq(&decl.transitive, &new_transitive) {
-            decl.transitive = new_transitive;
-            updates.push((sym.clone(), decl));
+            let mut updated = decl.clone();
+            updated.transitive = new_transitive;
+            updates.push((sym.clone(), updated));
         }
     }
 
@@ -360,18 +427,23 @@ fn propagate_transitive_batched(
         return Ok(0);
     }
 
-    // --- Batch-write all changed EffectDecls in one commit ---
+    // Apply updates to the local cache, then rebuild the complete effects map.
+    for (sym_id, decl) in &updates {
+        effects_cache.insert(sym_id.clone(), decl.clone());
+    }
+
+    let effects_map: serde_json::Map<String, Value> = effects_cache
+        .iter()
+        .filter_map(|(k, v)| {
+            serde_json::to_value(v).ok().map(|val| (k.clone(), val))
+        })
+        .collect();
+
     let spec = repo
         .speculate(ref_name, Some("asd-index-transitive".into()))
         .map_err(|e| AsdError::Other(e.to_string()))?;
-
-    for (sym_id, decl) in &updates {
-        let path = paths::effects_path(sym_id);
-        let val = serde_json::to_value(decl).map_err(|e| AsdError::Other(e.to_string()))?;
-        repo.spec_set_json(spec, &path, &val)
-            .map_err(|e| AsdError::Other(e.to_string()))?;
-    }
-
+    repo.spec_set_json(spec, "/asd/v1/effects", &Value::Object(effects_map))
+        .map_err(|e| AsdError::Other(e.to_string()))?;
     let opts = CommitOptions::new(
         agent_id,
         IntentCategory::Refine,
@@ -383,44 +455,41 @@ fn propagate_transitive_batched(
     Ok(updated)
 }
 
-fn compute_transitive(
-    index: &AsgIndexStore,
-    effects: &crate::effects::AsgEffectStore,
-    ref_name: &str,
+/// DFS over the in-memory `callees_of` map — no repo reads.
+fn compute_transitive_mem(
+    callees_of: &HashMap<String, Vec<String>>,
+    effects: &HashMap<String, EffectDecl>,
     sym: &str,
     memo: &mut HashMap<String, HashMap<EffectCategory, BTreeSet<String>>>,
     stack: &mut HashSet<String>,
-) -> Result<HashMap<EffectCategory, BTreeSet<String>>> {
-    use crate::effects::EffectStore;
-    use crate::index::IndexStore;
-
+) -> HashMap<EffectCategory, BTreeSet<String>> {
     if let Some(cached) = memo.get(sym) {
-        return Ok(cached.clone());
+        return cached.clone();
     }
     if stack.contains(sym) {
-        return Ok(HashMap::new());
+        return HashMap::new();
     }
     stack.insert(sym.to_string());
 
     let mut acc: HashMap<EffectCategory, BTreeSet<String>> = HashMap::new();
-    let callees = index.get_callees(ref_name, sym)?;
+    let empty = Vec::new();
+    let callees = callees_of.get(sym).unwrap_or(&empty);
 
-    for callee in &callees {
-        if let Some(decl) = effects.get_effects(ref_name, callee)? {
+    for callee in callees {
+        if let Some(decl) = effects.get(callee) {
             for e in &decl.declared {
                 acc.entry(e.effect).or_default().insert(callee.clone());
             }
         }
-        let callee_transitive =
-            compute_transitive(index, effects, ref_name, callee, memo, stack)?;
-        for (cat, _) in callee_transitive {
+        let callee_trans = compute_transitive_mem(callees_of, effects, callee, memo, stack);
+        for (cat, _) in callee_trans {
             acc.entry(cat).or_default().insert(callee.clone());
         }
     }
 
     stack.remove(sym);
     memo.insert(sym.to_string(), acc.clone());
-    Ok(acc)
+    acc
 }
 
 fn transitive_eq(a: &[TransitiveEffect], b: &[TransitiveEffect]) -> bool {

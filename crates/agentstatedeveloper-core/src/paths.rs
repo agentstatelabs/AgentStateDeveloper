@@ -4,7 +4,7 @@
 
 pub const ASD_ROOT: &str = "/asd/v1";
 
-fn clean(p: &str) -> String {
+pub fn clean(p: &str) -> String {
     p.trim_start_matches('/').replace("//", "/")
 }
 
