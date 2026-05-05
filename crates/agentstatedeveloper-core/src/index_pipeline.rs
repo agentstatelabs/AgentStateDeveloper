@@ -47,6 +47,9 @@ pub struct IndexSummary {
 /// silently skipped. The pipeline runs two passes (per-file parse + persist,
 /// then workspace-wide call-graph resolution), writes callee/caller indexes,
 /// propagates transitive effects, and tags any orphaned ledger entries.
+///
+/// `progress` is called before each file is processed with `(file, index, total)`.
+/// Pass `None` for no progress reporting.
 pub fn run_index(
     repo: &Repository,
     ref_name: &str,
@@ -54,6 +57,7 @@ pub fn run_index(
     agent_id: &str,
     adapters: &[Arc<dyn LanguageAdapter>],
     audit: Option<&dyn AuditSink>,
+    progress: Option<&dyn Fn(&Path, usize, usize)>,
 ) -> Result<IndexSummary> {
     let files = collect_source_files(path, adapters)?;
     let index_root = if path.is_dir() {
@@ -80,8 +84,12 @@ pub fn run_index(
     }
     let mut file_ctxs: Vec<FileCtx> = Vec::with_capacity(files.len());
 
+    let total = files.len();
     // Pass 1: parse and persist symbols + effects per file.
-    for (file, adapter) in &files {
+    for (idx, (file, adapter)) in files.iter().enumerate() {
+        if let Some(cb) = progress {
+            cb(file, idx + 1, total);
+        }
         let source = std::fs::read_to_string(file)
             .map_err(|e| AsdError::Other(format!("read {}: {}", file.display(), e)))?;
         let rel = file.strip_prefix(&index_root).unwrap_or(file);
@@ -125,7 +133,7 @@ pub fn run_index(
             effect_count += 1;
         }
 
-        file_ctxs.push(FileCtx { file_str, source, parsed, adapter: adapter.clone() });
+        file_ctxs.push(FileCtx { file_str, source, parsed, adapter: Arc::clone(adapter) });
     }
 
     // Build workspace-wide qname context for cross-module call resolution.
