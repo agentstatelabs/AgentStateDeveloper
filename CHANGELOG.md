@@ -5,6 +5,20 @@ Versions use semantic versioning; each milestone increments by 0.0.5.
 
 ---
 
+## [0.6.2] — 2026-05-05
+
+### Added
+- **`asd list symbols/effects/ledger`** — enumerate indexed objects with optional
+  filters (`--lang`, `--kind`, `--file`, `--has-declared`, `--category`)
+- **`asd list stats`** — aggregate graph metrics: symbol counts by language and
+  kind, effect categories, verification status, call graph edge counts, ledger totals
+
+### Fixed
+- **`asd trace` help text** — clarified that the tracer is Python-only (uses
+  `sys.settrace`); previously said "Run a Python program" which was misleading
+
+---
+
 ## [0.6.1] — 2026-05-05
 
 ### Added

@@ -94,8 +94,8 @@ pub enum Command {
     /// Verify declared effects for a symbol (M1: prints declared as unverified).
     VerifyEffects(commands::verify_effects::VerifyEffectsArgs),
 
-    /// Run a Python program under the ASD runtime tracer and ingest the
-    /// observed effects into ASG.
+    /// Run a program under the ASD runtime tracer and ingest observed effects
+    /// (Python only — uses sys.settrace via tools/asd_tracer.py).
     Trace(commands::trace::TraceArgs),
 
     /// Mirror ASG state into the `.asd/v1/` on-disk sidecar so it can
