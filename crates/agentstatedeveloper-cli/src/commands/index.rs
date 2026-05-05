@@ -104,11 +104,25 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
     let log_clone = Arc::clone(&log);
     let width = total.to_string().len();
 
+    let log_clone2 = Arc::clone(&log);
+
     let progress: &dyn Fn(&Path, usize, usize) = &|file: &Path, idx: usize, total: usize| {
         let msg = format!("  [{idx:>width$}/{total}] {}", file.display());
         if let Ok(mut guard) = log_clone.lock() {
             if let Some(l) = guard.as_mut() {
                 l.line(&msg);
+            }
+        }
+    };
+
+    // Phase messages always go to stderr (not just verbose) — they mark the
+    // boundary between file parsing and post-processing so the user knows
+    // the tool is still working on a large repo.
+    let on_phase: &dyn Fn(&str) = &|msg: &str| {
+        eprintln!("{}", msg);
+        if let Ok(mut guard) = log_clone2.lock() {
+            if let Some(l) = guard.as_mut() {
+                l.line(msg);
             }
         }
     };
@@ -121,6 +135,7 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
         &adapters,
         Some(engine.audit.as_ref()),
         Some(progress),
+        Some(on_phase),
     )?;
 
     // Unwrap Arc — run_index is done, no other holders.

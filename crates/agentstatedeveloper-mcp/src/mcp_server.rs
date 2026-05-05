@@ -1344,6 +1344,7 @@ impl AsdMcpServer {
             &adapters,
             Some(engine.audit.as_ref()),
             None,
+            None,
         ) {
             Ok(s) => serde_json::json!({
                 "path": p.path,

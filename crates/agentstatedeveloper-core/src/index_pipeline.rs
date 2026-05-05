@@ -64,6 +64,11 @@ pub struct CollectResult {
 ///
 /// All writes are batched into three commits (symbols, edges, transitive)
 /// regardless of repo size, keeping cost O(n) rather than O(n²).
+///
+/// `progress` is called before each file: `(file, index, total)`.
+/// `on_phase` is called when post-processing phases begin, with a short
+/// human-readable description (e.g. `"building call graph…"`).
+/// Pass `None` for either to suppress that output.
 pub fn run_index(
     repo: &Repository,
     ref_name: &str,
@@ -72,6 +77,7 @@ pub fn run_index(
     adapters: &[Arc<dyn LanguageAdapter>],
     audit: Option<&dyn AuditSink>,
     progress: Option<&dyn Fn(&Path, usize, usize)>,
+    on_phase: Option<&dyn Fn(&str)>,
 ) -> Result<IndexSummary> {
     let collected = collect_source_files(path, adapters)?;
     let files = collected.recognized;
@@ -174,6 +180,10 @@ pub fn run_index(
         file_ctxs.push(FileCtx { file_str, source, parsed, adapter: Arc::clone(adapter) });
     }
 
+    if let Some(f) = on_phase {
+        f(&format!("  {} files parsed — committing symbols + effects…", symbol_count));
+    }
+
     // Flush Pass 1 as a single commit.
     let opts1 = CommitOptions::new(
         agent_id,
@@ -198,6 +208,9 @@ pub fn run_index(
     // Pass 2: extract call edges, resolve via in-memory map, batch-write
     // callee/caller lists → 1 commit.
     // -----------------------------------------------------------------------
+    if let Some(f) = on_phase {
+        f("  building call graph…");
+    }
     for ctx in &file_ctxs {
         let edges = ctx.adapter.extract_call_edges(
             &ctx.file_str, &ctx.source, &ctx.parsed, &workspace,
@@ -255,6 +268,9 @@ pub fn run_index(
     // Transitive effect propagation: compute in-memory via DFS, then
     // batch-write only changed EffectDecls → 1 commit.
     // -----------------------------------------------------------------------
+    if let Some(f) = on_phase {
+        f(&format!("  propagating transitive effects ({} edges)…", resolved_edge_count));
+    }
     let index_store = AsgIndexStore { repo };
     let transitive_updates =
         propagate_transitive_batched(repo, &index_store, ref_name, &all_symbol_ids, agent_id)?;
