@@ -129,6 +129,31 @@ a ledger append through MCP appears in the same audit log as one through the
 CLI. That consistency is deliberate — security and compliance guarantees
 rely on it.
 
+### MCP server registration
+
+`asd mcp install` writes the `asd-mcp` entry into the `mcpServers` block of
+every agent tool config it finds:
+
+```bash
+asd mcp install           # all detected tools
+asd mcp install --tool cursor          # single tool
+asd mcp install --db /abs/path/to.db  # explicit db path
+asd mcp status            # show ✓/✗ per tool
+asd mcp uninstall         # remove from all tools
+```
+
+Detected tools and their config paths:
+
+| Tool | Config path |
+|---|---|
+| Claude Code | `~/.claude.json` |
+| Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) |
+| Cursor | `~/.cursor/mcp.json` |
+
+The installer sets `ASD_DB` in the `env` block so `asd-mcp` connects to the
+correct project database regardless of the working directory the tool uses to
+spawn the server. After installation, restart the agent tool to activate.
+
 ### Path convention
 
 ASD namespaces every node it writes under `/asd/v1/`. Layout:

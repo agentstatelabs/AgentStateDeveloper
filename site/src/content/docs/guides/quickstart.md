@@ -1,69 +1,102 @@
 ---
 title: Quick Start
-description: Clone, build, index a sample repository, and append your first ledger entry in five minutes.
+description: Install, initialize, index a project, register the MCP server, and append your first ledger entry.
 ---
 
-This walkthrough takes you from a fresh clone to a policy-gated ledger entry
-against the included Python sample repo. ASD supports nine languages out of
-the box (Python, TypeScript, Rust, Go, Java, C#, Ruby, Kotlin, Swift) — point
-`asd index` at any directory and it picks the right adapter automatically.
+This walkthrough takes you from a fresh install to a working ledger entry and
+a registered MCP server. ASD supports nine languages out of the box (Python,
+TypeScript, Rust, Go, Java, C#, Ruby, Kotlin, Swift) — point `asd index` at
+any directory and it picks the right adapter automatically.
 
-## 1. Build
+## 1. Install
+
+Build and install the binaries from source:
 
 ```bash
 git clone https://github.com/agentstatelabs/AgentStateDeveloper.git
 cd AgentStateDeveloper
-cargo build --release
+cargo install --path crates/agentstatedeveloper-cli   # installs asd
+cargo install --path crates/agentstatedeveloper-mcp   # installs asd-mcp + asd-serve
 ```
 
-The resulting binaries land in `target/release/`:
+> **Note:** the name `asd` on crates.io is taken by an unrelated diff tool.
+> `cargo install asd` installs the wrong thing — always install from source.
 
-- `asd` — CLI
-- `asd-mcp` — MCP stdio server
-- `asd-serve` — HTTP server + Lens UI host
+Verify:
 
-Put `target/release/` on your `PATH` or invoke the binaries by full path. The
-rest of this guide assumes `asd` is on `PATH`.
+```bash
+asd --version    # asd 0.5.5
+asd-mcp --help   # starts the stdio MCP server
+```
 
 ## 2. Initialize a repository
 
-From the root of the workspace:
+Change into the project you want to track, then run:
 
 ```bash
-cd examples/sample-py-repo
+cd my-project
 asd init
 ```
 
-```text
+```
 initialized at ./.asd-state.db
+.gitignore: updated (.asd-state.db ignored; .asd/v1/ tracked)
+
+ASD git hooks installed (.asd/hooks/):
+
+  pre-commit    trigger:  git commit
+                command:  asd sync --prune
+                purpose:  flush ledger/effects to .asd/v1/ and remove stale entries
+
+  post-merge    trigger:  git merge / git pull
+                command:  asd hydrate && asd index .
+                purpose:  load new .asd/v1/ entries into local db and rebuild index
+
+  post-checkout trigger:  git checkout / git switch
+                command:  asd hydrate && asd index .
+                purpose:  sync local db to the checked-out branch's sidecar state
 ```
 
-`asd init` creates a local SQLite-backed ASG repository at `./.asd-state.db`
-and stamps the ASD schema marker (`/asd/v1/meta/schema-version`).
+`asd init` creates `.asd-state.db`, updates `.gitignore`, and installs git
+hook scripts that keep the sidecar in sync automatically. Pass `--no-hooks`
+to skip hook installation.
 
-## 3. Index the sample
+## 3. Index your code
 
 ```bash
 asd index .
 ```
 
-```json
+```
+Indexing 42 files under . …
+Done. 187 symbols, 187 effects. (12 files skipped — run with -v to list)
 {
-  "files": 4,
-  "symbols": 13,
-  "effects": 13,
-  "edges": 5,
-  "intra_module_edges": 3,
-  "cross_module_edges": 2,
-  "transitive_updates": 3
+  "files": 42,
+  "skipped": 12,
+  "symbols": 187,
+  ...
 }
 ```
 
-Every recognized source file under the directory is parsed. Symbols land at
-`/asd/v1/index/by-qname/<qname>`; inferred effects at
-`/asd/v1/effects/<symbol_id>`; call edges at `/asd/v1/index/callees/` and
-`/asd/v1/index/callers/`. `transitive_updates` reports how many symbols
-received propagated effects from their callees.
+Every recognized source file is parsed. Unrecognized file types (`.yaml`,
+`.json`, `.md`, etc.) are silently skipped in standard mode. Add `--verbose`
+to see each file as it is processed and list every skipped file:
+
+```bash
+asd index . --verbose
+```
+
+```
+Indexing 42 files under . …
+  [ 1/42] src/payments.py
+  [ 2/42] src/auth.py
+  ...
+  12 files skipped (no adapter):
+  [skip] config/settings.yaml
+  [skip] README.md
+  ...
+Done. 187 symbols, 187 effects.
+```
 
 ## 4. Read a symbol
 
@@ -74,41 +107,31 @@ asd read payments.charge_card
 ```json
 {
   "symbol": {
-    "symbol_id": "sym_...",
     "qname": "payments.charge_card",
     "language": "python",
     "kind": "function",
-    "file": "payments.py",
-    "start": { "line": 26, "col": 1 },
-    "end":   { "line": 32, "col": 49 },
-    "signature": "def charge_card(user_id: str, amount: float)"
+    "file": "payments.py"
   },
   "effects": {
     "declared": [
       { "effect": "log",         "note": "log.info(\"charging user...\")" },
-      { "effect": "io.db.write", "note": "db.execute(\"INSERT INTO charges...\")" },
-      { "effect": "throw",       "note": "raise ValueError(...)" }
+      { "effect": "io.db.write", "note": "db.execute(\"INSERT INTO charges...\")" }
     ],
-    "transitive": [],
-    "verification": {
-      "by": "static-checker",
-      "status": "unverified"
-    }
+    "verification": { "by": "static-checker", "status": "unverified" }
   },
   "ledger": []
 }
 ```
 
-`asd read` is the primary "give an agent the context for this symbol" entry
-point — it returns the parsed symbol, its declared and transitive effects, and
-up to 5 ledger entries in a single JSON object.
+`asd read` is the primary agent entry point — symbol, declared and transitive
+effects, and recent ledger entries in one JSON object.
 
 ## 5. Append a ledger entry
 
 ```bash
 asd ledger append payments.charge_card \
   --kind hazard \
-  --summary "rejects amounts over 10000 — silent failure path if caller ignores exception" \
+  --summary "rejects amounts over 10000 — silent failure if caller ignores exception" \
   --author-kind human \
   --author-id alice@example.com
 ```
@@ -121,19 +144,16 @@ asd ledger append payments.charge_card \
 }
 ```
 
-With no policy loaded, solo-dev default is permissive — every write is
-`allowed` and `matched_policy` is `null`.
-
 ## 6. Load a policy
 
 The bundled `examples/policies.json` requires human approval for hazard
-entries. Point `asd` at it:
+entries:
 
 ```bash
-asd --policy ../../examples/policies.json \
+asd --policy examples/policies.json \
     ledger append payments.charge_card \
     --kind hazard \
-    --summary "boundary amount is 10000, not documented in signature" \
+    --summary "boundary is 10000, not documented in signature" \
     --author-kind agent \
     --author-id review-bot
 ```
@@ -146,71 +166,35 @@ asd --policy ../../examples/policies.json \
 }
 ```
 
-The entry still lands — with `awaiting-approval` and `approver:human` tags
-attached. A human approver closes the loop:
+## 7. Register the MCP server
+
+Wire `asd-mcp` into your agent tools so agents can call ASD directly:
 
 ```bash
-asd --policy ../../examples/policies.json \
-    ledger approve led_f5e4d3c2... \
-    --approver alice@example.com \
-    --approver-kind human \
-    --message "verified boundary in tests/test_payments.py"
+asd mcp install
 ```
 
-```json
-{
-  "status": "approved",
-  "entry_id": "led_f5e4d3c2...",
-  "symbol_id": "sym_...",
-  "tags": [
-    "approver:human",
-    "approved",
-    "approved-by:alice@example.com",
-    "approved-at:2026-04-17T14:22:03Z"
-  ]
-}
+```
+  claude-code    installed  /Users/user/.claude.json
+  claude-desktop installed  /Users/user/Library/Application Support/Claude/claude_desktop_config.json
+  cursor         installed  /Users/user/.cursor/mcp.json
+
+  asd-mcp binary:  /Users/user/.cargo/bin/asd-mcp
+  ASD_DB:          /path/to/my-project/.asd-state.db
+
+Restart your agent tool(s) to activate the MCP server.
 ```
 
-## 7. Wire up the audit log
-
-Every ledger mutation and policy decision can be mirrored to JSONL:
+`asd mcp install` detects all known tool configs on the machine and writes the
+`asd-mcp` entry with the correct `ASD_DB` path. Restart the tool to pick it up.
 
 ```bash
-asd --policy ../../examples/policies.json \
-    --audit-log ./audit.jsonl \
-    ledger append payments.get_balance \
-    --kind rationale \
-    --summary "returns 0.0 on missing row to avoid forcing callers to handle None"
-
-asd --audit-log ./audit.jsonl audit tail --limit 5
+asd mcp status     # check registration status
+asd mcp uninstall  # remove from all tools
+asd mcp install --tool cursor  # target a single tool
 ```
-
-```json
-{
-  "path": "./audit.jsonl",
-  "count": 1,
-  "events": [
-    {
-      "event_id": "evt_abc...",
-      "event_type": "ledger.append",
-      "actor_id": "asd-cli-user",
-      "actor_kind": "agent",
-      "outcome": "allowed",
-      "timestamp": "2026-04-17T14:25:11Z",
-      "subject_id": "led_...",
-      "secondary_id": "sym_...",
-      "payload": { "qname": "payments.get_balance", "kind": "rationale", "tags": [] }
-    }
-  ]
-}
-```
-
-Pipe that file into Splunk, Loki, or Datadog — one line per event, no
-transformation required.
 
 ## 8. Share your ASD context via git
-
-Run `asd sync` to flush the live state into `.asd/v1/`, then commit it:
 
 ```bash
 asd sync --prune
@@ -218,21 +202,21 @@ git add .asd/v1/
 git commit -m "chore: sync ASD sidecar"
 ```
 
-Anyone who clones the repo gets the full ledger history and effect
-declarations. They just run:
+Teammates who clone the repo run:
 
 ```bash
-asd init        # creates .asd-state.db and installs git hooks
-asd hydrate     # loads .asd/v1/ into the local db
-asd index .     # rebuilds the derived semantic index
+asd init        # installs hooks, updates .gitignore
+asd hydrate     # loads .asd/v1/ into local db
+asd index .     # rebuilds derived semantic index
+asd mcp install # registers asd-mcp with their agent tools
 ```
 
-After `asd init`, the **pre-commit hook** runs `asd sync --prune`
-automatically on every commit, so the sidecar stays in sync without
-any manual steps.
+After `asd init`, the pre-commit hook runs `asd sync --prune` automatically
+on every commit — no manual steps required.
 
 ## Next
 
 - [Core Concepts](/guides/concepts) — the seven primitives in detail.
+- [Architecture](/guides/architecture) — crate layout and storage model.
 - [CLI reference](/reference/cli) — every subcommand, flag, and env var.
-- [MCP tools](/reference/mcp-tools) — the 14-tool surface for agents.
+- [MCP tools](/reference/mcp-tools) — the 14+ tool surface for agents.

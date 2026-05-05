@@ -78,8 +78,8 @@ that has since rolled off the retention window.
 A single Rust workspace ships:
 
 - `asd` — CLI with `init`, `index`, `read`, `ledger`, `policy`, `verify-effects`,
-  `trace`, `sync`, `hydrate`, `audit` subcommands.
-- `asd-mcp` — stdio MCP server exposing 14 tools to coding agents.
+  `trace`, `sync`, `hydrate`, `audit`, `hooks`, `mcp` subcommands.
+- `asd-mcp` — stdio MCP server exposing 14+ tools to coding agents.
 - `asd-serve` — HTTP server (axum) hosting the JSON API and static Lens UI.
 - Nine language adapters (tree-sitter based): Python, TypeScript, Rust, Go,
   Java, C#, Ruby, Kotlin, and Swift.
@@ -88,6 +88,16 @@ A single Rust workspace ships:
 - A SvelteKit review UI (Lens) that reads the same HTTP API.
 - File-backed policy gate with ratification workflow.
 - JSONL audit stream.
+
+**Install:**
+
+```bash
+cargo install --path crates/agentstatedeveloper-cli
+cargo install --path crates/agentstatedeveloper-mcp
+```
+
+> The crate name `asd` on crates.io is taken by an unrelated tool. Always
+> install from source.
 
 BSL-1.1 licensed; converts to Apache-2.0 after four years.
 

@@ -6,9 +6,15 @@ ASD gives every function a decision ledger, an effect declaration, and a
 call graph — all queryable by the coding agents that write the code, and
 all checked into git so they travel with every clone.
 
+## Install
+
+```bash
+cargo install --path crates/agentstatedeveloper-cli   # installs asd
+cargo install --path crates/agentstatedeveloper-mcp   # installs asd-mcp + asd-serve
 ```
-cargo install asd
-```
+
+> **Note:** the crate name `asd` on crates.io is taken by an unrelated diff tool.
+> Install from source using the commands above.
 
 ## What it does
 
@@ -22,6 +28,61 @@ cargo install asd
 | **Ratification** | Approve, reject, or withdraw ledger entries. Full approval workflow. |
 | **Audit event stream** | Hash-chained JSONL log of every ledger mutation and policy evaluation. |
 | **Git-native sidecar** | Ledger entries and effects live in `.asd/v1/` — checked into git, travel with every clone. |
+
+## Quick start
+
+```bash
+# Clone and build
+git clone https://github.com/agentstatelabs/AgentStateDeveloper.git
+cd AgentStateDeveloper
+cargo install --path crates/agentstatedeveloper-cli
+cargo install --path crates/agentstatedeveloper-mcp
+
+# Initialize your project
+cd my-project
+asd init
+asd index .
+
+# Read a symbol
+asd read payments.chargeCard
+
+# Append a ledger entry
+asd ledger append payments.chargeCard \
+  --kind hazard \
+  --summary "fails silently above 10000 — caller must check return value" \
+  --author-kind human \
+  --author-id alice@example.com
+
+# Register the MCP server with your agent tools
+asd mcp install
+
+# Sync to sidecar and commit
+asd sync --prune
+git add .asd/v1/
+git commit -m "chore: sync ASD sidecar"
+```
+
+## MCP server setup
+
+`asd-mcp` is the stdio MCP server that coding agents use to query ASD.
+Register it in all detected tools with one command:
+
+```bash
+asd mcp install
+```
+
+This writes the `asd-mcp` entry into `mcpServers` in every config file it
+finds (Claude Code, Claude Desktop, Cursor). Restart the tool to activate.
+
+```bash
+asd mcp status    # show registration status across all tools
+asd mcp install --tool cursor          # install into one specific tool
+asd mcp install --db /abs/path/to/db  # use a non-default db path
+asd mcp uninstall                      # remove from all tools
+```
+
+The MCP server reads `ASD_DB` (set by `install` in the env block) so agents
+always connect to the right project database.
 
 ## Git-native sidecar
 
@@ -69,46 +130,35 @@ git clone <repo>
 asd init        # installs hooks, updates .gitignore
 asd hydrate     # loads .asd/v1/ → local SQLite
 asd index .     # rebuilds derived semantic index
+asd mcp install # registers asd-mcp with your agent tools
 ```
 
-## Quick start
+## Indexing
 
 ```bash
-# Build
-git clone https://github.com/agentstatelabs/AgentStateDeveloper.git
-cd AgentStateDeveloper
-cargo build --release
-
-# Index a project
-cd my-project
-asd init
-asd index .
-
-# Read a symbol
-asd read payments.chargeCard
-
-# Append a ledger entry
-asd ledger append payments.chargeCard \
-  --kind hazard \
-  --summary "fails silently above 10000 — caller must check return value" \
-  --author-kind human \
-  --author-id alice@example.com
-
-# Sync to sidecar and commit
-asd sync --prune
-git add .asd/v1/
-git commit -m "chore: sync ASD sidecar"
+asd index .            # index current directory
+asd index . --verbose  # show each file as it is processed, list skipped files
 ```
+
+Standard output:
+```
+Indexing 42 files under . …
+Done. 187 symbols, 187 effects. (12 files skipped — run with -v to list)
+```
+
+Unrecognized file types (`.yaml`, `.json`, `.md`, etc.) are silently skipped
+in standard mode and listed with `[skip]` in `--verbose` mode. The `skipped`
+count is always included in the JSON summary.
 
 ## Surfaces
 
-- **`asd`** — CLI: `init`, `index`, `read`, `ledger`, `policy`, `verify-effects`, `trace`, `sync`, `hydrate`, `audit`, `hooks`
-- **`asd-mcp`** — stdio MCP server exposing 14 tools to coding agents
+- **`asd`** — CLI: `init`, `index`, `read`, `ledger`, `policy`, `verify-effects`, `trace`, `sync`, `hydrate`, `audit`, `hooks`, `mcp`
+- **`asd-mcp`** — stdio MCP server exposing 14+ tools to coding agents
 - **`asd-serve`** — HTTP server + Lens review UI
 
 ## MCP tools
 
-Agents access ASD through 14 MCP tools: `health`, `code_query`, `code_read`,
+Agents access ASD through 14+ MCP tools: `health`, `code_query`, `code_read`,
 `effects_of`, `callers_of`, `callees_of`, `ledger_get`, `ledger_find`,
 `ledger_append`, `ledger_approve`, `ledger_reject`, `ledger_withdraw`,
 `ledger_supersede`, `effect_declare`, `traces_of`, `reindex`,

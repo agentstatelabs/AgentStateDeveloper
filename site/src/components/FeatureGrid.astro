@@ -139,17 +139,17 @@ mismatch: io.net.out declared but not observed
 					automatically. No server required.
 				</p>
 				<pre><code><span class="comment"># one-time setup</span>
-<span class="prompt">$</span> asd init
+<span class="prompt">$</span> asd init &amp;&amp; asd index . &amp;&amp; asd mcp install
 <span class="out">initialized at ./.asd-state.db
 .gitignore: updated
-ASD git hooks installed (.asd/hooks/):
+ASD git hooks installed (.asd/hooks/)
 
-  pre-commit    → asd sync --prune
-  post-merge    → asd hydrate &amp;&amp; asd index .
-  post-checkout → asd hydrate &amp;&amp; asd index .</span>
+  ✓ claude-code    registered
+  ✓ claude-desktop registered
+  ✓ cursor         registered</span>
 
-<span class="comment"># clone onboarding — three commands</span>
-<span class="prompt">$</span> asd init &amp;&amp; asd hydrate &amp;&amp; asd index .</code></pre>
+<span class="comment"># clone onboarding</span>
+<span class="prompt">$</span> asd init &amp;&amp; asd hydrate &amp;&amp; asd index . &amp;&amp; asd mcp install</code></pre>
 			</article>
 		</div>
 	</div>
