@@ -4,6 +4,7 @@ pub mod hydrate;
 pub mod index;
 pub mod init;
 pub mod ledger;
+pub mod list;
 pub mod mcp;
 pub mod policy;
 pub mod read;
