@@ -1,8 +1,15 @@
 //! `asd index <path>` — walk a directory for source files we have
 //! adapters for, parse them, and write Symbol + EffectDecl records into
 //! the ASG.
+//!
+//! A full debug log is always written to `.asd/index.log` in the current
+//! directory. `--verbose` tees that same output to stderr in real time.
+//! Skipped files are capped at 100 lines on stderr but fully recorded in
+//! the log file.
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use clap::Args;
@@ -12,34 +19,72 @@ use agentstatedeveloper_core::{collect_source_files, run_index, Engine};
 
 use crate::config::Config;
 
+const SKIPPED_DISPLAY_LIMIT: usize = 100;
+
 #[derive(Debug, Args)]
 pub struct IndexArgs {
     /// Directory (or file) to index. Recursively walks for known source
     /// extensions (`.py`, `.ts`, `.tsx`, `.rs`, `.go`, `.java`, `.cs`, `.rb`, `.kt`, `.swift`).
     pub path: PathBuf,
 
-    /// Print each file as it is indexed, and list skipped files.
+    /// Tee the full index log to stderr in real time.
     #[arg(short, long)]
     pub verbose: bool,
+}
+
+/// Always-on log that writes every line to `.asd/index.log` and
+/// optionally mirrors it to stderr when verbose is set.
+struct IndexLog {
+    file: std::fs::File,
+    verbose: bool,
+}
+
+impl IndexLog {
+    fn open(verbose: bool) -> Option<Self> {
+        let dir = PathBuf::from(".asd");
+        std::fs::create_dir_all(&dir).ok()?;
+        std::fs::File::create(dir.join("index.log")).ok().map(|f| Self { file: f, verbose })
+    }
+
+    fn line(&mut self, msg: &str) {
+        let _ = writeln!(self.file, "{}", msg);
+        if self.verbose {
+            eprintln!("{}", msg);
+        }
+    }
 }
 
 pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let adapters = default_adapters();
 
-    // Pre-scan so we can report counts and skipped files before processing starts.
+    let mut log = IndexLog::open(args.verbose);
+    let log_path = PathBuf::from(".asd/index.log");
+
+    // Pre-scan so we know total counts before processing starts.
     let collected = collect_source_files(&args.path, &adapters)?;
     let total = collected.recognized.len();
     let skipped = collected.skipped;
 
+    let header = format!(
+        "Indexing {} file{} under {} …",
+        total,
+        if total == 1 { "" } else { "s" },
+        args.path.display()
+    );
+
+    // Always print the header to stderr regardless of verbose.
+    eprintln!("{}", header);
+    if let Some(l) = &mut log { l.line(&header); }
+
     if total == 0 {
-        eprintln!("asd index: no recognized source files found under {}", args.path.display());
-        if args.verbose && !skipped.is_empty() {
-            eprintln!("  {} file{} skipped (no adapter):", skipped.len(), if skipped.len() == 1 { "" } else { "s" });
-            for f in &skipped {
-                eprintln!("  [skip] {}", f.display());
-            }
-        }
+        let msg = format!(
+            "asd index: no recognized source files found under {}",
+            args.path.display()
+        );
+        eprintln!("{}", msg);
+        if let Some(l) = &mut log { l.line(&msg); }
+        log_skipped(&skipped, &mut log, true);
         println!("{}", serde_json::to_string_pretty(&serde_json::json!({
             "files": 0,
             "skipped": skipped.len(),
@@ -54,19 +99,18 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
         return Ok(());
     }
 
-    eprintln!("Indexing {} file{} under {} …",
-        total,
-        if total == 1 { "" } else { "s" },
-        args.path.display()
-    );
+    // Wrap log in Arc<Mutex> so the progress closure can borrow it.
+    let log = Arc::new(Mutex::new(log));
+    let log_clone = Arc::clone(&log);
+    let width = total.to_string().len();
 
-    let verbose = args.verbose;
-    let progress: Option<&dyn Fn(&std::path::Path, usize, usize)> = if verbose {
-        Some(&|file: &std::path::Path, idx: usize, total: usize| {
-            eprintln!("  [{idx:>width$}/{total}] {}", file.display(), width = total.to_string().len());
-        })
-    } else {
-        None
+    let progress: &dyn Fn(&Path, usize, usize) = &|file: &Path, idx: usize, total: usize| {
+        let msg = format!("  [{idx:>width$}/{total}] {}", file.display());
+        if let Ok(mut guard) = log_clone.lock() {
+            if let Some(l) = guard.as_mut() {
+                l.line(&msg);
+            }
+        }
     };
 
     let summary = run_index(
@@ -76,25 +120,41 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
         &cfg.agent_id,
         &adapters,
         Some(engine.audit.as_ref()),
-        progress,
+        Some(progress),
     )?;
 
-    if args.verbose && !skipped.is_empty() {
-        eprintln!("  {} file{} skipped (no adapter):", skipped.len(), if skipped.len() == 1 { "" } else { "s" });
-        for f in &skipped {
-            eprintln!("  [skip] {}", f.display());
-        }
-    }
+    // Unwrap Arc — run_index is done, no other holders.
+    let mut log = Arc::try_unwrap(log).ok().and_then(|m| m.into_inner().ok()).flatten();
 
-    eprintln!("Done. {} symbol{}, {} effect{}.{}",
+    // Log all skipped files (no cap in log; capped on stderr).
+    log_skipped(&skipped, &mut log, args.verbose);
+
+    // Done summary — always to stderr.
+    let skipped_hint = if !skipped.is_empty() && !args.verbose {
+        format!(
+            " ({} file{} skipped — see {})",
+            skipped.len(),
+            if skipped.len() == 1 { "" } else { "s" },
+            log_path.display()
+        )
+    } else {
+        String::new()
+    };
+    let done_msg = format!(
+        "Done. {} symbol{}, {} effect{}.{}",
         summary.symbols, if summary.symbols == 1 { "" } else { "s" },
         summary.effects, if summary.effects == 1 { "" } else { "s" },
-        if summary.skipped > 0 && !args.verbose {
-            format!(" ({} file{} skipped — run with -v to list)", summary.skipped, if summary.skipped == 1 { "" } else { "s" })
-        } else {
-            String::new()
-        },
+        skipped_hint,
     );
+    eprintln!("{}", done_msg);
+    if let Some(l) = &mut log { l.line(&done_msg); }
+
+    let log_note = format!("Full log: {}", log_path.display());
+    if let Some(l) = &mut log { l.line(&log_note); }
+    // Only print log path hint to stderr when not verbose (verbose already showed everything).
+    if !args.verbose {
+        eprintln!("{}", log_note);
+    }
 
     println!(
         "{}",
@@ -111,4 +171,43 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
         }))?
     );
     Ok(())
+}
+
+/// Write skipped files to the log and conditionally to stderr.
+/// Log receives all files; stderr is capped at SKIPPED_DISPLAY_LIMIT.
+fn log_skipped(skipped: &[PathBuf], log: &mut Option<IndexLog>, show_on_stderr: bool) {
+    if skipped.is_empty() {
+        return;
+    }
+
+    let header = format!(
+        "  {} file{} skipped (no adapter):",
+        skipped.len(),
+        if skipped.len() == 1 { "" } else { "s" }
+    );
+
+    // Log file always gets the header and all entries.
+    if let Some(l) = log.as_mut() {
+        l.line(&header);
+        for f in skipped {
+            l.line(&format!("  [skip] {}", f.display()));
+        }
+    }
+
+    if !show_on_stderr {
+        return;
+    }
+
+    // stderr: header + up to SKIPPED_DISPLAY_LIMIT entries.
+    eprintln!("{}", header);
+    let display = skipped.len().min(SKIPPED_DISPLAY_LIMIT);
+    for f in &skipped[..display] {
+        eprintln!("  [skip] {}", f.display());
+    }
+    if skipped.len() > SKIPPED_DISPLAY_LIMIT {
+        eprintln!(
+            "  … and {} more — see .asd/index.log for the full list",
+            skipped.len() - SKIPPED_DISPLAY_LIMIT
+        );
+    }
 }
