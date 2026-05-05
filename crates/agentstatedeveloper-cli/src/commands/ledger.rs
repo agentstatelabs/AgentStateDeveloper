@@ -694,25 +694,28 @@ fn rebind(cfg: &Config, args: RebindArgs) -> Result<()> {
         _ => {}
     }
 
-    // Resolve new qname → new symbol_id.
+    // Resolve qnames → symbol_ids.
     let index_store = AsgIndexStore { repo: &engine.repo };
+    let from_symbol = index_store
+        .get_symbol_by_qname(&engine.ref_name, &args.from)?
+        .ok_or_else(|| anyhow::anyhow!("from qname not found in index: {} — run `asd index` first", args.from))?;
     let new_symbol = index_store
         .get_symbol_by_qname(&engine.ref_name, &args.to)?
         .ok_or_else(|| anyhow::anyhow!("qname not found in index: {} — run `asd index` first", args.to))?;
 
-    if new_symbol.symbol_id == args.from {
+    if new_symbol.symbol_id == from_symbol.symbol_id {
         anyhow::bail!("from and to resolve to the same symbol_id — nothing to rebind");
     }
 
     // Write the rebind record.
     let rebind = Rebind {
-        from_symbol_id: args.from.clone(),
+        from_symbol_id: from_symbol.symbol_id.clone(),
         to_symbol_id: new_symbol.symbol_id.clone(),
         to_qname: args.to.clone(),
         at: Utc::now(),
         by: args.agent_id.clone(),
     };
-    let rebind_path = paths::rebind_path(&args.from);
+    let rebind_path = paths::rebind_path(&from_symbol.symbol_id);
     let opts = CommitOptions::new(
         &args.agent_id,
         IntentCategory::Refine,
@@ -725,7 +728,7 @@ fn rebind(cfg: &Config, args: RebindArgs) -> Result<()> {
 
     // Re-parent all ledger entries from old symbol_id to new symbol_id.
     let ledger_store = AsgLedgerStore { repo: &engine.repo };
-    let entries = ledger_store.list_entries_with_superseded(&engine.ref_name, &args.from)?;
+    let entries = ledger_store.list_entries_with_superseded(&engine.ref_name, &from_symbol.symbol_id)?;
     let count = entries.len();
     for mut entry in entries {
         // Write under the new symbol_id path.
@@ -743,10 +746,11 @@ fn rebind(cfg: &Config, args: RebindArgs) -> Result<()> {
     }
 
     let event = AuditEvent::new(event_types::LEDGER_REBIND, &args.agent_id, "agent", "allow")
-        .with_subject(args.from.clone())
+        .with_subject(from_symbol.symbol_id.clone())
         .with_secondary(new_symbol.symbol_id.clone())
         .with_payload(json!({
-            "from_symbol_id": args.from,
+            "from_qname": args.from,
+            "from_symbol_id": from_symbol.symbol_id,
             "to_symbol_id": new_symbol.symbol_id,
             "to_qname": args.to,
             "entries_moved": count,
@@ -757,7 +761,7 @@ fn rebind(cfg: &Config, args: RebindArgs) -> Result<()> {
         "{}",
         serde_json::to_string_pretty(&json!({
             "status": "rebound",
-            "from_symbol_id": args.from,
+            "from_symbol_id": from_symbol.symbol_id,
             "to_symbol_id": new_symbol.symbol_id,
             "to_qname": args.to,
             "entries_moved": count,
