@@ -5,6 +5,36 @@ Versions use semantic versioning; each milestone increments by 0.0.5.
 
 ---
 
+## [0.6.0] — 2026-05-05
+
+### Added
+- **`asd mcp install/uninstall/status`** — registers `asd-mcp` in known agent
+  tool configs (Claude Code, Claude Desktop, Cursor); detects all present tools
+  automatically; writes `ASD_DB` into the env block so agents connect to the
+  right project database; `--tool` flag targets a single tool
+- **`asd index` progress output** — standard mode prints file count and
+  "Done. N symbols" summary; `--verbose` / `-v` shows each file as it is
+  processed
+- **Skipped-file reporting** — unrecognized extensions tracked in
+  `CollectResult`; `skipped` field added to `IndexSummary` and all JSON
+  output; standard mode hints to use `-v`; verbose mode lists every skipped
+  file with `[skip]` prefix
+- **`asd-mcp` and `asd-serve` binaries installed** via
+  `cargo install --path crates/agentstatedeveloper-mcp`
+
+### Fixed
+- **`ledger rebind`** — from-qname was not resolved to `sym_...` ID before
+  looking up entries to re-parent; `entries_moved` was always 0
+
+### Docs
+- README, quickstart, introduction, architecture updated with correct install
+  instructions (`cargo install --path`, not `cargo install asd`), `asd mcp`
+  usage, and index progress output examples
+- Hero and FeatureGrid updated to show `asd mcp install` in setup and clone
+  onboarding flows
+
+---
+
 ## [0.5.5] — 2026-05-05
 
 ### Added
