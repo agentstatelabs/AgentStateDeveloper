@@ -115,6 +115,10 @@ fn join_qname(prefix: &str, name: &str) -> String {
 }
 
 fn make_symbol(node: Node<'_>, src: &[u8], qname: String, kind: SymbolKind) -> ParsedSymbol {
+    make_symbol_sig(node, src, qname, kind, None)
+}
+
+fn make_symbol_sig(node: Node<'_>, src: &[u8], qname: String, kind: SymbolKind, signature: Option<String>) -> ParsedSymbol {
     ParsedSymbol {
         qname,
         kind,
@@ -123,8 +127,36 @@ fn make_symbol(node: Node<'_>, src: &[u8], qname: String, kind: SymbolKind) -> P
         end_line: node.end_position().row as u32 + 1,
         end_col: node.end_position().column as u32,
         body: node_text(node, src).to_string(),
-        signature: None,
+        signature,
     }
+}
+
+/// Extract Kotlin function signature: text up to (not including) the body `{`.
+fn extract_sig_before_brace(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(&src[node.start_byte()..node.end_byte()]).ok()?;
+    let bytes = text.as_bytes();
+    let mut depth: i32 = 0;
+    let mut i = 0;
+    let mut sig_end = text.len();
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' { i += 2; continue; }
+                    if bytes[i] == b'"' { break; }
+                    i += 1;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => { if depth > 0 { depth -= 1; } }
+            b'{' if depth == 0 => { sig_end = i; break; }
+            _ => {}
+        }
+        i += 1;
+    }
+    let sig = text[..sig_end].trim().to_string();
+    if sig.is_empty() { None } else { Some(sig) }
 }
 
 // -----------------------------------------------------------------------------
@@ -182,7 +214,8 @@ fn walk(node: Node<'_>, src: &[u8], scope: &str, out: &mut Vec<ParsedSymbol>) {
             } else {
                 SymbolKind::Method
             };
-            out.push(make_symbol(node, src, qname, kind));
+            let sig = extract_sig_before_brace(node, src);
+            out.push(make_symbol_sig(node, src, qname, kind, sig));
         }
         _ => {
             for i in 0..node.child_count() {

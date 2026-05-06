@@ -1186,7 +1186,7 @@ mod tests {
     fn infers_fs_read_and_write_from_open() {
         let body = "def f():\n    with open('/tmp/a.txt', 'w') as f:\n        f.write('hi')\n";
         let effects = infer_effects_from_body(body);
-        let cats: Vec<_> = effects.iter().map(|e| e.effect).collect();
+        let cats: Vec<_> = effects.iter().map(|e| e.effect.clone()).collect();
         assert!(cats.contains(&EffectCategory::IoFsRead));
         assert!(cats.contains(&EffectCategory::IoFsWrite));
     }

@@ -689,7 +689,7 @@ func f() {
 }
 "#;
         let effects = infer_effects_from_body(body);
-        let cats: Vec<_> = effects.iter().map(|e| e.effect).collect();
+        let cats: Vec<_> = effects.iter().map(|e| e.effect.clone()).collect();
         assert!(cats.contains(&EffectCategory::IoFsRead), "cats: {cats:?}");
         assert!(cats.contains(&EffectCategory::IoNetOut), "cats: {cats:?}");
     }
@@ -698,7 +698,7 @@ func f() {
     fn infers_log_from_fmt_println() {
         let body = r#"func f() { fmt.Println("hello") }"#;
         let effects = infer_effects_from_body(body);
-        let cats: Vec<_> = effects.iter().map(|e| e.effect).collect();
+        let cats: Vec<_> = effects.iter().map(|e| e.effect.clone()).collect();
         assert!(cats.contains(&EffectCategory::Log), "cats: {cats:?}");
     }
 

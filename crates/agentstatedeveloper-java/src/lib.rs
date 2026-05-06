@@ -165,7 +165,7 @@ fn walk(
                 end_line: node.end_position().row as u32 + 1,
                 end_col: node.end_position().column as u32,
                 body: node_text(node, src).to_string(),
-                signature: None,
+                signature: extract_sig_before_brace(node, src),
             });
             // Don't recurse into method bodies for nested classes — Java allows
             // local class declarations but they're rare; skip for simplicity.
@@ -197,6 +197,39 @@ fn walk(
             }
         }
     }
+}
+
+// -----------------------------------------------------------------------------
+// Signature extraction
+// -----------------------------------------------------------------------------
+
+/// Extract the method/constructor signature: text from declaration start up to
+/// (but not including) the opening `{` of the body. Tracks `()` and `[]` depth.
+fn extract_sig_before_brace(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(&src[node.start_byte()..node.end_byte()]).ok()?;
+    let bytes = text.as_bytes();
+    let mut depth: i32 = 0;
+    let mut i = 0;
+    let mut sig_end = text.len();
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' { i += 2; continue; }
+                    if bytes[i] == b'"' { break; }
+                    i += 1;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => { if depth > 0 { depth -= 1; } }
+            b'{' if depth == 0 => { sig_end = i; break; }
+            _ => {}
+        }
+        i += 1;
+    }
+    let sig = text[..sig_end].trim().to_string();
+    if sig.is_empty() { None } else { Some(sig) }
 }
 
 // -----------------------------------------------------------------------------

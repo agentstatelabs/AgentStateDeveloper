@@ -1330,7 +1330,7 @@ function f() {
 }
 "#;
         let effects = infer_effects_from_body(body);
-        let cats: Vec<_> = effects.iter().map(|e| e.effect).collect();
+        let cats: Vec<_> = effects.iter().map(|e| e.effect.clone()).collect();
         assert!(cats.contains(&EffectCategory::IoFsWrite));
     }
 
@@ -1342,7 +1342,7 @@ function f() {
 }
 "#;
         let effects = infer_effects_from_body(body);
-        let cats: Vec<_> = effects.iter().map(|e| e.effect).collect();
+        let cats: Vec<_> = effects.iter().map(|e| e.effect.clone()).collect();
         assert!(cats.contains(&EffectCategory::Log));
     }
 
@@ -1478,7 +1478,7 @@ function f() {
 }
 "#;
         let effects = infer_effects_from_body(body);
-        let cats: Vec<_> = effects.iter().map(|e| e.effect).collect();
+        let cats: Vec<_> = effects.iter().map(|e| e.effect.clone()).collect();
         assert!(cats.contains(&EffectCategory::Throw));
     }
 

@@ -94,6 +94,10 @@ fn join_qname(prefix: &str, name: &str) -> String {
 }
 
 fn make_symbol(node: Node<'_>, src: &[u8], qname: String, kind: SymbolKind) -> ParsedSymbol {
+    make_symbol_sig(node, src, qname, kind, None)
+}
+
+fn make_symbol_sig(node: Node<'_>, src: &[u8], qname: String, kind: SymbolKind, signature: Option<String>) -> ParsedSymbol {
     ParsedSymbol {
         qname,
         kind,
@@ -102,8 +106,17 @@ fn make_symbol(node: Node<'_>, src: &[u8], qname: String, kind: SymbolKind) -> P
         end_line: node.end_position().row as u32 + 1,
         end_col: node.end_position().column as u32,
         body: node_text(node, src).to_string(),
-        signature: None,
+        signature,
     }
+}
+
+/// Extract the Ruby method signature: the first line of the `def` declaration.
+/// Ruby uses `end` as the body terminator (not `{`), so we take everything
+/// up to the first newline.
+fn extract_ruby_sig(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(&src[node.start_byte()..node.end_byte()]).ok()?;
+    let first_line = text.lines().next()?.trim().to_string();
+    if first_line.is_empty() { None } else { Some(first_line) }
 }
 
 // -----------------------------------------------------------------------------
@@ -156,7 +169,8 @@ fn walk(node: Node<'_>, src: &[u8], scope: &str, out: &mut Vec<ParsedSymbol>) {
                 return;
             }
             let qname = join_qname(scope, name);
-            out.push(make_symbol(node, src, qname, SymbolKind::Method));
+            let sig = extract_ruby_sig(node, src);
+            out.push(make_symbol_sig(node, src, qname, SymbolKind::Method, sig));
         }
         "singleton_method" => {
             // def self.method_name — treat as a class-level Function
@@ -166,9 +180,9 @@ fn walk(node: Node<'_>, src: &[u8], scope: &str, out: &mut Vec<ParsedSymbol>) {
             if name.is_empty() {
                 return;
             }
-            // Qualify as ClassName.method_name (dot = class method)
             let qname = join_qname(scope, name);
-            out.push(make_symbol(node, src, qname, SymbolKind::Function));
+            let sig = extract_ruby_sig(node, src);
+            out.push(make_symbol_sig(node, src, qname, SymbolKind::Function, sig));
         }
         _ => {
             for i in 0..node.child_count() {
