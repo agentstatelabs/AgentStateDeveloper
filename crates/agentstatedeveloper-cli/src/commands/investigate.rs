@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore, LedgerStore,
-    SearchFtsDb,
+    SearchFtsDb, hybrid_boost,
 };
 
 use crate::commands::{
@@ -137,6 +137,7 @@ fn find_candidates(
         let mut scored: Vec<(f64, String)> = hits
             .into_iter()
             .map(|hit| {
+                let boost = hybrid_boost(&hit, tokens);
                 let ledger_boost = {
                     let entries = ledger_store
                         .list_entries(&engine.ref_name, &hit.symbol_id)
@@ -152,7 +153,7 @@ fn find_candidates(
                         tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
                     }
                 };
-                (hit.bm25_score + ledger_boost, hit.qname)
+                (hit.bm25_score + boost + ledger_boost, hit.qname)
             })
             .collect();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));

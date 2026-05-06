@@ -9,7 +9,7 @@ use clap::Args;
 
 use agentstatedeveloper_core::{
     AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore, LedgerStore, SearchFtsDb,
-    SymbolKind,
+    SymbolKind, hybrid_boost,
 };
 
 use crate::config::Config;
@@ -59,13 +59,12 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
     if let Some(hits) = fts_result {
         let tokens = query_tokens(&args.query);
 
-        // Hybrid reranking: BM25 + ledger boost.
+        // Hybrid reranking: BM25 + path/name boost + ledger boost.
         let mut scored: Vec<(f64, _)> = hits
             .into_iter()
             .map(|hit| {
-                let ledger_boost = if tokens.is_empty() {
-                    0.0
-                } else {
+                let boost = hybrid_boost(&hit, &tokens);
+                let ledger_boost = {
                     let entries = ledger_store
                         .list_entries(&engine.ref_name, &hit.symbol_id)
                         .unwrap_or_default();
@@ -80,7 +79,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                         tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
                     }
                 };
-                (hit.bm25_score + ledger_boost, hit)
+                (hit.bm25_score + boost + ledger_boost, hit)
             })
             .collect();
 

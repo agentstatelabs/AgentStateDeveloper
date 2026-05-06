@@ -19,7 +19,7 @@ use agentstatedeveloper_core::{
     Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory, EffectDecl, EffectStore,
     Engine, FtsFilters, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Rebind, ScratchEntry,
     ScratchFilter, ScratchStatus, ScratchStore, SearchFtsDb, Situation, actions, emit_audit,
-    event_types, paths,
+    event_types, hybrid_boost, paths,
 };
 
 /// The AgentStateDeveloper MCP server.
@@ -530,15 +530,16 @@ impl AsdMcpServer {
             let mut scored: Vec<(f64, _)> = hits
                 .into_iter()
                 .map(|hit| {
+                    let boost = hybrid_boost(&hit, &tokens);
                     let entries = ledger_store
                         .list_entries(&ref_name, &hit.symbol_id)
                         .unwrap_or_default();
                     let text = entries.iter().map(|e| e.summary.to_lowercase())
                         .collect::<Vec<_>>().join(" ");
-                    let boost = if text.is_empty() { 0.0 } else {
+                    let ledger_boost = if text.is_empty() { 0.0 } else {
                         tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
                     };
-                    (hit.bm25_score + boost, hit)
+                    (hit.bm25_score + boost + ledger_boost, hit)
                 })
                 .collect();
             scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
@@ -652,14 +653,15 @@ impl AsdMcpServer {
 
             if let Some(hits) = fts_result {
                 let mut sc: Vec<(f64, String)> = hits.into_iter().map(|hit| {
+                    let boost = hybrid_boost(&hit, &tokens);
                     let entries = ledger_store.list_entries(&ref_name, &hit.symbol_id)
                         .unwrap_or_default();
                     let text = entries.iter().map(|e| e.summary.to_lowercase())
                         .collect::<Vec<_>>().join(" ");
-                    let boost = if text.is_empty() { 0.0 } else {
+                    let ledger_boost = if text.is_empty() { 0.0 } else {
                         tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
                     };
-                    (hit.bm25_score + boost, hit.qname)
+                    (hit.bm25_score + boost + ledger_boost, hit.qname)
                 }).collect();
                 sc.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
                 sc.truncate(depth);

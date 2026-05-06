@@ -263,6 +263,7 @@ impl SearchFtsDb {
 
     /// True if the FTS table has at least one row.
     pub fn has_data(&self) -> bool {
+
         self.conn
             .query_row("SELECT COUNT(*) FROM asd_search_fts LIMIT 1", [], |r| {
                 r.get::<_, i64>(0)
@@ -270,6 +271,65 @@ impl SearchFtsDb {
             .map(|n| n > 0)
             .unwrap_or(false)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Hybrid reranking boost
+// ---------------------------------------------------------------------------
+
+/// Rust-side score boost applied on top of BM25 after FTS returns hits.
+///
+/// Two components, both measured against `tokens` (lowercased query words):
+///
+/// **Path word boost (+1.5 / token)** — camelCase-expands each file path
+/// segment and checks for exact word matches. "drift" matches the segment
+/// "ExampleFlow" (expanded → ["session","drift"]) but NOT "overlap" for
+/// the token "over". Rewards symbols that live in a subsystem named after
+/// a query concept without rewarding false substring matches.
+///
+/// **Name segment boost (+2.0 / token)** — camelCase-expands only the last
+/// dotted segment of `qname` (the function/method name, stripped of
+/// namespace). "drift playhead" matches both words in `refreshDriftPlayhead`
+/// (+4.0) but only "playhead" in `isInPlayheadHandle` (+2.0), correcting
+/// the case where a single-token exact match outranks a dual-token match.
+pub fn hybrid_boost(hit: &FtsHit, tokens: &[String]) -> f64 {
+    if tokens.is_empty() {
+        return 0.0;
+    }
+
+    // Expand file path into whole camelCase words.
+    let path_words: Vec<String> = hit.file
+        .split(|c: char| c == '/' || c == '\\' || c == '.')
+        .filter(|s| !s.is_empty())
+        .flat_map(|seg| {
+            let mut words: Vec<String> = vec![seg.to_lowercase()];
+            words.extend(split_camel(seg).iter().map(|w| w.to_lowercase()));
+            words
+        })
+        .filter(|w| w.len() >= 2)
+        .collect();
+
+    let path_boost = tokens
+        .iter()
+        .filter(|t| path_words.iter().any(|w| w == t.as_str()))
+        .count() as f64
+        * 1.5;
+
+    // Expand last qname segment (function name) into camelCase words.
+    let last_seg = hit.qname.rsplit('.').next().unwrap_or(&hit.qname);
+    let name_words: Vec<String> = {
+        let mut words: Vec<String> = vec![last_seg.to_lowercase()];
+        words.extend(split_camel(last_seg).iter().map(|w| w.to_lowercase()));
+        words
+    };
+
+    let name_boost = tokens
+        .iter()
+        .filter(|t| name_words.iter().any(|w| w == t.as_str()))
+        .count() as f64
+        * 2.0;
+
+    path_boost + name_boost
 }
 
 // ---------------------------------------------------------------------------
