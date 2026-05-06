@@ -382,8 +382,15 @@ pub fn hydrate_from_dir(
     // O(N²) that individual put_symbol calls produce.
     //
     // Validation: parse failures increment `blobs_rejected` and skip the
-    // file. Collisions (same qname already in ASG with a newer `created_at`)
-    // increment `symbols_skipped` and retain the more-recent record.
+    // file. Collisions (same qname OR same content fingerprint already in ASG)
+    // increment `symbols_skipped` and retain the live record.
+    //
+    // The secondary fingerprint check (symbol_fp) handles qname format changes:
+    // if the live index was built with a different qname scheme than the sidecar
+    // (e.g., after the 0.9.8 Sources-anchor fix), the same code unit exists
+    // under two different qnames.  Importing the stale-qname copy would inflate
+    // the symbol count and introduce mixed-format call edges.  Skipping by fp
+    // keeps only the freshly-indexed, correctly-qnamed symbol.
     // -----------------------------------------------------------------------
     let mut symbols_loaded = 0usize;
     let mut symbols_skipped = 0usize;
@@ -395,6 +402,15 @@ pub fn hydrate_from_dir(
             .ok()
             .and_then(|v| v.as_object().cloned())
             .unwrap_or_default();
+
+        // Secondary dedup: set of symbol_fp values already present in the live
+        // index under *any* qname.  Built once before the import loop so that
+        // sidecar symbols whose code hasn't changed are skipped even when their
+        // qname differs from the live record (e.g., after a qname format change).
+        let live_fps: std::collections::HashSet<String> = by_qname
+            .values()
+            .filter_map(|v| v.get("symbol_fp")?.as_str().map(|s| s.to_string()))
+            .collect();
 
         // code tree: lang → { "clean_file/symbol_fp" → Symbol }
         let mut by_code: BTreeMap<String, serde_json::Map<String, Value>> = {
@@ -432,19 +448,26 @@ pub fn hydrate_from_dir(
                 }
             };
 
-            // Collision check: if the same qname already exists in ASG and
-            // its symbol_fp (content fingerprint) matches the incoming one,
-            // this is a no-op — skip to avoid redundant writes.  If the fp
-            // differs, the sidecar version wins (it's the source of truth for
-            // hydrate).
+            // Primary collision check: same qname already present with matching
+            // fingerprint → no-op.  Different fingerprint → sidecar wins.
             if let Some(existing_val) = by_qname.get(&sym.qname) {
                 if let Ok(existing_sym) = serde_json::from_value::<Symbol>(existing_val.clone()) {
                     if existing_sym.symbol_fp == sym.symbol_fp {
                         symbols_skipped += 1;
-                        continue; // identical content — no write needed
+                        continue; // identical content under same qname — skip
                     }
                     // Different fingerprint → sidecar wins; fall through to insert.
                 }
+            }
+
+            // Secondary collision check: same symbol_fp already present under
+            // a *different* qname in the live index.  This catches stale-qname
+            // sidecar entries after a qname format change (e.g., 0.9.8 Sources-
+            // anchor) — the symbol was re-indexed with the new qname, so the
+            // sidecar copy is a renamed duplicate that must not be imported.
+            if live_fps.contains(&sym.symbol_fp) {
+                symbols_skipped += 1;
+                continue;
             }
 
             let sym_val = serde_json::to_value(&sym)?;
