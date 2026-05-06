@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore, LedgerStore,
-    SearchFtsDb, hybrid_boost,
+    SearchFtsDb, classify_layer, hybrid_boost, symbol_tier,
 };
 
 use crate::commands::{
@@ -88,6 +88,8 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             Ok(Some(s)) => s,
             _ => continue,
         };
+        let tier = symbol_tier(&sym.file);
+        let layer = classify_layer(&sym.file, tier);
         let ctx = assemble_symbol_context(
             &engine,
             &index_store,
@@ -97,7 +99,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             &id_map,
             args.include_body,
         )?;
-        let mut ep = json!({ "score": score });
+        let mut ep = json!({ "score": score, "layer": layer });
         if let (Some(obj), Some(ctx_obj)) = (ep.as_object_mut(), ctx.as_object()) {
             for (k, v) in ctx_obj {
                 obj.insert(k.clone(), v.clone());
@@ -106,10 +108,24 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         entry_points.push(ep);
     }
 
+    // Build by_layer grouped view (layer → [entry_points]).
+    let layer_order = ["ui", "viewmodel", "scheduler", "core_model", "persistence", "utility", "tests", "other"];
+    let mut by_layer: serde_json::Map<String, Value> = serde_json::Map::new();
+    for layer_key in &layer_order {
+        let members: Vec<&Value> = entry_points
+            .iter()
+            .filter(|ep| ep.get("layer").and_then(Value::as_str) == Some(layer_key))
+            .collect();
+        if !members.is_empty() {
+            by_layer.insert(layer_key.to_string(), Value::Array(members.into_iter().cloned().collect()));
+        }
+    }
+
     let out = json!({
         "query": args.query,
         "tokens": tokens,
         "entry_points": entry_points,
+        "by_layer": by_layer,
     });
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())

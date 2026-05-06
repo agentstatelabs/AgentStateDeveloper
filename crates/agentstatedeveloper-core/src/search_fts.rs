@@ -390,6 +390,112 @@ pub fn symbol_tier(file: &str) -> SymbolTier {
     if is_test_file(file) { 2 } else if is_utility_file(file) { 1 } else { 0 }
 }
 
+/// Classify a source file into a workflow layer for `asd investigate` grouping.
+///
+/// Returns one of: `"ui"`, `"viewmodel"`, `"core_model"`, `"scheduler"`,
+/// `"persistence"`, `"utility"`, `"tests"`, or `"other"`.
+///
+/// Classification is purely file-path based — directory names and filename
+/// suffixes are matched against common patterns for each layer. The `tier`
+/// argument is used so that tier-2 (test) files always land in `"tests"` and
+/// tier-1 (utility) files always land in `"utility"` regardless of path.
+pub fn classify_layer(file: &str, tier: SymbolTier) -> &'static str {
+    if tier == 2 { return "tests"; }
+    if tier == 1 { return "utility"; }
+
+    let lower = file.to_lowercase();
+    let segments: Vec<&str> = lower.split(|c| c == '/' || c == '\\').collect();
+    let filename = segments.last().copied().unwrap_or("");
+    // Strip extension to check suffix patterns.
+    let stem = filename.rsplit('.').nth(1).unwrap_or(filename);
+
+    // Check directory components (all except filename) for layer keywords.
+    let dirs: Vec<&str> = segments.iter().copied().rev().skip(1).collect();
+
+    // --- Scheduler / Engine ---
+    const SCHED_DIRS: &[&str] = &[
+        "scheduler", "schedulers", "engine", "engines", "audio", "audioengine",
+        "transport", "render", "renderer", "pipeline", "worker", "workers",
+        "processing", "realtime", "dsp", "clock",
+    ];
+    const SCHED_SUFFIXES: &[&str] = &[
+        "scheduler", "engine", "transport", "renderer", "pipeline",
+        "worker", "processor", "synthesizer", "synth", "clock", "timer",
+        "compiler", "loop",
+    ];
+    if dirs.iter().any(|d| SCHED_DIRS.contains(d))
+        || SCHED_SUFFIXES.iter().any(|s| stem.ends_with(s))
+    {
+        return "scheduler";
+    }
+
+    // --- Persistence ---
+    const PERSIST_DIRS: &[&str] = &[
+        "storage", "database", "db", "repository", "repositories",
+        "cache", "datastore", "persistence", "migration", "migrations",
+        "store", "dao",
+    ];
+    const PERSIST_SUFFIXES: &[&str] = &[
+        "repository", "store", "database", "cache", "storage",
+        "dao", "datasource", "migration",
+    ];
+    if dirs.iter().any(|d| PERSIST_DIRS.contains(d))
+        || PERSIST_SUFFIXES.iter().any(|s| stem.ends_with(s))
+    {
+        return "persistence";
+    }
+
+    // --- ViewModel / Presenter ---
+    const VM_DIRS: &[&str] = &[
+        "viewmodels", "viewmodel", "presenters", "presenter",
+        "coordinators", "coordinator", "interactors", "interactor",
+    ];
+    const VM_SUFFIXES: &[&str] = &[
+        "viewmodel", "viewstate", "presenter", "coordinator",
+        "interactor", "statemanager",
+    ];
+    if dirs.iter().any(|d| VM_DIRS.contains(d))
+        || VM_SUFFIXES.iter().any(|s| stem.ends_with(s))
+    {
+        return "viewmodel";
+    }
+
+    // --- UI ---
+    const UI_DIRS: &[&str] = &[
+        "views", "view", "screens", "screen", "pages", "page",
+        "components", "component", "widgets", "widget",
+        "cells", "viewcontrollers", "ui", "fragments",
+    ];
+    const UI_SUFFIXES: &[&str] = &[
+        "view", "screen", "page", "component", "widget",
+        "cell", "viewcontroller", "fragment", "layout", "button",
+        "label", "panel", "sheet", "modal", "overlay", "header", "footer",
+    ];
+    if dirs.iter().any(|d| UI_DIRS.contains(d))
+        || UI_SUFFIXES.iter().any(|s| stem.ends_with(s))
+    {
+        return "ui";
+    }
+
+    // --- Core Model / Domain ---
+    const MODEL_DIRS: &[&str] = &[
+        "models", "model", "domain", "core", "entities", "entity",
+        "services", "service", "usecases", "usecase", "business",
+        "logic", "features", "feature",
+    ];
+    const MODEL_SUFFIXES: &[&str] = &[
+        "model", "entity", "service", "usecase", "manager",
+        "handler", "factory", "builder", "validator",
+    ];
+    if dirs.iter().any(|d| MODEL_DIRS.contains(d))
+        || MODEL_SUFFIXES.iter().any(|s| stem.ends_with(s))
+    {
+        return "core_model";
+    }
+
+    "other"
+}
+
 /// Heuristically determine whether a symbol's source file is a utility file
 /// (Preview, Sample, Editor extension, Generated, Mock, Stub, Fixture, Demo).
 /// These are compiled into the app but are not production logic.
@@ -766,5 +872,18 @@ mod tests {
             10,
         ).unwrap();
         assert!(hits3.is_empty(), "language filter should exclude swift");
+    }
+
+    #[test]
+    fn layer_classification() {
+        assert_eq!(classify_layer("App/Views/DriftPlayheadView.swift", 0), "ui");
+        assert_eq!(classify_layer("App/ViewModel/DriftPlayheadViewModel.swift", 0), "viewmodel");
+        assert_eq!(classify_layer("App/Scheduler/DriftScheduler.swift", 0), "scheduler");
+        assert_eq!(classify_layer("App/Engine/AudioEngine.swift", 0), "scheduler");
+        assert_eq!(classify_layer("App/Storage/ClipRepository.swift", 0), "persistence");
+        assert_eq!(classify_layer("App/Domain/Clip.swift", 0), "core_model");
+        assert_eq!(classify_layer("App/Previews/DriftView_Previews.swift", 1), "utility");
+        assert_eq!(classify_layer("Tests/DriftTests.swift", 2), "tests");
+        assert_eq!(classify_layer("App/AppDelegate.swift", 0), "other");
     }
 }
