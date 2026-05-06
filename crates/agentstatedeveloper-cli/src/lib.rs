@@ -152,6 +152,10 @@ pub enum Command {
     /// Blast-radius analysis before editing a symbol: transitive callers,
     /// aggregated effects, invariants/hazards, affected tests, and recent git touches.
     Impact(commands::impact::ImpactArgs),
+
+    /// Structured pre-edit checklist: files to inspect, invariants to preserve,
+    /// tests to run, known hazards, and effects to verify. Markdown or JSON output.
+    Checklist(commands::checklist::ChecklistArgs),
 }
 
 /// Resolve [`Config`] from the parsed CLI flags.
@@ -193,5 +197,6 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Investigate(args) => investigate::run(cfg, args),
         Command::Status(args) => status::run(cfg, args),
         Command::Impact(args) => impact::run(cfg, args),
+        Command::Checklist(args) => checklist::run(cfg, args),
     }
 }

@@ -235,9 +235,9 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     Ok(())
 }
 
-/// Returns top-`depth` (score, symbol_id) pairs using FTS when available,
+/// Returns top-`depth` (score, qname) pairs using FTS when available,
 /// falling back to in-memory scoring.
-fn find_candidates(
+pub(crate) fn find_candidates(
     engine: &Engine,
     db_path: &std::path::Path,
     query: &str,
