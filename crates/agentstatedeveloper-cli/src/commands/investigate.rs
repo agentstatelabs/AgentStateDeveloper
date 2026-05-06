@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore, LedgerStore,
-    SearchFtsDb, classify_layer, extract_summary, hybrid_boost, load_layer_overrides,
-    stale_warning, symbol_tier,
+    SearchFtsDb, classify_layer, extract_summary, gather_recency, hybrid_boost,
+    load_layer_overrides, stale_warning, symbol_tier,
 };
 
 use crate::commands::{
@@ -101,6 +101,9 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         args.depth,
     );
 
+    // One git pass to gather recency for all candidate files (hot = 14 days).
+    let recency = gather_recency(200, 14.0);
+
     let mut entry_points: Vec<Value> = Vec::new();
     for (score, qname) in &candidates {
         let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
@@ -110,6 +113,9 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         let tier = symbol_tier(&sym.file);
         let layer = classify_layer(&sym.file, tier, &layer_overrides);
         let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
+        let rec = recency.get(&sym.file);
+        let last_touched_days = rec.and_then(|r| r.last_touched_days);
+        let hot = rec.map(|r| r.hot).unwrap_or(false);
         let ctx = assemble_symbol_context(
             &engine,
             &index_store,
@@ -119,7 +125,13 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             &id_map,
             args.include_body,
         )?;
-        let mut ep = json!({ "score": score, "layer": layer, "summary": summary });
+        let mut ep = json!({
+            "score": score,
+            "layer": layer,
+            "summary": summary,
+            "last_touched_days": last_touched_days,
+            "hot": hot,
+        });
         if let (Some(obj), Some(ctx_obj)) = (ep.as_object_mut(), ctx.as_object()) {
             for (k, v) in ctx_obj {
                 obj.insert(k.clone(), v.clone());

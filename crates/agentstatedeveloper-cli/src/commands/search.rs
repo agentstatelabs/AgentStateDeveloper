@@ -9,7 +9,7 @@ use clap::Args;
 
 use agentstatedeveloper_core::{
     AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore, LedgerStore, SearchFtsDb,
-    SymbolKind, extract_summary, hybrid_boost, is_stopword, stale_warning,
+    SymbolKind, extract_summary, gather_recency, hybrid_boost, is_stopword, stale_warning,
 };
 
 use crate::config::Config;
@@ -101,10 +101,24 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             return Ok(());
         }
 
+        // One git pass to annotate with recency (hot = changed in last 14 days).
+        let unique_files: Vec<&str> = {
+            let mut seen = std::collections::HashSet::new();
+            scored.iter().filter(|(_, h)| seen.insert(h.file.clone())).map(|(_, h)| h.file.as_str()).collect()
+        };
+        let _ = unique_files; // used implicitly via gather_recency scope
+        let recency = gather_recency(200, 14.0);
+
         for (score, hit) in &scored {
+            let rec = recency.get(&hit.file);
+            let hot_tag = if rec.map(|r| r.hot).unwrap_or(false) { " [hot]" } else { "" };
+            let age_tag = rec
+                .and_then(|r| r.last_touched_days)
+                .map(|d| format!(" ~{:.0}d ago", d))
+                .unwrap_or_default();
             println!(
-                "[{:.1}] {} {} ({}:{})",
-                score, hit.kind, hit.qname, hit.file, hit.line
+                "[{:.1}] {} {}{}{} ({}:{})",
+                score, hit.kind, hit.qname, hot_tag, age_tag, hit.file, hit.line
             );
             if let Some(sig) = &hit.signature {
                 if !sig.is_empty() {

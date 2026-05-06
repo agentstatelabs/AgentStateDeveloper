@@ -459,6 +459,80 @@ pub fn stale_warning(db_path: &std::path::Path, threshold_secs: u64) -> Option<S
 }
 
 // ---------------------------------------------------------------------------
+// Recency helpers
+// ---------------------------------------------------------------------------
+
+/// Per-file recency metadata derived from a single `git log` call.
+#[derive(Debug, Clone)]
+pub struct FileRecency {
+    /// Days since last commit on this file (fractional). `None` if git
+    /// is unavailable or the file has no git history.
+    pub last_touched_days: Option<f64>,
+    /// True when the file was last touched within `hot_days` days.
+    pub hot: bool,
+}
+
+/// Run one `git log` pass covering up to `scan_commits` commits and return
+/// a map of relative file path → `FileRecency`.
+///
+/// Uses `--name-only --pretty=format:%ct` so each commit block looks like:
+/// ```
+/// <unix_timestamp>
+///
+/// path/to/file.swift
+/// another/file.swift
+/// ```
+///
+/// The first commit that mentions a file is its "last touched" commit.
+/// `hot_days` controls the `hot` flag (files modified within that window).
+pub fn gather_recency(scan_commits: usize, hot_days: f64) -> std::collections::HashMap<String, FileRecency> {
+    use std::collections::HashMap;
+    use std::process::Command;
+
+    let output = Command::new("git")
+        .args([
+            "log",
+            &format!("-n{}", scan_commits),
+            "--pretty=format:%ct",
+            "--name-only",
+        ])
+        .output();
+
+    let Ok(out) = output else { return HashMap::new() };
+    if !out.status.success() { return HashMap::new() }
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as f64)
+        .unwrap_or(0.0);
+    let hot_secs = hot_days * 86400.0;
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut current_ts: Option<f64> = None;
+    let mut map: HashMap<String, FileRecency> = HashMap::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(ts) = trimmed.parse::<f64>() {
+            current_ts = Some(ts);
+        } else if let Some(ts) = current_ts {
+            // Only record the first (most recent) commit that mentions each file.
+            map.entry(trimmed.to_string()).or_insert_with(|| {
+                let days = (now_secs - ts) / 86400.0;
+                FileRecency {
+                    last_touched_days: Some(days.max(0.0)),
+                    hot: (now_secs - ts) <= hot_secs,
+                }
+            });
+        }
+    }
+    map
+}
+
+// ---------------------------------------------------------------------------
 // Symbol summary extraction
 // ---------------------------------------------------------------------------
 
@@ -1177,5 +1251,20 @@ mod tests {
         assert_eq!(overrides.len(), 2);
         assert!(overrides.contains(&("infra".to_string(), "persistence".to_string())));
         assert!(overrides.contains(&("business".to_string(), "core_model".to_string())));
+    }
+
+    #[test]
+    fn gather_recency_no_crash_outside_repo() {
+        // gather_recency must not panic even if git is unavailable or returns non-zero.
+        // In a git repo this should return a non-empty map; outside one it returns empty.
+        // Either way it must not panic.
+        let result = gather_recency(10, 14.0);
+        // No assertion on content — just verify it didn't panic and types are correct.
+        for (file, rec) in &result {
+            assert!(!file.is_empty());
+            if let Some(days) = rec.last_touched_days {
+                assert!(days >= 0.0);
+            }
+        }
     }
 }

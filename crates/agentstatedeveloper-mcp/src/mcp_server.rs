@@ -21,8 +21,8 @@ use agentstatedeveloper_core::{
     Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory, EffectDecl, EffectStore,
     Engine, FtsFilters, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Rebind, ScratchEntry,
     ScratchFilter, ScratchStatus, ScratchStore, SearchFtsDb, Situation, actions, classify_layer,
-    emit_audit, event_types, extract_summary, hybrid_boost, is_stopword, load_layer_overrides,
-    paths, symbol_tier,
+    emit_audit, event_types, extract_summary, gather_recency, hybrid_boost, is_stopword,
+    load_layer_overrides, paths, symbol_tier,
 };
 
 /// The AgentStateDeveloper MCP server.
@@ -564,10 +564,12 @@ impl AsdMcpServer {
                 .then_with(|| a.1.qname.cmp(&b.1.qname)));
             scored.truncate(limit);
 
+            let recency = gather_recency(200, 14.0);
             let results: Vec<serde_json::Value> = scored.iter().map(|(score, hit)| {
                 let tier = hit.tier;
                 let layer = classify_layer(&hit.file, tier, &layer_overrides);
                 let summary = extract_summary(hit.doc.as_deref(), hit.signature.as_deref());
+                let rec = recency.get(&hit.file);
                 serde_json::json!({
                     "score": score,
                     "qname": hit.qname,
@@ -580,6 +582,8 @@ impl AsdMcpServer {
                     "summary": summary,
                     "signature": hit.signature,
                     "doc": hit.doc,
+                    "last_touched_days": rec.and_then(|r| r.last_touched_days),
+                    "hot": rec.map(|r| r.hot).unwrap_or(false),
                 })
             }).collect();
             return serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string());
@@ -623,10 +627,12 @@ impl AsdMcpServer {
         }
         scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.qname.cmp(&b.1.qname)));
         scored.truncate(limit);
+        let recency = gather_recency(200, 14.0);
         let results: Vec<serde_json::Value> = scored.iter().map(|(score, sym)| {
             let tier = symbol_tier(&sym.file);
             let layer = classify_layer(&sym.file, tier, &layer_overrides);
             let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
+            let rec = recency.get(&sym.file);
             serde_json::json!({
                 "score": score,
                 "qname": sym.qname,
@@ -639,6 +645,8 @@ impl AsdMcpServer {
                 "summary": summary,
                 "signature": sym.signature,
                 "doc": sym.doc,
+                "last_touched_days": rec.and_then(|r| r.last_touched_days),
+                "hot": rec.map(|r| r.hot).unwrap_or(false),
             })
         }).collect();
         serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string())
@@ -752,6 +760,8 @@ impl AsdMcpServer {
             }
         }
 
+        let recency = gather_recency(200, 14.0);
+
         let resolve_ids = |ids: Vec<String>| -> Vec<serde_json::Value> {
             ids.iter().map(|id| {
                 if let Some(s) = id_map.get(id) {
@@ -788,10 +798,13 @@ impl AsdMcpServer {
             let tier = symbol_tier(&sym.file);
             let layer = classify_layer(&sym.file, tier, &layer_overrides);
             let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
+            let rec = recency.get(&sym.file);
             entry_points.push(serde_json::json!({
                 "score": score,
                 "layer": layer,
                 "summary": summary,
+                "last_touched_days": rec.and_then(|r| r.last_touched_days),
+                "hot": rec.map(|r| r.hot).unwrap_or(false),
                 "qname": sym.qname,
                 "kind": format!("{:?}", sym.kind).to_lowercase(),
                 "language": sym.language,
