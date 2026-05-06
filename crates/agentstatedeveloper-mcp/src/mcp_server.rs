@@ -19,7 +19,7 @@ use agentstatedeveloper_core::{
     Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory, EffectDecl, EffectStore,
     Engine, FtsFilters, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Rebind, ScratchEntry,
     ScratchFilter, ScratchStatus, ScratchStore, SearchFtsDb, Situation, actions, emit_audit,
-    event_types, hybrid_boost, paths,
+    event_types, hybrid_boost, is_stopword, paths,
 };
 
 /// The AgentStateDeveloper MCP server.
@@ -505,7 +505,7 @@ impl AsdMcpServer {
         let tokens: Vec<String> = p.query
             .split(|c: char| c.is_whitespace() || c == '_' || c == '-' || c == '.')
             .map(|t| t.to_lowercase())
-            .filter(|t| t.len() >= 2)
+            .filter(|t| t.len() >= 2 && !is_stopword(t))
             .collect();
 
         if tokens.is_empty() {
@@ -626,7 +626,7 @@ impl AsdMcpServer {
         let tokens: Vec<String> = p.query
             .split(|c: char| c.is_whitespace() || c == '_' || c == '-' || c == '.')
             .map(|t| t.to_lowercase())
-            .filter(|t| t.len() >= 2)
+            .filter(|t| t.len() >= 2 && !is_stopword(t))
             .collect();
 
         if tokens.is_empty() {

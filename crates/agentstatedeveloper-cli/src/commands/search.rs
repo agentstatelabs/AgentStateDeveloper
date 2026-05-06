@@ -9,7 +9,7 @@ use clap::Args;
 
 use agentstatedeveloper_core::{
     AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore, LedgerStore, SearchFtsDb,
-    SymbolKind, hybrid_boost,
+    SymbolKind, hybrid_boost, is_stopword,
 };
 
 use crate::config::Config;
@@ -186,7 +186,7 @@ pub(crate) fn query_tokens(query: &str) -> Vec<String> {
     query
         .split(|c: char| c.is_whitespace() || c == '_' || c == '-' || c == '.')
         .map(|t| t.to_lowercase())
-        .filter(|t| t.len() >= 2)
+        .filter(|t| t.len() >= 2 && !is_stopword(t))
         .collect()
 }
 

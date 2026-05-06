@@ -34,6 +34,34 @@ use rusqlite::{Connection, params};
 use crate::schema::Symbol;
 
 // ---------------------------------------------------------------------------
+// Stopwords
+// ---------------------------------------------------------------------------
+
+/// English function words with no discriminative value for code search.
+///
+/// These are prepositions and conjunctions that appear naturally in
+/// natural-language queries ("playhead **over** clips", "scroll **with**
+/// velocity") but never appear as meaningful code identifiers. Filtering them
+/// prevents FTS MATCH from finding false positives like Swift named parameters
+/// (`punchIn(over existingClip:)`) or generic variable names.
+///
+/// Intentionally omits: "do", "in", "go" (language keywords), "no" (boolean
+/// shorthand), "up", "down" (directional — common in audio/UI APIs).
+pub const STOPWORDS: &[&str] = &[
+    "a", "an", "and", "as", "at", "be", "but", "by", "for", "from",
+    "if",  "into", "is", "it", "nor", "not", "of", "on", "or", "so",
+    "the", "to", "via", "vs", "yet", "with", "over", "about", "between",
+    "than", "that", "this", "are", "was", "were", "has", "have", "had",
+    "its", "our",
+];
+
+/// Returns true if the token is a stopword.
+#[inline]
+pub fn is_stopword(token: &str) -> bool {
+    STOPWORDS.contains(&token)
+}
+
+// ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
@@ -192,7 +220,7 @@ impl SearchFtsDb {
         let tokens: Vec<String> = query
             .split(|c: char| c.is_whitespace() || c == '_' || c == '-' || c == '.')
             .map(|t| t.to_lowercase())
-            .filter(|t| t.len() >= 2)
+            .filter(|t| t.len() >= 2 && !is_stopword(t))
             .collect();
 
         if tokens.is_empty() {
@@ -479,6 +507,34 @@ fn split_camel(s: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopword_filtering() {
+        // Pure stopword queries produce no tokens → empty results, not a panic.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let fts = SearchFtsDb::open(&db_path).unwrap();
+        use crate::schema::{Position, Symbol, SymbolKind};
+        let sym = Symbol {
+            symbol_id: "s1".into(), symbol_fp: "fp".into(),
+            qname: "App.Foo.punchIn".into(), language: "swift".into(),
+            kind: SymbolKind::Method,
+            file: "App/Foo.swift".into(),
+            start: Position { line: 1, col: 0 }, end: Position { line: 5, col: 0 },
+            signature: Some("func punchIn(over existingClip: Clip)".into()),
+            doc: None,
+        };
+        fts.rebuild(std::slice::from_ref(&sym)).unwrap();
+
+        // "over" alone is a stopword — filtered → empty tokens → no results.
+        let hits = fts.search("over", &FtsFilters::default(), 10).unwrap();
+        assert!(hits.is_empty(), "'over' is a stopword, should return no hits");
+
+        // "playhead over clips" — only "playhead" and "clips" survive filtering.
+        // "punchIn(over existingClip)" has no "playhead" or "clips" → no match.
+        let hits2 = fts.search("playhead over clips", &FtsFilters::default(), 10).unwrap();
+        assert!(hits2.is_empty(), "stopword-only overlap should not match punchIn");
+    }
 
     #[test]
     fn split_camel_basic() {
