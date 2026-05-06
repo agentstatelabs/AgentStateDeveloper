@@ -399,7 +399,7 @@ fn propagate_transitive_batched(
         let Some(decl) = effects_cache.get(sym) else { continue; };
 
         let declared_cats: HashSet<EffectCategory> =
-            decl.declared.iter().map(|e| e.effect).collect();
+            decl.declared.iter().map(|e| e.effect.clone()).collect();
 
         let mut new_transitive: Vec<TransitiveEffect> = computed
             .into_iter()
@@ -478,7 +478,7 @@ fn compute_transitive_mem(
     for callee in callees {
         if let Some(decl) = effects.get(callee) {
             for e in &decl.declared {
-                acc.entry(e.effect).or_default().insert(callee.clone());
+                acc.entry(e.effect.clone()).or_default().insert(callee.clone());
             }
         }
         let callee_trans = compute_transitive_mem(callees_of, effects, callee, memo, stack);
@@ -497,7 +497,7 @@ fn transitive_eq(a: &[TransitiveEffect], b: &[TransitiveEffect]) -> bool {
     let to_key = |t: &TransitiveEffect| {
         let mut via = t.via.clone();
         via.sort();
-        (t.effect, via)
+        (t.effect.clone(), via)
     };
     let mut a_keys: Vec<_> = a.iter().map(to_key).collect();
     let mut b_keys: Vec<_> = b.iter().map(to_key).collect();

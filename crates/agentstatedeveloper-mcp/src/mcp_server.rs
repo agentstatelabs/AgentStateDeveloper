@@ -1153,7 +1153,7 @@ impl AsdMcpServer {
         // in the existing declared list, this call is broadening.
         let existing_set: std::collections::HashSet<EffectCategory> = existing
             .as_ref()
-            .map(|d| d.declared.iter().map(|e| e.effect).collect())
+            .map(|d| d.declared.iter().map(|e| e.effect.clone()).collect())
             .unwrap_or_default();
         let new_categories: Vec<String> =
             declared.iter().map(|e| e.effect.as_str().to_string()).collect();

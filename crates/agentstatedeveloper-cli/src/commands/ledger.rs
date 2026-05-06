@@ -207,6 +207,12 @@ pub enum CliLedgerKind {
     Rationale,
     Hazard,
     Tradeoff,
+    /// Invariant that must always hold at this symbol.
+    Invariant,
+    /// Ownership: which subsystem/team owns this symbol.
+    Ownership,
+    /// Proof that an invariant holds (test, review, trace).
+    Proof,
 }
 
 impl From<CliLedgerKind> for LedgerKind {
@@ -218,6 +224,9 @@ impl From<CliLedgerKind> for LedgerKind {
             CliLedgerKind::Rationale => LedgerKind::Rationale,
             CliLedgerKind::Hazard => LedgerKind::Hazard,
             CliLedgerKind::Tradeoff => LedgerKind::Tradeoff,
+            CliLedgerKind::Invariant => LedgerKind::Invariant,
+            CliLedgerKind::Ownership => LedgerKind::Ownership,
+            CliLedgerKind::Proof => LedgerKind::Proof,
         }
     }
 }

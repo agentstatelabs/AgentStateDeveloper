@@ -59,12 +59,24 @@ pub struct LedgerEntry {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LedgerKind {
+    /// A design or implementation decision that was made.
     Decision,
+    /// An assumption that was made (may need validation).
     Assumption,
+    /// A hard constraint this symbol must always satisfy.
     Constraint,
+    /// Rationale for why something was done a particular way.
     Rationale,
+    /// A known danger: what can go wrong if this changes.
     Hazard,
+    /// A tradeoff accepted to gain some benefit.
     Tradeoff,
+    /// An invariant that must always hold at this symbol.
+    Invariant,
+    /// Ownership declaration: which subsystem/team owns this symbol.
+    Ownership,
+    /// Evidence that an invariant holds (test, review, trace, etc.).
+    Proof,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,46 +126,47 @@ pub struct Effect {
     pub note: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Effect category — either a well-known built-in or a user-defined domain
+/// string (e.g. `"midi.send"`, `"audio.graph.connect"`).
+///
+/// User-defined categories are declared with `asd effect declare --category`
+/// and are not inferred automatically by language adapters.  Well-known
+/// categories may be inferred.
+///
+/// # Extensibility
+/// The `Other(String)` variant accepts any dot-separated namespace string.
+/// Recommended namespaces for common domains:
+/// - `audio.*` — audio engine operations (`audio.graph.connect`, `audio.graph.disconnect`)
+/// - `midi.*` — MIDI I/O (`midi.send`, `midi.receive`)
+/// - `scheduler.*` — sequencer/lane control (`scheduler.restart`, `scheduler.stop`)
+/// - `ui.*` — UI state mutations (`ui.state.mutate`)
+/// - `file.*` — higher-level import/export (`file.import`, `file.export`)
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EffectCategory {
-    #[serde(rename = "io.fs.read")]
+    // Infrastructure effects (inferred by language adapters)
     IoFsRead,
-    #[serde(rename = "io.fs.write")]
     IoFsWrite,
-    #[serde(rename = "io.net.in")]
     IoNetIn,
-    #[serde(rename = "io.net.out")]
     IoNetOut,
-    #[serde(rename = "io.db.read")]
     IoDbRead,
-    #[serde(rename = "io.db.write")]
     IoDbWrite,
-    #[serde(rename = "state.global.read")]
     StateGlobalRead,
-    #[serde(rename = "state.global.write")]
     StateGlobalWrite,
-    #[serde(rename = "state.process")]
     StateProcess,
-    #[serde(rename = "env.read")]
     EnvRead,
-    #[serde(rename = "time.read")]
     TimeRead,
-    #[serde(rename = "time.sleep")]
     TimeSleep,
-    #[serde(rename = "random")]
     Random,
-    #[serde(rename = "proc.spawn")]
     ProcSpawn,
-    #[serde(rename = "throw")]
     Throw,
-    #[serde(rename = "log")]
     Log,
-    #[serde(rename = "pure")]
     Pure,
+    /// User-defined domain effect (e.g. `"midi.send"`, `"audio.graph.connect"`).
+    Other(String),
 }
 
 impl EffectCategory {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             EffectCategory::IoFsRead => "io.fs.read",
             EffectCategory::IoFsWrite => "io.fs.write",
@@ -172,7 +185,44 @@ impl EffectCategory {
             EffectCategory::Throw => "throw",
             EffectCategory::Log => "log",
             EffectCategory::Pure => "pure",
+            EffectCategory::Other(s) => s.as_str(),
         }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "io.fs.read" => EffectCategory::IoFsRead,
+            "io.fs.write" => EffectCategory::IoFsWrite,
+            "io.net.in" => EffectCategory::IoNetIn,
+            "io.net.out" => EffectCategory::IoNetOut,
+            "io.db.read" => EffectCategory::IoDbRead,
+            "io.db.write" => EffectCategory::IoDbWrite,
+            "state.global.read" => EffectCategory::StateGlobalRead,
+            "state.global.write" => EffectCategory::StateGlobalWrite,
+            "state.process" => EffectCategory::StateProcess,
+            "env.read" => EffectCategory::EnvRead,
+            "time.read" => EffectCategory::TimeRead,
+            "time.sleep" => EffectCategory::TimeSleep,
+            "random" => EffectCategory::Random,
+            "proc.spawn" => EffectCategory::ProcSpawn,
+            "throw" => EffectCategory::Throw,
+            "log" => EffectCategory::Log,
+            "pure" => EffectCategory::Pure,
+            other => EffectCategory::Other(other.to_string()),
+        }
+    }
+}
+
+impl serde::Serialize for EffectCategory {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for EffectCategory {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(EffectCategory::from_str(&s))
     }
 }
 
@@ -252,6 +302,9 @@ impl LedgerKind {
             LedgerKind::Rationale => "rationale",
             LedgerKind::Hazard => "hazard",
             LedgerKind::Tradeoff => "tradeoff",
+            LedgerKind::Invariant => "invariant",
+            LedgerKind::Ownership => "ownership",
+            LedgerKind::Proof => "proof",
         }
     }
 }

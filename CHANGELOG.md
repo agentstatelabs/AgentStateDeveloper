@@ -5,6 +5,29 @@ Versions use semantic versioning; each milestone increments by 0.0.5.
 
 ---
 
+## [0.8.5] — 2026-05-05
+
+### Added
+- **Swift function signatures** — `asd index` now captures full Swift function
+  signatures (parameter labels, types, return type, `async`/`throws`) from
+  tree-sitter parse; stored in `symbol.signature`; shown in `asd read` and
+  `asd context-for` output.
+- **Extensible effect categories** — `EffectCategory` gains an `Other(String)`
+  variant accepting any dot-namespaced string (e.g. `midi.send`,
+  `audio.graph.connect`, `scheduler.restart`, `ui.state.mutate`).  Existing
+  built-in categories are unchanged; new categories are user-declared.
+- **Workflow ledger entry types** — three new `LedgerKind` variants:
+  `invariant` (what must always be true), `ownership` (subsystem/team owner),
+  `proof` (evidence an invariant holds). `hazard` was already present.
+  All four are now available via `asd ledger append --kind`.
+- **`asd context-for <qnames>`** — context assembly command for agent queries.
+  Given one or more comma-separated qnames, returns a ranked package:
+  symbol signature + location, direct callers/callees, declared + transitive
+  effects, invariants, hazards, ownership, proofs, and other ledger entries.
+  Accepts `--budget-tokens` and `--include-body`.
+
+---
+
 ## [0.8.0] — 2026-05-05
 
 ### Added

@@ -48,7 +48,7 @@ pub fn propagate_transitive<I: IndexStore, E: EffectStore>(
         // Excluded categories already declared on this symbol; transitive
         // de-dups against declared.
         let declared_cats: HashSet<EffectCategory> =
-            decl.declared.iter().map(|e| e.effect).collect();
+            decl.declared.iter().map(|e| e.effect.clone()).collect();
 
         let mut new_transitive: Vec<TransitiveEffect> = computed
             .into_iter()
@@ -109,7 +109,7 @@ fn compute<I: IndexStore, E: EffectStore>(
         // to `sym` with via=[callee].
         if let Some(decl) = effects.get_effects(ref_name, callee)? {
             for e in &decl.declared {
-                acc.entry(e.effect)
+                acc.entry(e.effect.clone())
                     .or_default()
                     .insert(callee.clone());
             }
@@ -140,7 +140,7 @@ fn transitive_eq(a: &[TransitiveEffect], b: &[TransitiveEffect]) -> bool {
     let to_key = |t: &TransitiveEffect| {
         let mut via = t.via.clone();
         via.sort();
-        (t.effect, via)
+        (t.effect.clone(), via)
     };
     let mut a_keys: Vec<_> = a.iter().map(to_key).collect();
     let mut b_keys: Vec<_> = b.iter().map(to_key).collect();

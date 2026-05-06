@@ -123,6 +123,11 @@ pub enum Command {
 
     /// Show symbols called by the given symbol (direct or transitive).
     Callees(commands::graph::CalleesArgs),
+
+    /// Assemble agent query context for one or more symbols.
+    /// Returns signature, callers/callees, effects, invariants, hazards, and ledger.
+    #[command(name = "context-for")]
+    ContextFor(commands::context_for::ContextForArgs),
 }
 
 /// Resolve [`Config`] from the parsed CLI flags.
@@ -157,5 +162,6 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::List(args) => list::run(cfg, args),
         Command::Callers(args) => graph::run_callers(cfg, args),
         Command::Callees(args) => graph::run_callees(cfg, args),
+        Command::ContextFor(args) => context_for::run(cfg, args),
     }
 }

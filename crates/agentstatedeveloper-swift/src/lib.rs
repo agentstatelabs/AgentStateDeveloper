@@ -109,7 +109,7 @@ fn join_qname(prefix: &str, name: &str) -> String {
     }
 }
 
-fn make_symbol(node: Node<'_>, src: &[u8], qname: String, kind: SymbolKind) -> ParsedSymbol {
+fn make_symbol(node: Node<'_>, src: &[u8], qname: String, kind: SymbolKind, signature: Option<String>) -> ParsedSymbol {
     ParsedSymbol {
         qname,
         kind,
@@ -118,8 +118,59 @@ fn make_symbol(node: Node<'_>, src: &[u8], qname: String, kind: SymbolKind) -> P
         end_line: node.end_position().row as u32 + 1,
         end_col: node.end_position().column as u32,
         body: node_text(node, src).to_string(),
-        signature: None,
+        signature,
     }
+}
+
+/// Extract the function signature: everything from the declaration start up to
+/// (but not including) the opening `{` of the function body.
+///
+/// Tracks `()` and `[]` depth to avoid splitting on closure literals used as
+/// default parameter values, e.g. `func foo(cb: () -> Void = { })`.
+/// For protocol requirements with no body, the full declaration text is returned.
+fn extract_function_signature(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let start = node.start_byte();
+    let end = node.end_byte();
+    let text = std::str::from_utf8(&src[start..end]).ok()?;
+    let bytes = text.as_bytes();
+
+    let mut depth: i32 = 0;
+    let mut i = 0;
+    let mut sig_end = text.len(); // default: whole text (no body brace found)
+
+    while i < bytes.len() {
+        match bytes[i] {
+            // Skip string literals to avoid confusing `{` inside them.
+            b'"' => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'"' {
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            b'{' if depth == 0 => {
+                sig_end = i;
+                break;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let sig = text[..sig_end].trim().to_string();
+    if sig.is_empty() { None } else { Some(sig) }
 }
 
 // -----------------------------------------------------------------------------
@@ -148,7 +199,7 @@ fn walk(node: Node<'_>, src: &[u8], scope: &str, out: &mut Vec<ParsedSymbol>) {
             let qname = join_qname(scope, name);
             // Skip extension re-declarations to avoid duplicating the type symbol.
             if decl_kind != "extension" {
-                out.push(make_symbol(node, src, qname.clone(), SymbolKind::Class));
+                out.push(make_symbol(node, src, qname.clone(), SymbolKind::Class, None));
             }
             // Walk body
             if let Some(body) = child_by_field(node, "body")
@@ -168,7 +219,7 @@ fn walk(node: Node<'_>, src: &[u8], scope: &str, out: &mut Vec<ParsedSymbol>) {
                 return;
             }
             let qname = join_qname(scope, name);
-            out.push(make_symbol(node, src, qname.clone(), SymbolKind::Class));
+            out.push(make_symbol(node, src, qname.clone(), SymbolKind::Class, None));
             if let Some(body) = child_by_field(node, "body")
                 .or_else(|| find_child_by_kind(node, "protocol_body"))
             {
@@ -190,11 +241,13 @@ fn walk(node: Node<'_>, src: &[u8], scope: &str, out: &mut Vec<ParsedSymbol>) {
             } else {
                 SymbolKind::Function
             };
-            out.push(make_symbol(node, src, qname, kind));
+            let sig = extract_function_signature(node, src);
+            out.push(make_symbol(node, src, qname, kind, sig));
         }
         "init_declaration" => {
             let qname = join_qname(scope, "init");
-            out.push(make_symbol(node, src, qname, SymbolKind::Function));
+            let sig = extract_function_signature(node, src);
+            out.push(make_symbol(node, src, qname, SymbolKind::Function, sig));
         }
         _ => {
             for i in 0..node.child_count() {
