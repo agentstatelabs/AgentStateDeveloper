@@ -734,6 +734,14 @@ fn parse_property_line(line: &str) -> Option<(String, String)> {
         // Strip optional/implicit-unwrap markers
         let type_name = raw_type.trim_end_matches('?').trim_end_matches('!').trim();
 
+        // Strip Swift 5.7+ `any`/`some` existential/opaque type markers so
+        // `var scheduler: any SchedulerProtocol` → `SchedulerProtocol`.
+        let type_name = type_name
+            .strip_prefix("any ")
+            .or_else(|| type_name.strip_prefix("some "))
+            .unwrap_or(type_name)
+            .trim();
+
         // Take just the base name before any generic brackets
         let base_type = type_name
             .find('<')
@@ -841,6 +849,33 @@ fn enclosing_type_qname(
         .map(|s| s.to_string())
 }
 
+/// Try to find a callee qname for `type_name.method` in the workspace.
+///
+/// Two-pass strategy to handle suffix ambiguity in SPM packages where the
+/// module directory and class share the same name (e.g. `Scheduler/Scheduler.swift`
+/// → qname `Engine.Scheduler.Scheduler.laneLoopPositions`):
+///
+/// 1. `"Scheduler.laneLoopPositions"` — simple 2-component suffix.
+///    May be ambiguous if a test mock or protocol also defines the method.
+///
+/// 2. `"Scheduler.Scheduler.laneLoopPositions"` — the same-name-as-module
+///    3-component suffix.  Much less likely to collide with test fixtures
+///    and uniquely identifies the concrete class in the package.
+fn resolve_instance_method(
+    type_name: &str,
+    method: &str,
+    workspace: &WorkspaceSymbols,
+) -> Option<String> {
+    workspace
+        .find_by_suffix(&format!("{type_name}.{method}"))
+        .map(|s| s.to_string())
+        .or_else(|| {
+            workspace
+                .find_by_suffix(&format!("{type_name}.{type_name}.{method}"))
+                .map(|s| s.to_string())
+        })
+}
+
 fn collect_calls(
     node: Node<'_>,
     src: &[u8],
@@ -940,10 +975,36 @@ fn collect_calls(
                         let et_simple = sym.qname.split('.').rev().nth(1).unwrap_or("");
                         if !et_simple.is_empty() {
                             let prop_key = format!("{}.{}", et_simple, simple_recv);
-                            prop_map.get(&prop_key).and_then(|actual_type| {
-                                workspace.find_by_suffix(&format!("{}.{}", actual_type, method))
-                                    .map(|s| s.to_string())
-                            })
+
+                            // Primary path: explicit type from property map.
+                            // `resolve_instance_method` also tries the doubled-suffix
+                            // ("Scheduler.Scheduler.method") to handle SPM packages
+                            // where the module dir and class share a name and a single
+                            // suffix lookup would be ambiguous.
+                            let via_prop_map = prop_map
+                                .get(&prop_key)
+                                .and_then(|actual_type| {
+                                    resolve_instance_method(actual_type, method, workspace)
+                                });
+
+                            if via_prop_map.is_some() {
+                                via_prop_map
+                            } else {
+                                // Naming-convention fallback: Swift convention is that
+                                // a property `scheduler` typically has type `Scheduler`.
+                                // Activates when the prop_map has no entry (e.g. the
+                                // declaration used `any`/`some` with a protocol that
+                                // wasn't extracted, or the property was injected via
+                                // init without a stored-property declaration).
+                                let capitalized = {
+                                    let mut s = simple_recv.to_string();
+                                    if let Some(first) = s.get_mut(0..1) {
+                                        first.make_ascii_uppercase();
+                                    }
+                                    s
+                                };
+                                resolve_instance_method(&capitalized, method, workspace)
+                            }
                         } else {
                             None
                         }
@@ -1373,6 +1434,84 @@ class DriftSynthPool {
         // But if the type string becomes empty we return None — this is fine.
         assert_eq!(parse_property_line("    func doSomething() {}"), None);
         assert_eq!(parse_property_line("    // let x: SomeType"), None);
+        // `any`/`some` existential/opaque markers (Swift 5.7+)
+        assert_eq!(
+            parse_property_line("    var scheduler: any SchedulerProtocol"),
+            Some(("scheduler".into(), "SchedulerProtocol".into()))
+        );
+        assert_eq!(
+            parse_property_line("    var engine: some AudioEngineProtocol?"),
+            Some(("engine".into(), "AudioEngineProtocol".into()))
+        );
+    }
+
+    /// When `find_by_suffix("Scheduler.laneLoopPositions")` is ambiguous (e.g. a
+    /// test mock also defines the method), the resolver must fall back to the
+    /// longer `"Scheduler.Scheduler.laneLoopPositions"` suffix that uniquely
+    /// identifies the concrete SPM class.
+    #[test]
+    fn resolve_instance_method_uses_doubled_suffix_on_ambiguity() {
+        let mut ws = WorkspaceSymbols::default();
+        // Real class (SPM package: Engine/Scheduler/Scheduler.swift)
+        ws.qnames
+            .insert("Engine.Scheduler.Scheduler.laneLoopPositions".to_string());
+        // Test mock (creates ambiguity on the simple 2-component suffix)
+        ws.qnames
+            .insert("Tests.MockScheduler.laneLoopPositions".to_string());
+        ws.build_suffix_index();
+
+        // Simple suffix is ambiguous → resolve_instance_method should pick the
+        // doubled-suffix variant instead.
+        let result = resolve_instance_method("Scheduler", "laneLoopPositions", &ws);
+        assert_eq!(
+            result.as_deref(),
+            Some("Engine.Scheduler.Scheduler.laneLoopPositions"),
+            "should resolve via doubled suffix when simple suffix is ambiguous"
+        );
+    }
+
+    /// Naming-convention fallback: when no explicit type annotation exists in
+    /// the prop_map for the receiver, try capitalising the receiver name.
+    /// `scheduler.restartLane(...)` → look for `Scheduler.restartLane`.
+    #[test]
+    fn naming_convention_fallback_resolves_property_call() {
+        // Class with NO explicit type on the scheduler property (injected via init;
+        // parse_property_line can't extract the type from the assignment).
+        let src = r#"
+class SessionViewModel {
+    let scheduler: Scheduler
+
+    func handlePad(laneID: Int, tick: Int) {
+        scheduler.restartLane(laneID, at: tick)
+    }
+}
+"#;
+        let mut ws = WorkspaceSymbols::default();
+        // Callee is in a different package with the same-name-as-module pattern.
+        ws.qnames
+            .insert("Engine.Scheduler.Scheduler.restartLane".to_string());
+        // Inject ambiguity on the simple suffix to force the doubled-suffix path.
+        ws.qnames
+            .insert("Tests.MockScheduler.restartLane".to_string());
+        ws.build_suffix_index();
+
+        let syms = adapter()
+            .parse_symbols("Sources/Session/SessionViewModel.swift", src)
+            .unwrap();
+        let edges = adapter().extract_call_edges(
+            "Sources/Session/SessionViewModel.swift",
+            src,
+            &syms,
+            &ws,
+        );
+        let found = edges.iter().any(|e| {
+            e.caller_qname.ends_with("handlePad")
+                && e.callee_qname == "Engine.Scheduler.Scheduler.restartLane"
+        });
+        assert!(
+            found,
+            "expected doubled-suffix resolution of scheduler.restartLane; got: {edges:?}"
+        );
     }
 
     /// Regression: extension methods calling stored properties via labeled arguments
