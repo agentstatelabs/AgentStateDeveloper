@@ -377,6 +377,46 @@ pub fn hybrid_boost(hit: &FtsHit, tokens: &[String]) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
+// Symbol summary extraction
+// ---------------------------------------------------------------------------
+
+/// Extract a one-line human-readable summary for a symbol.
+///
+/// Priority:
+/// 1. First sentence of the doc comment (up to `.` / `!` / `?` / newline,
+///    capped at 120 chars). Trailing punctuation stripped.
+/// 2. Condensed signature (first 100 chars, trimmed).
+/// 3. Empty string.
+pub fn extract_summary(doc: Option<&str>, signature: Option<&str>) -> String {
+    if let Some(d) = doc {
+        let trimmed = d.trim();
+        if !trimmed.is_empty() {
+            let end = trimmed
+                .char_indices()
+                .find_map(|(i, c)| {
+                    if matches!(c, '.' | '!' | '?' | '\n') {
+                        Some(i + c.len_utf8())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(trimmed.len().min(120));
+            let sentence = trimmed[..end.min(trimmed.len())].trim().trim_end_matches(['.', '!', '?', '\n']);
+            if !sentence.is_empty() {
+                return sentence.to_string();
+            }
+        }
+    }
+    if let Some(sig) = signature {
+        let trimmed = sig.trim();
+        if !trimmed.is_empty() {
+            return trimmed.chars().take(100).collect();
+        }
+    }
+    String::new()
+}
+
+// ---------------------------------------------------------------------------
 // Tier classification
 // ---------------------------------------------------------------------------
 
@@ -872,6 +912,27 @@ mod tests {
             10,
         ).unwrap();
         assert!(hits3.is_empty(), "language filter should exclude swift");
+    }
+
+    #[test]
+    fn summary_extraction() {
+        // First sentence from doc.
+        assert_eq!(
+            extract_summary(Some("Updates drift pad visual playhead from transport state. Called on every render tick."), None),
+            "Updates drift pad visual playhead from transport state"
+        );
+        // Doc with newline as sentence boundary.
+        assert_eq!(
+            extract_summary(Some("Short summary\nMore detail here."), None),
+            "Short summary"
+        );
+        // Falls back to signature when doc absent.
+        assert_eq!(
+            extract_summary(None, Some("func refreshDriftPlayhead() -> Void")),
+            "func refreshDriftPlayhead() -> Void"
+        );
+        // Returns empty when neither present.
+        assert_eq!(extract_summary(None, None), "");
     }
 
     #[test]

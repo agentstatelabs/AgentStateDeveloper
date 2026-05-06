@@ -9,7 +9,7 @@ use clap::Args;
 
 use agentstatedeveloper_core::{
     AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore, LedgerStore, SearchFtsDb,
-    SymbolKind, hybrid_boost, is_stopword,
+    SymbolKind, extract_summary, hybrid_boost, is_stopword,
 };
 
 use crate::config::Config;
@@ -102,11 +102,9 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     println!("       sig: {}", sig);
                 }
             }
-            if let Some(doc) = &hit.doc {
-                if !doc.is_empty() {
-                    let preview: String = doc.chars().take(80).collect();
-                    println!("       doc: {}", preview);
-                }
+            let summary = extract_summary(hit.doc.as_deref(), hit.signature.as_deref());
+            if !summary.is_empty() {
+                println!("       {}", summary);
             }
         }
         return Ok(());
@@ -167,11 +165,9 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         if let Some(sig) = sym.signature.as_deref() {
             if !sig.is_empty() { println!("       sig: {}", sig); }
         }
-        if let Some(doc) = sym.doc.as_deref() {
-            if !doc.is_empty() {
-                let preview: String = doc.chars().take(80).collect();
-                println!("       doc: {}", preview);
-            }
+        let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
+        if !summary.is_empty() {
+            println!("       {}", summary);
         }
     }
 

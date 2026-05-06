@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore, LedgerStore,
-    SearchFtsDb, classify_layer, hybrid_boost, symbol_tier,
+    SearchFtsDb, classify_layer, extract_summary, hybrid_boost, symbol_tier,
 };
 
 use crate::commands::{
@@ -90,6 +90,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         };
         let tier = symbol_tier(&sym.file);
         let layer = classify_layer(&sym.file, tier);
+        let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
         let ctx = assemble_symbol_context(
             &engine,
             &index_store,
@@ -99,7 +100,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             &id_map,
             args.include_body,
         )?;
-        let mut ep = json!({ "score": score, "layer": layer });
+        let mut ep = json!({ "score": score, "layer": layer, "summary": summary });
         if let (Some(obj), Some(ctx_obj)) = (ep.as_object_mut(), ctx.as_object()) {
             for (k, v) in ctx_obj {
                 obj.insert(k.clone(), v.clone());
