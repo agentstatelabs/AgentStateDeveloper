@@ -793,14 +793,52 @@ fn build_property_type_map(symbols: &[ParsedSymbol]) -> HashMap<String, String> 
 // Call-edge extraction
 // -----------------------------------------------------------------------------
 
-fn enclosing_type_qname(qname: &str, known: &HashSet<&str>) -> Option<String> {
+/// Derive the enclosing type qname from a method qname.
+///
+/// For a method declared inside the same file (non-extension), the parent
+/// qname is present in the file-local `known` set.  For extension methods the
+/// class is defined in a *different* file, so `known` won't contain it.
+///
+/// Two fallback tiers:
+///
+/// 1. **Workspace exact**: check `workspace.qnames` for the direct parent.
+///    Handles cases where the class file used the same structure.
+///
+/// 2. **Suffix search**: extension files embed the source file name in the
+///    scope, producing qnames like:
+///      `"ExampleFlow.ExampleFlowViewModel+DriftPad.ExampleFlowViewModel.method"`
+///    The canonical class qname in the workspace is:
+///      `"ExampleFlow.ExampleFlowViewModel.ExampleFlowViewModel"`
+///    We recover it by searching for the class simple name (last component of
+///    the parent) via the suffix index.
+///
+/// Returns `None` only when no match is found (free functions, truly unknown
+/// contexts).
+fn enclosing_type_qname(
+    qname: &str,
+    known: &HashSet<&str>,
+    workspace: &WorkspaceSymbols,
+) -> Option<String> {
     let idx = qname.rfind('.')?;
     let parent = &qname[..idx];
-    if known.contains(parent) {
-        Some(parent.to_string())
-    } else {
-        None
+
+    // Tier 1: file-local set or direct workspace lookup.
+    if known.contains(parent) || workspace.contains(parent) {
+        return Some(parent.to_string());
     }
+
+    // Tier 2: extension files embed the file name in the scope, making the
+    // parent not directly present.  Recover the canonical class qname from
+    // the workspace suffix index using just the class simple name.
+    let class_name = parent.rsplit('.').next()?;
+    // Guard against single-component parents (module-level free functions)
+    // where `class_name` would equal the entire parent — avoid false matches.
+    if !parent.contains('.') {
+        return None;
+    }
+    workspace
+        .find_by_suffix(class_name)
+        .map(|s| s.to_string())
 }
 
 fn collect_calls(
@@ -985,7 +1023,7 @@ fn extract_call_edges_impl(
             Some(t) => t,
             None => continue,
         };
-        let enclosing_type = enclosing_type_qname(&sym.qname, &known);
+        let enclosing_type = enclosing_type_qname(&sym.qname, &known, workspace);
         collect_calls(
             tree.root_node(),
             src_bytes,
@@ -1335,5 +1373,149 @@ class DriftSynthPool {
         // But if the type string becomes empty we return None — this is fine.
         assert_eq!(parse_property_line("    func doSomething() {}"), None);
         assert_eq!(parse_property_line("    // let x: SomeType"), None);
+    }
+
+    /// Regression: extension methods calling stored properties via labeled arguments
+    /// must produce call edges even when the class declaration is in a different file.
+    ///
+    /// Real-world pattern: `ExampleFlowViewModel+DriftPad.swift` calls
+    /// `scheduler.restartLane(laneID, at: tick)` and
+    /// `scheduler.laneLoopPositions(currentTick: tick)`, but `scheduler: Scheduler`
+    /// is declared in `ExampleFlowViewModel.swift`.
+    #[test]
+    fn extension_file_property_call_cross_file() {
+        // ---- "class file" symbols (ExampleFlowViewModel.swift) ----
+        let class_src = r#"
+class ExampleFlowViewModel {
+    let scheduler: Scheduler
+
+    func mainMethod() {}
+}
+"#;
+        let class_syms = adapter()
+            .parse_symbols(
+                "App/ExampleFlow/Sources/ExampleFlow/ExampleFlowViewModel.swift",
+                class_src,
+            )
+            .unwrap();
+
+        // ---- "extension file" symbols (ExampleFlowViewModel+DriftPad.swift) ----
+        let ext_src = r#"
+extension ExampleFlowViewModel {
+    func driftPadMethod(laneID: Int, tick: Int) {
+        let pos = scheduler.laneLoopPositions(currentTick: tick)
+        scheduler.restartLane(laneID, at: tick)
+        self.scheduler.laneLoopPositions(currentTick: tick)
+    }
+}
+"#;
+        let ext_syms = adapter()
+            .parse_symbols(
+                "App/ExampleFlow/Sources/ExampleFlow/ExampleFlowViewModel+DriftPad.swift",
+                ext_src,
+            )
+            .unwrap();
+
+        // ---- workspace: both files contribute qnames ----
+        let mut ws = WorkspaceSymbols::default();
+        // Callee lives in the Engine package
+        ws.qnames
+            .insert("Engine.Scheduler.Scheduler.laneLoopPositions".to_string());
+        ws.qnames
+            .insert("Engine.Scheduler.Scheduler.restartLane".to_string());
+        // All parsed symbols from both files
+        for s in class_syms.iter().chain(ext_syms.iter()) {
+            ws.qnames.insert(s.qname.clone());
+            ws.kinds.insert(s.qname.clone(), s.kind);
+        }
+        ws.build_suffix_index();
+
+        // ---- populate workspace.properties from the class file ----
+        ws.properties
+            .extend(adapter().extract_property_types(&class_syms));
+
+        // ---- extract edges from the extension file ----
+        let edges = adapter().extract_call_edges(
+            "App/ExampleFlow/Sources/ExampleFlow/ExampleFlowViewModel+DriftPad.swift",
+            ext_src,
+            &ext_syms,
+            &ws,
+        );
+        let callees: Vec<&str> = edges
+            .iter()
+            .filter(|e| e.caller_qname.ends_with("driftPadMethod"))
+            .map(|e| e.callee_qname.as_str())
+            .collect();
+
+        assert!(
+            callees
+                .iter()
+                .any(|q| q.ends_with("Scheduler.laneLoopPositions")),
+            "laneLoopPositions not resolved; callees from driftPadMethod: {callees:?}\n\
+             All edges: {edges:?}\n\
+             workspace.properties: {:?}",
+            ws.properties
+        );
+        assert!(
+            callees
+                .iter()
+                .any(|q| q.ends_with("Scheduler.restartLane")),
+            "restartLane not resolved; callees from driftPadMethod: {callees:?}\n\
+             All edges: {edges:?}"
+        );
+    }
+
+    /// `enclosing_type` must be resolved from the workspace for extension methods
+    /// (the class symbol is not in the file-local `known` set for extension files).
+    #[test]
+    fn self_method_call_in_extension_resolves_via_workspace() {
+        let class_src = r#"
+class AudioEngine {
+    func start() {}
+    func stop() {}
+}
+"#;
+        let ext_src = r#"
+extension AudioEngine {
+    func restart() {
+        self.stop()
+        self.start()
+    }
+}
+"#;
+        let class_syms = adapter()
+            .parse_symbols("Sources/Audio/AudioEngine.swift", class_src)
+            .unwrap();
+        let ext_syms = adapter()
+            .parse_symbols("Sources/Audio/AudioEngine+Restart.swift", ext_src)
+            .unwrap();
+
+        let mut ws = WorkspaceSymbols::default();
+        for s in class_syms.iter().chain(ext_syms.iter()) {
+            ws.qnames.insert(s.qname.clone());
+            ws.kinds.insert(s.qname.clone(), s.kind);
+        }
+        ws.build_suffix_index();
+
+        let edges = adapter().extract_call_edges(
+            "Sources/Audio/AudioEngine+Restart.swift",
+            ext_src,
+            &ext_syms,
+            &ws,
+        );
+        let from_restart: Vec<&str> = edges
+            .iter()
+            .filter(|e| e.caller_qname.ends_with("restart"))
+            .map(|e| e.callee_qname.as_str())
+            .collect();
+
+        assert!(
+            from_restart.iter().any(|q| q.ends_with("AudioEngine.stop")),
+            "self.stop() not resolved in extension; edges: {from_restart:?}"
+        );
+        assert!(
+            from_restart.iter().any(|q| q.ends_with("AudioEngine.start")),
+            "self.start() not resolved in extension; edges: {from_restart:?}"
+        );
     }
 }
