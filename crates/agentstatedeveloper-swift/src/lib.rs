@@ -585,6 +585,140 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
 }
 
 // -----------------------------------------------------------------------------
+// Property-to-type map (for instance property call resolution)
+// -----------------------------------------------------------------------------
+
+/// Strip leading Swift property modifiers/attributes so `parse_property_line`
+/// sees `let`/`var` at the start.
+fn strip_property_prefixes(s: &str) -> &str {
+    let mut rest = s;
+    loop {
+        let prev = rest;
+        // @Attribute / @Attribute(args)
+        if rest.starts_with('@') {
+            let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
+            let after_attr = rest[end..].trim_start();
+            if after_attr.starts_with('(') {
+                let close = after_attr.find(')').unwrap_or(after_attr.len().saturating_sub(1));
+                rest = after_attr[close + 1..].trim_start();
+            } else {
+                rest = after_attr;
+            }
+            continue;
+        }
+        for prefix in &[
+            "private(set) ", "public(set) ", "internal(set) ",
+            "private ", "public ", "internal ", "fileprivate ", "open ",
+            "weak ", "unowned(safe) ", "unowned(unsafe) ", "unowned ",
+            "lazy ", "static ", "override ", "final ",
+            "nonisolated ", "isolated ",
+        ] {
+            if let Some(after) = rest.strip_prefix(prefix) {
+                rest = after.trim_start();
+                break;
+            }
+        }
+        if rest == prev {
+            break;
+        }
+    }
+    rest
+}
+
+/// Try to parse a single line as a stored Swift property declaration.
+/// Returns `(property_name, base_type_name)` on success.
+///
+/// Handled patterns:
+/// ```swift
+/// let pool: DriftSynthPool
+/// var compiler: DriftCompiler?
+/// @Published var items: [Item]
+/// private weak var delegate: SomeDelegate?
+/// ```
+fn parse_property_line(line: &str) -> Option<(String, String)> {
+    let trimmed = line.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with("//")
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with("func ")
+        || trimmed.starts_with("init(")
+        || trimmed.starts_with("deinit")
+        || trimmed.starts_with("class ")
+        || trimmed.starts_with("struct ")
+        || trimmed.starts_with("enum ")
+        || trimmed.starts_with("case ")
+        || trimmed.starts_with("typealias ")
+        || trimmed.starts_with("subscript")
+    {
+        return None;
+    }
+
+    let rest = strip_property_prefixes(trimmed);
+
+    // Must start with `let` or `var`
+    let after_binding = rest
+        .strip_prefix("let ")
+        .or_else(|| rest.strip_prefix("var "))
+        .or_else(|| rest.strip_prefix("let\t"))
+        .or_else(|| rest.strip_prefix("var\t"))?
+        .trim_start();
+
+    // Property name: identifier chars
+    let name_end = after_binding
+        .find(|c: char| !c.is_alphanumeric() && c != '_')
+        .unwrap_or(after_binding.len());
+    let name = &after_binding[..name_end];
+    if name.is_empty() {
+        return None;
+    }
+
+    let rest_after_name = after_binding[name_end..].trim_start();
+    let after_colon = rest_after_name.strip_prefix(':')?;
+    let type_str = after_colon.trim_start();
+
+    // Stop at `=` or `{`
+    let type_end = type_str
+        .find(|c: char| c == '=' || c == '{')
+        .unwrap_or(type_str.len());
+    let raw_type = type_str[..type_end].trim();
+
+    // Strip optional/implicit-unwrap markers
+    let type_name = raw_type.trim_end_matches('?').trim_end_matches('!').trim();
+
+    // Take just the base name before any generic brackets
+    let base_type = type_name
+        .find('<')
+        .map(|i| &type_name[..i])
+        .unwrap_or(type_name)
+        .trim();
+
+    // Swift type names start with uppercase
+    if base_type.is_empty() || !base_type.starts_with(|c: char| c.is_uppercase()) {
+        return None;
+    }
+
+    Some((name.to_string(), base_type.to_string()))
+}
+
+/// Build a flat map `"EnclosingTypeSimpleName.propertyName" → "TypeSimpleName"`
+/// by scanning each class/struct symbol body for stored property declarations.
+fn build_property_type_map(symbols: &[ParsedSymbol]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for sym in symbols {
+        if !matches!(sym.kind, SymbolKind::Class) {
+            continue;
+        }
+        let type_simple = sym.qname.rsplit('.').next().unwrap_or(&sym.qname);
+        for line in sym.body.lines() {
+            if let Some((prop_name, type_name)) = parse_property_line(line) {
+                map.insert(format!("{}.{}", type_simple, prop_name), type_name);
+            }
+        }
+    }
+    map
+}
+
+// -----------------------------------------------------------------------------
 // Call-edge extraction
 // -----------------------------------------------------------------------------
 
@@ -606,6 +740,7 @@ fn collect_calls(
     known: &HashSet<&str>,
     workspace: &WorkspaceSymbols,
     enclosing_type: Option<&str>,
+    prop_map: &HashMap<String, String>,
     edges: &mut HashSet<CallEdge>,
 ) {
     if node.kind() == "call_expression" {
@@ -614,8 +749,14 @@ fn collect_calls(
                 || func_node.kind() == "member_expression"
             {
                 let recv = func_node.child(0).map(|n| node_text(n, src)).unwrap_or("");
-                let method = child_by_field(func_node, "name")
+                // In tree-sitter-swift the member name lives inside a
+                // `navigation_suffix` child as a `simple_identifier`, not in
+                // a field named "name".  Try that first, then fall back to a
+                // "name" field for any grammar that does use it.
+                let method = find_child_by_kind(func_node, "navigation_suffix")
+                    .and_then(|suffix| find_child_by_kind(suffix, "simple_identifier"))
                     .map(|n| node_text(n, src))
+                    .or_else(|| child_by_field(func_node, "name").map(|n| node_text(n, src)))
                     .unwrap_or("");
                 (recv, method)
             } else {
@@ -642,10 +783,22 @@ fn collect_calls(
                     let q = format!("{}.{}", simple_recv, method);
                     if known.contains(q.as_str()) || workspace.contains(&q) {
                         Some(q)
+                    } else if let Some(s) = workspace.find_by_suffix(&q) {
+                        // Suffix fallback: handles file-path qname prefixes.
+                        Some(s.to_string())
+                    } else if simple_recv.starts_with(|c: char| c.is_lowercase()) {
+                        // Instance property call: `pool.resolve()` where `pool` is a
+                        // stored property.  Look up its declared type in the property
+                        // map and retry suffix lookup on `ActualType.method`.
+                        enclosing_type.and_then(|et| {
+                            let et_simple = et.rsplit('.').next().unwrap_or(et);
+                            let prop_key = format!("{}.{}", et_simple, simple_recv);
+                            let actual_type = prop_map.get(&prop_key)?;
+                            workspace.find_by_suffix(&format!("{}.{}", actual_type, method))
+                                .map(|s| s.to_string())
+                        })
                     } else {
-                        // Suffix fallback: find the workspace qname ending with
-                        // ".<simple_recv>.<method>" (handles file-path prefixes).
-                        workspace.find_by_suffix(&q).map(|s| s.to_string())
+                        None
                     }
                 };
 
@@ -670,6 +823,7 @@ fn collect_calls(
             known,
             workspace,
             enclosing_type,
+            prop_map,
             edges,
         );
     }
@@ -689,6 +843,10 @@ fn extract_call_edges_impl(
         let simple = s.qname.rsplit('.').next().unwrap_or(&s.qname).to_string();
         by_simple.entry(simple).or_insert_with(|| s.qname.clone());
     }
+
+    // Build property-to-type map for resolving instance-property calls like
+    // `pool.resolve()` where `pool: DriftSynthPool` is a stored property.
+    let prop_map = build_property_type_map(symbols);
 
     let mut parser = Parser::new();
     if parser.set_language(&SWIFT.into()).is_err() {
@@ -715,6 +873,7 @@ fn extract_call_edges_impl(
             &known,
             workspace,
             enclosing_type.as_deref(),
+            &prop_map,
             &mut edges,
         );
     }
@@ -851,5 +1010,63 @@ class OrderService {
             e.caller_qname.ends_with(".placeOrder") && e.callee_qname.ends_with(".charge")
         });
         assert!(found, "expected intra-class edge; got: {edges:?}");
+    }
+
+    #[test]
+    fn resolves_instance_property_call_via_prop_map() {
+        // `pool` is a stored property of type `DriftSynthPool`.
+        // `schedule()` calls `pool.resolve()` — the call graph must resolve
+        // the receiver to `DriftSynthPool` and emit the cross-file edge.
+        let src = r#"
+class SynthScheduler {
+    let pool: DriftSynthPool
+
+    func schedule() {
+        pool.resolve()
+    }
+}
+
+class DriftSynthPool {
+    func resolve() {}
+}
+"#;
+        let mut ws = WorkspaceSymbols::default();
+        ws.qnames.insert("Sources.Models.DriftSynthPool.resolve".to_string());
+        ws.build_suffix_index();
+
+        let syms = adapter()
+            .parse_symbols("Sources/Models/SynthScheduler.swift", src)
+            .unwrap();
+        let edges =
+            adapter().extract_call_edges("Sources/Models/SynthScheduler.swift", src, &syms, &ws);
+
+        let found = edges.iter().any(|e| {
+            e.caller_qname.ends_with(".schedule")
+                && e.callee_qname.ends_with("DriftSynthPool.resolve")
+        });
+        assert!(found, "expected property-map edge; got: {edges:?}");
+    }
+
+    #[test]
+    fn parse_property_line_handles_variants() {
+        assert_eq!(
+            parse_property_line("    let pool: DriftSynthPool"),
+            Some(("pool".into(), "DriftSynthPool".into()))
+        );
+        assert_eq!(
+            parse_property_line("    var compiler: DriftCompiler?"),
+            Some(("compiler".into(), "DriftCompiler".into()))
+        );
+        // Array/dictionary types start with `[`, not uppercase → not tracked
+        assert_eq!(parse_property_line("    @Published var items: [Item]"), None);
+        assert_eq!(
+            parse_property_line("    private weak var delegate: SomeDelegate?"),
+            Some(("delegate".into(), "SomeDelegate".into()))
+        );
+        // Computed property — has `{`, type ends before it → type_name should
+        // still be extracted since the `{` cuts the type string.
+        // But if the type string becomes empty we return None — this is fine.
+        assert_eq!(parse_property_line("    func doSomething() {}"), None);
+        assert_eq!(parse_property_line("    // let x: SomeType"), None);
     }
 }
