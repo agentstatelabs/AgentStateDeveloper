@@ -309,6 +309,81 @@ impl LedgerKind {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Scratchpad types
+// ---------------------------------------------------------------------------
+
+/// Status of a [`ScratchEntry`]. Transitions: Draft → Promoted or Discarded.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ScratchStatus {
+    /// Working note, not yet acted on.
+    Draft,
+    /// Promoted to a ledger entry; `promoted_to` holds the `entry_id`.
+    Promoted,
+    /// Explicitly discarded by the author.
+    Discarded,
+}
+
+/// Ephemeral working note scoped to a symbol and/or named workflow.
+///
+/// Scratch entries are stored locally at `/asd/v1/scratch/<scratch_id>`.
+/// They are **not** synced to the sidecar and not subject to policy gate.
+/// Use [`ScratchStatus::Promoted`] + `promoted_to` to link a note that
+/// has been elevated to a durable [`LedgerEntry`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScratchEntry {
+    /// Stable ID, format `"scr_<uuid-simple>"`.
+    pub scratch_id: String,
+    /// Optional: scope to an indexed symbol_id.
+    pub symbol_id: Option<String>,
+    /// Optional: named investigation context (e.g. `"tracing-sync-bug"`).
+    pub workflow: Option<String>,
+    /// Agent or user who wrote the note (`agent_id`).
+    pub session: String,
+    /// Markdown-friendly working notes.
+    pub content: String,
+    /// Current status.
+    pub status: ScratchStatus,
+    /// Set when status transitions to `Promoted`; holds the ledger `entry_id`.
+    pub promoted_to: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    /// When set, the entry is considered expired after this timestamp.
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Freeform tags for grouping.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+impl ScratchEntry {
+    /// Create a new draft entry with minimal fields. Caller fills in optional
+    /// `symbol_id`, `workflow`, `expires_at`, and `tags` after construction.
+    pub fn new(content: impl Into<String>, session: impl Into<String>) -> Self {
+        let now = Utc::now();
+        Self {
+            scratch_id: format!("scr_{}", Uuid::new_v4().simple()),
+            symbol_id: None,
+            workflow: None,
+            session: session.into(),
+            content: content.into(),
+            status: ScratchStatus::Draft,
+            promoted_to: None,
+            created_at: now,
+            updated_at: now,
+            expires_at: None,
+            tags: Vec::new(),
+        }
+    }
+
+    /// Returns `true` when `expires_at` is set and is in the past.
+    pub fn is_expired(&self) -> bool {
+        self.expires_at.map_or(false, |t| Utc::now() > t)
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 /// Record that a symbol was renamed/moved so its ledger history follows it.
 /// Written to `/asd/v1/rebinds/<from_symbol_id>` at rename time.
 #[derive(Debug, Clone, Serialize, Deserialize)]

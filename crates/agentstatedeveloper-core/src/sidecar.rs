@@ -102,6 +102,10 @@ pub struct HydrateSummary {
 /// Pre-existing files whose keys aren't in ASG are left alone (orphan
 /// handling — see module docs). Overwrites are done atomically enough
 /// for the single-writer solo-dev case: write then rename.
+///
+/// **Scratch entries are excluded by design**: this function only walks
+/// the `effects`, `ledger`, `symbols`, and `rebinds` prefixes; the
+/// `/asd/v1/scratch/` tree is never read or written.
 pub fn sync_to_dir(
     repo: &Repository,
     ref_name: &str,

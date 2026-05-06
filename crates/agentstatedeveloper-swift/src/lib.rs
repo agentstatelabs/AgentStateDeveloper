@@ -83,10 +83,48 @@ impl LanguageAdapter for SwiftAdapter {
 // qname helpers
 // -----------------------------------------------------------------------------
 
-/// `Sources/Payments/ChargeService.swift` → `Sources.Payments.ChargeService`
+/// Walk path components and return the tail after the first `Sources`,
+/// `Source`, or `src` segment.  Falls back to `path` unchanged when no such
+/// segment is present (non-SPM layouts, flat directories, etc.).
+///
+/// This makes qnames stable across different `asd index` invocation roots: for
+/// SPM projects the stable anchor is the SPM target name (the directory
+/// immediately inside `Sources/`), not the filesystem path from the index root.
+///
+/// Examples:
+/// - `Packages/SequencerCore/Sources/Engine/DriftCompiler`
+///   → `Engine/DriftCompiler`
+/// - `App/ExampleFlow/Sources/ExampleFlow/ExampleFlowViewModel`
+///   → `ExampleFlow/ExampleFlowViewModel`
+/// - `Sources/Engine/DriftCompiler`  (already at Sources)
+///   → `Engine/DriftCompiler`
+/// - `Engine/DriftCompiler`  (no Sources segment; no-op)
+///   → `Engine/DriftCompiler`
+fn strip_sources_prefix(path: &str) -> &str {
+    let mut offset = 0usize;
+    for part in path.split('/') {
+        if matches!(part, "Sources" | "Source" | "src") {
+            let after = offset + part.len() + 1; // skip segment + trailing slash
+            if after < path.len() {
+                return &path[after..];
+            }
+        }
+        offset += part.len() + 1;
+    }
+    path
+}
+
+/// Derive the stable qname prefix from a Swift file path.
+///
+/// Strips everything up to and including the first `Sources/` segment so that
+/// the prefix is anchored to the SPM target name, not the indexing root.
+///
+/// `App/ExampleFlow/Sources/ExampleFlow/ExampleFlowViewModel.swift`
+///   → `ExampleFlow.ExampleFlowViewModel`
 fn file_qname_prefix(file: &str) -> String {
     let s = file.strip_prefix("./").unwrap_or(file);
     let s = s.strip_suffix(".swift").unwrap_or(s);
+    let s = strip_sources_prefix(s);
     s.replace('/', ".")
 }
 
@@ -819,6 +857,40 @@ fn collect_calls(
                     } else if let Some(s) = workspace.find_by_suffix(&q) {
                         // Suffix fallback: handles file-path qname prefixes.
                         Some(s.to_string())
+                    } else if simple_recv == "Self" || simple_recv == "self" {
+                        // `Self.method()` — treat exactly like a bare call from the
+                        // enclosing type.  No qname in the workspace ends in
+                        // `Self.<something>`, so suffix lookup above always fails.
+                        if let Some(et) = enclosing_type {
+                            let q2 = format!("{}.{}", et, method);
+                            if known.contains(q2.as_str()) {
+                                Some(q2)
+                            } else {
+                                workspace.find_by_suffix(&format!("{}.{}", et, method))
+                                    .map(|s| s.to_string())
+                            }
+                        } else {
+                            None
+                        }
+                    } else if simple_recv.starts_with(|c: char| c.is_uppercase()) {
+                        // Type-qualified static call: `DriftCompiler.filterByMuteSolo()`
+                        // The workspace.find_by_suffix above already ran and missed
+                        // (ambiguous or not found).  Secondary attempt: if the receiver
+                        // matches the enclosing type's simple name, treat it as a
+                        // same-type call and resolve via the full enclosing-type qname.
+                        let et_simple = sym.qname.split('.').rev().nth(1).unwrap_or("");
+                        if !et_simple.is_empty() && simple_recv == et_simple {
+                            if let Some(et) = enclosing_type {
+                                workspace.find_by_suffix(&format!("{}.{}", et, method))
+                                    .map(|s| s.to_string())
+                            } else {
+                                None
+                            }
+                        } else {
+                            // Cross-type static call: already tried find_by_suffix(q)
+                            // above; nothing more to try without a type registry.
+                            None
+                        }
                     } else if simple_recv.starts_with(|c: char| c.is_lowercase()) {
                         // Instance property call: `pool.resolve()` where `pool` is a
                         // stored property.  Look up its declared type in the property
@@ -983,9 +1055,146 @@ enum Currency {
 
     #[test]
     fn file_prefix_strips_swift_extension() {
-        assert_eq!(file_qname_prefix("Sources/Payments/ChargeService.swift"), "Sources.Payments.ChargeService");
+        // SPM: strip Sources/ segment → stable target-name anchor
+        assert_eq!(
+            file_qname_prefix("Sources/Payments/ChargeService.swift"),
+            "Payments.ChargeService"
+        );
+        // Deep SPM path: same result regardless of index root depth
+        assert_eq!(
+            file_qname_prefix("Packages/SequencerCore/Sources/Engine/DriftCompiler.swift"),
+            "Engine.DriftCompiler"
+        );
+        // Xcode app target path
+        assert_eq!(
+            file_qname_prefix("App/ExampleFlow/Sources/ExampleFlow/ExampleFlowViewModel.swift"),
+            "ExampleFlow.ExampleFlowViewModel"
+        );
+        // Flat file with no Sources segment — unchanged
+        assert_eq!(file_qname_prefix("Engine/DriftCompiler.swift"), "Engine.DriftCompiler");
+        // Legacy ./prefix stripped, no Sources segment
         assert_eq!(file_qname_prefix("./App/Models/User.swift"), "App.Models.User");
+        // Top-level file
         assert_eq!(file_qname_prefix("main.swift"), "main");
+    }
+
+    #[test]
+    fn strip_sources_prefix_variants() {
+        // Standard SPM Sources/
+        assert_eq!(
+            strip_sources_prefix("Packages/Core/Sources/Engine/Foo"),
+            "Engine/Foo"
+        );
+        // Source (singular)
+        assert_eq!(strip_sources_prefix("MyApp/Source/Models/Bar"), "Models/Bar");
+        // src (lowercase)
+        assert_eq!(strip_sources_prefix("web/src/utils/helpers"), "utils/helpers");
+        // Already at Sources (no prefix to strip)
+        assert_eq!(strip_sources_prefix("Sources/Engine/Foo"), "Engine/Foo");
+        // No Sources segment → unchanged
+        assert_eq!(strip_sources_prefix("Engine/DriftCompiler"), "Engine/DriftCompiler");
+        // Sources at the end with no tail → unchanged (edge case)
+        assert_eq!(strip_sources_prefix("Pkg/Sources"), "Pkg/Sources");
+    }
+
+    #[test]
+    fn static_method_calls_within_same_type() {
+        let src = r#"
+struct DriftCompiler {
+    static func compile(clips: [String]) -> [String] {
+        let filtered = filterByMuteSolo(clips: clips)
+        let expanded = Self.expandClip(filtered[0])
+        return DriftCompiler.postProcess(expanded)
+    }
+    static func filterByMuteSolo(clips: [String]) -> [String] { clips }
+    static func expandClip(_ c: String) -> String { c }
+    static func postProcess(_ c: String) -> [String] { [c] }
+}
+"#;
+        let adapter = adapter();
+        // Symbols parsed with a Sources/-anchored path
+        let syms = adapter
+            .parse_symbols("Sources/Engine/DriftCompiler.swift", src)
+            .unwrap();
+        // All four methods should be parsed
+        let qnames: Vec<&str> = syms.iter().map(|s| s.qname.as_str()).collect();
+        assert!(qnames.iter().any(|q| q.ends_with("DriftCompiler.compile")), "{qnames:?}");
+        assert!(qnames.iter().any(|q| q.ends_with("DriftCompiler.filterByMuteSolo")), "{qnames:?}");
+        assert!(qnames.iter().any(|q| q.ends_with("DriftCompiler.expandClip")), "{qnames:?}");
+        assert!(qnames.iter().any(|q| q.ends_with("DriftCompiler.postProcess")), "{qnames:?}");
+
+        // Build workspace seeded from these symbols (simulates what index_pipeline does)
+        let mut ws = WorkspaceSymbols::default();
+        for s in &syms {
+            ws.qnames.insert(s.qname.clone());
+            ws.kinds.insert(s.qname.clone(), s.kind);
+        }
+        ws.build_suffix_index();
+
+        let edges = adapter.extract_call_edges(
+            "Sources/Engine/DriftCompiler.swift",
+            src,
+            &syms,
+            &ws,
+        );
+
+        let caller: Vec<&str> = edges
+            .iter()
+            .filter(|e| e.caller_qname.ends_with("DriftCompiler.compile"))
+            .map(|e| e.callee_qname.as_str())
+            .collect();
+
+        // Bare call: filterByMuteSolo(...)
+        assert!(
+            caller.iter().any(|q| q.ends_with("DriftCompiler.filterByMuteSolo")),
+            "missing bare intra-type call; edges from compile: {caller:?}"
+        );
+        // Self.expandClip(...)
+        assert!(
+            caller.iter().any(|q| q.ends_with("DriftCompiler.expandClip")),
+            "missing Self.method() call; edges from compile: {caller:?}"
+        );
+        // DriftCompiler.postProcess(...)
+        assert!(
+            caller.iter().any(|q| q.ends_with("DriftCompiler.postProcess")),
+            "missing TypeName.method() call; edges from compile: {caller:?}"
+        );
+    }
+
+    #[test]
+    fn self_dot_call_resolves_to_enclosing_type() {
+        let src = r#"
+class Scheduler {
+    func start() {
+        Self.validate()
+        self.reset()
+    }
+    func validate() {}
+    func reset() {}
+}
+"#;
+        let adapter = adapter();
+        let syms = adapter.parse_symbols("Sources/Core/Scheduler.swift", src).unwrap();
+        let mut ws = WorkspaceSymbols::default();
+        for s in &syms {
+            ws.qnames.insert(s.qname.clone());
+            ws.kinds.insert(s.qname.clone(), s.kind);
+        }
+        ws.build_suffix_index();
+        let edges = adapter.extract_call_edges("Sources/Core/Scheduler.swift", src, &syms, &ws);
+        let from_start: Vec<&str> = edges
+            .iter()
+            .filter(|e| e.caller_qname.ends_with("Scheduler.start"))
+            .map(|e| e.callee_qname.as_str())
+            .collect();
+        assert!(
+            from_start.iter().any(|q| q.ends_with("Scheduler.validate")),
+            "Self.validate() not resolved; edges: {from_start:?}"
+        );
+        assert!(
+            from_start.iter().any(|q| q.ends_with("Scheduler.reset")),
+            "self.reset() not resolved; edges: {from_start:?}"
+        );
     }
 
     #[test]

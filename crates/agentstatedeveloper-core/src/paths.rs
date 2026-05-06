@@ -62,3 +62,18 @@ pub fn rebind_path(from_symbol_id: &str) -> String {
 pub fn ledger_entry_index_path(entry_id: &str) -> String {
     format!("{}/ledger-idx/{}", ASD_ROOT, entry_id)
 }
+
+// ---------------------------------------------------------------------------
+// Scratchpad paths
+// ---------------------------------------------------------------------------
+
+/// Root prefix for all scratch entries. Flat layout (not symbol-nested)
+/// because scratch has multiple scoping dimensions (symbol, workflow, session).
+pub fn scratch_root() -> &'static str {
+    "/asd/v1/scratch"
+}
+
+/// Path for a single scratch entry.
+pub fn scratch_entry_path(scratch_id: &str) -> String {
+    format!("/asd/v1/scratch/{}", scratch_id)
+}

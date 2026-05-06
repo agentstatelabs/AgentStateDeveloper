@@ -11,6 +11,7 @@ pub mod mcp;
 pub mod policy;
 pub mod read;
 pub mod repair;
+pub mod scratch;
 pub mod sync;
 pub mod trace;
 pub mod verify_effects;

@@ -15,10 +15,10 @@ use tokio::sync::Mutex;
 
 use agentstatedeveloper_adapters::default_adapters;
 use agentstatedeveloper_core::{
-    ASD_PATH_PREFIX, AsgEffectStore, AsgIndexStore, AsgLedgerStore, AuditEvent, Author,
-    AuthorKind, Decision, Effect, EffectCategory, EffectDecl, EffectStore, Engine, IndexStore,
-    LedgerEntry, LedgerKind, LedgerStore, Rebind, Situation,
-    actions, emit_audit, event_types, paths,
+    ASD_PATH_PREFIX, AsgEffectStore, AsgIndexStore, AsgLedgerStore, AsgScratchStore, AuditEvent,
+    Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory, EffectDecl, EffectStore,
+    Engine, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Rebind, ScratchEntry, ScratchFilter,
+    ScratchStatus, ScratchStore, Situation, actions, emit_audit, event_types, paths,
 };
 
 /// The AgentStateDeveloper MCP server.
@@ -243,6 +243,95 @@ fn default_author_kind() -> String {
 }
 fn default_author_id() -> String {
     "asd-mcp".to_string()
+}
+
+// -- Scratch parameter types ------------------------------------------------
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ScratchWriteParams {
+    /// Working notes content (markdown OK).
+    pub content: String,
+    /// Optional: qualified name of the symbol to attach this note to.
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// Optional: named investigation context (e.g. "tracing-sync-bug").
+    #[serde(default)]
+    pub workflow: Option<String>,
+    /// Optional: time-to-live in hours. When not set, no expiry.
+    #[serde(default)]
+    pub ttl_hours: Option<i64>,
+    /// Optional: freeform tags.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ScratchListParams {
+    /// Filter by symbol qualified name.
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// Filter by workflow name.
+    #[serde(default)]
+    pub workflow: Option<String>,
+    /// Filter by session/agent_id.
+    #[serde(default)]
+    pub session: Option<String>,
+    /// Filter by status: "draft", "promoted", "discarded". Defaults to "draft".
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Max results to return (default: 50).
+    #[serde(default = "default_limit")]
+    pub limit: u32,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ScratchReadParams {
+    /// Scratch entry ID (`scr_…`).
+    pub scratch_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ScratchUpdateParams {
+    /// Scratch entry ID to update.
+    pub scratch_id: String,
+    /// Replacement content (replaces previous content entirely).
+    pub content: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ScratchDiscardParams {
+    /// Scratch entry ID to discard.
+    pub scratch_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ScratchPromoteParams {
+    /// Scratch entry ID to promote.
+    pub scratch_id: String,
+    /// Ledger kind: decision, assumption, constraint, rationale, hazard, tradeoff, invariant, ownership, proof.
+    pub kind: String,
+    /// Symbol qualified name. Required if the scratch entry has no symbol attached.
+    #[serde(default)]
+    pub qname: Option<String>,
+    /// One-line summary. Defaults to the first non-empty line of the scratch content.
+    #[serde(default)]
+    pub summary: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ScratchCleanParams {
+    /// Delete entries older than this many hours. Required.
+    pub older_than_hours: u32,
+    /// Comma-separated statuses to clean: "discarded,promoted" (default).
+    #[serde(default = "default_scratch_clean_statuses")]
+    pub statuses: String,
+    /// When true, report what would be deleted without removing anything.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+fn default_scratch_clean_statuses() -> String {
+    "discarded,promoted".to_string()
 }
 
 // -- Tool implementations ---------------------------------------------------
@@ -1553,6 +1642,235 @@ impl AsdMcpServer {
             "upgrade_url": "https://agentstatedeveloper.dev/pricing",
         }))
         .unwrap_or_else(|_| "{}".to_string())
+    }
+
+    // -- Scratch tools -------------------------------------------------------
+
+    #[tool(
+        description = "Write a new draft scratch entry. Scratch entries are local-only working notes scoped to a symbol/workflow/session. No policy gate — write freely. Returns { scratch_id, status }."
+    )]
+    async fn scratch_write(&self, params: Parameters<ScratchWriteParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let store = AsgScratchStore { repo: &engine.repo };
+
+        let mut entry = ScratchEntry::new(&p.content, "asd-mcp");
+        entry.workflow = p.workflow;
+        entry.tags = p.tags.unwrap_or_default();
+
+        if let Some(ttl_h) = p.ttl_hours {
+            entry.expires_at = Some(chrono::Utc::now() + chrono::Duration::hours(ttl_h));
+        }
+
+        // Resolve --symbol to symbol_id.
+        if let Some(ref qname) = p.symbol {
+            let index = AsgIndexStore { repo: &engine.repo };
+            match index.get_symbol_by_qname(&ref_name, qname) {
+                Ok(Some(sym)) => { entry.symbol_id = Some(sym.symbol_id); }
+                Ok(None) => return err_json(&format!("symbol not found: {qname}")),
+                Err(e) => return err_json(&e.to_string()),
+            }
+        }
+
+        match store.write_entry(&ref_name, &entry, "asd-mcp") {
+            Ok(stored) => serde_json::to_string(&serde_json::json!({
+                "scratch_id": stored.scratch_id,
+                "status": "draft",
+            }))
+            .unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "List scratch entries. Default: draft status, non-expired. Use status=null to see all. Returns { entries: [...], count }."
+    )]
+    async fn scratch_list(&self, params: Parameters<ScratchListParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let store = AsgScratchStore { repo: &engine.repo };
+
+        let status = match p.status.as_deref() {
+            Some("promoted") => Some(ScratchStatus::Promoted),
+            Some("discarded") => Some(ScratchStatus::Discarded),
+            Some("draft") | None => Some(ScratchStatus::Draft),
+            Some(other) => return err_json(&format!("unknown status: {other}")),
+        };
+
+        let mut filter = ScratchFilter {
+            workflow: p.workflow,
+            session: p.session,
+            status,
+            exclude_expired: true,
+            symbol_id: None,
+        };
+
+        if let Some(ref qname) = p.symbol {
+            let index = AsgIndexStore { repo: &engine.repo };
+            match index.get_symbol_by_qname(&ref_name, qname) {
+                Ok(Some(sym)) => { filter.symbol_id = Some(sym.symbol_id); }
+                Ok(None) => return err_json(&format!("symbol not found: {qname}")),
+                Err(e) => return err_json(&e.to_string()),
+            }
+        }
+
+        match store.list_entries(&ref_name, &filter) {
+            Ok(mut entries) => {
+                entries.truncate(p.limit.max(1) as usize);
+                let count = entries.len();
+                serde_json::to_string(&serde_json::json!({
+                    "entries": entries,
+                    "count": count,
+                }))
+                .unwrap_or_else(|_| "{}".to_string())
+            }
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Read a single scratch entry by scratch_id. Returns the full ScratchEntry JSON."
+    )]
+    async fn scratch_read(&self, params: Parameters<ScratchReadParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let store = AsgScratchStore { repo: &engine.repo };
+        match store.read_entry(&ref_name, &p.scratch_id) {
+            Ok(entry) => serde_json::to_string(&entry).unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Replace the content of an existing draft scratch entry. Returns the updated ScratchEntry."
+    )]
+    async fn scratch_update(&self, params: Parameters<ScratchUpdateParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let store = AsgScratchStore { repo: &engine.repo };
+        match store.update_entry(&ref_name, &p.scratch_id, &p.content, "asd-mcp") {
+            Ok(entry) => serde_json::to_string(&entry).unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Mark a scratch entry as discarded (soft-delete). Use scratch_clean to permanently purge discarded entries. Returns { ok: true }."
+    )]
+    async fn scratch_discard(&self, params: Parameters<ScratchDiscardParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let store = AsgScratchStore { repo: &engine.repo };
+        match store.discard_entry(&ref_name, &p.scratch_id, "asd-mcp") {
+            Ok(()) => r#"{"ok":true}"#.to_string(),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Promote a draft scratch entry to a durable ledger entry. Requires `kind` and a symbol (via `qname` or the entry's existing symbol_id). Goes through policy + audit. Returns { scratch_id, promoted_to, entry_id }."
+    )]
+    async fn scratch_promote(&self, params: Parameters<ScratchPromoteParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let scratch_store = AsgScratchStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+
+        // 1. Read scratch entry.
+        let entry = match scratch_store.read_entry(&ref_name, &p.scratch_id) {
+            Ok(e) => e,
+            Err(e) => return err_json(&e.to_string()),
+        };
+
+        // 2. Resolve symbol_id.
+        let symbol_id = if let Some(ref qname) = p.qname {
+            let index = AsgIndexStore { repo: &engine.repo };
+            match index.get_symbol_by_qname(&ref_name, qname) {
+                Ok(Some(sym)) => sym.symbol_id,
+                Ok(None) => return err_json(&format!("symbol not found: {qname}")),
+                Err(e) => return err_json(&e.to_string()),
+            }
+        } else if let Some(ref sid) = entry.symbol_id {
+            sid.clone()
+        } else {
+            return err_json(
+                "no symbol attached to scratch entry and qname was not provided",
+            );
+        };
+
+        // 3. Parse ledger kind.
+        let kind = match parse_ledger_kind(&p.kind) {
+            Ok(k) => k,
+            Err(e) => return err_json(&e),
+        };
+
+        // 4. Build summary.
+        let summary = p.summary.unwrap_or_else(|| {
+            entry.content
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or(&entry.content)
+                .chars()
+                .take(140)
+                .collect()
+        });
+
+        // 5. Create LedgerEntry.
+        let author = Author { kind: AuthorKind::Agent, id: "asd-mcp".to_string() };
+        let mut ledger_entry = LedgerEntry::new(&symbol_id, kind, &summary, author);
+        ledger_entry.body = Some(entry.content.clone());
+
+        if let Err(e) = ledger_store.append_entry(&ref_name, &ledger_entry, "asd-mcp") {
+            return err_json(&e.to_string());
+        }
+
+        // 6. Mark scratch promoted.
+        match scratch_store.mark_promoted(&ref_name, &entry.scratch_id, &ledger_entry.entry_id, "asd-mcp") {
+            Ok(promoted) => serde_json::to_string(&serde_json::json!({
+                "scratch_id": promoted.scratch_id,
+                "promoted_to": ledger_entry.entry_id,
+                "entry_id": ledger_entry.entry_id,
+            }))
+            .unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Permanently delete scratch entries matching the filter. Returns { deleted: N }. Use dry_run=true to preview without deleting."
+    )]
+    async fn scratch_clean(&self, params: Parameters<ScratchCleanParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let store = AsgScratchStore { repo: &engine.repo };
+
+        let statuses: Vec<ScratchStatus> = p.statuses
+            .split(',')
+            .filter_map(|t| match t.trim() {
+                "draft" => Some(ScratchStatus::Draft),
+                "promoted" => Some(ScratchStatus::Promoted),
+                "discarded" => Some(ScratchStatus::Discarded),
+                _ => None,
+            })
+            .collect();
+
+        let filter = CleanFilter {
+            older_than: Some(chrono::Duration::hours(p.older_than_hours as i64)),
+            statuses,
+        };
+
+        match store.clean_entries(&ref_name, &filter, p.dry_run) {
+            Ok(count) => serde_json::to_string(&serde_json::json!({ "deleted": count, "dry_run": p.dry_run }))
+                .unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
     }
 }
 

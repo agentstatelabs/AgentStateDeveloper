@@ -25,7 +25,7 @@ use serde_json::json;
 
 use crate::error::Result;
 use crate::paths;
-use crate::schema::EffectDecl;
+use crate::schema::{EffectDecl, ScratchEntry, ScratchStatus};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -83,6 +83,7 @@ pub fn scan_asg(repo: &Repository, ref_name: &str) -> Result<Vec<RepairIssue>> {
     check_callee_refs(repo, ref_name, &live_symbol_ids, &mut issues);
     check_caller_refs(repo, ref_name, &live_symbol_ids, &mut issues);
     check_ledger(repo, ref_name, &live_symbol_ids, &mut issues);
+    check_scratch(repo, ref_name, &live_symbol_ids, &mut issues);
 
     Ok(issues)
 }
@@ -384,6 +385,58 @@ pub fn drop_orphaned_edge_refs(
         |id| paths::callers_path(id),
     );
     Ok(dropped)
+}
+
+/// Informational check: find draft scratch entries whose `symbol_id` is no
+/// longer in the live index. Does not auto-delete; the agent may still need
+/// the note. Emits a `Warn`-level, non-auto-fixable issue per orphan.
+fn check_scratch(
+    repo: &Repository,
+    ref_name: &str,
+    live: &HashSet<String>,
+    issues: &mut Vec<RepairIssue>,
+) {
+    let prefix = paths::scratch_root();
+    let map = match repo.get_tree(ref_name, prefix) {
+        Ok(serde_json::Value::Object(m)) => m,
+        _ => return,
+    };
+    for (scratch_id, value) in &map {
+        let entry = match serde_json::from_value::<ScratchEntry>(value.clone()) {
+            Ok(e) => e,
+            Err(e) => {
+                issues.push(RepairIssue {
+                    kind: "malformed_scratch".to_string(),
+                    severity: IssueSeverity::Error,
+                    path: paths::scratch_entry_path(scratch_id),
+                    detail: format!("scratch entry '{scratch_id}' fails to deserialize: {e}"),
+                    auto_fixable: false,
+                });
+                continue;
+            }
+        };
+        // Only warn about Draft entries — Promoted/Discarded may legitimately
+        // outlive their symbol after cleanup cycles.
+        if entry.status != ScratchStatus::Draft {
+            continue;
+        }
+        if let Some(ref sym_id) = entry.symbol_id {
+            if !live.contains(sym_id) {
+                issues.push(RepairIssue {
+                    kind: "orphaned_scratch".to_string(),
+                    severity: IssueSeverity::Warn,
+                    path: paths::scratch_entry_path(scratch_id),
+                    detail: format!(
+                        "scratch entry '{scratch_id}' references symbol '{sym_id}' \
+                         which is no longer in the index (session: {}, workflow: {})",
+                        entry.session,
+                        entry.workflow.as_deref().unwrap_or("—"),
+                    ),
+                    auto_fixable: false,
+                });
+            }
+        }
+    }
 }
 
 fn extract_str_array(v: &serde_json::Value, field: &str) -> Vec<String> {

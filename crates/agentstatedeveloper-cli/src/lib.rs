@@ -133,6 +133,11 @@ pub enum Command {
     /// call graph edges) and optionally apply safe auto-corrections.
     /// By default runs read-only (dry-run); pass `--fix` to apply corrections.
     Repair(commands::repair::RepairArgs),
+
+    /// Working notes scoped to a symbol or investigation, with a
+    /// promote-to-ledger path. Local-only; not synced by `asd sync`.
+    #[command(subcommand)]
+    Scratch(commands::scratch::ScratchCmd),
 }
 
 /// Resolve [`Config`] from the parsed CLI flags.
@@ -169,5 +174,6 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Callees(args) => graph::run_callees(cfg, args),
         Command::ContextFor(args) => context_for::run(cfg, args),
         Command::Repair(args) => repair::run(cfg, args),
+        Command::Scratch(cmd) => scratch::run(cfg, cmd),
     }
 }
