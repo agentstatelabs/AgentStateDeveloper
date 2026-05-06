@@ -44,6 +44,25 @@ pub struct CodeQueryParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct CodeSearchParams {
+    /// Natural-language concept or keyword(s) to search for. Tokenised and
+    /// scored across symbol name, signature, doc comment, file path, and
+    /// ledger entry summaries. Returns ranked results.
+    pub query: String,
+    /// Filter by symbol kind: module, function, method, class, variable.
+    pub kind: Option<String>,
+    /// Filter by language (e.g. "swift", "python").
+    pub language: Option<String>,
+    /// Max results to return (default: 20).
+    #[serde(default = "default_search_limit")]
+    pub limit: u32,
+}
+
+fn default_search_limit() -> u32 {
+    20
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct CodeReadParams {
     /// Fully-qualified symbol name.
     pub qname: String,
@@ -320,6 +339,135 @@ impl AsdMcpServer {
 
         symbols.sort_by(|a, b| a.qname.cmp(&b.qname));
         serde_json::to_string(&symbols).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    #[tool(
+        description = "Search symbols by concept or keyword(s). Unlike code_query (which filters by exact substring), code_search scores every symbol across its name, signature, doc comment, file path, and ledger summaries — returning the best matches ranked by relevance. Use this for the first 10 minutes of feature archaeology when you don't yet know the exact symbol names."
+    )]
+    async fn code_search(&self, params: Parameters<CodeSearchParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let limit = p.limit.max(1) as usize;
+
+        // Tokenise the query: split on whitespace and common separators,
+        // lower-case each token, drop empties.
+        let tokens: Vec<String> = p
+            .query
+            .split(|c: char| c.is_whitespace() || c == '_' || c == '-' || c == '.')
+            .map(|t| t.to_lowercase())
+            .filter(|t| t.len() >= 2)
+            .collect();
+
+        if tokens.is_empty() {
+            return "[]".to_string();
+        }
+
+        let kind_filter = p.kind.as_deref().map(|k| k.to_lowercase());
+        let lang_filter = p.language.as_deref();
+
+        // Collect all qnames from the index.
+        let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+        let qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
+            Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
+            _ => return "[]".to_string(),
+        };
+
+        let index = AsgIndexStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+
+        let mut scored: Vec<(u32, Symbol)> = Vec::new();
+
+        for qname in &qnames {
+            let sym = match index.get_symbol_by_qname(&ref_name, qname) {
+                Ok(Some(s)) => s,
+                _ => continue,
+            };
+
+            // Kind filter.
+            if let Some(ref k) = kind_filter {
+                let sym_kind = match sym.kind {
+                    agentstatedeveloper_core::SymbolKind::Module => "module",
+                    agentstatedeveloper_core::SymbolKind::Function => "function",
+                    agentstatedeveloper_core::SymbolKind::Method => "method",
+                    agentstatedeveloper_core::SymbolKind::Class => "class",
+                    agentstatedeveloper_core::SymbolKind::Variable => "variable",
+                };
+                if sym_kind != k {
+                    continue;
+                }
+            }
+            // Language filter.
+            if let Some(lang) = lang_filter {
+                if sym.language != lang {
+                    continue;
+                }
+            }
+
+            // Build a searchable corpus for this symbol.
+            let qname_lower = sym.qname.to_lowercase();
+            let sig_lower = sym
+                .signature
+                .as_deref()
+                .unwrap_or("")
+                .to_lowercase();
+            let doc_lower = sym.doc.as_deref().unwrap_or("").to_lowercase();
+            let file_lower = sym.file.to_lowercase();
+
+            // Ledger summaries — fetch but don't fail the whole search on error.
+            let ledger_text: String = ledger_store
+                .list_entries(&ref_name, &sym.symbol_id)
+                .unwrap_or_default()
+                .iter()
+                .map(|e| e.summary.to_lowercase())
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            // Score: count token hits per field with weights.
+            // qname: 4, signature: 3, doc: 3, ledger: 2, file: 1
+            let mut score: u32 = 0;
+            for token in &tokens {
+                if qname_lower.contains(token.as_str()) {
+                    score += 4;
+                }
+                if !sig_lower.is_empty() && sig_lower.contains(token.as_str()) {
+                    score += 3;
+                }
+                if !doc_lower.is_empty() && doc_lower.contains(token.as_str()) {
+                    score += 3;
+                }
+                if !ledger_text.is_empty() && ledger_text.contains(token.as_str()) {
+                    score += 2;
+                }
+                if file_lower.contains(token.as_str()) {
+                    score += 1;
+                }
+            }
+
+            if score > 0 {
+                scored.push((score, sym));
+            }
+        }
+
+        // Sort descending by score, then alphabetically by qname for ties.
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.qname.cmp(&b.1.qname)));
+        scored.truncate(limit);
+
+        let results: Vec<serde_json::Value> = scored
+            .into_iter()
+            .map(|(score, sym)| {
+                serde_json::json!({
+                    "score": score,
+                    "qname": sym.qname,
+                    "kind": format!("{:?}", sym.kind).to_lowercase(),
+                    "file": sym.file,
+                    "signature": sym.signature,
+                    "doc": sym.doc,
+                })
+            })
+            .collect();
+
+        serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string())
     }
 
     #[tool(
@@ -1307,7 +1455,11 @@ fn parse_ledger_kind(s: &str) -> Result<LedgerKind, String> {
         "rationale" => Ok(LedgerKind::Rationale),
         "hazard" => Ok(LedgerKind::Hazard),
         "tradeoff" => Ok(LedgerKind::Tradeoff),
-        other => Err(format!("unknown ledger kind: {}", other)),
+        "invariant" => Ok(LedgerKind::Invariant),
+        other => Err(format!(
+            "unknown ledger kind: {}. Valid: decision, assumption, constraint, rationale, hazard, tradeoff, invariant",
+            other
+        )),
     }
 }
 

@@ -98,6 +98,7 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
                     col: p.end_col,
                 },
                 signature: p.signature.clone(),
+                doc: p.doc.clone(),
             };
 
             index_store.put_symbol(&engine.ref_name, &symbol, &cfg.agent_id)?;

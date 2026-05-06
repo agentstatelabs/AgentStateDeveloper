@@ -35,6 +35,7 @@ fn seed_engine(e: &Engine) -> (Symbol, EffectDecl, LedgerEntry) {
         start: Position { line: 1, col: 0 },
         end: Position { line: 10, col: 0 },
         signature: Some("def charge_card(amount: int) -> bool".to_string()),
+        doc: None,
     };
     let index = AsgIndexStore { repo: &e.repo };
     index

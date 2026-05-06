@@ -15,6 +15,9 @@ pub struct ParsedSymbol {
     pub end_col: u32,
     pub body: String,
     pub signature: Option<String>,
+    /// Leading doc comment for this symbol (stripped of comment markers,
+    /// trimmed). Populated by the language adapter. `None` when absent.
+    pub doc: Option<String>,
 }
 
 /// A directed call edge from one qname to another, produced by a language

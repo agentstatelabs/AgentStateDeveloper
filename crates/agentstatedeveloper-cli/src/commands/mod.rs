@@ -5,6 +5,7 @@ pub mod init;
 pub mod ledger;
 pub mod policy;
 pub mod read;
+pub mod search;
 pub mod sync;
 pub mod trace;
 pub mod verify_effects;

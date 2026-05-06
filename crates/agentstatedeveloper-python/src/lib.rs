@@ -181,6 +181,7 @@ fn make_parsed_symbol(
     let start = node.start_position();
     let end = node.end_position();
     let body = node_text(node, src).unwrap_or_default();
+    let doc = extract_python_doc(&body);
     ParsedSymbol {
         qname,
         kind,
@@ -191,7 +192,35 @@ fn make_parsed_symbol(
         end_col: (end.column as u32) + 1,
         body,
         signature,
+        doc,
     }
+}
+
+/// Extract leading doc from a Python symbol body.
+///
+/// Handles:
+/// - Triple-quoted docstrings: `"""..."""` or `'''...'''` after `def`/`class` header
+/// - Leading `#` comment block immediately before the body (uncommon but used)
+fn extract_python_doc(body: &str) -> Option<String> {
+    // Find the first triple-quoted string in the body (docstring convention).
+    for quote in &[r#"""""#, "'''"] {
+        if let Some(start) = body.find(quote) {
+            let after = start + quote.len();
+            if let Some(end_rel) = body[after..].find(quote) {
+                let content = &body[after..after + end_rel];
+                let cleaned = content
+                    .lines()
+                    .map(|l| l.trim())
+                    .filter(|l| !l.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !cleaned.is_empty() {
+                    return Some(truncate_doc(&cleaned));
+                }
+            }
+        }
+    }
+    None
 }
 
 fn extract_function_signature(node: Node<'_>, src: &[u8], name: &str) -> Option<String> {
@@ -617,6 +646,20 @@ fn extract_url_host(args: &str) -> Option<String> {
 }
 
 /// Return a short, single-line note snippet.
+/// Cap a doc string at 512 characters, trimming at a word boundary when possible.
+fn truncate_doc(s: &str) -> String {
+    const MAX: usize = 512;
+    if s.len() <= MAX {
+        return s.to_string();
+    }
+    // Try to break at a space before the limit.
+    let truncated = &s[..MAX];
+    match truncated.rfind(' ') {
+        Some(pos) => format!("{}…", &truncated[..pos]),
+        None => format!("{}…", truncated),
+    }
+}
+
 fn trim_note(s: &str) -> String {
     let first_line = s.lines().next().unwrap_or("").trim();
     if first_line.len() > 120 {

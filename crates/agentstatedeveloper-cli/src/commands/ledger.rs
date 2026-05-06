@@ -171,6 +171,7 @@ pub enum CliLedgerKind {
     Rationale,
     Hazard,
     Tradeoff,
+    Invariant,
 }
 
 impl From<CliLedgerKind> for LedgerKind {
@@ -182,6 +183,7 @@ impl From<CliLedgerKind> for LedgerKind {
             CliLedgerKind::Rationale => LedgerKind::Rationale,
             CliLedgerKind::Hazard => LedgerKind::Hazard,
             CliLedgerKind::Tradeoff => LedgerKind::Tradeoff,
+            CliLedgerKind::Invariant => LedgerKind::Invariant,
         }
     }
 }

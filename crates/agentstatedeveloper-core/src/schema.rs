@@ -16,6 +16,11 @@ pub struct Symbol {
     pub start: Position,
     pub end: Position,
     pub signature: Option<String>,
+    /// Leading doc comment extracted by the language adapter (stripped of
+    /// comment markers, trimmed). Capped at 512 chars during indexing.
+    /// Used by `code_search` for concept-level discovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -65,6 +70,10 @@ pub enum LedgerKind {
     Rationale,
     Hazard,
     Tradeoff,
+    /// A durable semantic invariant: a property that must always hold,
+    /// regardless of implementation changes. Surfaced prominently by
+    /// `code_read` and `investigate`.
+    Invariant,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,6 +261,7 @@ impl LedgerKind {
             LedgerKind::Rationale => "rationale",
             LedgerKind::Hazard => "hazard",
             LedgerKind::Tradeoff => "tradeoff",
+            LedgerKind::Invariant => "invariant",
         }
     }
 }

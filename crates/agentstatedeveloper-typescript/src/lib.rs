@@ -337,6 +337,7 @@ fn make_parsed_symbol(
     let start = node.start_position();
     let end = node.end_position();
     let body = node_text(node, src).unwrap_or_default();
+    let doc = extract_preceding_doc(src, node.start_byte());
     ParsedSymbol {
         qname,
         kind,
@@ -346,6 +347,71 @@ fn make_parsed_symbol(
         end_col: (end.column as u32) + 1,
         body,
         signature,
+        doc,
+    }
+}
+
+/// Look backwards from `start_byte` in `src` for a JSDoc block (`/** ... */`)
+/// or a run of `//` line comments immediately preceding the symbol.
+/// Returns the text stripped of comment markers and trimmed, or `None`.
+fn extract_preceding_doc(src: &[u8], start_byte: usize) -> Option<String> {
+    if start_byte == 0 {
+        return None;
+    }
+    let before = std::str::from_utf8(&src[..start_byte]).ok()?;
+
+    // Strip trailing whitespace/blank lines to find the last non-blank line.
+    let trimmed_end = before.trim_end();
+    if trimmed_end.is_empty() {
+        return None;
+    }
+
+    // Case 1: ends with `*/` — try to find the matching `/**`.
+    if trimmed_end.ends_with("*/") {
+        if let Some(block_start) = trimmed_end.rfind("/**") {
+            let block = &trimmed_end[block_start + 3..trimmed_end.len() - 2];
+            let cleaned = block
+                .lines()
+                .map(|l| l.trim().trim_start_matches('*').trim())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !cleaned.is_empty() {
+                return Some(truncate_doc(&cleaned));
+            }
+        }
+    }
+
+    // Case 2: ends with a `//` comment line — collect the contiguous block.
+    let lines: Vec<&str> = trimmed_end.lines().collect();
+    let mut comment_lines: Vec<&str> = Vec::new();
+    for line in lines.iter().rev() {
+        let t = line.trim();
+        if t.starts_with("//") {
+            comment_lines.push(t.trim_start_matches("//").trim());
+        } else {
+            break;
+        }
+    }
+    if !comment_lines.is_empty() {
+        comment_lines.reverse();
+        let cleaned = comment_lines.join(" ");
+        return Some(truncate_doc(&cleaned));
+    }
+
+    None
+}
+
+/// Cap a doc string at 512 characters, trimming at a word boundary when possible.
+fn truncate_doc(s: &str) -> String {
+    const MAX: usize = 512;
+    if s.len() <= MAX {
+        return s.to_string();
+    }
+    let truncated = &s[..MAX];
+    match truncated.rfind(' ') {
+        Some(pos) => format!("{}…", &truncated[..pos]),
+        None => format!("{}…", truncated),
     }
 }
 

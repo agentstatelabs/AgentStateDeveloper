@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 mod config;
 mod commands;
 
-use commands::{audit, hydrate, index, init, ledger, policy, read, sync, trace, verify_effects};
+use commands::{audit, hydrate, index, init, ledger, policy, read, search, sync, trace, verify_effects};
 
 /// AgentStateDeveloper — code-level context and audit overlay.
 #[derive(Debug, Parser)]
@@ -72,6 +72,9 @@ enum Command {
     /// effect declarations) emitted to the JSONL audit log.
     #[command(subcommand)]
     Audit(audit::AuditCmd),
+
+    /// Ranked concept search over indexed symbols.
+    Search(search::SearchArgs),
 }
 
 fn main() -> Result<()> {
@@ -89,5 +92,6 @@ fn main() -> Result<()> {
         Command::Sync(args) => sync::run(&cfg, args),
         Command::Hydrate(args) => hydrate::run(&cfg, args),
         Command::Audit(sub) => audit::run(&cfg, sub),
+        Command::Search(args) => search::run(&cfg, args),
     }
 }
