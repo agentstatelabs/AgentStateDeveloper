@@ -9,7 +9,7 @@ use clap::Args;
 
 use agentstatedeveloper_core::{
     AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore, LedgerStore, SearchFtsDb,
-    SymbolKind, extract_summary, hybrid_boost, is_stopword,
+    SymbolKind, extract_summary, hybrid_boost, is_stopword, stale_warning,
 };
 
 use crate::config::Config;
@@ -41,6 +41,9 @@ pub struct SearchArgs {
 }
 
 pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
+    if let Some(warn) = stale_warning(&cfg.db_path, 3600) {
+        eprintln!("{warn}");
+    }
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let ledger_store = AsgLedgerStore { repo: &engine.repo };
 

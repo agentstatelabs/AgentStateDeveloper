@@ -141,6 +141,16 @@ impl SearchFtsDb {
             )?;
         }
 
+        // asd_index_meta is a simple key-value store for index metadata.
+        // It is NOT dropped on FTS schema version changes — it persists
+        // across rebuilds so indexed_at survives schema upgrades.
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS asd_index_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );"
+        )?;
+
         self.conn.execute_batch(&format!(
             "CREATE VIRTUAL TABLE IF NOT EXISTS asd_search_fts USING fts5(
                 symbol_id  UNINDEXED,
@@ -178,7 +188,34 @@ impl SearchFtsDb {
         for sym in symbols {
             self.insert_symbol(sym)?;
         }
+        // Stamp the rebuild time so staleness checks can compare against it.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.conn.execute(
+            "INSERT OR REPLACE INTO asd_index_meta (key, value) VALUES ('indexed_at', ?1)",
+            params![now.to_string()],
+        )?;
         Ok(())
+    }
+
+    /// Unix timestamp (seconds) of the last `rebuild()` call, or `None` if
+    /// the index has never been built.
+    pub fn last_indexed_at(&self) -> Option<i64> {
+        self.conn.query_row(
+            "SELECT value FROM asd_index_meta WHERE key = 'indexed_at' LIMIT 1",
+            [],
+            |r| r.get::<_, String>(0),
+        ).ok().and_then(|s| s.parse().ok())
+    }
+
+    /// Number of rows in the FTS table (total indexed symbols).
+    pub fn symbol_count(&self) -> usize {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM asd_search_fts", [], |r| r.get::<_, i64>(0))
+            .map(|n| n as usize)
+            .unwrap_or(0)
     }
 
     fn insert_symbol(&self, sym: &Symbol) -> rusqlite::Result<()> {
@@ -374,6 +411,51 @@ pub fn hybrid_boost(hit: &FtsHit, tokens: &[String]) -> f64 {
     let tier_penalty = if hit.tier == 1 { -2.0 } else { 0.0 };
 
     path_boost + name_boost + tier_penalty
+}
+
+// ---------------------------------------------------------------------------
+// Staleness helpers
+// ---------------------------------------------------------------------------
+
+/// Format a unix timestamp age as a human-readable string ("3h ago", "just now").
+pub fn format_age(indexed_at: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let secs = (now - indexed_at).max(0);
+    if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    }
+}
+
+/// Return a stale-index warning string if the index is older than
+/// `threshold_secs` (default: 3600 = 1 hour), or `None` if fresh.
+pub fn stale_warning(db_path: &std::path::Path, threshold_secs: u64) -> Option<String> {
+    let fts = SearchFtsDb::open(db_path).ok()?;
+    if !fts.has_data() {
+        return Some("asd: index is empty — run 'asd index <dir>' to build it.".to_string());
+    }
+    let indexed_at = fts.last_indexed_at()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let age_secs = (now - indexed_at).max(0) as u64;
+    if age_secs > threshold_secs {
+        Some(format!(
+            "asd: index may be stale — last indexed {}. Run 'asd index <dir>' to update.",
+            format_age(indexed_at)
+        ))
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------

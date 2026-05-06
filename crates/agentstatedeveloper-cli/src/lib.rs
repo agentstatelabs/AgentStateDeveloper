@@ -145,6 +145,9 @@ pub enum Command {
     /// Broad feature archaeology: search → expand call chains, invariants,
     /// hazards, and effects for the top matching entry points in one pass.
     Investigate(commands::investigate::InvestigateArgs),
+
+    /// Show index health: age, symbol count, and optionally dirty source files.
+    Status(commands::status::StatusArgs),
 }
 
 /// Resolve [`Config`] from the parsed CLI flags.
@@ -184,5 +187,6 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Scratch(cmd) => scratch::run(cfg, cmd),
         Command::Search(args) => search::run(cfg, args),
         Command::Investigate(args) => investigate::run(cfg, args),
+        Command::Status(args) => status::run(cfg, args),
     }
 }

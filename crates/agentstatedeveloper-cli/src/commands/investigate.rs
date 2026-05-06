@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore, LedgerStore,
-    SearchFtsDb, classify_layer, extract_summary, hybrid_boost, symbol_tier,
+    SearchFtsDb, classify_layer, extract_summary, hybrid_boost, stale_warning, symbol_tier,
 };
 
 use crate::commands::{
@@ -50,6 +50,9 @@ pub struct InvestigateArgs {
 }
 
 pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
+    if let Some(warn) = stale_warning(&cfg.db_path, 3600) {
+        eprintln!("{warn}");
+    }
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let index_store = AsgIndexStore { repo: &engine.repo };
     let ledger_store = AsgLedgerStore { repo: &engine.repo };
