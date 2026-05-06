@@ -130,6 +130,7 @@ fn make_symbol_sig(node: Node<'_>, src: &[u8], qname: String, kind: SymbolKind, 
         end_col: node.end_position().column as u32,
         body: node_text(node, src).to_string(),
         signature,
+        doc: None,
     }
 }
 

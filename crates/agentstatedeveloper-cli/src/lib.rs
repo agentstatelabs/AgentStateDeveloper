@@ -138,6 +138,9 @@ pub enum Command {
     /// promote-to-ledger path. Local-only; not synced by `asd sync`.
     #[command(subcommand)]
     Scratch(commands::scratch::ScratchCmd),
+
+    /// Ranked concept search over indexed symbols.
+    Search(commands::search::SearchArgs),
 }
 
 /// Resolve [`Config`] from the parsed CLI flags.
@@ -175,5 +178,6 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::ContextFor(args) => context_for::run(cfg, args),
         Command::Repair(args) => repair::run(cfg, args),
         Command::Scratch(cmd) => scratch::run(cfg, cmd),
+        Command::Search(args) => search::run(cfg, args),
     }
 }

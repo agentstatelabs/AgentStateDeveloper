@@ -16,6 +16,8 @@ pub struct Symbol {
     pub start: Position,
     pub end: Position,
     pub signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

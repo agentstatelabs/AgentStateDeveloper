@@ -136,6 +136,7 @@ fn walk(
                 end_col: node.end_position().column as u32,
                 body: node_text(node, src).to_string(),
                 signature: None,
+                doc: None,
             });
             // Walk body for nested members
             if let Some(body) = child_by_field(node, "body") {
@@ -166,6 +167,7 @@ fn walk(
                 end_col: node.end_position().column as u32,
                 body: node_text(node, src).to_string(),
                 signature: extract_sig_before_brace(node, src),
+                doc: None,
             });
             // Don't recurse into method bodies for nested classes — Java allows
             // local class declarations but they're rare; skip for simplicity.
@@ -188,6 +190,7 @@ fn walk(
                 end_col: node.end_position().column as u32,
                 body: node_text(node, src).to_string(),
                 signature: None,
+                doc: None,
             });
         }
         _ => {

@@ -367,6 +367,7 @@ fn make_parsed_symbol(
     let start = node.start_position();
     let end = node.end_position();
     let body = node_text(node, src).unwrap_or_default();
+    let doc = extract_preceding_doc(src, node.start_byte());
     ParsedSymbol {
         qname,
         kind,
@@ -376,7 +377,51 @@ fn make_parsed_symbol(
         end_col: (end.column as u32) + 1,
         body,
         signature,
+        doc,
     }
+}
+
+fn extract_preceding_doc(src: &[u8], start_byte: usize) -> Option<String> {
+    let before = std::str::from_utf8(&src[..start_byte]).ok()?;
+    let trimmed_end = before.trim_end();
+    if trimmed_end.ends_with("*/") {
+        if let Some(block_start) = trimmed_end.rfind("/**") {
+            let block = &trimmed_end[block_start + 3..trimmed_end.len() - 2];
+            let cleaned = block
+                .lines()
+                .map(|l| l.trim().trim_start_matches('*').trim())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !cleaned.is_empty() {
+                return Some(truncate_doc(&cleaned));
+            }
+        }
+    }
+    let lines: Vec<&str> = trimmed_end.lines().collect();
+    let mut comment_lines: Vec<&str> = Vec::new();
+    for line in lines.iter().rev() {
+        let t = line.trim();
+        if t.starts_with("//") {
+            comment_lines.push(t.trim_start_matches("//").trim());
+        } else {
+            break;
+        }
+    }
+    if !comment_lines.is_empty() {
+        comment_lines.reverse();
+        return Some(truncate_doc(&comment_lines.join(" ")));
+    }
+    None
+}
+
+fn truncate_doc(s: &str) -> String {
+    const MAX: usize = 512;
+    if s.len() <= MAX {
+        return s.to_string();
+    }
+    let cut = s[..MAX].rfind(' ').unwrap_or(MAX);
+    s[..cut].to_string()
 }
 
 fn extract_function_signature(node: Node<'_>, src: &[u8], name: &str) -> Option<String> {

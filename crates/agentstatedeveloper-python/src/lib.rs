@@ -212,6 +212,7 @@ fn make_parsed_symbol(
     let start = node.start_position();
     let end = node.end_position();
     let body = node_text(node, src).unwrap_or_default();
+    let doc = extract_python_doc(&body);
     ParsedSymbol {
         qname,
         kind,
@@ -222,7 +223,38 @@ fn make_parsed_symbol(
         end_col: (end.column as u32) + 1,
         body,
         signature,
+        doc,
     }
+}
+
+fn extract_python_doc(body: &str) -> Option<String> {
+    for quote in &[r#"""""#, "'''"] {
+        if let Some(start) = body.find(quote) {
+            let after = start + quote.len();
+            if let Some(end_rel) = body[after..].find(quote) {
+                let content = &body[after..after + end_rel];
+                let cleaned = content
+                    .lines()
+                    .map(|l| l.trim())
+                    .filter(|l| !l.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !cleaned.is_empty() {
+                    return Some(truncate_doc(&cleaned));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn truncate_doc(s: &str) -> String {
+    const MAX: usize = 512;
+    if s.len() <= MAX {
+        return s.to_string();
+    }
+    let cut = s[..MAX].rfind(' ').unwrap_or(MAX);
+    s[..cut].to_string()
 }
 
 fn extract_function_signature(node: Node<'_>, src: &[u8], name: &str) -> Option<String> {

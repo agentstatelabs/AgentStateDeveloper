@@ -231,6 +231,7 @@ fn make_parsed_symbol(
         end_col: (end.column as u32) + 1,
         body,
         signature,
+        doc: None,
     }
 }
 

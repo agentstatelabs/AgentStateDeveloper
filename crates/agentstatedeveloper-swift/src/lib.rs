@@ -164,6 +164,7 @@ fn make_symbol(node: Node<'_>, src: &[u8], qname: String, kind: SymbolKind, sign
         end_col: node.end_position().column as u32,
         body: node_text(node, src).to_string(),
         signature,
+        doc: None,
     }
 }
 

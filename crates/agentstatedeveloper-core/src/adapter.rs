@@ -15,6 +15,7 @@ pub struct ParsedSymbol {
     pub end_col: u32,
     pub body: String,
     pub signature: Option<String>,
+    pub doc: Option<String>,
 }
 
 /// A directed call edge from one qname to another, produced by a language

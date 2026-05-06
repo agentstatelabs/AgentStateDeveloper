@@ -178,6 +178,7 @@ pub fn run_index(
                 start: Position { line: p.start_line, col: p.start_col },
                 end: Position { line: p.end_line, col: p.end_col },
                 signature: p.signature.clone(),
+                doc: p.doc.clone(),
             };
 
             let sym_val = serde_json::to_value(&sym)
