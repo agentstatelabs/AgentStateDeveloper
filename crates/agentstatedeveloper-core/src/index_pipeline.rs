@@ -252,6 +252,10 @@ pub fn run_index(
             workspace.kinds.insert(p.qname.clone(), p.kind);
         }
     }
+    // Build suffix index after all qnames are inserted so adapters can do
+    // O(1) suffix-based lookup (e.g., "DriftCompiler.compile" →
+    // "Sources.Models.DriftCompiler.compile").
+    workspace.build_suffix_index();
 
     // -----------------------------------------------------------------------
     // Pass 2: extract call edges, resolve, write callees+callers as two

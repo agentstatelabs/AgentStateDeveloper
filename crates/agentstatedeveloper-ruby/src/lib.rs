@@ -902,6 +902,7 @@ end
         let ws = WorkspaceSymbols {
             qnames: HashSet::new(),
             kinds: HashMap::new(),
+            ..Default::default()
         };
         let syms = adapter().parse_symbols("order_service.rb", src).unwrap();
         let edges = adapter().extract_call_edges("order_service.rb", src, &syms, &ws);

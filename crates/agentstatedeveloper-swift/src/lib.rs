@@ -630,16 +630,22 @@ fn collect_calls(
                             Some(q)
                         } else {
                             by_simple.get(method).cloned()
+                                .or_else(|| workspace.find_by_suffix(&format!("{}.{}", et, method)).map(|s| s.to_string()))
                         }
                     } else {
                         by_simple.get(method).cloned()
                     }
                 } else {
-                    let q = format!("{}.{}", receiver, method);
+                    // Receiver may be a chained expression like `self.pool` — extract
+                    // just the last component as the simple receiver name.
+                    let simple_recv = receiver.rsplit('.').next().unwrap_or(receiver);
+                    let q = format!("{}.{}", simple_recv, method);
                     if known.contains(q.as_str()) || workspace.contains(&q) {
                         Some(q)
                     } else {
-                        None
+                        // Suffix fallback: find the workspace qname ending with
+                        // ".<simple_recv>.<method>" (handles file-path prefixes).
+                        workspace.find_by_suffix(&q).map(|s| s.to_string())
                     }
                 };
 
@@ -838,10 +844,7 @@ class OrderService {
     }
 }
 "#;
-        let ws = WorkspaceSymbols {
-            qnames: HashSet::new(),
-            kinds: HashMap::new(),
-        };
+        let ws = WorkspaceSymbols::default();
         let syms = adapter().parse_symbols("OrderService.swift", src).unwrap();
         let edges = adapter().extract_call_edges("OrderService.swift", src, &syms, &ws);
         let found = edges.iter().any(|e| {

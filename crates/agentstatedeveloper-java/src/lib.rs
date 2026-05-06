@@ -924,6 +924,7 @@ public class ChargeService {
         let ws = WorkspaceSymbols {
             qnames: ["com.payments.ChargeService.charge".to_string()].into(),
             kinds: HashMap::new(),
+            ..Default::default()
         };
         let syms = adapter().parse_symbols("src/OrderService.java", src).unwrap();
         let edges = adapter().extract_call_edges("src/OrderService.java", src, &syms, &ws);

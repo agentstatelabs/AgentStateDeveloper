@@ -901,6 +901,7 @@ namespace MyApp.Orders {
         let ws = WorkspaceSymbols {
             qnames: ["MyApp.Payments.ChargeService.Charge".to_string()].into(),
             kinds: HashMap::new(),
+            ..Default::default()
         };
         let syms = adapter().parse_symbols("OrderService.cs", src).unwrap();
         let edges = adapter().extract_call_edges("OrderService.cs", src, &syms, &ws);

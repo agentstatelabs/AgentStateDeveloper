@@ -867,6 +867,7 @@ class OrderService {
         let ws = WorkspaceSymbols {
             qnames: HashSet::new(),
             kinds: HashMap::new(),
+            ..Default::default()
         };
         let syms = adapter().parse_symbols("OrderService.kt", src).unwrap();
         let edges = adapter().extract_call_edges("OrderService.kt", src, &syms, &ws);
