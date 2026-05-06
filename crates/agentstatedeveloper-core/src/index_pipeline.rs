@@ -414,24 +414,18 @@ pub fn run_index(
         let _ = sink.emit(&event);
     }
 
-    // FTS5 update — incremental: upsert every file touched in this run.
-    // Errors are non-fatal; a missing FTS index just means search falls
-    // back to the in-memory path until the next successful index.
+    // FTS5 atomic rebuild — replace the entire index from the current snapshot.
+    // Full rebuild avoids stale rows from deleted or renamed files; the indexer
+    // already owns the complete world, so incremental tracking adds no benefit.
+    // Errors are non-fatal; search falls back to in-memory until next index.
     if let Some(db) = db_path {
         if let Some(f) = on_phase {
-            f("  updating FTS search index…");
+            f("  rebuilding FTS search index…");
         }
         match SearchFtsDb::open(db) {
             Ok(fts) => {
-                // Group indexed symbols by file for per-file upsert.
-                let mut by_file: HashMap<String, Vec<Symbol>> = HashMap::new();
-                for sym in indexed_symbols {
-                    by_file.entry(sym.file.clone()).or_default().push(sym);
-                }
-                for (file, syms) in &by_file {
-                    if let Err(e) = fts.upsert_file(file, syms) {
-                        eprintln!("asd: FTS upsert warning for {file}: {e}");
-                    }
+                if let Err(e) = fts.rebuild(&indexed_symbols) {
+                    eprintln!("asd: FTS rebuild warning: {e}");
                 }
             }
             Err(e) => {

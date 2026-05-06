@@ -33,6 +33,11 @@ pub struct SearchArgs {
     /// Maximum results to show (default: 20).
     #[arg(long, default_value = "20")]
     pub limit: usize,
+
+    /// Include symbols from test files in results. By default tests are
+    /// excluded so production entry points rank first.
+    #[arg(long)]
+    pub include_tests: bool,
 }
 
 pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
@@ -42,6 +47,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
     let filters = FtsFilters {
         kind: args.kind.as_deref().map(|k| k.to_lowercase()),
         language: args.language.as_deref().map(|l| l.to_lowercase()),
+        include_tests: args.include_tests,
     };
 
     // --- FTS path ---

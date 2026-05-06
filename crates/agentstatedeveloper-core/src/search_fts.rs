@@ -8,14 +8,24 @@
 //! second connection to the same WAL-mode database is safe and avoids coupling
 //! the two storage layers.
 //!
+//! ## Rebuild vs. incremental
+//! `rebuild()` is the canonical path: the indexer already holds the complete
+//! "current world" snapshot after `asd index`, so a full replace avoids any
+//! sync bugs with the git blob store (e.g. deleted files leaving stale FTS rows).
+//!
 //! ## Tokenizer choice
 //! `unicode61 remove_diacritics 1` — word-based, unicode-aware. CamelCase and
 //! snake_case identifiers are pre-expanded at insert time so "refreshDriftPlayhead"
-//! becomes "refreshDriftPlayhead refresh drift playhead", making word-level and
-//! substring-approximate queries both work.
+//! becomes "refreshDriftPlayhead refresh drift playhead", making word-level
+//! queries work without prefix tricks.
 //!
 //! ## Column weights for BM25
-//! qname=10, signature=5, doc=5, file=2  (language and kind are UNINDEXED)
+//! qname=10, signature=5, doc=5, file=2  (unindexed metadata columns excluded)
+//!
+//! ## Test symbol handling
+//! `is_test` is set at insert time based on file-path heuristics. Tests are
+//! excluded from results by default; pass `FtsFilters { include_tests: true }`
+//! to include them.
 
 use std::path::Path;
 
@@ -43,6 +53,7 @@ pub struct FtsHit {
     /// Original signature (not expanded).
     pub signature: Option<String>,
     pub doc: Option<String>,
+    pub is_test: bool,
 }
 
 /// Filters applied before BM25 ranking.
@@ -50,6 +61,9 @@ pub struct FtsHit {
 pub struct FtsFilters {
     pub kind: Option<String>,
     pub language: Option<String>,
+    /// Include test symbols (files under test/tests/spec directories, etc.).
+    /// Default: false — tests are excluded so production entry points rank first.
+    pub include_tests: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -62,9 +76,6 @@ pub struct SearchFtsDb {
 
 impl SearchFtsDb {
     /// Open (or create) the FTS index in `db_path`.
-    ///
-    /// `db_path` is the same file as the stategraph database. We open a second
-    /// connection in WAL mode so reads/writes don't block each other.
     pub fn open(db_path: &Path) -> rusqlite::Result<Self> {
         let conn = Connection::open(db_path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
@@ -74,9 +85,9 @@ impl SearchFtsDb {
     }
 
     fn ensure_schema(&self) -> rusqlite::Result<()> {
-        // Version 2: adds qname_orig/sig_orig/file_orig UNINDEXED display columns.
-        // If the version table is absent or stale, drop and recreate everything.
-        const SCHEMA_VER: i64 = 2;
+        // Version 3: adds is_test UNINDEXED column.
+        // Any version mismatch drops and recreates — data is reproduced by next `asd index`.
+        const SCHEMA_VER: i64 = 3;
 
         let current: i64 = self.conn.query_row(
             "SELECT version FROM asd_fts_meta LIMIT 1",
@@ -105,6 +116,7 @@ impl SearchFtsDb {
                 qname_orig UNINDEXED,
                 sig_orig   UNINDEXED,
                 file_orig  UNINDEXED,
+                is_test    UNINDEXED,
                 tokenize   = 'unicode61 remove_diacritics 1'
             );
             CREATE TABLE IF NOT EXISTS asd_search_meta (
@@ -116,29 +128,11 @@ impl SearchFtsDb {
         ))
     }
 
-    /// Remove all FTS entries for a specific source file, then insert fresh
-    /// entries for every symbol in `symbols` that belongs to that file.
+    /// Atomically replace the entire FTS table from `symbols`.
     ///
-    /// This is the incremental update path used by `asd index`.
-    pub fn upsert_file(&self, file: &str, symbols: &[Symbol]) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "DELETE FROM asd_search_fts WHERE file = ?1",
-            params![file],
-        )?;
-
-        for sym in symbols.iter().filter(|s| s.file == file) {
-            self.insert_symbol(sym)?;
-        }
-
-        self.conn.execute(
-            "INSERT OR REPLACE INTO asd_search_meta(file, indexed_at) VALUES(?1, unixepoch())",
-            params![file],
-        )?;
-        Ok(())
-    }
-
-    /// Wipe and rebuild the entire FTS table from `symbols`.
-    /// Used by `asd reindex` and on first index of a fresh db.
+    /// This is the canonical indexing path. Because `asd index` already has the
+    /// complete current-world snapshot, a full rebuild is cheaper than tracking
+    /// which files changed and avoids stale rows from deleted files.
     pub fn rebuild(&self, symbols: &[Symbol]) -> rusqlite::Result<()> {
         self.conn.execute_batch(
             "DELETE FROM asd_search_fts; DELETE FROM asd_search_meta;",
@@ -156,12 +150,13 @@ impl SearchFtsDb {
         let doc = sym.doc.as_deref().unwrap_or("");
         let file_exp = expand_text(&sym.file);
         let kind = format!("{:?}", sym.kind).to_lowercase();
+        let is_test = if is_test_file(&sym.file) { "1" } else { "0" };
 
         self.conn.execute(
             "INSERT INTO asd_search_fts(
                  symbol_id, qname, signature, doc, file, language, kind, line,
-                 qname_orig, sig_orig, file_orig)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                 qname_orig, sig_orig, file_orig, is_test)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             params![
                 sym.symbol_id,
                 qname_exp,
@@ -174,6 +169,7 @@ impl SearchFtsDb {
                 sym.qname,
                 sym.signature.as_deref().unwrap_or(""),
                 sym.file,
+                is_test,
             ],
         )?;
         Ok(())
@@ -181,11 +177,8 @@ impl SearchFtsDb {
 
     /// Ranked FTS search. Returns hits ordered by relevance (highest first).
     ///
-    /// `query` is tokenised the same way as at insert — whitespace/punctuation
-    /// splits into tokens, each matched independently. Passing `"playhead clips"`
-    /// finds symbols that contain both words across any indexed column.
-    ///
     /// BM25 column weights: qname=10, signature=5, doc=5, file=2.
+    /// Tests excluded unless `filters.include_tests` is true.
     pub fn search(
         &self,
         query: &str,
@@ -196,11 +189,6 @@ impl SearchFtsDb {
             return Ok(vec![]);
         }
 
-        // Build the FTS MATCH expression: each token OR-OR'd isn't right;
-        // SQLite FTS5 MATCH uses implicit AND by default for space-separated terms.
-        // We want any token to contribute (OR semantics) — use column filters.
-        // Strategy: run one query per token and UNION, or use the prefix query.
-        // Simplest correct approach: `token1 OR token2 OR ...` via explicit OR.
         let tokens: Vec<String> = query
             .split(|c: char| c.is_whitespace() || c == '_' || c == '-' || c == '.')
             .map(|t| t.to_lowercase())
@@ -211,15 +199,14 @@ impl SearchFtsDb {
             return Ok(vec![]);
         }
 
-        // FTS5 MATCH expression: "token1" OR "token2" ...
-        // Each token is quoted to avoid special-char issues.
+        // FTS5 MATCH: "token1" OR "token2" ... — each token quoted against special chars.
         let match_expr = tokens
             .iter()
             .map(|t| format!("\"{}\"", t.replace('"', "")))
             .collect::<Vec<_>>()
             .join(" OR ");
 
-        // Pre-filter by kind/language in SQL to reduce result set before BM25 sort.
+        // UNINDEXED columns can be used in regular WHERE clauses (not MATCH).
         let kind_clause = filters
             .kind
             .as_deref()
@@ -230,17 +217,20 @@ impl SearchFtsDb {
             .as_deref()
             .map(|l| format!("AND language = '{}'", l.to_lowercase().replace('\'', "")))
             .unwrap_or_default();
+        let test_clause = if filters.include_tests { "" } else { "AND is_test != '1'" };
 
-        // Fetch more than limit so hybrid ledger reranking has room to work.
+        // Fetch extra for hybrid ledger reranking.
         let fetch = (limit * 4).max(80);
 
-        // Columns: 0=symbol_id,1=language,2=kind,3=line,4=doc,5=qname_orig,6=sig_orig,7=file_orig,8=score
+        // Columns: 0=symbol_id,1=language,2=kind,3=line,4=doc,
+        //          5=qname_orig,6=sig_orig,7=file_orig,8=is_test,9=score
         let sql = format!(
             "SELECT symbol_id, language, kind, line, doc,
-                    qname_orig, sig_orig, file_orig,
+                    qname_orig, sig_orig, file_orig, is_test,
                     bm25(asd_search_fts, 10.0, 5.0, 5.0, 2.0) AS score
              FROM asd_search_fts
              WHERE asd_search_fts MATCH ?1
+             {test_clause}
              {kind_clause}
              {lang_clause}
              ORDER BY score
@@ -249,8 +239,9 @@ impl SearchFtsDb {
 
         let mut stmt = self.conn.prepare(&sql)?;
         let hits = stmt.query_map(params![match_expr], |row| {
-            let bm25_raw: f64 = row.get(8)?;
+            let bm25_raw: f64 = row.get(9)?;
             let sig_orig: Option<String> = row.get(6)?;
+            let is_test_str: String = row.get(8).unwrap_or_default();
             Ok(FtsHit {
                 bm25_score: -bm25_raw,
                 symbol_id: row.get(0)?,
@@ -261,6 +252,7 @@ impl SearchFtsDb {
                 qname: row.get(5)?,
                 signature: sig_orig.filter(|s| !s.is_empty()),
                 file: row.get(7)?,
+                is_test: is_test_str == "1",
             })
         })?
         .filter_map(|r| r.ok())
@@ -281,12 +273,74 @@ impl SearchFtsDb {
 }
 
 // ---------------------------------------------------------------------------
+// Test-file detection
+// ---------------------------------------------------------------------------
+
+/// Heuristically determine whether a symbol's source file is a test file.
+///
+/// Checks directory components and filename patterns that are idiomatic across
+/// all supported languages. Does NOT check symbol name — only the file path.
+fn is_test_file(file: &str) -> bool {
+    let lower = file.to_lowercase();
+    let segments: Vec<&str> = lower.split(|c| c == '/' || c == '\\').collect();
+
+    // Directory components that indicate a test tree.
+    const TEST_DIRS: &[&str] = &[
+        "tests", "test", "specs", "spec", "__tests__", "__mocks__", "testing", "testcases",
+    ];
+    if segments.iter().rev().skip(1).any(|s| TEST_DIRS.contains(s)) {
+        return true;
+    }
+
+    // Filename patterns (language-specific conventions).
+    if let Some(filename) = segments.last() {
+        // Python: test_foo.py, foo_test.py
+        if filename.starts_with("test_") || filename.ends_with("_test.py") {
+            return true;
+        }
+        // Go: foo_test.go
+        if filename.ends_with("_test.go") {
+            return true;
+        }
+        // Rust: foo_test.rs
+        if filename.ends_with("_test.rs") {
+            return true;
+        }
+        // Swift: FooTests.swift, FooSpec.swift
+        if filename.ends_with("tests.swift") || filename.ends_with("spec.swift") {
+            return true;
+        }
+        // JS/TS: foo.test.ts, foo.spec.ts, foo.test.tsx, foo.spec.tsx, foo.test.js
+        if filename.contains(".test.") || filename.contains(".spec.") {
+            return true;
+        }
+        // Ruby: foo_spec.rb
+        if filename.ends_with("_spec.rb") {
+            return true;
+        }
+        // Java/Kotlin: FooTest.java, FooTests.kt
+        if filename.ends_with("test.java")
+            || filename.ends_with("tests.java")
+            || filename.ends_with("test.kt")
+            || filename.ends_with("tests.kt")
+        {
+            return true;
+        }
+        // C#: FooTests.cs
+        if filename.ends_with("tests.cs") || filename.ends_with("test.cs") {
+            return true;
+        }
+    }
+
+    false
+}
+
+// ---------------------------------------------------------------------------
 // Text expansion helpers
 // ---------------------------------------------------------------------------
 
 /// Expand a dotted qname like `App.MyModule.refreshDriftPlayhead` into a
-/// string that contains both the original and all word fragments:
-/// `"App.MyModule.refreshDriftPlayhead app mymodule refresh drift playhead"`.
+/// string that contains both the original and all word fragments.
 fn expand_identifier(qname: &str) -> String {
     let mut parts: Vec<String> = vec![qname.to_string()];
 
@@ -329,8 +383,6 @@ fn expand_text(text: &str) -> String {
 }
 
 /// Split a camelCase or PascalCase token into constituent words.
-/// "refreshDriftPlayhead" → ["refresh", "Drift", "Playhead"]
-/// "DriftSynthPool"       → ["Drift", "Synth", "Pool"]
 fn split_camel(s: &str) -> Vec<&str> {
     let bytes = s.as_bytes();
     let mut starts = vec![0usize];
@@ -338,11 +390,11 @@ fn split_camel(s: &str) -> Vec<&str> {
     for i in 1..bytes.len() {
         let prev = bytes[i - 1];
         let curr = bytes[i];
-        // Transition: lower→upper ("dD") or digit→upper ("1D")
+        // lower→upper ("dD") or digit→upper ("1D")
         if curr.is_ascii_uppercase() && (prev.is_ascii_lowercase() || prev.is_ascii_digit()) {
             starts.push(i);
         }
-        // Transition: consecutive uppercase followed by lower ("XMLParser" → "XML","Parser")
+        // consecutive uppercase followed by lower ("XMLParser" → "XML","Parser")
         if i + 1 < bytes.len()
             && prev.is_ascii_uppercase()
             && curr.is_ascii_uppercase()
@@ -386,6 +438,55 @@ mod tests {
     }
 
     #[test]
+    fn is_test_file_detection() {
+        assert!(is_test_file("Packages/AudioEngine/Tests/KarplusStrongTests.swift"));
+        assert!(is_test_file("tests/test_charge_card.py"));
+        assert!(is_test_file("src/__tests__/auth.test.ts"));
+        assert!(is_test_file("payments/test_stripe.py"));
+        assert!(is_test_file("pkg/payments/charge_test.go"));
+        assert!(is_test_file("src/auth/auth_spec.rb"));
+        assert!(!is_test_file("App/ExampleFlow/ExampleFlowApp.swift"));
+        assert!(!is_test_file("src/payments/charge.py"));
+        assert!(!is_test_file("Packages/AudioEngine/Sources/KarplusStrong.swift"));
+    }
+
+    #[test]
+    fn fts_excludes_tests_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let fts = SearchFtsDb::open(&db_path).unwrap();
+
+        use crate::schema::{Position, Symbol, SymbolKind};
+        let make_sym = |id: &str, qname: &str, file: &str| Symbol {
+            symbol_id: id.to_string(),
+            symbol_fp: format!("fp_{id}"),
+            qname: qname.to_string(),
+            language: "swift".to_string(),
+            kind: SymbolKind::Method,
+            file: file.to_string(),
+            start: Position { line: 1, col: 0 },
+            end: Position { line: 10, col: 0 },
+            signature: None,
+            doc: None,
+        };
+
+        let prod = make_sym("sym_prod", "App.ViewModel.refreshDriftPlayhead", "App/ViewModel.swift");
+        let test = make_sym("sym_test", "Tests.DriftTests.testRefreshPlayhead", "Tests/DriftTests.swift");
+
+        fts.rebuild(&[prod, test]).unwrap();
+        assert!(fts.has_data());
+
+        // Default: tests excluded.
+        let hits = fts.search("playhead", &FtsFilters::default(), 10).unwrap();
+        assert_eq!(hits.len(), 1, "only prod symbol by default");
+        assert_eq!(hits[0].symbol_id, "sym_prod");
+
+        // With include_tests: both returned.
+        let hits_all = fts.search("playhead", &FtsFilters { include_tests: true, ..Default::default() }, 10).unwrap();
+        assert_eq!(hits_all.len(), 2, "both when include_tests");
+    }
+
+    #[test]
     fn fts_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
@@ -405,19 +506,21 @@ mod tests {
             doc: Some("Refreshes the drift playhead position".into()),
         };
 
-        fts.upsert_file(&sym.file, std::slice::from_ref(&sym)).unwrap();
+        fts.rebuild(std::slice::from_ref(&sym)).unwrap();
         assert!(fts.has_data());
 
         let hits = fts.search("playhead", &FtsFilters::default(), 10).unwrap();
         assert!(!hits.is_empty(), "should find by qname fragment");
         assert_eq!(hits[0].symbol_id, "sym_abc");
+        assert_eq!(hits[0].qname, "App.ViewModel.refreshDriftPlayhead", "orig qname preserved");
+        assert!(!hits[0].is_test, "production file not flagged as test");
 
         let hits2 = fts.search("refresh drift", &FtsFilters::default(), 10).unwrap();
         assert!(!hits2.is_empty(), "should find multi-token");
 
         let hits3 = fts.search(
             "playhead",
-            &FtsFilters { language: Some("python".into()), kind: None },
+            &FtsFilters { language: Some("python".into()), ..Default::default() },
             10,
         ).unwrap();
         assert!(hits3.is_empty(), "language filter should exclude swift");

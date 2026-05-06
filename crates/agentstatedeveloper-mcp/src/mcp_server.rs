@@ -48,8 +48,7 @@ pub struct CodeQueryParams {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct CodeSearchParams {
-    /// Concept or keyword(s) to search for. Scored across qname(4),
-    /// signature(3), doc(3), ledger(2), file(1) per token.
+    /// Concept or keyword(s) to search for. BM25-ranked via FTS5.
     pub query: String,
     /// Filter by symbol kind: module, function, method, class, variable.
     pub kind: Option<String>,
@@ -58,6 +57,10 @@ pub struct CodeSearchParams {
     /// Max results to return (default: 20).
     #[serde(default = "default_search_limit")]
     pub limit: u32,
+    /// Include test-file symbols in results (default: false — tests excluded so
+    /// production entry points rank first).
+    #[serde(default)]
+    pub include_tests: bool,
 }
 
 fn default_search_limit() -> u32 { 20 }
@@ -73,6 +76,9 @@ pub struct InvestigateParams {
     pub kind: Option<String>,
     /// Filter by language (e.g. "swift", "python", "typescript", "rust").
     pub language: Option<String>,
+    /// Include test-file symbols as entry-point candidates (default: false).
+    #[serde(default)]
+    pub include_tests: bool,
 }
 
 fn default_investigate_depth() -> u32 { 5 }
@@ -510,6 +516,7 @@ impl AsdMcpServer {
         let filters = FtsFilters {
             kind: p.kind.as_deref().map(|k| k.to_lowercase()),
             language: p.language.as_deref().map(|l| l.to_lowercase()),
+            include_tests: p.include_tests,
         };
 
         // --- FTS path ---
@@ -629,6 +636,7 @@ impl AsdMcpServer {
         let filters = FtsFilters {
             kind: p.kind.as_deref().map(|k| k.to_lowercase()),
             language: p.language.as_deref().map(|l| l.to_lowercase()),
+            include_tests: p.include_tests,
         };
 
         let index = AsgIndexStore { repo: &engine.repo };

@@ -43,6 +43,10 @@ pub struct InvestigateArgs {
     /// Include full source body of each symbol in output (can be large).
     #[arg(long, default_value = "false")]
     pub include_body: bool,
+
+    /// Include symbols from test files in entry-point candidates.
+    #[arg(long)]
+    pub include_tests: bool,
 }
 
 pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
@@ -61,6 +65,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     let filters = FtsFilters {
         kind: args.kind.as_deref().map(|k| k.to_lowercase()),
         language: args.language.as_deref().map(|l| l.to_lowercase()),
+        include_tests: args.include_tests,
     };
 
     // Each entry_point candidate: (combined_score, symbol_id, qname)
