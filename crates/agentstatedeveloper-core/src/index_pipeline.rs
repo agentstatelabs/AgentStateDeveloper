@@ -132,9 +132,21 @@ pub fn run_index(
 
     let mut symbol_count = 0usize;
     let mut effect_count = 0usize;
-    let mut qname_to_sym_id: HashMap<String, String> = HashMap::new();
     let mut all_edges: Vec<CallEdge> = Vec::new();
     let mut all_symbol_ids: Vec<String> = Vec::new();
+
+    // Pre-populate qname_to_sym_id from previously-indexed symbols so that
+    // cross-package call edges (caller in this run → callee from a prior run)
+    // are preserved.  The parsing loop below will overwrite entries for any
+    // symbol that is re-indexed in the current run.
+    let mut qname_to_sym_id: HashMap<String, String> = by_qname
+        .iter()
+        .filter_map(|(qname, sym_val)| {
+            sym_val.get("symbol_id")
+                .and_then(|v| v.as_str())
+                .map(|id| (qname.clone(), id.to_string()))
+        })
+        .collect();
 
     struct FileCtx {
         file_str: String,
@@ -216,6 +228,45 @@ pub fn run_index(
         f(&format!("  {} files parsed — committing symbols + effects…", symbol_count));
     }
 
+    // -----------------------------------------------------------------------
+    // Build workspace-wide qname context for cross-module call resolution.
+    //
+    // Seed from the FULL by-qname map — which at this point contains both
+    // previously-indexed symbols (seeded from the repo at the start of Pass 1)
+    // AND the symbols parsed in this run.  This allows cross-package edges to
+    // resolve: e.g., when indexing ExampleFlow, calls to DriftCompiler.compile
+    // resolve because SequencerCore was indexed in a prior run and its symbols
+    // are already in by_qname.
+    //
+    // Must happen BEFORE the Pass 1 commit because spec_set_json consumes
+    // by_qname (moves it into a Value::Object).
+    // -----------------------------------------------------------------------
+    let mut workspace = WorkspaceSymbols::default();
+    for (qname, sym_val) in &by_qname {
+        workspace.qnames.insert(qname.clone());
+        // Extract kind from the serialized Symbol JSON (e.g. "method", "class").
+        if let Some(kind_str) = sym_val.get("kind").and_then(|v| v.as_str()) {
+            if let Ok(kind) = serde_json::from_value::<crate::schema::SymbolKind>(
+                serde_json::Value::String(kind_str.to_string()),
+            ) {
+                workspace.kinds.insert(qname.clone(), kind);
+            }
+        }
+    }
+    // Build suffix index after all qnames are inserted so adapters can do
+    // O(1) suffix-based lookup (e.g., "DriftCompiler.compile" →
+    // "Sources.Models.DriftCompiler.compile").
+    workspace.build_suffix_index();
+
+    // Populate the workspace property map from ALL files so that instance
+    // property calls (e.g., `pool.resolve()` where `pool: DriftSynthPool` is
+    // declared in a different file) can be resolved across file boundaries.
+    // Each adapter contributes its language-specific property extraction.
+    for ctx in &file_ctxs {
+        let props = ctx.adapter.extract_property_types(&ctx.parsed);
+        workspace.properties.extend(props);
+    }
+
     // Build the nested code tree JSON: { lang: { "file/fp": Symbol, … }, … }
     let code_tree: serde_json::Map<String, Value> = by_code
         .into_iter()
@@ -241,21 +292,6 @@ pub fn run_index(
     );
     repo.commit_speculation(spec1, opts1)
         .map_err(|e| AsdError::Other(e.to_string()))?;
-
-    // -----------------------------------------------------------------------
-    // Build workspace-wide qname context for cross-module call resolution.
-    // -----------------------------------------------------------------------
-    let mut workspace = WorkspaceSymbols::default();
-    for ctx in &file_ctxs {
-        for p in &ctx.parsed {
-            workspace.qnames.insert(p.qname.clone());
-            workspace.kinds.insert(p.qname.clone(), p.kind);
-        }
-    }
-    // Build suffix index after all qnames are inserted so adapters can do
-    // O(1) suffix-based lookup (e.g., "DriftCompiler.compile" →
-    // "Sources.Models.DriftCompiler.compile").
-    workspace.build_suffix_index();
 
     // -----------------------------------------------------------------------
     // Pass 2: extract call edges, resolve, write callees+callers as two

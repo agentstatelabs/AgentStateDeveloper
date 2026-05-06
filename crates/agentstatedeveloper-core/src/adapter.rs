@@ -34,6 +34,15 @@ pub struct CallEdge {
 /// A call site using `DriftCompiler.compile(...)` only sees the type+method tail.
 /// After inserting all qnames, call [`build_suffix_index`] once so that
 /// [`find_by_suffix`] can resolve `"DriftCompiler.compile"` → the full qname in O(1).
+///
+/// ## Cross-file property map
+///
+/// Stored property declarations (`let name: TypeName` / `var name: TypeName`)
+/// are collected across ALL files in the current index run and stored in
+/// `properties` as `"EnclosingTypeSimpleName.propName" → "TypeSimpleName"`.
+/// Call adapters populate this via [`LanguageAdapter::extract_property_types`].
+/// Swift uses it to resolve `pool.resolve()` → `DriftSynthPool.resolve` when
+/// `pool: DriftSynthPool` is declared in a different file of the same project.
 #[derive(Debug, Clone, Default)]
 pub struct WorkspaceSymbols {
     /// All qnames known to the indexer, flat.
@@ -45,6 +54,12 @@ pub struct WorkspaceSymbols {
     /// Each key is a 2-or-more component tail of a qname, e.g.
     /// `"DriftCompiler.compile"` → `["Sources.Models.DriftCompiler.compile"]`.
     pub suffix_index: HashMap<String, Vec<String>>,
+    /// Cross-file property map: `"EnclosingTypeSimple.propName"` →
+    /// `"TypeSimpleName"`.  Populated by the index pipeline from ALL files
+    /// via [`LanguageAdapter::extract_property_types`] before call-graph
+    /// extraction runs.  Allows resolving instance property calls when the
+    /// property declaration is in a different file than the method body.
+    pub properties: HashMap<String, String>,
 }
 
 impl WorkspaceSymbols {
@@ -133,5 +148,18 @@ pub trait LanguageAdapter: Send + Sync {
         _workspace: &WorkspaceSymbols,
     ) -> Vec<CallEdge> {
         Vec::new()
+    }
+
+    /// Extract stored property declarations from a file's parsed symbols,
+    /// returning `"EnclosingTypeSimpleName.propertyName" → "TypeSimpleName"`.
+    ///
+    /// Called by the index pipeline for EVERY file in a run so that
+    /// `workspace.properties` accumulates a project-wide property map.
+    /// That map is then available to `extract_call_edges` to resolve
+    /// instance property calls across file boundaries.
+    ///
+    /// Default: returns an empty map (most adapters don't need this).
+    fn extract_property_types(&self, _symbols: &[ParsedSymbol]) -> HashMap<String, String> {
+        HashMap::new()
     }
 }

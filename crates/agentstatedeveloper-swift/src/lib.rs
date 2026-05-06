@@ -70,6 +70,13 @@ impl LanguageAdapter for SwiftAdapter {
     ) -> Vec<CallEdge> {
         extract_call_edges_impl(file, source, symbols, workspace)
     }
+
+    fn extract_property_types(
+        &self,
+        symbols: &[ParsedSymbol],
+    ) -> std::collections::HashMap<String, String> {
+        build_property_type_map(symbols)
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -634,6 +641,8 @@ fn strip_property_prefixes(s: &str) -> &str {
 /// var compiler: DriftCompiler?
 /// @Published var items: [Item]
 /// private weak var delegate: SomeDelegate?
+/// let pool = DriftSynthPool()          // inferred from initializer
+/// let scheduler = BatchScheduler.make() // inferred from factory call
 /// ```
 fn parse_property_line(line: &str) -> Option<(String, String)> {
     let trimmed = line.trim();
@@ -673,31 +682,55 @@ fn parse_property_line(line: &str) -> Option<(String, String)> {
     }
 
     let rest_after_name = after_binding[name_end..].trim_start();
-    let after_colon = rest_after_name.strip_prefix(':')?;
-    let type_str = after_colon.trim_start();
 
-    // Stop at `=` or `{`
-    let type_end = type_str
-        .find(|c: char| c == '=' || c == '{')
-        .unwrap_or(type_str.len());
-    let raw_type = type_str[..type_end].trim();
+    // --- Path A: explicit type annotation `let name: TypeName` ---
+    if let Some(after_colon) = rest_after_name.strip_prefix(':') {
+        let type_str = after_colon.trim_start();
 
-    // Strip optional/implicit-unwrap markers
-    let type_name = raw_type.trim_end_matches('?').trim_end_matches('!').trim();
+        // Stop at `=` or `{`
+        let type_end = type_str
+            .find(|c: char| c == '=' || c == '{')
+            .unwrap_or(type_str.len());
+        let raw_type = type_str[..type_end].trim();
 
-    // Take just the base name before any generic brackets
-    let base_type = type_name
-        .find('<')
-        .map(|i| &type_name[..i])
-        .unwrap_or(type_name)
-        .trim();
+        // Strip optional/implicit-unwrap markers
+        let type_name = raw_type.trim_end_matches('?').trim_end_matches('!').trim();
 
-    // Swift type names start with uppercase
-    if base_type.is_empty() || !base_type.starts_with(|c: char| c.is_uppercase()) {
-        return None;
+        // Take just the base name before any generic brackets
+        let base_type = type_name
+            .find('<')
+            .map(|i| &type_name[..i])
+            .unwrap_or(type_name)
+            .trim();
+
+        // Swift type names start with uppercase
+        if base_type.is_empty() || !base_type.starts_with(|c: char| c.is_uppercase()) {
+            return None;
+        }
+
+        return Some((name.to_string(), base_type.to_string()));
     }
 
-    Some((name.to_string(), base_type.to_string()))
+    // --- Path B: inferred type from initializer `let name = TypeName(...)` ---
+    // e.g. `let driftSynthPool = DriftSynthPool()`
+    if let Some(after_eq) = rest_after_name.strip_prefix('=') {
+        let after_eq = after_eq.trim_start();
+
+        // Extract the first token (potential type name or expression)
+        let token_end = after_eq
+            .find(|c: char| c == '(' || c == '.' || c == ' ' || c == '\t' || c == '{')
+            .unwrap_or(after_eq.len());
+        let token = &after_eq[..token_end];
+
+        // Must start with uppercase to be a type constructor (not a variable/literal)
+        if token.is_empty() || !token.starts_with(|c: char| c.is_uppercase()) {
+            return None;
+        }
+
+        return Some((name.to_string(), token.to_string()));
+    }
+
+    None
 }
 
 /// Build a flat map `"EnclosingTypeSimpleName.propertyName" → "TypeSimpleName"`
@@ -790,13 +823,20 @@ fn collect_calls(
                         // Instance property call: `pool.resolve()` where `pool` is a
                         // stored property.  Look up its declared type in the property
                         // map and retry suffix lookup on `ActualType.method`.
-                        enclosing_type.and_then(|et| {
-                            let et_simple = et.rsplit('.').next().unwrap_or(et);
+                        //
+                        // Derive the simple enclosing type from `sym.qname` directly
+                        // (second-to-last component) so this works for extension methods
+                        // where the class isn't in the file-local `known` set.
+                        let et_simple = sym.qname.split('.').rev().nth(1).unwrap_or("");
+                        if !et_simple.is_empty() {
                             let prop_key = format!("{}.{}", et_simple, simple_recv);
-                            let actual_type = prop_map.get(&prop_key)?;
-                            workspace.find_by_suffix(&format!("{}.{}", actual_type, method))
-                                .map(|s| s.to_string())
-                        })
+                            prop_map.get(&prop_key).and_then(|actual_type| {
+                                workspace.find_by_suffix(&format!("{}.{}", actual_type, method))
+                                    .map(|s| s.to_string())
+                            })
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
@@ -844,9 +884,18 @@ fn extract_call_edges_impl(
         by_simple.entry(simple).or_insert_with(|| s.qname.clone());
     }
 
-    // Build property-to-type map for resolving instance-property calls like
-    // `pool.resolve()` where `pool: DriftSynthPool` is a stored property.
-    let prop_map = build_property_type_map(symbols);
+    // Use the workspace-wide property map for resolving instance property calls
+    // like `pool.resolve()` where `pool: DriftSynthPool` is declared in another
+    // file.  `workspace.properties` is populated by the index pipeline from ALL
+    // files via `extract_property_types` before call-edge extraction begins.
+    // Fall back to a file-local map if the workspace map is empty (e.g., unit tests).
+    let local_prop_map;
+    let prop_map: &HashMap<String, String> = if !workspace.properties.is_empty() {
+        &workspace.properties
+    } else {
+        local_prop_map = build_property_type_map(symbols);
+        &local_prop_map
+    };
 
     let mut parser = Parser::new();
     if parser.set_language(&SWIFT.into()).is_err() {
@@ -1062,6 +1111,15 @@ class DriftSynthPool {
         assert_eq!(
             parse_property_line("    private weak var delegate: SomeDelegate?"),
             Some(("delegate".into(), "SomeDelegate".into()))
+        );
+        // Initializer-inferred type
+        assert_eq!(
+            parse_property_line("    let driftSynthPool = DriftSynthPool()"),
+            Some(("driftSynthPool".into(), "DriftSynthPool".into()))
+        );
+        assert_eq!(
+            parse_property_line("    let scheduler = BatchScheduler.make()"),
+            Some(("scheduler".into(), "BatchScheduler".into()))
         );
         // Computed property — has `{`, type ends before it → type_name should
         // still be extracted since the `{` cuts the type string.
