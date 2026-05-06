@@ -456,6 +456,8 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
         "chrono::Utc::now()",
         "Utc::now()",
         "Local::now()",
+        "time::OffsetDateTime::now_utc(",
+        "OffsetDateTime::now_utc(",
     ];
     if let Some(note) = first_match_note(body, &time_read_needles) {
         effects.push(Effect {
@@ -466,7 +468,16 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     }
 
     // Random — rand crate
-    let random_needles = ["rand::", "thread_rng()", "rng.gen", "Rng::gen", "random::<"];
+    let random_needles = [
+        "rand::",
+        "thread_rng()",
+        "rng.gen",
+        "Rng::gen",
+        "random::<",
+        "OsRng",
+        "Uuid::new_v4(",
+        "uuid::Uuid::new_v4(",
+    ];
     if let Some(note) = first_match_note(body, &random_needles) {
         effects.push(Effect {
             effect: EffectCategory::Random,

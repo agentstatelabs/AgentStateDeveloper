@@ -493,10 +493,13 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     let time_needles = [
         "DateTime.Now",
         "DateTime.UtcNow",
+        "DateTime.Today",
         "DateTimeOffset.Now",
         "DateTimeOffset.UtcNow",
         "Stopwatch.GetTimestamp()",
+        "Stopwatch.StartNew()",
         "Environment.TickCount",
+        "TimeProvider.System",
     ];
     if let Some(note) = first_match_note(body, &time_needles) {
         effects.push(Effect {

@@ -515,7 +515,13 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
         "Instant.now()",
         "LocalDateTime.now()",
         "LocalDate.now()",
+        "LocalTime.now()",
+        "ZonedDateTime.now()",
+        "OffsetDateTime.now()",
         "Clock.System.now()",
+        "measureTimeMillis",
+        "measureNanoTime",
+        "measureTimedValue",
     ];
     if let Some(note) = first_match_note(body, &time_needles) {
         effects.push(Effect {
@@ -530,9 +536,13 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
         "Random.nextInt(",
         "Random.nextLong(",
         "Random.nextFloat(",
+        "Random.nextDouble(",
+        "Random.nextBoolean(",
+        "Random.Default",
         "SecureRandom(",
         "UUID.randomUUID()",
         "kotlin.random.Random",
+        ".random()",
     ];
     if let Some(note) = first_match_note(body, &rand_needles) {
         effects.push(Effect {

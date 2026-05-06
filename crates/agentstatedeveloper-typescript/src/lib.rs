@@ -553,7 +553,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     }
 
     // Date.now / new Date / performance.now -> TimeRead
-    let time_read_needles = ["Date.now", "new Date(", "performance.now"];
+    let time_read_needles = ["Date.now", "new Date(", "performance.now", "Date.parse(", "Temporal.Now"];
     if let Some(note) = first_match_note(body, &time_read_needles) {
         effects.push(Effect {
             effect: EffectCategory::TimeRead,
@@ -568,6 +568,9 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
         "crypto.randomBytes",
         "crypto.randomUUID",
         "crypto.getRandomValues",
+        "nanoid(",
+        "uuidv4(",
+        "uuid.v4(",
     ];
     if let Some(note) = first_match_note(body, &random_needles) {
         effects.push(Effect {

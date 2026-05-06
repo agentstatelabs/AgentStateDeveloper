@@ -422,7 +422,14 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     }
 
     // time.time / time.monotonic / datetime.now -> TimeRead
-    let time_read_patterns = ["time.time", "time.monotonic", "datetime.now"];
+    let time_read_patterns = [
+        "time.time",
+        "time.monotonic",
+        "time.perf_counter",
+        "datetime.now",
+        "datetime.utcnow",
+        "datetime.today",
+    ];
     if let Some(note) = first_match_note(body, &time_read_patterns) {
         effects.push(Effect {
             effect: EffectCategory::TimeRead,
@@ -432,7 +439,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     }
 
     // random.* / secrets.* -> Random
-    let random_patterns = ["random.", "secrets."];
+    let random_patterns = ["random.", "secrets.", "os.urandom("];
     if let Some(note) = first_match_note(body, &random_patterns) {
         effects.push(Effect {
             effect: EffectCategory::Random,

@@ -529,7 +529,9 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     let time_needles = [
         "Time.now",
         "Time.current",
+        "Time.at(",
         "DateTime.now",
+        "DateTime.current",
         "Date.today",
         "Time.zone.now",
         "Process.clock_gettime(",
@@ -547,9 +549,12 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
         "rand(",
         "rand ",
         "Random.rand(",
+        "Random.new(",
         "SecureRandom.",
         "SecureRandom.uuid",
         "SecureRandom.hex",
+        ".sample",
+        ".shuffle",
     ];
     if let Some(note) = first_match_note(body, &rand_needles) {
         effects.push(Effect {

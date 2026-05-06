@@ -540,6 +540,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
         "CFAbsoluteTimeGetCurrent()",
         "DispatchTime.now()",
         "Clock.now",
+        "ProcessInfo.processInfo.systemUptime",
     ];
     if let Some(note) = first_match_note(body, &time_needles) {
         effects.push(Effect {
@@ -552,6 +553,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     // Random
     let rand_needles = [
         ".random(",
+        ".shuffled(",
         "Int.random(",
         "Double.random(",
         "Float.random(",

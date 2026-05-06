@@ -349,12 +349,25 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     }
 
     // Time read — time.Now
-    if let Some(note) = first_match_note(body, &["time.Now()"]) {
+    let time_read_needles = ["time.Now()", "time.Since(", "time.Until(", "time.Date("];
+    if let Some(note) = first_match_note(body, &time_read_needles) {
         effects.push(Effect { effect: EffectCategory::TimeRead, qualifiers: serde_json::Value::Null, note: Some(note) });
     }
 
     // Random — math/rand, crypto/rand
-    let random_needles = ["rand.Int(", "rand.Intn(", "rand.Float", "rand.Read(", "crypto/rand", "rand.New("];
+    let random_needles = [
+        "rand.Int(",
+        "rand.Intn(",
+        "rand.Float",
+        "rand.Read(",
+        "rand.Shuffle(",
+        "rand.Int63(",
+        "rand.Uint32(",
+        "rand.Uint64(",
+        "rand.Perm(",
+        "crypto/rand",
+        "rand.New(",
+    ];
     if let Some(note) = first_match_note(body, &random_needles) {
         effects.push(Effect { effect: EffectCategory::Random, qualifiers: serde_json::Value::Null, note: Some(note) });
     }

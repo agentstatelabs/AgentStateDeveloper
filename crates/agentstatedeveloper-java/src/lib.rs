@@ -517,7 +517,9 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
         "Instant.now()",
         "LocalDateTime.now()",
         "LocalDate.now()",
+        "LocalTime.now()",
         "ZonedDateTime.now()",
+        "OffsetDateTime.now()",
         "new Date()",
         "Calendar.getInstance()",
     ];
@@ -531,11 +533,12 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
 
     // Random
     let rand_needles = [
-        "new Random()",
-        "new SecureRandom()",
+        "new Random(",
+        "new SecureRandom(",
         "Math.random()",
         "ThreadLocalRandom.current()",
         "UUID.randomUUID()",
+        "RandomGenerator",
     ];
     if let Some(note) = first_match_note(body, &rand_needles) {
         effects.push(Effect {
