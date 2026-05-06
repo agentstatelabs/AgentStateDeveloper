@@ -4,6 +4,7 @@ pub mod graph;
 pub mod hooks;
 pub mod hydrate;
 pub mod index;
+pub mod investigate;
 pub mod init;
 pub mod ledger;
 pub mod list;

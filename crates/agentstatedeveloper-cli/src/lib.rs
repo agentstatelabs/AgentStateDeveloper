@@ -141,6 +141,10 @@ pub enum Command {
 
     /// Ranked concept search over indexed symbols.
     Search(commands::search::SearchArgs),
+
+    /// Broad feature archaeology: search → expand call chains, invariants,
+    /// hazards, and effects for the top matching entry points in one pass.
+    Investigate(commands::investigate::InvestigateArgs),
 }
 
 /// Resolve [`Config`] from the parsed CLI flags.
@@ -179,5 +183,6 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Repair(args) => repair::run(cfg, args),
         Command::Scratch(cmd) => scratch::run(cfg, cmd),
         Command::Search(args) => search::run(cfg, args),
+        Command::Investigate(args) => investigate::run(cfg, args),
     }
 }

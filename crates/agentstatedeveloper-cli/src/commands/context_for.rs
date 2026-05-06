@@ -93,7 +93,7 @@ pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
     Ok(())
 }
 
-fn assemble_symbol_context(
+pub(crate) fn assemble_symbol_context(
     engine: &Engine,
     index_store: &AsgIndexStore<'_>,
     effect_store: &AsgEffectStore<'_>,
