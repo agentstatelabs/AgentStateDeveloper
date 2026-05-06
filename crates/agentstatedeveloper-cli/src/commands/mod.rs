@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod checklist;
 pub mod impact;
+pub mod prepare_change;
 pub mod context_for;
 pub mod graph;
 pub mod hooks;

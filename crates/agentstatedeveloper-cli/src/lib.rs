@@ -156,6 +156,12 @@ pub enum Command {
     /// Structured pre-edit checklist: files to inspect, invariants to preserve,
     /// tests to run, known hazards, and effects to verify. Markdown or JSON output.
     Checklist(commands::checklist::ChecklistArgs),
+
+    /// One-call agent-ready context package for a planned change: design invariants,
+    /// layer-grouped entry points, likely edit files, affected tests, effects, and
+    /// recent git touches — all composed in a single JSON response.
+    #[command(name = "prepare-change")]
+    PrepareChange(commands::prepare_change::PrepareChangeArgs),
 }
 
 /// Resolve [`Config`] from the parsed CLI flags.
@@ -198,5 +204,6 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Status(args) => status::run(cfg, args),
         Command::Impact(args) => impact::run(cfg, args),
         Command::Checklist(args) => checklist::run(cfg, args),
+        Command::PrepareChange(args) => prepare_change::run(cfg, args),
     }
 }

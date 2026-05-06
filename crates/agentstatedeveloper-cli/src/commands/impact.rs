@@ -185,6 +185,12 @@ pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
 // Simple ordered map using Vec to preserve insertion order.
 type IndexMap = std::collections::HashMap<String, usize>;
 
+/// Public wrapper for use in prepare_change — takes a slice directly.
+pub(crate) fn git_recent_touches_pub(files: &[(String, usize)], git_depth: usize) -> Value {
+    let map: IndexMap = files.iter().cloned().collect();
+    git_recent_touches(&map, git_depth)
+}
+
 /// Run `git log --follow -n <depth> --pretty=format:'...' -- <file>` for each
 /// touched file. Returns an array of `{file, commits:[{sha,author,date,msg}]}`.
 fn git_recent_touches(files: &IndexMap, git_depth: usize) -> Value {

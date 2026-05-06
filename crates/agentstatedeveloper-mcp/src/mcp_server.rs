@@ -92,6 +92,33 @@ fn default_impact_depth() -> u32 { 3 }
 fn default_git_depth() -> u32 { 20 }
 fn default_checklist_depth() -> u32 { 5 }
 fn default_test_depth() -> u32 { 2 }
+fn default_prepare_depth() -> u32 { 7 }
+fn default_prepare_git_depth() -> u32 { 10 }
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PrepareChangeParams {
+    /// Free-form description of the intended change (treated as a search query).
+    pub description: String,
+    /// Number of top entry-point symbols to expand (default: 7).
+    #[serde(default = "default_prepare_depth")]
+    pub depth: u32,
+    /// Filter by symbol kind.
+    pub kind: Option<String>,
+    /// Filter by language.
+    pub language: Option<String>,
+    /// Include test-file symbols as entry-point candidates (default: false).
+    #[serde(default)]
+    pub include_tests: bool,
+    /// Adjust output for a specific intent.
+    /// Values: bugfix, feature, refactor, test, architecture, ui.
+    pub intent: Option<String>,
+    /// BFS depth for finding affected tests from the top entry point (default: 2).
+    #[serde(default = "default_test_depth")]
+    pub test_depth: u32,
+    /// Number of recent git commits to scan per file (default: 10).
+    #[serde(default = "default_prepare_git_depth")]
+    pub git_depth: u32,
+}
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ChecklistParams {
@@ -2318,6 +2345,210 @@ impl AsdMcpServer {
                 .unwrap_or_else(|_| "{}".to_string()),
             Err(e) => err_json(&e.to_string()),
         }
+    }
+
+    #[tool(
+        description = "One-call agent-ready context package for a planned change. Composes investigate + impact + checklist: design_invariants, known_hazards, entry_points by layer, likely_edit_files (with recency), affected_tests, effects_summary, and recently_touched git history. Use this as the first call before any non-trivial code change."
+    )]
+    async fn prepare_change(&self, params: Parameters<PrepareChangeParams>) -> String {
+        let p = params.0;
+        let intent = p.intent.as_deref().and_then(parse_intent).unwrap_or("");
+        let db_path = self.db_path.clone();
+        let layer_overrides = load_layer_overrides(&db_path);
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+
+        let tokens: Vec<String> = p.description
+            .split(|c: char| c.is_whitespace() || c == '_' || c == '-' || c == '.')
+            .map(|t| t.to_lowercase())
+            .filter(|t| t.len() >= 2 && !is_stopword(t))
+            .collect();
+
+        if tokens.is_empty() {
+            return serde_json::json!({ "description": p.description, "entry_points": {} }).to_string();
+        }
+
+        let depth = p.depth.max(1) as usize;
+        let test_depth = p.test_depth.max(1) as usize;
+        let git_depth = p.git_depth.max(1) as usize;
+        let filters = FtsFilters {
+            kind: p.kind.as_deref().map(|k| k.to_lowercase()),
+            language: p.language.as_deref().map(|l| l.to_lowercase()),
+            include_tests: p.include_tests,
+        };
+
+        let index = AsgIndexStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let effect_store = AsgEffectStore { repo: &engine.repo };
+
+        let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+        let all_qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
+            Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
+            _ => vec![],
+        };
+        let mut id_map: std::collections::HashMap<String, agentstatedeveloper_core::Symbol> =
+            std::collections::HashMap::new();
+        for qn in &all_qnames {
+            if let Ok(Some(s)) = index.get_symbol_by_qname(&ref_name, qn) {
+                id_map.insert(s.symbol_id.clone(), s);
+            }
+        }
+
+        // FTS / fallback candidate search.
+        let candidates: Vec<(f64, String)> = {
+            let fts_result = SearchFtsDb::open(&db_path)
+                .ok().filter(|fts| fts.has_data())
+                .and_then(|fts| fts.search(&p.description, &filters, depth * 4).ok());
+            if let Some(hits) = fts_result {
+                let mut sc: Vec<(f64, String)> = hits.into_iter().map(|hit| {
+                    let boost = hybrid_boost(&hit, &tokens);
+                    let entries = ledger_store.list_entries(&ref_name, &hit.symbol_id).unwrap_or_default();
+                    let text = entries.iter().map(|e| e.summary.to_lowercase()).collect::<Vec<_>>().join(" ");
+                    let lb = if text.is_empty() { 0.0 } else {
+                        tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
+                    };
+                    (hit.bm25_score + boost + lb, hit.qname)
+                }).collect();
+                sc.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                sc.truncate(depth); sc
+            } else {
+                let kf = filters.kind.clone(); let lf = filters.language.clone();
+                let mut sc: Vec<(f64, String)> = Vec::new();
+                for qname in &all_qnames {
+                    let sym = match index.get_symbol_by_qname(&ref_name, qname) { Ok(Some(s)) => s, _ => continue };
+                    let sk = format!("{:?}", sym.kind).to_lowercase();
+                    if let Some(ref k) = kf { if &sk != k { continue; } }
+                    if let Some(ref l) = lf { if &sym.language != l { continue; } }
+                    let qn = sym.qname.to_lowercase();
+                    let sig = sym.signature.as_deref().unwrap_or("").to_lowercase();
+                    let doc = sym.doc.as_deref().unwrap_or("").to_lowercase();
+                    let file = sym.file.to_lowercase();
+                    let lt: String = ledger_store.list_entries(&ref_name, &sym.symbol_id)
+                        .unwrap_or_default().iter().map(|e| e.summary.to_lowercase()).collect::<Vec<_>>().join(" ");
+                    let mut score: u32 = 0;
+                    for t in &tokens {
+                        if qn.contains(t.as_str()) { score += 4; }
+                        if !sig.is_empty() && sig.contains(t.as_str()) { score += 3; }
+                        if !doc.is_empty() && doc.contains(t.as_str()) { score += 3; }
+                        if !lt.is_empty() && lt.contains(t.as_str()) { score += 2; }
+                        if file.contains(t.as_str()) { score += 1; }
+                    }
+                    if score > 0 { sc.push((score as f64, sym.qname)); }
+                }
+                sc.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                sc.truncate(depth); sc
+            }
+        };
+
+        let recency = gather_recency(200, 14.0);
+        let layer_order = intent_layer_order(intent);
+        let mut by_layer: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        let mut design_invariants: Vec<serde_json::Value> = Vec::new();
+        let mut known_hazards: Vec<serde_json::Value> = Vec::new();
+        let mut effects_summary: Vec<serde_json::Value> = Vec::new();
+        let mut file_scores: Vec<(f64, String, String, Option<f64>, bool)> = Vec::new();
+        let mut seen_files: HashSet<String> = HashSet::new();
+        let mut seen_inv: HashSet<String> = HashSet::new();
+        let mut seen_effect: HashSet<String> = HashSet::new();
+        let mut top_sym_id: Option<String> = None;
+
+        for (score, qname) in &candidates {
+            let sym = match index.get_symbol_by_qname(&ref_name, qname) { Ok(Some(s)) => s, _ => continue };
+            let tier = symbol_tier(&sym.file);
+            let layer = classify_layer(&sym.file, tier, &layer_overrides);
+            let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
+            let rec = recency.get(&sym.file);
+            let ltd = rec.and_then(|r| r.last_touched_days);
+            let hot = rec.map(|r| r.hot).unwrap_or(false);
+            if top_sym_id.is_none() { top_sym_id = Some(sym.symbol_id.clone()); }
+            if seen_files.insert(sym.file.clone()) {
+                file_scores.push((*score, sym.file.clone(), layer.to_string(), ltd, hot));
+            }
+            let entries = ledger_store.list_entries(&ref_name, &sym.symbol_id).unwrap_or_default();
+            for entry in &entries {
+                match entry.kind {
+                    LedgerKind::Invariant => {
+                        if seen_inv.insert(entry.summary.clone()) {
+                            design_invariants.push(serde_json::json!({ "summary": entry.summary, "source": sym.qname }));
+                        }
+                    }
+                    LedgerKind::Hazard => {
+                        known_hazards.push(serde_json::json!({ "summary": entry.summary, "source": sym.qname }));
+                    }
+                    _ => {}
+                }
+            }
+            if let Ok(Some(decl)) = effect_store.get_effects(&ref_name, &sym.symbol_id) {
+                for eff in &decl.declared {
+                    let cat = format!("{:?}", eff.effect);
+                    let key = format!("{}:{}", cat, sym.qname);
+                    if seen_effect.insert(key) {
+                        effects_summary.push(serde_json::json!({ "category": cat, "source": sym.qname }));
+                    }
+                }
+            }
+            let ep = serde_json::json!({
+                "score": score, "qname": sym.qname, "file": sym.file,
+                "line": sym.start.line, "layer": layer, "summary": summary,
+                "last_touched_days": ltd, "hot": hot,
+            });
+            by_layer.entry(layer.to_string())
+                .or_insert_with(|| serde_json::Value::Array(vec![]))
+                .as_array_mut().unwrap().push(ep);
+        }
+
+        // Reorder by_layer.
+        let mut ordered: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        for lk in layer_order {
+            if let Some(v) = by_layer.remove(*lk) { ordered.insert(lk.to_string(), v); }
+        }
+
+        file_scores.sort_by(|a, b| b.4.cmp(&a.4).then_with(|| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)));
+        let likely_edit_files: Vec<serde_json::Value> = file_scores.iter().map(|(score, file, layer, days, hot)| {
+            serde_json::json!({ "file": file, "layer": layer, "score": score, "last_touched_days": days, "hot": hot })
+        }).collect();
+
+        // Affected tests via BFS from top entry point.
+        let mut affected_tests: Vec<serde_json::Value> = Vec::new();
+        if let Some(start_id) = top_sym_id {
+            let mut visited: HashSet<String> = HashSet::new();
+            let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+            let mut seen_tnames: HashSet<String> = HashSet::new();
+            visited.insert(start_id.clone());
+            queue.push_back((start_id, 0));
+            while let Some((sid, depth)) = queue.pop_front() {
+                if depth >= test_depth { continue; }
+                let callers = index.get_callers(&ref_name, &sid).unwrap_or_default();
+                for cid in callers {
+                    if visited.contains(&cid) { continue; }
+                    visited.insert(cid.clone());
+                    if let Some(s) = id_map.get(&cid) {
+                        if symbol_tier(&s.file) == 2 && seen_tnames.insert(s.qname.clone()) {
+                            affected_tests.push(serde_json::json!({ "qname": s.qname, "file": s.file, "line": s.start.line }));
+                        }
+                        if depth + 1 < test_depth { queue.push_back((cid, depth + 1)); }
+                    }
+                }
+            }
+        }
+
+        // Recent git touches on top 3 files.
+        let top_files: Vec<(String, usize)> = file_scores.iter().take(3).map(|(_, f, _, _, _)| (f.clone(), 0)).collect();
+        let recently_touched = mcp_git_recent_touches(&top_files, git_depth);
+
+        let focus = intent_focus(intent);
+        serde_json::to_string(&serde_json::json!({
+            "description": p.description,
+            "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
+            "focus": if focus.is_empty() { serde_json::Value::Null } else { serde_json::json!(focus) },
+            "design_invariants": design_invariants,
+            "known_hazards": known_hazards,
+            "entry_points": { "by_layer": ordered },
+            "likely_edit_files": likely_edit_files,
+            "affected_tests": affected_tests,
+            "effects_summary": effects_summary,
+            "recently_touched": recently_touched,
+        })).unwrap_or_else(|_| "{}".to_string())
     }
 
     #[tool(
