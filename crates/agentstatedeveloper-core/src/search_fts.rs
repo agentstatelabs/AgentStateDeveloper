@@ -459,6 +459,113 @@ pub fn stale_warning(db_path: &std::path::Path, threshold_secs: u64) -> Option<S
 }
 
 // ---------------------------------------------------------------------------
+// Agent output trimming
+// ---------------------------------------------------------------------------
+
+/// Default token budget for `--agent` mode (8 000 tokens ≈ 32 000 chars).
+pub const AGENT_DEFAULT_BUDGET: usize = 8_000;
+
+/// Trim a JSON value for LLM consumption.
+///
+/// 1. Recursively removes bulk fields: `body`, `doc`, `tokens`.
+/// 2. Collapses low-signal arrays (`callers`, `callees`, `notes`,
+///    `decisions_and_notes`, `proofs`, `ownership`, `commits`)
+///    to at most `max_list` items.
+/// 3. In `callers` / `callees` arrays, keeps only `qname` + `file`.
+/// 4. Limits `recently_touched` to 3 files × `max_list` commits.
+///
+/// Returns the trimmed value. Does **not** mutate the input.
+pub fn trim_for_agent(v: &serde_json::Value, max_list: usize) -> serde_json::Value {
+    use serde_json::Value;
+
+    // Fields to drop entirely.
+    const DROP_FIELDS: &[&str] = &["body", "doc", "tokens"];
+    // Arrays to truncate to max_list.
+    const TRUNCATE_ARRAYS: &[&str] = &[
+        "callers", "callees", "notes", "decisions_and_notes",
+        "proofs", "ownership", "other_ledger",
+    ];
+    // Arrays where we simplify each item to {qname, file} only.
+    const SIMPLIFY_REFS: &[&str] = &["callers", "callees"];
+
+    match v {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, val) in map {
+                if DROP_FIELDS.contains(&k.as_str()) {
+                    continue;
+                }
+                let trimmed = trim_for_agent(val, max_list);
+                let final_val = if TRUNCATE_ARRAYS.contains(&k.as_str()) {
+                    if let Value::Array(arr) = &trimmed {
+                        let slice: Vec<Value> = arr
+                            .iter()
+                            .take(max_list)
+                            .map(|item| {
+                                if SIMPLIFY_REFS.contains(&k.as_str()) {
+                                    // Keep only qname + file for call graph refs.
+                                    if let Value::Object(obj) = item {
+                                        let mut mini = serde_json::Map::new();
+                                        if let Some(q) = obj.get("qname") { mini.insert("qname".into(), q.clone()); }
+                                        if let Some(f) = obj.get("file") { mini.insert("file".into(), f.clone()); }
+                                        Value::Object(mini)
+                                    } else {
+                                        item.clone()
+                                    }
+                                } else {
+                                    item.clone()
+                                }
+                            })
+                            .collect();
+                        let truncated = arr.len() > max_list;
+                        if truncated {
+                            Value::Array({
+                                let mut s = slice;
+                                s.push(serde_json::json!(format!("... {} more", arr.len() - max_list)));
+                                s
+                            })
+                        } else {
+                            Value::Array(slice)
+                        }
+                    } else {
+                        trimmed
+                    }
+                } else if k == "recently_touched" {
+                    // Cap to 3 files, each with max_list commits.
+                    if let Value::Array(files) = &trimmed {
+                        let capped: Vec<Value> = files.iter().take(3).map(|file_entry| {
+                            if let Value::Object(obj) = file_entry {
+                                let mut m = obj.clone();
+                                if let Some(Value::Array(commits)) = m.get_mut("commits") {
+                                    commits.truncate(max_list);
+                                }
+                                Value::Object(m)
+                            } else {
+                                file_entry.clone()
+                            }
+                        }).collect();
+                        Value::Array(capped)
+                    } else {
+                        trimmed
+                    }
+                } else {
+                    trimmed
+                };
+                out.insert(k.clone(), final_val);
+            }
+            Value::Object(out)
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(|i| trim_for_agent(i, max_list)).collect()),
+        other => other.clone(),
+    }
+}
+
+/// Estimate token count from a JSON string (rough: 1 token ≈ 4 chars).
+pub fn estimate_tokens(json: &str) -> usize {
+    json.len().saturating_add(3) / 4
+}
+
+// ---------------------------------------------------------------------------
 // Intent mode
 // ---------------------------------------------------------------------------
 
@@ -521,7 +628,7 @@ pub struct FileRecency {
 /// a map of relative file path → `FileRecency`.
 ///
 /// Uses `--name-only --pretty=format:%ct` so each commit block looks like:
-/// ```
+/// ```text
 /// <unix_timestamp>
 ///
 /// path/to/file.swift

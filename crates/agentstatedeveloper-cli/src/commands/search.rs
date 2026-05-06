@@ -8,9 +8,10 @@ use anyhow::Result;
 use clap::Args;
 
 use agentstatedeveloper_core::{
-    AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore, LedgerStore, SearchFtsDb,
-    SymbolKind, extract_summary, gather_recency, hybrid_boost, intent_focus, is_stopword,
-    parse_intent, stale_warning,
+    AGENT_DEFAULT_BUDGET, AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore,
+    LedgerStore, SearchFtsDb, SymbolKind, classify_layer, estimate_tokens, extract_summary,
+    gather_recency, hybrid_boost, intent_focus, is_stopword, load_layer_overrides, parse_intent,
+    stale_warning, symbol_tier, trim_for_agent,
 };
 
 use crate::config::Config;
@@ -48,6 +49,15 @@ pub struct SearchArgs {
     /// Values: bugfix, feature, refactor, test, architecture, ui.
     #[arg(long)]
     pub intent: Option<String>,
+
+    /// Emit token-budgeted JSON for LLM consumption. Trims bodies and
+    /// collapses low-signal fields; adds token_estimate.
+    #[arg(long)]
+    pub agent: bool,
+
+    /// Token budget when --agent is set (default: 8000).
+    #[arg(long, default_value = "8000")]
+    pub agent_budget: usize,
 }
 
 pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
@@ -60,6 +70,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
     if !intent.is_empty() {
         eprintln!("intent: {}", intent_focus(intent));
     }
+    let layer_overrides = load_layer_overrides(&cfg.db_path);
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let ledger_store = AsgLedgerStore { repo: &engine.repo };
 
@@ -112,32 +123,51 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         }
 
         // One git pass to annotate with recency (hot = changed in last 14 days).
-        let unique_files: Vec<&str> = {
-            let mut seen = std::collections::HashSet::new();
-            scored.iter().filter(|(_, h)| seen.insert(h.file.clone())).map(|(_, h)| h.file.as_str()).collect()
-        };
-        let _ = unique_files; // used implicitly via gather_recency scope
         let recency = gather_recency(200, 14.0);
 
-        for (score, hit) in &scored {
-            let rec = recency.get(&hit.file);
-            let hot_tag = if rec.map(|r| r.hot).unwrap_or(false) { " [hot]" } else { "" };
-            let age_tag = rec
-                .and_then(|r| r.last_touched_days)
-                .map(|d| format!(" ~{:.0}d ago", d))
-                .unwrap_or_default();
-            println!(
-                "[{:.1}] {} {}{}{} ({}:{})",
-                score, hit.kind, hit.qname, hot_tag, age_tag, hit.file, hit.line
-            );
-            if let Some(sig) = &hit.signature {
-                if !sig.is_empty() {
-                    println!("       sig: {}", sig);
-                }
+        if args.agent {
+            let results: Vec<serde_json::Value> = scored.iter().map(|(score, hit)| {
+                let rec = recency.get(&hit.file);
+                let tier = symbol_tier(&hit.file);
+                let layer = classify_layer(&hit.file, tier, &layer_overrides);
+                serde_json::json!({
+                    "score": score, "qname": hit.qname, "kind": hit.kind,
+                    "file": hit.file, "line": hit.line, "layer": layer,
+                    "summary": extract_summary(hit.doc.as_deref(), hit.signature.as_deref()),
+                    "last_touched_days": rec.and_then(|r| r.last_touched_days),
+                    "hot": rec.map(|r| r.hot).unwrap_or(false),
+                })
+            }).collect();
+            let raw = serde_json::json!({
+                "query": args.query,
+                "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
+                "results": results,
+            });
+            let trimmed = trim_for_agent(&raw, 5);
+            let json_str = serde_json::to_string_pretty(&trimmed)?;
+            let token_est = estimate_tokens(&json_str);
+            let mut out = trimmed.clone();
+            if let Some(obj) = out.as_object_mut() {
+                obj.insert("token_estimate".into(), serde_json::json!(token_est));
             }
-            let summary = extract_summary(hit.doc.as_deref(), hit.signature.as_deref());
-            if !summary.is_empty() {
-                println!("       {}", summary);
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        } else {
+            for (score, hit) in &scored {
+                let rec = recency.get(&hit.file);
+                let hot_tag = if rec.map(|r| r.hot).unwrap_or(false) { " [hot]" } else { "" };
+                let age_tag = rec
+                    .and_then(|r| r.last_touched_days)
+                    .map(|d| format!(" ~{:.0}d ago", d))
+                    .unwrap_or_default();
+                println!(
+                    "[{:.1}] {} {}{}{} ({}:{})",
+                    score, hit.kind, hit.qname, hot_tag, age_tag, hit.file, hit.line
+                );
+                if let Some(sig) = &hit.signature {
+                    if !sig.is_empty() { println!("       sig: {}", sig); }
+                }
+                let summary = extract_summary(hit.doc.as_deref(), hit.signature.as_deref());
+                if !summary.is_empty() { println!("       {}", summary); }
             }
         }
         return Ok(());

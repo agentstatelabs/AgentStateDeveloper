@@ -10,8 +10,9 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore, LedgerStore,
-    SearchFtsDb, classify_layer, extract_summary, gather_recency, hybrid_boost, intent_focus,
-    intent_layer_order, load_layer_overrides, parse_intent, stale_warning, symbol_tier,
+    SearchFtsDb, classify_layer, estimate_tokens, extract_summary, gather_recency, hybrid_boost,
+    intent_focus, intent_layer_order, load_layer_overrides, parse_intent, stale_warning,
+    symbol_tier, trim_for_agent,
 };
 
 use crate::commands::{
@@ -65,6 +66,11 @@ pub struct InvestigateArgs {
     /// Values: bugfix, feature, refactor, test, architecture, ui.
     #[arg(long)]
     pub intent: Option<String>,
+
+    /// Emit token-budgeted JSON for LLM consumption. Trims bodies,
+    /// collapses low-signal fields, adds token_estimate.
+    #[arg(long)]
+    pub agent: bool,
 }
 
 pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
@@ -230,6 +236,18 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             "hazards": all_hazards,
             "by_layer": by_layer,
         })
+    };
+    let out = if args.agent {
+        let trimmed = trim_for_agent(&out, 5);
+        let json_str = serde_json::to_string_pretty(&trimmed)?;
+        let token_est = estimate_tokens(&json_str);
+        let mut v = trimmed;
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("token_estimate".into(), json!(token_est));
+        }
+        v
+    } else {
+        out
     };
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())

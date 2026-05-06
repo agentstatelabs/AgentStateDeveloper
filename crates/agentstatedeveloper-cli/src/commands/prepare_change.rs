@@ -17,8 +17,9 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, FtsFilters, IndexStore,
-    LedgerKind, LedgerStore, classify_layer, extract_summary, gather_recency, intent_focus,
-    intent_layer_order, load_layer_overrides, parse_intent, stale_warning, symbol_tier,
+    LedgerKind, LedgerStore, classify_layer, estimate_tokens, extract_summary, gather_recency,
+    intent_focus, intent_layer_order, load_layer_overrides, parse_intent, stale_warning,
+    symbol_tier, trim_for_agent,
 };
 
 use crate::commands::{
@@ -66,6 +67,11 @@ pub struct PrepareChangeArgs {
     /// Number of recent git commits to scan per file (default: 10).
     #[arg(long, default_value = "10")]
     pub git_depth: usize,
+
+    /// Emit token-budgeted JSON for LLM consumption. Trims bodies,
+    /// collapses low-signal fields, adds token_estimate.
+    #[arg(long)]
+    pub agent: bool,
 }
 
 pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
@@ -280,6 +286,18 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         "effects_summary": effects_summary,
         "recently_touched": recently_touched,
     });
+    let out = if args.agent {
+        let trimmed = trim_for_agent(&out, 5);
+        let json_str = serde_json::to_string_pretty(&trimmed)?;
+        let token_est = estimate_tokens(&json_str);
+        let mut v = trimmed;
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("token_estimate".into(), json!(token_est));
+        }
+        v
+    } else {
+        out
+    };
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
 }

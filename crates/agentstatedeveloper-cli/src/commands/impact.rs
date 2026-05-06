@@ -12,8 +12,8 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, IndexStore, LedgerKind,
-    LedgerStore, classify_layer, intent_focus, load_layer_overrides, parse_intent, stale_warning,
-    symbol_tier,
+    LedgerStore, classify_layer, estimate_tokens, intent_focus, load_layer_overrides, parse_intent,
+    stale_warning, symbol_tier, trim_for_agent,
 };
 
 use crate::commands::graph::build_id_map;
@@ -40,6 +40,11 @@ pub struct ImpactArgs {
     /// Values: bugfix, feature, refactor, test, architecture, ui.
     #[arg(long)]
     pub intent: Option<String>,
+
+    /// Emit token-budgeted JSON for LLM consumption. Trims bodies,
+    /// collapses low-signal fields, adds token_estimate.
+    #[arg(long)]
+    pub agent: bool,
 }
 
 pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
@@ -178,6 +183,18 @@ pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
         "affected_tests": affected_test_rows,
         "recently_touched": recently_touched,
     });
+    let out = if args.agent {
+        let trimmed = trim_for_agent(&out, 5);
+        let json_str = serde_json::to_string_pretty(&trimmed)?;
+        let token_est = estimate_tokens(&json_str);
+        let mut v = trimmed;
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("token_estimate".into(), json!(token_est));
+        }
+        v
+    } else {
+        out
+    };
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
 }
