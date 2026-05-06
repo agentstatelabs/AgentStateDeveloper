@@ -30,15 +30,17 @@ use crate::schema::Symbol;
 /// A single ranked result from FTS search.
 #[derive(Debug, Clone)]
 pub struct FtsHit {
-    /// BM25 score (negative: lower is better in SQLite's FTS5 convention;
-    /// we negate it so higher = more relevant for callers).
+    /// BM25 score (negated from SQLite's negative convention; higher = more relevant).
     pub bm25_score: f64,
     pub symbol_id: String,
+    /// Original qname (not expanded).
     pub qname: String,
     pub kind: String,
     pub language: String,
+    /// Original file path (not expanded).
     pub file: String,
     pub line: u32,
+    /// Original signature (not expanded).
     pub signature: Option<String>,
     pub doc: Option<String>,
 }
@@ -72,7 +74,25 @@ impl SearchFtsDb {
     }
 
     fn ensure_schema(&self) -> rusqlite::Result<()> {
-        self.conn.execute_batch(
+        // Version 2: adds qname_orig/sig_orig/file_orig UNINDEXED display columns.
+        // If the version table is absent or stale, drop and recreate everything.
+        const SCHEMA_VER: i64 = 2;
+
+        let current: i64 = self.conn.query_row(
+            "SELECT version FROM asd_fts_meta LIMIT 1",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        if current != SCHEMA_VER {
+            self.conn.execute_batch(
+                "DROP TABLE IF EXISTS asd_search_fts;
+                 DROP TABLE IF EXISTS asd_search_meta;
+                 DROP TABLE IF EXISTS asd_fts_meta;",
+            )?;
+        }
+
+        self.conn.execute_batch(&format!(
             "CREATE VIRTUAL TABLE IF NOT EXISTS asd_search_fts USING fts5(
                 symbol_id  UNINDEXED,
                 qname,
@@ -82,15 +102,18 @@ impl SearchFtsDb {
                 language   UNINDEXED,
                 kind       UNINDEXED,
                 line       UNINDEXED,
+                qname_orig UNINDEXED,
+                sig_orig   UNINDEXED,
+                file_orig  UNINDEXED,
                 tokenize   = 'unicode61 remove_diacritics 1'
             );
-
-            -- metadata table to track per-file index state
             CREATE TABLE IF NOT EXISTS asd_search_meta (
                 file       TEXT PRIMARY KEY,
                 indexed_at INTEGER NOT NULL
-            );",
-        )
+            );
+            CREATE TABLE IF NOT EXISTS asd_fts_meta (version INTEGER PRIMARY KEY);
+            INSERT OR IGNORE INTO asd_fts_meta VALUES ({SCHEMA_VER});"
+        ))
     }
 
     /// Remove all FTS entries for a specific source file, then insert fresh
@@ -128,14 +151,17 @@ impl SearchFtsDb {
 
     fn insert_symbol(&self, sym: &Symbol) -> rusqlite::Result<()> {
         let qname_exp = expand_identifier(&sym.qname);
-        let sig_exp = sym.signature.as_deref().map(expand_text).unwrap_or_default();
+        let sig_orig = sym.signature.as_deref().unwrap_or("");
+        let sig_exp = if sig_orig.is_empty() { String::new() } else { expand_text(sig_orig) };
         let doc = sym.doc.as_deref().unwrap_or("");
         let file_exp = expand_text(&sym.file);
         let kind = format!("{:?}", sym.kind).to_lowercase();
 
         self.conn.execute(
-            "INSERT INTO asd_search_fts(symbol_id, qname, signature, doc, file, language, kind, line)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            "INSERT INTO asd_search_fts(
+                 symbol_id, qname, signature, doc, file, language, kind, line,
+                 qname_orig, sig_orig, file_orig)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
                 sym.symbol_id,
                 qname_exp,
@@ -145,6 +171,9 @@ impl SearchFtsDb {
                 sym.language,
                 kind,
                 sym.start.line,
+                sym.qname,
+                sym.signature.as_deref().unwrap_or(""),
+                sym.file,
             ],
         )?;
         Ok(())
@@ -205,8 +234,10 @@ impl SearchFtsDb {
         // Fetch more than limit so hybrid ledger reranking has room to work.
         let fetch = (limit * 4).max(80);
 
+        // Columns: 0=symbol_id,1=language,2=kind,3=line,4=doc,5=qname_orig,6=sig_orig,7=file_orig,8=score
         let sql = format!(
-            "SELECT symbol_id, qname, language, kind, file, line, signature, doc,
+            "SELECT symbol_id, language, kind, line, doc,
+                    qname_orig, sig_orig, file_orig,
                     bm25(asd_search_fts, 10.0, 5.0, 5.0, 2.0) AS score
              FROM asd_search_fts
              WHERE asd_search_fts MATCH ?1
@@ -219,16 +250,17 @@ impl SearchFtsDb {
         let mut stmt = self.conn.prepare(&sql)?;
         let hits = stmt.query_map(params![match_expr], |row| {
             let bm25_raw: f64 = row.get(8)?;
+            let sig_orig: Option<String> = row.get(6)?;
             Ok(FtsHit {
-                bm25_score: -bm25_raw, // negate: FTS5 returns negative scores
+                bm25_score: -bm25_raw,
                 symbol_id: row.get(0)?,
-                qname: row.get(1)?,
-                language: row.get(2)?,
-                kind: row.get(3)?,
-                file: row.get(4)?,
-                line: row.get::<_, u32>(5).unwrap_or(0),
-                signature: row.get(6)?,
-                doc: row.get(7)?,
+                language: row.get(1)?,
+                kind: row.get(2)?,
+                line: row.get::<_, u32>(3).unwrap_or(0),
+                doc: row.get(4)?,
+                qname: row.get(5)?,
+                signature: sig_orig.filter(|s| !s.is_empty()),
+                file: row.get(7)?,
             })
         })?
         .filter_map(|r| r.ok())
