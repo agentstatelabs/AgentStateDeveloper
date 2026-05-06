@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore, LedgerStore,
-    SearchFtsDb, classify_layer, extract_summary, gather_recency, hybrid_boost,
-    load_layer_overrides, stale_warning, symbol_tier,
+    SearchFtsDb, classify_layer, extract_summary, gather_recency, hybrid_boost, intent_focus,
+    intent_layer_order, load_layer_overrides, parse_intent, stale_warning, symbol_tier,
 };
 
 use crate::commands::{
@@ -60,6 +60,11 @@ pub struct InvestigateArgs {
     /// Maximum entry points per layer in grouped output (default: unlimited).
     #[arg(long)]
     pub max_per_layer: Option<usize>,
+
+    /// Adjust output ordering and guidance for a specific intent.
+    /// Values: bugfix, feature, refactor, test, architecture, ui.
+    #[arg(long)]
+    pub intent: Option<String>,
 }
 
 pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
@@ -67,6 +72,13 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         if let Some(warn) = stale_warning(&cfg.db_path, 3600) {
             eprintln!("{warn}");
         }
+    }
+    let intent = args.intent.as_deref()
+        .and_then(parse_intent)
+        .unwrap_or("");
+    if args.intent.is_some() && intent.is_empty() {
+        eprintln!("asd: unknown intent {:?} — valid values: bugfix, feature, refactor, test, architecture, ui",
+            args.intent.as_deref().unwrap_or(""));
     }
     let layer_overrides = load_layer_overrides(&cfg.db_path);
     let engine = Engine::open_sqlite(&cfg.db_path)?;
@@ -176,12 +188,13 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     }
 
     // Build by_layer grouped view (layer → [entry_points]).
-    let layer_order = ["ui", "viewmodel", "scheduler", "core_model", "persistence", "utility", "tests", "other"];
+    // Layer order is intent-aware; intent="" falls back to default order.
+    let layer_order = intent_layer_order(intent);
     let mut by_layer: serde_json::Map<String, Value> = serde_json::Map::new();
-    for layer_key in &layer_order {
+    for layer_key in layer_order {
         let mut members: Vec<Value> = entry_points
             .iter()
-            .filter(|ep| ep.get("layer").and_then(Value::as_str) == Some(layer_key))
+            .filter(|ep| ep.get("layer").and_then(Value::as_str) == Some(*layer_key))
             .cloned()
             .collect();
         if let Some(max) = args.max_per_layer {
@@ -192,12 +205,16 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         }
     }
 
+    let focus = intent_focus(intent);
+
     // Default: grouped by_layer output (compact, deduped by layer).
     // --flat restores the legacy flat entry_points array.
     // Invariants/hazards surfaced first so agents see constraints before call graphs.
     let out = if args.flat {
         json!({
             "query": args.query,
+            "intent": if intent.is_empty() { Value::Null } else { Value::String(intent.to_string()) },
+            "focus": if focus.is_empty() { Value::Null } else { Value::String(focus.to_string()) },
             "tokens": tokens,
             "invariants": all_invariants,
             "hazards": all_hazards,
@@ -206,6 +223,8 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     } else {
         json!({
             "query": args.query,
+            "intent": if intent.is_empty() { Value::Null } else { Value::String(intent.to_string()) },
+            "focus": if focus.is_empty() { Value::Null } else { Value::String(focus.to_string()) },
             "tokens": tokens,
             "invariants": all_invariants,
             "hazards": all_hazards,

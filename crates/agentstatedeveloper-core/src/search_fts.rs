@@ -459,6 +459,51 @@ pub fn stale_warning(db_path: &std::path::Path, threshold_secs: u64) -> Option<S
 }
 
 // ---------------------------------------------------------------------------
+// Intent mode
+// ---------------------------------------------------------------------------
+
+/// Parse and validate an intent string. Returns a static str or `None`
+/// if the value is unrecognised.
+///
+/// Valid values: `bugfix`, `feature`, `refactor`, `test`, `architecture`, `ui`.
+pub fn parse_intent(s: &str) -> Option<&'static str> {
+    match s.to_lowercase().as_str() {
+        "bugfix"       => Some("bugfix"),
+        "feature"      => Some("feature"),
+        "refactor"     => Some("refactor"),
+        "test"         => Some("test"),
+        "architecture" => Some("architecture"),
+        "ui"           => Some("ui"),
+        _ => None,
+    }
+}
+
+/// One-line agent guidance for each intent.
+pub fn intent_focus(intent: &str) -> &'static str {
+    match intent {
+        "bugfix"       => "Focus: callers that may be broken, effects, invariants to preserve, affected tests.",
+        "feature"      => "Focus: callees to extend, ownership boundaries, empty extension points.",
+        "refactor"     => "Focus: callers (blast radius), invariants that must hold, ownership constraints.",
+        "test"         => "Focus: affected test symbols, effects under test, existing proof ledger entries.",
+        "architecture" => "Focus: invariants, ownership boundaries, layer grouping, cross-layer effects.",
+        "ui"           => "Focus: UI/ViewModel layers, effects that touch display state, scheduler coupling.",
+        _              => "",
+    }
+}
+
+/// Return the preferred layer display order for an intent.
+/// The standard order is used for unlisted layers.
+pub fn intent_layer_order(intent: &str) -> &'static [&'static str] {
+    match intent {
+        "ui"           => &["ui", "viewmodel", "scheduler", "core_model", "persistence", "utility", "tests", "other"],
+        "architecture" => &["core_model", "persistence", "scheduler", "viewmodel", "ui", "utility", "tests", "other"],
+        "bugfix"       => &["core_model", "scheduler", "persistence", "viewmodel", "ui", "tests", "utility", "other"],
+        "test"         => &["tests", "core_model", "scheduler", "persistence", "viewmodel", "ui", "utility", "other"],
+        _              => &["ui", "viewmodel", "scheduler", "core_model", "persistence", "utility", "tests", "other"],
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Recency helpers
 // ---------------------------------------------------------------------------
 
@@ -1251,6 +1296,22 @@ mod tests {
         assert_eq!(overrides.len(), 2);
         assert!(overrides.contains(&("infra".to_string(), "persistence".to_string())));
         assert!(overrides.contains(&("business".to_string(), "core_model".to_string())));
+    }
+
+    #[test]
+    fn intent_parsing() {
+        assert_eq!(parse_intent("bugfix"), Some("bugfix"));
+        assert_eq!(parse_intent("ARCHITECTURE"), Some("architecture"));
+        assert_eq!(parse_intent("ui"), Some("ui"));
+        assert_eq!(parse_intent("typo"), None);
+        // Each valid intent has non-empty focus guidance.
+        for i in &["bugfix", "feature", "refactor", "test", "architecture", "ui"] {
+            assert!(!intent_focus(i).is_empty(), "no focus for {i}");
+        }
+        // Layer order has 8 entries for every intent.
+        for i in &["bugfix", "feature", "refactor", "test", "architecture", "ui", ""] {
+            assert_eq!(intent_layer_order(i).len(), 8);
+        }
     }
 
     #[test]

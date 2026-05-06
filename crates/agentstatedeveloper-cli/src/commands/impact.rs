@@ -12,7 +12,8 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, IndexStore, LedgerKind,
-    LedgerStore, classify_layer, load_layer_overrides, stale_warning, symbol_tier,
+    LedgerStore, classify_layer, intent_focus, load_layer_overrides, parse_intent, stale_warning,
+    symbol_tier,
 };
 
 use crate::commands::graph::build_id_map;
@@ -34,6 +35,11 @@ pub struct ImpactArgs {
     /// Suppress the stale-index warning.
     #[arg(long)]
     pub quiet: bool,
+
+    /// Adjust output framing for a specific intent.
+    /// Values: bugfix, feature, refactor, test, architecture, ui.
+    #[arg(long)]
+    pub intent: Option<String>,
 }
 
 pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
@@ -42,6 +48,7 @@ pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
             eprintln!("{warn}");
         }
     }
+    let intent = args.intent.as_deref().and_then(parse_intent).unwrap_or("");
     let layer_overrides = load_layer_overrides(&cfg.db_path);
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let index_store = AsgIndexStore { repo: &engine.repo };
@@ -156,9 +163,12 @@ pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
         obj.remove("body");
     }
 
+    let focus = intent_focus(intent);
     let out = json!({
         "symbol": sym_val,
         "layer": layer,
+        "intent": if intent.is_empty() { Value::Null } else { Value::String(intent.to_string()) },
+        "focus": if focus.is_empty() { Value::Null } else { Value::String(focus.to_string()) },
         "caller_count": caller_rows.len(),
         "test_count": affected_test_rows.len(),
         "invariants": all_invariants,

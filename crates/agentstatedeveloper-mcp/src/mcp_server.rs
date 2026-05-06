@@ -21,8 +21,8 @@ use agentstatedeveloper_core::{
     Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory, EffectDecl, EffectStore,
     Engine, FtsFilters, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Rebind, ScratchEntry,
     ScratchFilter, ScratchStatus, ScratchStore, SearchFtsDb, Situation, actions, classify_layer,
-    emit_audit, event_types, extract_summary, gather_recency, hybrid_boost, is_stopword,
-    load_layer_overrides, paths, symbol_tier,
+    emit_audit, event_types, extract_summary, gather_recency, hybrid_boost, intent_focus,
+    intent_layer_order, is_stopword, load_layer_overrides, parse_intent, paths, symbol_tier,
 };
 
 /// The AgentStateDeveloper MCP server.
@@ -82,6 +82,9 @@ pub struct InvestigateParams {
     /// Include test-file symbols as entry-point candidates (default: false).
     #[serde(default)]
     pub include_tests: bool,
+    /// Adjust output ordering and guidance for a specific intent.
+    /// Values: bugfix, feature, refactor, test, architecture, ui.
+    pub intent: Option<String>,
 }
 
 fn default_investigate_depth() -> u32 { 5 }
@@ -657,6 +660,7 @@ impl AsdMcpServer {
     )]
     async fn investigate(&self, params: Parameters<InvestigateParams>) -> String {
         let p = params.0;
+        let intent = p.intent.as_deref().and_then(parse_intent).unwrap_or("");
         let db_path = self.db_path.clone();
         let layer_overrides = load_layer_overrides(&db_path);
         let engine = self.engine.lock().await;
@@ -849,20 +853,23 @@ impl AsdMcpServer {
             }
         }
 
-        // Group by layer.
-        let layer_order = ["ui", "viewmodel", "scheduler", "core_model", "persistence", "utility", "tests", "other"];
+        // Group by layer (intent-aware ordering).
+        let layer_order = intent_layer_order(intent);
         let mut by_layer = serde_json::Map::new();
-        for lk in &layer_order {
+        for lk in layer_order {
             let members: Vec<&serde_json::Value> = entry_points.iter()
-                .filter(|ep| ep.get("layer").and_then(|v| v.as_str()) == Some(lk))
+                .filter(|ep| ep.get("layer").and_then(|v| v.as_str()) == Some(*lk))
                 .collect();
             if !members.is_empty() {
                 by_layer.insert(lk.to_string(), serde_json::Value::Array(members.into_iter().cloned().collect()));
             }
         }
 
+        let focus = intent_focus(intent);
         serde_json::to_string(&serde_json::json!({
             "query": p.query,
+            "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
+            "focus": if focus.is_empty() { serde_json::Value::Null } else { serde_json::json!(focus) },
             "tokens": tokens,
             "invariants": all_invariants,
             "hazards": all_hazards,

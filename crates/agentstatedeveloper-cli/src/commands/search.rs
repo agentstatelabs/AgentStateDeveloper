@@ -9,7 +9,8 @@ use clap::Args;
 
 use agentstatedeveloper_core::{
     AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore, LedgerStore, SearchFtsDb,
-    SymbolKind, extract_summary, gather_recency, hybrid_boost, is_stopword, stale_warning,
+    SymbolKind, extract_summary, gather_recency, hybrid_boost, intent_focus, is_stopword,
+    parse_intent, stale_warning,
 };
 
 use crate::config::Config;
@@ -42,6 +43,11 @@ pub struct SearchArgs {
     /// Suppress the stale-index warning.
     #[arg(long)]
     pub quiet: bool,
+
+    /// Adjust guidance context for a specific intent.
+    /// Values: bugfix, feature, refactor, test, architecture, ui.
+    #[arg(long)]
+    pub intent: Option<String>,
 }
 
 pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
@@ -49,6 +55,10 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         if let Some(warn) = stale_warning(&cfg.db_path, 3600) {
             eprintln!("{warn}");
         }
+    }
+    let intent = args.intent.as_deref().and_then(parse_intent).unwrap_or("");
+    if !intent.is_empty() {
+        eprintln!("intent: {}", intent_focus(intent));
     }
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let ledger_store = AsgLedgerStore { repo: &engine.repo };
