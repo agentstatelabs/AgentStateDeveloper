@@ -18,8 +18,8 @@ use agentstatedeveloper_core::{
     ASD_PATH_PREFIX, AsgEffectStore, AsgIndexStore, AsgLedgerStore, AsgScratchStore, AuditEvent,
     Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory, EffectDecl, EffectStore,
     Engine, FtsFilters, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Rebind, ScratchEntry,
-    ScratchFilter, ScratchStatus, ScratchStore, SearchFtsDb, Situation, actions, emit_audit,
-    event_types, hybrid_boost, is_stopword, paths,
+    ScratchFilter, ScratchStatus, ScratchStore, SearchFtsDb, Situation, actions, classify_layer,
+    emit_audit, event_types, extract_summary, hybrid_boost, is_stopword, paths, symbol_tier,
 };
 
 /// The AgentStateDeveloper MCP server.
@@ -547,6 +547,9 @@ impl AsdMcpServer {
             scored.truncate(limit);
 
             let results: Vec<serde_json::Value> = scored.iter().map(|(score, hit)| {
+                let tier = hit.tier;
+                let layer = classify_layer(&hit.file, tier);
+                let summary = extract_summary(hit.doc.as_deref(), hit.signature.as_deref());
                 serde_json::json!({
                     "score": score,
                     "qname": hit.qname,
@@ -554,6 +557,9 @@ impl AsdMcpServer {
                     "language": hit.language,
                     "file": hit.file,
                     "line": hit.line,
+                    "tier": tier,
+                    "layer": layer,
+                    "summary": summary,
                     "signature": hit.signature,
                     "doc": hit.doc,
                 })
@@ -600,6 +606,9 @@ impl AsdMcpServer {
         scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.qname.cmp(&b.1.qname)));
         scored.truncate(limit);
         let results: Vec<serde_json::Value> = scored.iter().map(|(score, sym)| {
+            let tier = symbol_tier(&sym.file);
+            let layer = classify_layer(&sym.file, tier);
+            let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
             serde_json::json!({
                 "score": score,
                 "qname": sym.qname,
@@ -607,6 +616,9 @@ impl AsdMcpServer {
                 "language": sym.language,
                 "file": sym.file,
                 "line": sym.start.line,
+                "tier": tier,
+                "layer": layer,
+                "summary": summary,
                 "signature": sym.signature,
                 "doc": sym.doc,
             })
@@ -754,28 +766,75 @@ impl AsdMcpServer {
                 }
             }
 
+            let tier = symbol_tier(&sym.file);
+            let layer = classify_layer(&sym.file, tier);
+            let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
             entry_points.push(serde_json::json!({
                 "score": score,
+                "layer": layer,
+                "summary": summary,
                 "qname": sym.qname,
                 "kind": format!("{:?}", sym.kind).to_lowercase(),
                 "language": sym.language,
                 "file": sym.file,
                 "line": sym.start.line,
                 "signature": sym.signature,
-                "doc": sym.doc,
+                "invariants": invariants,
+                "hazards": hazards,
                 "callers": resolve_ids(caller_ids),
                 "callees": resolve_ids(callee_ids),
                 "effects": effects,
-                "invariants": invariants,
-                "hazards": hazards,
                 "notes": other_ledger,
             }));
+        }
+
+        // Aggregate invariants/hazards across all entry points.
+        let mut all_invariants: Vec<serde_json::Value> = Vec::new();
+        let mut all_hazards: Vec<serde_json::Value> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for ep in &entry_points {
+            let qname = ep.get("qname").and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(invs) = ep.get("invariants").and_then(|v| v.as_array()) {
+                for inv in invs {
+                    let key = inv.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    if !key.is_empty() && seen.insert(key) {
+                        let mut v = inv.clone();
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.insert("source_qname".to_string(), serde_json::Value::String(qname.to_string()));
+                        }
+                        all_invariants.push(v);
+                    }
+                }
+            }
+            if let Some(hzs) = ep.get("hazards").and_then(|v| v.as_array()) {
+                for hz in hzs {
+                    let mut v = hz.clone();
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("source_qname".to_string(), serde_json::Value::String(qname.to_string()));
+                    }
+                    all_hazards.push(v);
+                }
+            }
+        }
+
+        // Group by layer.
+        let layer_order = ["ui", "viewmodel", "scheduler", "core_model", "persistence", "utility", "tests", "other"];
+        let mut by_layer = serde_json::Map::new();
+        for lk in &layer_order {
+            let members: Vec<&serde_json::Value> = entry_points.iter()
+                .filter(|ep| ep.get("layer").and_then(|v| v.as_str()) == Some(lk))
+                .collect();
+            if !members.is_empty() {
+                by_layer.insert(lk.to_string(), serde_json::Value::Array(members.into_iter().cloned().collect()));
+            }
         }
 
         serde_json::to_string(&serde_json::json!({
             "query": p.query,
             "tokens": tokens,
-            "entry_points": entry_points,
+            "invariants": all_invariants,
+            "hazards": all_hazards,
+            "by_layer": by_layer,
         })).unwrap_or_else(|_| "{}".to_string())
     }
 

@@ -469,21 +469,46 @@ pub fn stale_warning(db_path: &std::path::Path, threshold_secs: u64) -> Option<S
 ///    capped at 120 chars). Trailing punctuation stripped.
 /// 2. Condensed signature (first 100 chars, trimmed).
 /// 3. Empty string.
+/// Strip language-specific doc comment markers from a single line.
+/// Handles Rust `///`/`//!`, C/Java/Swift `/**`/`*`/`*/`, Python `#`, Haskell/SQL `--`.
+fn strip_doc_prefix(line: &str) -> &str {
+    let s = line.trim();
+    // Multi-char prefixes first.
+    for prefix in &["///", "//!", "/**", "*/", "//"] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            return rest.trim_start_matches([' ', '\t']).trim_end_matches([' ', '\t']);
+        }
+    }
+    // Single-char: leading `*` (continuation in /** ... */), `#`, `-`
+    if s.starts_with("* ") || s == "*" {
+        return s[1..].trim_start_matches([' ', '\t']);
+    }
+    for prefix in &["#", "--"] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            return rest.trim_start_matches([' ', '\t']);
+        }
+    }
+    s
+}
+
 pub fn extract_summary(doc: Option<&str>, signature: Option<&str>) -> String {
     if let Some(d) = doc {
-        let trimmed = d.trim();
-        if !trimmed.is_empty() {
-            let end = trimmed
+        // Strip per-line doc prefixes, join, then take first sentence.
+        let cleaned: String = d
+            .lines()
+            .map(strip_doc_prefix)
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim()
+            .to_string();
+        if !cleaned.is_empty() {
+            let end = cleaned
                 .char_indices()
                 .find_map(|(i, c)| {
-                    if matches!(c, '.' | '!' | '?' | '\n') {
-                        Some(i + c.len_utf8())
-                    } else {
-                        None
-                    }
+                    if matches!(c, '.' | '!' | '?') { Some(i + c.len_utf8()) } else { None }
                 })
-                .unwrap_or(trimmed.len().min(120));
-            let sentence = trimmed[..end.min(trimmed.len())].trim().trim_end_matches(['.', '!', '?', '\n']);
+                .unwrap_or(cleaned.len().min(120));
+            let sentence = cleaned[..end.min(cleaned.len())].trim().trim_end_matches(['.', '!', '?']);
             if !sentence.is_empty() {
                 return sentence.to_string();
             }
@@ -1003,9 +1028,9 @@ mod tests {
             extract_summary(Some("Updates drift pad visual playhead from transport state. Called on every render tick."), None),
             "Updates drift pad visual playhead from transport state"
         );
-        // Doc with newline as sentence boundary.
+        // Doc with newline — joined, first sentence extracted.
         assert_eq!(
-            extract_summary(Some("Short summary\nMore detail here."), None),
+            extract_summary(Some("Short summary.\nMore detail here."), None),
             "Short summary"
         );
         // Falls back to signature when doc absent.
@@ -1015,6 +1040,27 @@ mod tests {
         );
         // Returns empty when neither present.
         assert_eq!(extract_summary(None, None), "");
+
+        // Doc prefix stripping — Rust triple-slash.
+        assert_eq!(
+            extract_summary(Some("/// Updates the drift playhead. Called each frame."), None),
+            "Updates the drift playhead"
+        );
+        // Multi-line Rust doc block.
+        assert_eq!(
+            extract_summary(Some("/// Refreshes visual state.\n/// Must be called on main thread."), None),
+            "Refreshes visual state"
+        );
+        // JavaDoc / Swift style — trailing dot stripped.
+        assert_eq!(
+            extract_summary(Some("/** Computes clip boundaries. */"), None),
+            "Computes clip boundaries"
+        );
+        // Python # prefix.
+        assert_eq!(
+            extract_summary(Some("# Process the audio buffer."), None),
+            "Process the audio buffer"
+        );
     }
 
     #[test]

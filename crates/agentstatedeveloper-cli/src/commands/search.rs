@@ -38,11 +38,17 @@ pub struct SearchArgs {
     /// excluded so production entry points rank first.
     #[arg(long)]
     pub include_tests: bool,
+
+    /// Suppress the stale-index warning.
+    #[arg(long)]
+    pub quiet: bool,
 }
 
 pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
-    if let Some(warn) = stale_warning(&cfg.db_path, 3600) {
-        eprintln!("{warn}");
+    if !args.quiet {
+        if let Some(warn) = stale_warning(&cfg.db_path, 3600) {
+            eprintln!("{warn}");
+        }
     }
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let ledger_store = AsgLedgerStore { repo: &engine.repo };

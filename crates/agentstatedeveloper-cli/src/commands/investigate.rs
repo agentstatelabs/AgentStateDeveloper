@@ -47,11 +47,25 @@ pub struct InvestigateArgs {
     /// Include symbols from test files in entry-point candidates.
     #[arg(long)]
     pub include_tests: bool,
+
+    /// Suppress the stale-index warning.
+    #[arg(long)]
+    pub quiet: bool,
+
+    /// Return a flat `entry_points` array instead of the default `by_layer` grouped output.
+    #[arg(long)]
+    pub flat: bool,
+
+    /// Maximum entry points per layer in grouped output (default: unlimited).
+    #[arg(long)]
+    pub max_per_layer: Option<usize>,
 }
 
 pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
-    if let Some(warn) = stale_warning(&cfg.db_path, 3600) {
-        eprintln!("{warn}");
+    if !args.quiet {
+        if let Some(warn) = stale_warning(&cfg.db_path, 3600) {
+            eprintln!("{warn}");
+        }
     }
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let index_store = AsgIndexStore { repo: &engine.repo };
@@ -151,25 +165,39 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     let layer_order = ["ui", "viewmodel", "scheduler", "core_model", "persistence", "utility", "tests", "other"];
     let mut by_layer: serde_json::Map<String, Value> = serde_json::Map::new();
     for layer_key in &layer_order {
-        let members: Vec<&Value> = entry_points
+        let mut members: Vec<Value> = entry_points
             .iter()
             .filter(|ep| ep.get("layer").and_then(Value::as_str) == Some(layer_key))
+            .cloned()
             .collect();
+        if let Some(max) = args.max_per_layer {
+            members.truncate(max);
+        }
         if !members.is_empty() {
-            by_layer.insert(layer_key.to_string(), Value::Array(members.into_iter().cloned().collect()));
+            by_layer.insert(layer_key.to_string(), Value::Array(members));
         }
     }
 
-    // Invariants and hazards are surfaced first — agents should read them before
-    // diving into entry_points so they don't miss anti-footgun constraints.
-    let out = json!({
-        "query": args.query,
-        "tokens": tokens,
-        "invariants": all_invariants,
-        "hazards": all_hazards,
-        "by_layer": by_layer,
-        "entry_points": entry_points,
-    });
+    // Default: grouped by_layer output (compact, deduped by layer).
+    // --flat restores the legacy flat entry_points array.
+    // Invariants/hazards surfaced first so agents see constraints before call graphs.
+    let out = if args.flat {
+        json!({
+            "query": args.query,
+            "tokens": tokens,
+            "invariants": all_invariants,
+            "hazards": all_hazards,
+            "entry_points": entry_points,
+        })
+    } else {
+        json!({
+            "query": args.query,
+            "tokens": tokens,
+            "invariants": all_invariants,
+            "hazards": all_hazards,
+            "by_layer": by_layer,
+        })
+    };
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
 }
