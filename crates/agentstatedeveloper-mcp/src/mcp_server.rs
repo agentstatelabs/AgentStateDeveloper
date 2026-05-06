@@ -17,8 +17,9 @@ use agentstatedeveloper_adapters::default_adapters;
 use agentstatedeveloper_core::{
     ASD_PATH_PREFIX, AsgEffectStore, AsgIndexStore, AsgLedgerStore, AsgScratchStore, AuditEvent,
     Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory, EffectDecl, EffectStore,
-    Engine, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Rebind, ScratchEntry, ScratchFilter,
-    ScratchStatus, ScratchStore, Situation, actions, emit_audit, event_types, paths,
+    Engine, FtsFilters, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Rebind, ScratchEntry,
+    ScratchFilter, ScratchStatus, ScratchStore, SearchFtsDb, Situation, actions, emit_audit,
+    event_types, paths,
 };
 
 /// The AgentStateDeveloper MCP server.
@@ -487,10 +488,11 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Ranked concept search over indexed symbols. Tokenises the query and scores every symbol across qname(4), signature(3), doc(3), ledger(2), file(1). Returns symbols sorted by relevance. Use this when you need to discover entry points for a feature or concept."
+        description = "Ranked concept search over indexed symbols using FTS5/BM25. Returns symbols sorted by relevance. Use this when you need to discover entry points for a feature or concept — 'playhead over clips', 'auth flow', 'export pipeline', etc."
     )]
     async fn code_search(&self, params: Parameters<CodeSearchParams>) -> String {
         let p = params.0;
+        let db_path = self.db_path.clone();
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
 
@@ -504,49 +506,79 @@ impl AsdMcpServer {
             return "[]".to_string();
         }
 
-        let kind_filter = p.kind.as_deref().map(|k| k.to_lowercase());
-        let lang_filter = p.language.as_deref().map(|s| s.to_string());
         let limit = p.limit.max(1) as usize;
+        let filters = FtsFilters {
+            kind: p.kind.as_deref().map(|k| k.to_lowercase()),
+            language: p.language.as_deref().map(|l| l.to_lowercase()),
+        };
 
+        // --- FTS path ---
+        let fts_result = SearchFtsDb::open(&db_path)
+            .ok()
+            .filter(|fts| fts.has_data())
+            .and_then(|fts| fts.search(&p.query, &filters, limit * 4).ok());
+
+        if let Some(hits) = fts_result {
+            let ledger_store = AsgLedgerStore { repo: &engine.repo };
+            let mut scored: Vec<(f64, _)> = hits
+                .into_iter()
+                .map(|hit| {
+                    let entries = ledger_store
+                        .list_entries(&ref_name, &hit.symbol_id)
+                        .unwrap_or_default();
+                    let text = entries.iter().map(|e| e.summary.to_lowercase())
+                        .collect::<Vec<_>>().join(" ");
+                    let boost = if text.is_empty() { 0.0 } else {
+                        tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
+                    };
+                    (hit.bm25_score + boost, hit)
+                })
+                .collect();
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.qname.cmp(&b.1.qname)));
+            scored.truncate(limit);
+
+            let results: Vec<serde_json::Value> = scored.iter().map(|(score, hit)| {
+                serde_json::json!({
+                    "score": score,
+                    "qname": hit.qname,
+                    "kind": hit.kind,
+                    "language": hit.language,
+                    "file": hit.file,
+                    "line": hit.line,
+                    "signature": hit.signature,
+                    "doc": hit.doc,
+                })
+            }).collect();
+            return serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string());
+        }
+
+        // --- Fallback: in-memory O(N) scoring ---
+        let kind_filter = filters.kind;
+        let lang_filter = filters.language;
         let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
         let qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
             Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
             _ => return "[]".to_string(),
         };
-
         let index = AsgIndexStore { repo: &engine.repo };
         let ledger_store = AsgLedgerStore { repo: &engine.repo };
         let mut scored: Vec<(u32, agentstatedeveloper_core::Symbol)> = Vec::new();
-
         for qname in &qnames {
-            let sym = match index.get_symbol_by_qname(&ref_name, &qname) {
+            let sym = match index.get_symbol_by_qname(&ref_name, qname) {
                 Ok(Some(s)) => s,
                 _ => continue,
             };
-            if let Some(ref k) = kind_filter {
-                let sk = match sym.kind {
-                    agentstatedeveloper_core::SymbolKind::Module => "module",
-                    agentstatedeveloper_core::SymbolKind::Function => "function",
-                    agentstatedeveloper_core::SymbolKind::Method => "method",
-                    agentstatedeveloper_core::SymbolKind::Class => "class",
-                    agentstatedeveloper_core::SymbolKind::Variable => "variable",
-                };
-                if sk != k.as_str() { continue; }
-            }
-            if let Some(ref lang) = lang_filter {
-                if &sym.language != lang { continue; }
-            }
+            let sk = format!("{:?}", sym.kind).to_lowercase();
+            if let Some(ref k) = kind_filter { if &sk != k { continue; } }
+            if let Some(ref lang) = lang_filter { if &sym.language != lang { continue; } }
             let qn = sym.qname.to_lowercase();
             let sig = sym.signature.as_deref().unwrap_or("").to_lowercase();
             let doc = sym.doc.as_deref().unwrap_or("").to_lowercase();
             let file = sym.file.to_lowercase();
-            let ledger_text: String = ledger_store
-                .list_entries(&ref_name, &sym.symbol_id)
-                .unwrap_or_default()
-                .iter()
-                .map(|e| e.summary.to_lowercase())
-                .collect::<Vec<_>>()
-                .join(" ");
+            let ledger_text: String = ledger_store.list_entries(&ref_name, &sym.symbol_id)
+                .unwrap_or_default().iter().map(|e| e.summary.to_lowercase())
+                .collect::<Vec<_>>().join(" ");
             let mut score: u32 = 0;
             for token in &tokens {
                 if qn.contains(token.as_str()) { score += 4; }
@@ -557,10 +589,8 @@ impl AsdMcpServer {
             }
             if score > 0 { scored.push((score, sym)); }
         }
-
         scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.qname.cmp(&b.1.qname)));
         scored.truncate(limit);
-
         let results: Vec<serde_json::Value> = scored.iter().map(|(score, sym)| {
             serde_json::json!({
                 "score": score,
@@ -577,10 +607,11 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Feature archaeology in one pass: search for entry points, then expand each with call chains, effects, invariants, and hazards. Use this at the start of any broad investigation — 'playhead over clips', 'auth flow', 'export pipeline', etc."
+        description = "Feature archaeology in one pass: FTS5 search for entry points, then expand each with call chains, effects, invariants, and hazards. Use this at the start of any broad investigation — 'playhead over clips', 'auth flow', 'export pipeline', etc."
     )]
     async fn investigate(&self, params: Parameters<InvestigateParams>) -> String {
         let p = params.0;
+        let db_path = self.db_path.clone();
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
 
@@ -594,65 +625,80 @@ impl AsdMcpServer {
             return serde_json::json!({ "query": p.query, "entry_points": [] }).to_string();
         }
 
-        let kind_filter = p.kind.as_deref().map(|k| k.to_lowercase());
-        let lang_filter = p.language.as_deref().map(|s| s.to_string());
         let depth = p.depth.max(1) as usize;
-
-        let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-        let qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
-            Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
-            _ => return serde_json::json!({ "query": p.query, "entry_points": [] }).to_string(),
+        let filters = FtsFilters {
+            kind: p.kind.as_deref().map(|k| k.to_lowercase()),
+            language: p.language.as_deref().map(|l| l.to_lowercase()),
         };
 
         let index = AsgIndexStore { repo: &engine.repo };
         let ledger_store = AsgLedgerStore { repo: &engine.repo };
         let effect_store = AsgEffectStore { repo: &engine.repo };
-        let mut scored: Vec<(u32, agentstatedeveloper_core::Symbol)> = Vec::new();
 
-        for qname in &qnames {
-            let sym = match index.get_symbol_by_qname(&ref_name, qname) {
-                Ok(Some(s)) => s,
-                _ => continue,
-            };
-            if let Some(ref k) = kind_filter {
-                let sk = match sym.kind {
-                    agentstatedeveloper_core::SymbolKind::Module => "module",
-                    agentstatedeveloper_core::SymbolKind::Function => "function",
-                    agentstatedeveloper_core::SymbolKind::Method => "method",
-                    agentstatedeveloper_core::SymbolKind::Class => "class",
-                    agentstatedeveloper_core::SymbolKind::Variable => "variable",
+        // Find top-N entry points using FTS with hybrid reranking.
+        let top_qnames: Vec<(f64, String)> = {
+            let fts_result = SearchFtsDb::open(&db_path)
+                .ok()
+                .filter(|fts| fts.has_data())
+                .and_then(|fts| fts.search(&p.query, &filters, depth * 4).ok());
+
+            if let Some(hits) = fts_result {
+                let mut sc: Vec<(f64, String)> = hits.into_iter().map(|hit| {
+                    let entries = ledger_store.list_entries(&ref_name, &hit.symbol_id)
+                        .unwrap_or_default();
+                    let text = entries.iter().map(|e| e.summary.to_lowercase())
+                        .collect::<Vec<_>>().join(" ");
+                    let boost = if text.is_empty() { 0.0 } else {
+                        tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
+                    };
+                    (hit.bm25_score + boost, hit.qname)
+                }).collect();
+                sc.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                sc.truncate(depth);
+                sc
+            } else {
+                // Fallback: in-memory scoring.
+                let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+                let qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
+                    Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
+                    _ => vec![],
                 };
-                if sk != k.as_str() { continue; }
+                let kind_filter = filters.kind.clone();
+                let lang_filter = filters.language.clone();
+                let mut sc: Vec<(f64, String)> = Vec::new();
+                for qname in &qnames {
+                    let sym = match index.get_symbol_by_qname(&ref_name, qname) {
+                        Ok(Some(s)) => s,
+                        _ => continue,
+                    };
+                    let sk = format!("{:?}", sym.kind).to_lowercase();
+                    if let Some(ref k) = kind_filter { if &sk != k { continue; } }
+                    if let Some(ref lang) = lang_filter { if &sym.language != lang { continue; } }
+                    let qn = sym.qname.to_lowercase();
+                    let sig = sym.signature.as_deref().unwrap_or("").to_lowercase();
+                    let doc = sym.doc.as_deref().unwrap_or("").to_lowercase();
+                    let file = sym.file.to_lowercase();
+                    let lt: String = ledger_store.list_entries(&ref_name, &sym.symbol_id)
+                        .unwrap_or_default().iter().map(|e| e.summary.to_lowercase())
+                        .collect::<Vec<_>>().join(" ");
+                    let mut score: u32 = 0;
+                    for t in &tokens {
+                        if qn.contains(t.as_str()) { score += 4; }
+                        if !sig.is_empty() && sig.contains(t.as_str()) { score += 3; }
+                        if !doc.is_empty() && doc.contains(t.as_str()) { score += 3; }
+                        if !lt.is_empty() && lt.contains(t.as_str()) { score += 2; }
+                        if file.contains(t.as_str()) { score += 1; }
+                    }
+                    if score > 0 { sc.push((score as f64, sym.qname)); }
+                }
+                sc.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                sc.truncate(depth);
+                sc
             }
-            if let Some(ref lang) = lang_filter {
-                if &sym.language != lang { continue; }
-            }
-            let qn = sym.qname.to_lowercase();
-            let sig = sym.signature.as_deref().unwrap_or("").to_lowercase();
-            let doc = sym.doc.as_deref().unwrap_or("").to_lowercase();
-            let file = sym.file.to_lowercase();
-            let ledger_text: String = ledger_store
-                .list_entries(&ref_name, &sym.symbol_id)
-                .unwrap_or_default()
-                .iter()
-                .map(|e| e.summary.to_lowercase())
-                .collect::<Vec<_>>()
-                .join(" ");
-            let mut score: u32 = 0;
-            for token in &tokens {
-                if qn.contains(token.as_str()) { score += 4; }
-                if !sig.is_empty() && sig.contains(token.as_str()) { score += 3; }
-                if !doc.is_empty() && doc.contains(token.as_str()) { score += 3; }
-                if !ledger_text.is_empty() && ledger_text.contains(token.as_str()) { score += 2; }
-                if file.contains(token.as_str()) { score += 1; }
-            }
-            if score > 0 { scored.push((score, sym)); }
-        }
+        };
 
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.qname.cmp(&b.1.qname)));
-        scored.truncate(depth);
-
-        // Build a symbol_id → Symbol map for call graph resolution.
+        // Build id_map for call graph resolution.
+        let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
         let all_qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
             Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
             _ => vec![],
@@ -676,7 +722,11 @@ impl AsdMcpServer {
         };
 
         let mut entry_points: Vec<serde_json::Value> = Vec::new();
-        for (score, sym) in &scored {
+        for (score, qname) in &top_qnames {
+            let sym = match index.get_symbol_by_qname(&ref_name, qname) {
+                Ok(Some(s)) => s,
+                _ => continue,
+            };
             let callee_ids = index.get_callees(&ref_name, &sym.symbol_id).unwrap_or_default();
             let caller_ids = index.get_callers(&ref_name, &sym.symbol_id).unwrap_or_default();
             let effects = effect_store.get_effects(&ref_name, &sym.symbol_id).unwrap_or(None);
@@ -688,8 +738,8 @@ impl AsdMcpServer {
             for entry in &ledger {
                 let v = serde_json::to_value(entry).unwrap_or_default();
                 match entry.kind {
-                    agentstatedeveloper_core::LedgerKind::Invariant => invariants.push(v),
-                    agentstatedeveloper_core::LedgerKind::Hazard => hazards.push(v),
+                    LedgerKind::Invariant => invariants.push(v),
+                    LedgerKind::Hazard => hazards.push(v),
                     _ => other_ledger.push(v),
                 }
             }
@@ -1698,6 +1748,7 @@ impl AsdMcpServer {
             Some(engine.audit.as_ref()),
             None,
             None,
+            Some(&self.db_path),
         ) {
             Ok(s) => serde_json::json!({
                 "path": p.path,

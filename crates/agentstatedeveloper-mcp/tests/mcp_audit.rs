@@ -61,6 +61,7 @@ fn prime_db(db_path: &std::path::Path) {
                 col: p.end_col,
             },
             signature: p.signature.clone(),
+            doc: None,
         };
         index_store
             .put_symbol(&engine.ref_name, &symbol, "audit-test")

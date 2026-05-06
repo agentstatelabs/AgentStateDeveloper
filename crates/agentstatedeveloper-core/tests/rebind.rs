@@ -23,6 +23,7 @@ fn make_symbol(id: &str, qname: &str) -> Symbol {
         start: Position { line: 1, col: 0 },
         end: Position { line: 5, col: 0 },
         signature: None,
+        doc: None,
     }
 }
 

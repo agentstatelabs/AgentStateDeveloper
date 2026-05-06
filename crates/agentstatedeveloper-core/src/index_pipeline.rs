@@ -44,6 +44,7 @@ use crate::schema::{
     EffectCategory, EffectDecl, Position, Symbol, TransitiveEffect, Verification,
     VerificationSource, VerificationStatus,
 };
+use crate::search_fts::SearchFtsDb;
 use crate::symbol::{canonical_symbol_id, symbol_fingerprint};
 
 use agentstategraph::Repository;
@@ -86,6 +87,7 @@ pub fn run_index(
     audit: Option<&dyn AuditSink>,
     progress: Option<&dyn Fn(&Path, usize, usize)>,
     on_phase: Option<&dyn Fn(&str)>,
+    db_path: Option<&Path>,
 ) -> Result<IndexSummary> {
     let collected = collect_source_files(path, adapters)?;
     let files = collected.recognized;
@@ -153,6 +155,7 @@ pub fn run_index(
         adapter: Arc<dyn LanguageAdapter>,
     }
     let mut file_ctxs: Vec<FileCtx> = Vec::with_capacity(files.len());
+    let mut indexed_symbols: Vec<Symbol> = Vec::new();
 
     for (idx, (file, adapter)) in files.iter().enumerate() {
         if let Some(cb) = progress {
@@ -216,6 +219,7 @@ pub fn run_index(
 
             qname_to_sym_id.insert(p.qname.clone(), symbol_id.clone());
             symbol_count += 1;
+            indexed_symbols.push(sym);
         }
 
         file_ctxs.push(FileCtx { file_str, source, parsed, adapter: Arc::clone(adapter) });
@@ -408,6 +412,32 @@ pub fn run_index(
                 "orphaned_tagged": orphaned_tagged,
             }));
         let _ = sink.emit(&event);
+    }
+
+    // FTS5 update — incremental: upsert every file touched in this run.
+    // Errors are non-fatal; a missing FTS index just means search falls
+    // back to the in-memory path until the next successful index.
+    if let Some(db) = db_path {
+        if let Some(f) = on_phase {
+            f("  updating FTS search index…");
+        }
+        match SearchFtsDb::open(db) {
+            Ok(fts) => {
+                // Group indexed symbols by file for per-file upsert.
+                let mut by_file: HashMap<String, Vec<Symbol>> = HashMap::new();
+                for sym in indexed_symbols {
+                    by_file.entry(sym.file.clone()).or_default().push(sym);
+                }
+                for (file, syms) in &by_file {
+                    if let Err(e) = fts.upsert_file(file, syms) {
+                        eprintln!("asd: FTS upsert warning for {file}: {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("asd: FTS index unavailable (non-fatal): {e}");
+            }
+        }
     }
 
     Ok(IndexSummary {

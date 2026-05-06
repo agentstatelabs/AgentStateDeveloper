@@ -136,6 +136,7 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
         Some(engine.audit.as_ref()),
         Some(progress),
         Some(on_phase),
+        Some(&cfg.db_path),
     )?;
 
     // Unwrap Arc — run_index is done, no other holders.

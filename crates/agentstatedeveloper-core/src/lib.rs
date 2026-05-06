@@ -16,6 +16,7 @@ pub mod paths;
 pub mod policy;
 pub mod repair;
 pub mod schema;
+pub mod search_fts;
 pub mod scratch;
 pub mod sidecar;
 pub mod symbol;
@@ -40,6 +41,7 @@ pub use schema::{
 };
 pub use scratch::{AsgScratchStore, CleanFilter, ScratchFilter, ScratchStore};
 pub use repair::{IssueSeverity, RepairIssue, RepairReport, drop_orphaned_edge_refs, repair_asg, scan_asg};
+pub use search_fts::{FtsFilters, FtsHit, SearchFtsDb};
 pub use sidecar::{hydrate_from_dir, prune_sidecar, sync_to_dir, HydrateSummary, SyncSummary};
 pub use symbol::{canonical_symbol_id, symbol_fingerprint};
 pub use transitive::propagate_transitive;
