@@ -3,7 +3,9 @@
 //!
 //! Patterns mirror `agentstategraph-mcp::server` (same `rmcp` version).
 
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
+use std::process::Command as Proc;
 use std::sync::Arc;
 
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -83,6 +85,20 @@ pub struct InvestigateParams {
 }
 
 fn default_investigate_depth() -> u32 { 5 }
+fn default_impact_depth() -> u32 { 3 }
+fn default_git_depth() -> u32 { 20 }
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ImpactParams {
+    /// Fully-qualified symbol name to analyse.
+    pub qname: String,
+    /// Caller-graph traversal depth (default: 3).
+    #[serde(default = "default_impact_depth")]
+    pub depth: u32,
+    /// Number of recent git commits to look back per touched file (default: 20).
+    #[serde(default = "default_git_depth")]
+    pub git_depth: u32,
+}
 
 #[derive(Deserialize, JsonSchema)]
 pub struct CodeReadParams {
@@ -2259,12 +2275,180 @@ impl AsdMcpServer {
             Err(e) => err_json(&e.to_string()),
         }
     }
+
+    #[tool(
+        description = "Blast-radius analysis for a symbol before editing. Returns transitive callers (up to depth), aggregated effects, invariants/hazards from all callers, affected test symbols, and recent git touches per file. Use this before any code change to understand scope."
+    )]
+    async fn impact(&self, params: Parameters<ImpactParams>) -> String {
+        let p = params.0;
+        let db_path = self.db_path.clone();
+        let layer_overrides = load_layer_overrides(&db_path);
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+
+        let index = AsgIndexStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let effect_store = AsgEffectStore { repo: &engine.repo };
+
+        let symbol = match index.get_symbol_by_qname(&ref_name, &p.qname) {
+            Ok(Some(s)) => s,
+            Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
+            Err(e) => return err_json(&e.to_string()),
+        };
+
+        let tier = symbol_tier(&symbol.file);
+        let layer = classify_layer(&symbol.file, tier, &layer_overrides);
+
+        // Build id_map for call graph resolution.
+        let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+        let all_qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
+            Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
+            _ => vec![],
+        };
+        let mut id_map: std::collections::HashMap<String, agentstatedeveloper_core::Symbol> =
+            std::collections::HashMap::new();
+        for qn in &all_qnames {
+            if let Ok(Some(s)) = index.get_symbol_by_qname(&ref_name, qn) {
+                id_map.insert(s.symbol_id.clone(), s);
+            }
+        }
+
+        // BFS transitive callers.
+        let max_depth = p.depth.max(1) as usize;
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+        visited.insert(symbol.symbol_id.clone());
+        queue.push_back((symbol.symbol_id.clone(), 0));
+
+        let mut caller_rows: Vec<serde_json::Value> = Vec::new();
+        let mut affected_test_rows: Vec<serde_json::Value> = Vec::new();
+        let mut touched_files: Vec<(String, usize)> = vec![(symbol.file.clone(), 0)];
+
+        while let Some((sym_id, depth)) = queue.pop_front() {
+            if depth >= max_depth { continue; }
+            let neighbors = index.get_callers(&ref_name, &sym_id).unwrap_or_default();
+            for nbr_id in neighbors {
+                if visited.contains(&nbr_id) { continue; }
+                visited.insert(nbr_id.clone());
+                if let Some(s) = id_map.get(&nbr_id) {
+                    let t = symbol_tier(&s.file);
+                    let l = classify_layer(&s.file, t, &layer_overrides);
+                    let row = serde_json::json!({
+                        "qname": s.qname,
+                        "file": s.file,
+                        "line": s.start.line,
+                        "depth": depth + 1,
+                        "layer": l,
+                    });
+                    if t == 2 {
+                        affected_test_rows.push(row);
+                    } else {
+                        caller_rows.push(row);
+                    }
+                    if !touched_files.iter().any(|(f, _)| f == &s.file) {
+                        touched_files.push((s.file.clone(), depth + 1));
+                    }
+                    if depth + 1 < max_depth {
+                        queue.push_back((nbr_id, depth + 1));
+                    }
+                }
+            }
+        }
+
+        // Collect invariants/hazards from target + all callers.
+        let all_sym_ids: Vec<String> = std::iter::once(symbol.symbol_id.clone())
+            .chain(visited.iter().cloned())
+            .collect();
+        let mut all_invariants: Vec<serde_json::Value> = Vec::new();
+        let mut all_hazards: Vec<serde_json::Value> = Vec::new();
+        let mut seen_inv: HashSet<String> = HashSet::new();
+        for sym_id in &all_sym_ids {
+            let entries = ledger_store.list_entries(&ref_name, sym_id).unwrap_or_default();
+            for entry in entries {
+                let key = entry.summary.clone();
+                match entry.kind {
+                    LedgerKind::Invariant => {
+                        if seen_inv.insert(key) {
+                            let mut v = serde_json::to_value(&entry).unwrap_or_default();
+                            if let Some(obj) = v.as_object_mut() {
+                                obj.insert("source_symbol_id".to_string(), serde_json::json!(sym_id));
+                            }
+                            all_invariants.push(v);
+                        }
+                    }
+                    LedgerKind::Hazard => {
+                        let mut v = serde_json::to_value(&entry).unwrap_or_default();
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.insert("source_symbol_id".to_string(), serde_json::json!(sym_id));
+                        }
+                        all_hazards.push(v);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Effects for the target symbol.
+        let effects = effect_store.get_effects(&ref_name, &symbol.symbol_id).unwrap_or(None);
+
+        // Recent git touches.
+        let git_depth = p.git_depth.max(1) as usize;
+        let recently_touched = mcp_git_recent_touches(&touched_files, git_depth);
+
+        let mut sym_val = serde_json::to_value(&symbol).unwrap_or_default();
+        if let Some(obj) = sym_val.as_object_mut() { obj.remove("body"); }
+
+        serde_json::to_string(&serde_json::json!({
+            "symbol": sym_val,
+            "layer": layer,
+            "caller_count": caller_rows.len(),
+            "test_count": affected_test_rows.len(),
+            "invariants": all_invariants,
+            "hazards": all_hazards,
+            "effects": effects,
+            "callers": caller_rows,
+            "affected_tests": affected_test_rows,
+            "recently_touched": recently_touched,
+        })).unwrap_or_else(|_| "{}".to_string())
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for AsdMcpServer {}
 
 // -- Helpers ----------------------------------------------------------------
+
+fn mcp_git_recent_touches(files: &[(String, usize)], git_depth: usize) -> serde_json::Value {
+    let mut result: Vec<serde_json::Value> = Vec::new();
+    let mut sorted = files.to_vec();
+    sorted.sort_by_key(|(_, d)| *d);
+    for (file, _) in &sorted {
+        let output = Proc::new("git")
+            .args(["log", "--follow", &format!("-n{git_depth}"),
+                   "--pretty=format:%H\x1f%an\x1f%ad\x1f%s", "--date=short", "--", file])
+            .output();
+        let commits: Vec<serde_json::Value> = match output {
+            Ok(out) if out.status.success() => {
+                String::from_utf8_lossy(&out.stdout).lines()
+                    .filter(|l| !l.is_empty())
+                    .filter_map(|line| {
+                        let p: Vec<&str> = line.splitn(4, '\x1f').collect();
+                        if p.len() == 4 {
+                            Some(serde_json::json!({
+                                "sha": &p[0][..8.min(p[0].len())],
+                                "author": p[1], "date": p[2], "message": p[3],
+                            }))
+                        } else { None }
+                    }).collect()
+            }
+            _ => vec![],
+        };
+        if !commits.is_empty() {
+            result.push(serde_json::json!({ "file": file, "commits": commits }));
+        }
+    }
+    serde_json::json!(result)
+}
 
 fn err_json(msg: &str) -> String {
     serde_json::to_string(&serde_json::json!({ "error": msg }))

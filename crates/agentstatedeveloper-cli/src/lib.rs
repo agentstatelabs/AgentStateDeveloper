@@ -148,6 +148,10 @@ pub enum Command {
 
     /// Show index health: age, symbol count, and optionally dirty source files.
     Status(commands::status::StatusArgs),
+
+    /// Blast-radius analysis before editing a symbol: transitive callers,
+    /// aggregated effects, invariants/hazards, affected tests, and recent git touches.
+    Impact(commands::impact::ImpactArgs),
 }
 
 /// Resolve [`Config`] from the parsed CLI flags.
@@ -188,5 +192,6 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Search(args) => search::run(cfg, args),
         Command::Investigate(args) => investigate::run(cfg, args),
         Command::Status(args) => status::run(cfg, args),
+        Command::Impact(args) => impact::run(cfg, args),
     }
 }
