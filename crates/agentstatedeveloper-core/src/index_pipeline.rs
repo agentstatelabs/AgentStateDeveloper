@@ -131,9 +131,7 @@ pub fn run_index(
     };
 
     let mut symbol_count = 0usize;
-    let mut effect_count = 0usize;
     let mut all_edges: Vec<CallEdge> = Vec::new();
-    let mut all_symbol_ids: Vec<String> = Vec::new();
 
     // Pre-populate qname_to_sym_id from previously-indexed symbols so that
     // cross-package call edges (caller in this run → callee from a prior run)
@@ -216,16 +214,29 @@ pub fn run_index(
                 .insert(code_key, sym_val);
 
             qname_to_sym_id.insert(p.qname.clone(), symbol_id.clone());
-            all_symbol_ids.push(symbol_id);
             symbol_count += 1;
-            effect_count += 1;
         }
 
         file_ctxs.push(FileCtx { file_str, source, parsed, adapter: Arc::clone(adapter) });
     }
 
+    // Authoritative counts: by_qname is keyed by qname so duplicate qnames
+    // silently overwrite.  Capture the deduped size before flushing.
+    let unique_symbol_count = by_qname.len();
+    let unique_effect_count = by_effects.len();
+    if symbol_count != unique_symbol_count {
+        // More parsed than written — qname collisions (e.g. test doubles that
+        // shadow a production type's qname).  Not an error; just report it.
+        eprintln!(
+            "  note: {} qname collision(s) — {} symbols parsed, {} unique written",
+            symbol_count - unique_symbol_count,
+            symbol_count,
+            unique_symbol_count,
+        );
+    }
+
     if let Some(f) = on_phase {
-        f(&format!("  {} files parsed — committing symbols + effects…", symbol_count));
+        f(&format!("  {} files parsed — committing symbols + effects…", unique_symbol_count));
     }
 
     // -----------------------------------------------------------------------
@@ -288,7 +299,7 @@ pub fn run_index(
     let opts1 = CommitOptions::new(
         agent_id,
         IntentCategory::Checkpoint,
-        format!("asd index: {} symbols across {} files", symbol_count, files.len()),
+        format!("asd index: {} symbols across {} files", unique_symbol_count, files.len()),
     );
     repo.commit_speculation(spec1, opts1)
         .map_err(|e| AsdError::Other(e.to_string()))?;
@@ -297,6 +308,16 @@ pub fn run_index(
     // Pass 2: extract call edges, resolve, write callees+callers as two
     // complete subtree writes → O(N) objects, 1 commit.
     // -----------------------------------------------------------------------
+    // Rebuild all_symbol_ids from the winning qname→sym_id mapping so that
+    // transitive propagation only processes symbol_ids that are actually
+    // present in by_effects (avoids wasted DFS over orphaned IDs from qname
+    // collisions where the loser's symbol_id was pushed but never "won" the
+    // by_qname slot).
+    let all_symbol_ids: Vec<String> = {
+        let mut seen: HashSet<String> = HashSet::new();
+        qname_to_sym_id.values().filter(|id| seen.insert((*id).clone())).cloned().collect()
+    };
+
     if let Some(f) = on_phase {
         f("  building call graph…");
     }
@@ -379,8 +400,8 @@ pub fn run_index(
             .with_payload(serde_json::json!({
                 "path": path.to_string_lossy(),
                 "files": files.len(),
-                "symbols": symbol_count,
-                "effects": effect_count,
+                "symbols": unique_symbol_count,
+                "effects": unique_effect_count,
                 "edges": resolved_edge_count,
                 "transitive_updates": transitive_updates,
                 "orphaned_tagged": orphaned_tagged,
@@ -391,8 +412,8 @@ pub fn run_index(
     Ok(IndexSummary {
         files: files.len(),
         skipped: skipped_files.len(),
-        symbols: symbol_count,
-        effects: effect_count,
+        symbols: unique_symbol_count,
+        effects: unique_effect_count,
         edges: resolved_edge_count,
         intra_module_edges,
         cross_module_edges,
