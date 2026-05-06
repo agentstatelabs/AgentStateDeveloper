@@ -109,6 +109,41 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         entry_points.push(ep);
     }
 
+    // Aggregate invariants and hazards across all entry points into a single
+    // top-level section — the anti-footgun guard an agent should read first.
+    let mut all_invariants: Vec<Value> = Vec::new();
+    let mut all_hazards: Vec<Value> = Vec::new();
+    let mut seen_invariants: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for ep in &entry_points {
+        let qname = ep.get("symbol")
+            .and_then(|s| s.get("qname"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+
+        if let Some(invs) = ep.get("invariants").and_then(Value::as_array) {
+            for inv in invs {
+                let key = inv.get("summary").and_then(Value::as_str).unwrap_or("").to_string();
+                if !key.is_empty() && seen_invariants.insert(key) {
+                    let mut v = inv.clone();
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("source_qname".to_string(), Value::String(qname.to_string()));
+                    }
+                    all_invariants.push(v);
+                }
+            }
+        }
+        if let Some(hzs) = ep.get("hazards").and_then(Value::as_array) {
+            for hz in hzs {
+                let mut v = hz.clone();
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("source_qname".to_string(), Value::String(qname.to_string()));
+                }
+                all_hazards.push(v);
+            }
+        }
+    }
+
     // Build by_layer grouped view (layer → [entry_points]).
     let layer_order = ["ui", "viewmodel", "scheduler", "core_model", "persistence", "utility", "tests", "other"];
     let mut by_layer: serde_json::Map<String, Value> = serde_json::Map::new();
@@ -122,11 +157,15 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         }
     }
 
+    // Invariants and hazards are surfaced first — agents should read them before
+    // diving into entry_points so they don't miss anti-footgun constraints.
     let out = json!({
         "query": args.query,
         "tokens": tokens,
-        "entry_points": entry_points,
+        "invariants": all_invariants,
+        "hazards": all_hazards,
         "by_layer": by_layer,
+        "entry_points": entry_points,
     });
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())

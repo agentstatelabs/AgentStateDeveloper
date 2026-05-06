@@ -151,13 +151,15 @@ pub(crate) fn assemble_symbol_context(
         }
     }
 
+    // Invariants and hazards are anti-footgun guards — surface them first so
+    // agents see them before the call-graph details.
     Ok(json!({
         "symbol": sym_val,
+        "invariants": invariants,
+        "hazards": hazards,
         "callers": resolve(&caller_ids),
         "callees": resolve(&callee_ids),
         "effects": effects,
-        "invariants": invariants,
-        "hazards": hazards,
         "ownership": ownership,
         "proofs": proofs,
         "decisions_and_notes": other_ledger,
