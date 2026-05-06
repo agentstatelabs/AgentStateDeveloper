@@ -128,6 +128,11 @@ pub enum Command {
     /// Returns signature, callers/callees, effects, invariants, hazards, and ledger.
     #[command(name = "context-for")]
     ContextFor(commands::context_for::ContextForArgs),
+
+    /// Scan the ASG for integrity issues (orphaned refs, malformed blobs, stale
+    /// call graph edges) and optionally apply safe auto-corrections.
+    /// By default runs read-only (dry-run); pass `--fix` to apply corrections.
+    Repair(commands::repair::RepairArgs),
 }
 
 /// Resolve [`Config`] from the parsed CLI flags.
@@ -163,5 +168,6 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Callers(args) => graph::run_callers(cfg, args),
         Command::Callees(args) => graph::run_callees(cfg, args),
         Command::ContextFor(args) => context_for::run(cfg, args),
+        Command::Repair(args) => repair::run(cfg, args),
     }
 }

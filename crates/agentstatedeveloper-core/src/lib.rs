@@ -14,6 +14,7 @@ pub mod index;
 pub mod ledger;
 pub mod paths;
 pub mod policy;
+pub mod repair;
 pub mod schema;
 pub mod sidecar;
 pub mod symbol;
@@ -36,6 +37,7 @@ pub use schema::{
     Evidence, LedgerEntry, LedgerKind, Mismatch, Position, Rebind, Symbol, SymbolKind,
     TransitiveEffect, Verification, VerificationSource, VerificationStatus,
 };
+pub use repair::{IssueSeverity, RepairIssue, RepairReport, drop_orphaned_edge_refs, repair_asg, scan_asg};
 pub use sidecar::{hydrate_from_dir, prune_sidecar, sync_to_dir, HydrateSummary, SyncSummary};
 pub use symbol::{canonical_symbol_id, symbol_fingerprint};
 pub use transitive::propagate_transitive;

@@ -10,6 +10,7 @@ pub mod list;
 pub mod mcp;
 pub mod policy;
 pub mod read;
+pub mod repair;
 pub mod sync;
 pub mod trace;
 pub mod verify_effects;

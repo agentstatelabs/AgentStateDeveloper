@@ -34,9 +34,13 @@ pub fn run(cfg: &Config, args: HydrateArgs) -> Result<()> {
 
     let out = json!({
         "dir": dir.join(".asd/v1").display().to_string(),
+        "symbols_loaded": summary.symbols_loaded,
+        "symbols_skipped": summary.symbols_skipped,
         "effects_loaded": summary.effects_loaded,
         "ledger_entries_loaded": summary.ledger_entries_loaded,
-        "symbols_loaded": summary.symbols_loaded,
+        "rebinds_replayed": summary.rebinds_replayed,
+        "blobs_rejected": summary.blobs_rejected,
+        "refs_dropped": summary.refs_dropped,
         "missing_schema_version": summary.missing_schema_version,
         "note": "commit history not restored; run `asd index` to rebuild the semantic index and call graph",
     });

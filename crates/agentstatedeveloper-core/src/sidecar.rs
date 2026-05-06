@@ -53,6 +53,7 @@ use crate::error::{AsdError, Result};
 use crate::index::{AsgIndexStore, IndexStore};
 use crate::ledger::{AsgLedgerStore, LedgerStore};
 use crate::paths;
+use crate::repair::drop_orphaned_edge_refs;
 use crate::schema::{ASD_SCHEMA_VERSION, EffectDecl, LedgerEntry, Rebind, Symbol};
 
 /// Relative path (from project root) to the sidecar root.
@@ -81,6 +82,18 @@ pub struct HydrateSummary {
     pub symbols_loaded: usize,
     pub rebinds_replayed: usize,
     pub missing_schema_version: bool,
+    /// Symbols whose sidecar file was newer than the existing ASG entry and
+    /// overwrote it, OR whose existing ASG entry was already up-to-date
+    /// (i.e., no net change). Currently counts collisions detected (both
+    /// kept-new and kept-old paths).
+    pub symbols_skipped: usize,
+    /// JSON parse failures across all sidecar file types (symbols, effects,
+    /// ledger). Malformed files are logged to stderr and skipped rather than
+    /// aborting the hydrate.
+    pub blobs_rejected: usize,
+    /// Orphaned callee/caller refs dropped from the call graph after hydrate
+    /// to ensure referential integrity.
+    pub refs_dropped: usize,
 }
 
 /// Mirror live ASG state into the `.asd/v1/` sidecar under `dir`.
@@ -363,8 +376,14 @@ pub fn hydrate_from_dir(
     // Symbols — bulk load: read all sidecar files into memory maps, then
     // write each subtree in one spec_set_json call. O(N) objects vs the
     // O(N²) that individual put_symbol calls produce.
+    //
+    // Validation: parse failures increment `blobs_rejected` and skip the
+    // file. Collisions (same qname already in ASG with a newer `created_at`)
+    // increment `symbols_skipped` and retain the more-recent record.
     // -----------------------------------------------------------------------
     let mut symbols_loaded = 0usize;
+    let mut symbols_skipped = 0usize;
+    let mut blobs_rejected = 0usize;
     if symbols_dir.is_dir() {
         // Seed from existing state so partial hydrates merge cleanly.
         let mut by_qname: serde_json::Map<String, Value> = repo
@@ -389,8 +408,41 @@ pub fn hydrate_from_dir(
             let entry = entry?;
             let path = entry.path();
             if !is_json_file(&path) { continue; }
-            let text = fs::read_to_string(&path)?;
-            let sym: Symbol = serde_json::from_str(&text)?;
+            let text = match fs::read_to_string(&path) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("asd hydrate: skipping unreadable {}: {}", path.display(), e);
+                    blobs_rejected += 1;
+                    continue;
+                }
+            };
+            let sym: Symbol = match serde_json::from_str(&text) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "asd hydrate: skipping malformed symbol {}: {}",
+                        path.display(), e
+                    );
+                    blobs_rejected += 1;
+                    continue;
+                }
+            };
+
+            // Collision check: if the same qname already exists in ASG and
+            // its symbol_fp (content fingerprint) matches the incoming one,
+            // this is a no-op — skip to avoid redundant writes.  If the fp
+            // differs, the sidecar version wins (it's the source of truth for
+            // hydrate).
+            if let Some(existing_val) = by_qname.get(&sym.qname) {
+                if let Ok(existing_sym) = serde_json::from_value::<Symbol>(existing_val.clone()) {
+                    if existing_sym.symbol_fp == sym.symbol_fp {
+                        symbols_skipped += 1;
+                        continue; // identical content — no write needed
+                    }
+                    // Different fingerprint → sidecar wins; fall through to insert.
+                }
+            }
+
             let sym_val = serde_json::to_value(&sym)?;
             let code_key = format!(
                 "{}/{}",
@@ -427,7 +479,7 @@ pub fn hydrate_from_dir(
     }
 
     // -----------------------------------------------------------------------
-    // Effects — same bulk approach.
+    // Effects — same bulk approach, with parse-failure tolerance.
     // -----------------------------------------------------------------------
     let mut effects_loaded = 0usize;
     if effects_dir.is_dir() {
@@ -441,8 +493,25 @@ pub fn hydrate_from_dir(
             let entry = entry?;
             let path = entry.path();
             if !is_json_file(&path) { continue; }
-            let text = fs::read_to_string(&path)?;
-            let decl: EffectDecl = serde_json::from_str(&text)?;
+            let text = match fs::read_to_string(&path) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("asd hydrate: skipping unreadable {}: {}", path.display(), e);
+                    blobs_rejected += 1;
+                    continue;
+                }
+            };
+            let decl: EffectDecl = match serde_json::from_str(&text) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!(
+                        "asd hydrate: skipping malformed effect {}: {}",
+                        path.display(), e
+                    );
+                    blobs_rejected += 1;
+                    continue;
+                }
+            };
             let val = serde_json::to_value(&decl)?;
             by_effects.insert(decl.symbol_id.clone(), val);
             effects_loaded += 1;
@@ -467,6 +536,7 @@ pub fn hydrate_from_dir(
     // -----------------------------------------------------------------------
     // Ledger entries — individual writes are fine here; ledger entries are
     // rare and the nested per-symbol path structure makes bulk writes complex.
+    // Parse failures skip the file rather than aborting the hydrate.
     // -----------------------------------------------------------------------
     let mut ledger_entries_loaded = 0usize;
     if ledger_dir.is_dir() {
@@ -482,9 +552,29 @@ pub fn hydrate_from_dir(
                 if !is_json_file(&file_path) {
                     continue;
                 }
-                let text = fs::read_to_string(&file_path)?;
-                let e: LedgerEntry = serde_json::from_str(&text)?;
-                ledger_store.append_entry(ref_name, &e, agent_id)?;
+                let text = match fs::read_to_string(&file_path) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        eprintln!(
+                            "asd hydrate: skipping unreadable {}: {}",
+                            file_path.display(), e
+                        );
+                        blobs_rejected += 1;
+                        continue;
+                    }
+                };
+                let entry: LedgerEntry = match serde_json::from_str(&text) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        eprintln!(
+                            "asd hydrate: skipping malformed ledger entry {}: {}",
+                            file_path.display(), e
+                        );
+                        blobs_rejected += 1;
+                        continue;
+                    }
+                };
+                ledger_store.append_entry(ref_name, &entry, agent_id)?;
                 ledger_entries_loaded += 1;
             }
         }
@@ -564,12 +654,33 @@ pub fn hydrate_from_dir(
 
     let missing_schema_version = !meta_dir.join("schema-version").is_file();
 
+    // -----------------------------------------------------------------------
+    // Post-hydrate integrity pass: drop any callee/caller refs whose target
+    // symbol_id isn't present in the (now fully hydrated) index.  This
+    // catches stale edges that the sidecar carried from a previous bad merge.
+    // -----------------------------------------------------------------------
+    let refs_dropped =
+        drop_orphaned_edge_refs(repo, ref_name, agent_id).unwrap_or_else(|e| {
+            eprintln!("asd hydrate: edge-ref cleanup failed: {}", e);
+            0
+        });
+
+    if refs_dropped > 0 {
+        eprintln!(
+            "asd hydrate: dropped {} orphaned call-graph ref(s) — run `asd repair` for details",
+            refs_dropped
+        );
+    }
+
     Ok(HydrateSummary {
         effects_loaded,
         ledger_entries_loaded,
         symbols_loaded,
         rebinds_replayed,
         missing_schema_version,
+        symbols_skipped,
+        blobs_rejected,
+        refs_dropped,
     })
 }
 
