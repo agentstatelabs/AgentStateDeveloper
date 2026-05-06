@@ -10,7 +10,8 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore, LedgerStore,
-    SearchFtsDb, classify_layer, extract_summary, hybrid_boost, stale_warning, symbol_tier,
+    SearchFtsDb, classify_layer, extract_summary, hybrid_boost, load_layer_overrides,
+    stale_warning, symbol_tier,
 };
 
 use crate::commands::{
@@ -67,6 +68,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             eprintln!("{warn}");
         }
     }
+    let layer_overrides = load_layer_overrides(&cfg.db_path);
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let index_store = AsgIndexStore { repo: &engine.repo };
     let ledger_store = AsgLedgerStore { repo: &engine.repo };
@@ -106,7 +108,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             _ => continue,
         };
         let tier = symbol_tier(&sym.file);
-        let layer = classify_layer(&sym.file, tier);
+        let layer = classify_layer(&sym.file, tier, &layer_overrides);
         let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
         let ctx = assemble_symbol_context(
             &engine,

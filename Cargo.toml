@@ -20,7 +20,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.9.16"
+version = "0.9.17"
 edition = "2024"
 authors = ["Craig Brown"]
 license = "BSL-1.1"
@@ -44,6 +44,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 blake3 = "1"
 anyhow = "1"
 tokio = { version = "1", features = ["full"] }
+toml = "0.8"
 
 # Parsing
 tree-sitter = "0.24"

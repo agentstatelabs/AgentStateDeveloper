@@ -19,7 +19,8 @@ use agentstatedeveloper_core::{
     Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory, EffectDecl, EffectStore,
     Engine, FtsFilters, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Rebind, ScratchEntry,
     ScratchFilter, ScratchStatus, ScratchStore, SearchFtsDb, Situation, actions, classify_layer,
-    emit_audit, event_types, extract_summary, hybrid_boost, is_stopword, paths, symbol_tier,
+    emit_audit, event_types, extract_summary, hybrid_boost, is_stopword, load_layer_overrides,
+    paths, symbol_tier,
 };
 
 /// The AgentStateDeveloper MCP server.
@@ -499,6 +500,7 @@ impl AsdMcpServer {
     async fn code_search(&self, params: Parameters<CodeSearchParams>) -> String {
         let p = params.0;
         let db_path = self.db_path.clone();
+        let layer_overrides = load_layer_overrides(&db_path);
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
 
@@ -548,7 +550,7 @@ impl AsdMcpServer {
 
             let results: Vec<serde_json::Value> = scored.iter().map(|(score, hit)| {
                 let tier = hit.tier;
-                let layer = classify_layer(&hit.file, tier);
+                let layer = classify_layer(&hit.file, tier, &layer_overrides);
                 let summary = extract_summary(hit.doc.as_deref(), hit.signature.as_deref());
                 serde_json::json!({
                     "score": score,
@@ -607,7 +609,7 @@ impl AsdMcpServer {
         scored.truncate(limit);
         let results: Vec<serde_json::Value> = scored.iter().map(|(score, sym)| {
             let tier = symbol_tier(&sym.file);
-            let layer = classify_layer(&sym.file, tier);
+            let layer = classify_layer(&sym.file, tier, &layer_overrides);
             let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
             serde_json::json!({
                 "score": score,
@@ -632,6 +634,7 @@ impl AsdMcpServer {
     async fn investigate(&self, params: Parameters<InvestigateParams>) -> String {
         let p = params.0;
         let db_path = self.db_path.clone();
+        let layer_overrides = load_layer_overrides(&db_path);
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
 
@@ -767,7 +770,7 @@ impl AsdMcpServer {
             }
 
             let tier = symbol_tier(&sym.file);
-            let layer = classify_layer(&sym.file, tier);
+            let layer = classify_layer(&sym.file, tier, &layer_overrides);
             let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
             entry_points.push(serde_json::json!({
                 "score": score,

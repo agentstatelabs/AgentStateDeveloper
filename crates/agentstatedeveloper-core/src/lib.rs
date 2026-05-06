@@ -41,7 +41,7 @@ pub use schema::{
 };
 pub use scratch::{AsgScratchStore, CleanFilter, ScratchFilter, ScratchStore};
 pub use repair::{IssueSeverity, RepairIssue, RepairReport, drop_orphaned_edge_refs, repair_asg, scan_asg};
-pub use search_fts::{FtsFilters, FtsHit, SearchFtsDb, SymbolTier, classify_layer, extract_summary, hybrid_boost, is_stopword, symbol_tier};
+pub use search_fts::{FtsFilters, FtsHit, SearchFtsDb, SymbolTier, classify_layer, extract_summary, hybrid_boost, is_stopword, load_layer_overrides, symbol_tier};
 pub use search_fts::{format_age, stale_warning};
 pub use sidecar::{hydrate_from_dir, prune_sidecar, sync_to_dir, HydrateSummary, SyncSummary};
 pub use symbol::{canonical_symbol_id, symbol_fingerprint};

@@ -537,20 +537,87 @@ pub fn symbol_tier(file: &str) -> SymbolTier {
     if is_test_file(file) { 2 } else if is_utility_file(file) { 1 } else { 0 }
 }
 
+/// Load user-defined layer overrides from `.asd/layers.toml` next to `db_path`.
+///
+/// Returns a vec of `(path_substring, layer_name)` pairs in declaration order.
+/// Unknown layer names are silently skipped. Returns an empty vec if the file
+/// does not exist or cannot be parsed.
+///
+/// Config format:
+/// ```toml
+/// # .asd/layers.toml
+/// [patterns]
+/// "Sources/Networking" = "persistence"
+/// "Sources/Features"   = "core_model"
+/// "Sources/UI"         = "ui"
+/// ```
+pub fn load_layer_overrides(db_path: &std::path::Path) -> Vec<(String, String)> {
+    let candidates = [
+        db_path.parent().map(|p| p.join(".asd").join("layers.toml")),
+        db_path.parent().map(|p| p.join("layers.toml")),
+    ];
+
+    for maybe_path in candidates.iter().flatten() {
+        let Ok(text) = std::fs::read_to_string(maybe_path) else { continue };
+        #[derive(serde::Deserialize)]
+        struct LayersFile { patterns: Option<toml::Table> }
+        let Ok(parsed) = toml::from_str::<LayersFile>(&text) else { continue };
+        let Some(patterns) = parsed.patterns else { continue };
+        let pairs: Vec<(String, String)> = patterns
+            .into_iter()
+            .filter_map(|(k, v)| {
+                let layer = v.as_str()?;
+                validate_layer_name(layer).map(|l| (k.to_lowercase(), l.to_string()))
+            })
+            .collect();
+        if !pairs.is_empty() {
+            return pairs;
+        }
+    }
+    vec![]
+}
+
+fn validate_layer_name(name: &str) -> Option<&'static str> {
+    match name {
+        "ui" => Some("ui"),
+        "viewmodel" => Some("viewmodel"),
+        "scheduler" => Some("scheduler"),
+        "core_model" => Some("core_model"),
+        "persistence" => Some("persistence"),
+        "utility" => Some("utility"),
+        "tests" => Some("tests"),
+        "other" => Some("other"),
+        _ => None,
+    }
+}
+
 /// Classify a source file into a workflow layer for `asd investigate` grouping.
 ///
 /// Returns one of: `"ui"`, `"viewmodel"`, `"core_model"`, `"scheduler"`,
 /// `"persistence"`, `"utility"`, `"tests"`, or `"other"`.
 ///
+/// `overrides` is a slice of `(path_substring, layer_name)` pairs loaded from
+/// `.asd/layers.toml`. User entries are checked first in order; the first
+/// substring match wins. Pass `&[]` to use only built-in patterns.
+///
 /// Classification is purely file-path based — directory names and filename
 /// suffixes are matched against common patterns for each layer. The `tier`
 /// argument is used so that tier-2 (test) files always land in `"tests"` and
 /// tier-1 (utility) files always land in `"utility"` regardless of path.
-pub fn classify_layer(file: &str, tier: SymbolTier) -> &'static str {
+pub fn classify_layer(file: &str, tier: SymbolTier, overrides: &[(String, String)]) -> &'static str {
     if tier == 2 { return "tests"; }
     if tier == 1 { return "utility"; }
 
+    // User-defined overrides take priority over built-in patterns.
     let lower = file.to_lowercase();
+    for (pattern, layer) in overrides {
+        if lower.contains(pattern.as_str()) {
+            if let Some(l) = validate_layer_name(layer) {
+                return l;
+            }
+        }
+    }
+
     let segments: Vec<&str> = lower.split(|c| c == '/' || c == '\\').collect();
     let filename = segments.last().copied().unwrap_or("");
     // Strip extension to check suffix patterns.
@@ -1065,14 +1132,50 @@ mod tests {
 
     #[test]
     fn layer_classification() {
-        assert_eq!(classify_layer("App/Views/DriftPlayheadView.swift", 0), "ui");
-        assert_eq!(classify_layer("App/ViewModel/DriftPlayheadViewModel.swift", 0), "viewmodel");
-        assert_eq!(classify_layer("App/Scheduler/DriftScheduler.swift", 0), "scheduler");
-        assert_eq!(classify_layer("App/Engine/AudioEngine.swift", 0), "scheduler");
-        assert_eq!(classify_layer("App/Storage/ClipRepository.swift", 0), "persistence");
-        assert_eq!(classify_layer("App/Domain/Clip.swift", 0), "core_model");
-        assert_eq!(classify_layer("App/Previews/DriftView_Previews.swift", 1), "utility");
-        assert_eq!(classify_layer("Tests/DriftTests.swift", 2), "tests");
-        assert_eq!(classify_layer("App/AppDelegate.swift", 0), "other");
+        assert_eq!(classify_layer("App/Views/DriftPlayheadView.swift", 0, &[]), "ui");
+        assert_eq!(classify_layer("App/ViewModel/DriftPlayheadViewModel.swift", 0, &[]), "viewmodel");
+        assert_eq!(classify_layer("App/Scheduler/DriftScheduler.swift", 0, &[]), "scheduler");
+        assert_eq!(classify_layer("App/Engine/AudioEngine.swift", 0, &[]), "scheduler");
+        assert_eq!(classify_layer("App/Storage/ClipRepository.swift", 0, &[]), "persistence");
+        assert_eq!(classify_layer("App/Domain/Clip.swift", 0, &[]), "core_model");
+        assert_eq!(classify_layer("App/Previews/DriftView_Previews.swift", 1, &[]), "utility");
+        assert_eq!(classify_layer("Tests/DriftTests.swift", 2, &[]), "tests");
+        assert_eq!(classify_layer("App/AppDelegate.swift", 0, &[]), "other");
+    }
+
+    #[test]
+    fn layer_overrides_respected() {
+        // Keys in overrides must be lowercase (as produced by load_layer_overrides).
+        let overrides = vec![
+            ("custominfra".to_string(), "persistence".to_string()),
+            ("bizlogic".to_string(), "core_model".to_string()),
+        ];
+        assert_eq!(classify_layer("App/CustomInfra/Repo.swift", 0, &overrides), "persistence");
+        assert_eq!(classify_layer("App/BizLogic/Workflow.swift", 0, &overrides), "core_model");
+        // Non-matching path falls through to built-in rules.
+        assert_eq!(classify_layer("App/Views/Foo.swift", 0, &overrides), "ui");
+    }
+
+    #[test]
+    fn load_layer_overrides_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let overrides = load_layer_overrides(&tmp.path().join("asd.db"));
+        assert!(overrides.is_empty());
+    }
+
+    #[test]
+    fn load_layer_overrides_parses_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let asd_dir = tmp.path().join(".asd");
+        std::fs::create_dir_all(&asd_dir).unwrap();
+        std::fs::write(
+            asd_dir.join("layers.toml"),
+            "[patterns]\nInfra = \"persistence\"\nBusiness = \"core_model\"\n",
+        ).unwrap();
+        // load_layer_overrides takes the db_path (not the project root) and uses its parent.
+        let overrides = load_layer_overrides(&tmp.path().join("asd.db"));
+        assert_eq!(overrides.len(), 2);
+        assert!(overrides.contains(&("infra".to_string(), "persistence".to_string())));
+        assert!(overrides.contains(&("business".to_string(), "core_model".to_string())));
     }
 }
