@@ -67,18 +67,44 @@ impl LanguageAdapter for RustAdapter {
     }
 }
 
+/// Walk path components and return the tail after the first `src` segment.
+/// Falls back to the full path for crates without that convention.
+///
+/// Examples:
+/// - `src/engine.rs`            → `engine.rs`
+/// - `crates/foo/src/lib.rs`    → `lib.rs`
+/// - `main.rs`                  → `main.rs`  (no `src` segment, unchanged)
+fn strip_src_prefix(path: &str) -> &str {
+    let mut offset = 0usize;
+    for part in path.split('/') {
+        if part == "src" {
+            let after = offset + part.len() + 1;
+            if after < path.len() {
+                return &path[after..];
+            }
+        }
+        offset += part.len() + 1;
+    }
+    path
+}
+
 /// Derive the dotted module prefix for a file path.
 ///
-/// `src/engine.rs` -> `src.engine`
-/// `./foo/bar.rs`  -> `foo.bar`
-/// `main.rs`       -> `main`
-/// `lib.rs`        -> `lib`
+/// Anchors at the `src/` boundary so the prefix is stable regardless of
+/// which directory `asd index` was invoked from.
+///
+/// `src/engine.rs`              -> `engine`
+/// `crates/mylib/src/lib.rs`    -> `lib`
+/// `./foo/bar.rs`               -> `foo.bar`  (no src segment, fallback)
+/// `main.rs`                    -> `main`
+/// `lib.rs`                     -> `lib`
 fn module_qname_prefix(file: &str) -> String {
     let mut s = file;
     if let Some(stripped) = s.strip_prefix("./") {
         s = stripped;
     }
     let s = s.strip_suffix(".rs").unwrap_or(s);
+    let s = strip_src_prefix(s);
     s.replace('\\', "/").replace('/', ".")
 }
 
@@ -869,9 +895,22 @@ mod tests {
 
     #[test]
     fn module_prefix_strips_rs_and_leading_dot_slash() {
-        assert_eq!(module_qname_prefix("src/engine.rs"), "src.engine");
+        // src/ anchor — stable regardless of index root
+        assert_eq!(module_qname_prefix("src/engine.rs"), "engine");
+        assert_eq!(module_qname_prefix("crates/mylib/src/lib.rs"), "lib");
+        assert_eq!(module_qname_prefix("src/payments/charge.rs"), "payments.charge");
+        // no src segment — full relative path (fallback)
         assert_eq!(module_qname_prefix("./foo/bar.rs"), "foo.bar");
         assert_eq!(module_qname_prefix("lib.rs"), "lib");
+        assert_eq!(module_qname_prefix("main.rs"), "main");
+    }
+
+    #[test]
+    fn strip_src_prefix_variants() {
+        assert_eq!(strip_src_prefix("src/engine.rs"), "engine.rs");
+        assert_eq!(strip_src_prefix("crates/foo/src/lib.rs"), "lib.rs");
+        assert_eq!(strip_src_prefix("main.rs"), "main.rs");
+        assert_eq!(strip_src_prefix("nosrc/foo.rs"), "nosrc/foo.rs");
     }
 
     #[test]
@@ -891,15 +930,15 @@ pub enum Status { Ok, Err }
         let a = RustAdapter::new();
         let syms = a.parse_symbols("src/engine.rs", src).unwrap();
         let qnames: Vec<_> = syms.iter().map(|s| s.qname.clone()).collect();
-        assert!(qnames.contains(&"src.engine.Engine".to_string()), "got {qnames:?}");
-        assert!(qnames.contains(&"src.engine.Engine".to_string()), "got {qnames:?}");
-        assert!(qnames.contains(&"src.engine.Engine.open".to_string()), "got {qnames:?}");
-        assert!(qnames.contains(&"src.engine.Engine.run".to_string()), "got {qnames:?}");
-        assert!(qnames.contains(&"src.engine.top_level".to_string()), "got {qnames:?}");
-        assert!(qnames.contains(&"src.engine.Status".to_string()), "got {qnames:?}");
-        let open = syms.iter().find(|s| s.qname == "src.engine.Engine.open").unwrap();
+        // src/ is stripped — qnames are anchored to the crate interior
+        assert!(qnames.contains(&"engine.Engine".to_string()), "got {qnames:?}");
+        assert!(qnames.contains(&"engine.Engine.open".to_string()), "got {qnames:?}");
+        assert!(qnames.contains(&"engine.Engine.run".to_string()), "got {qnames:?}");
+        assert!(qnames.contains(&"engine.top_level".to_string()), "got {qnames:?}");
+        assert!(qnames.contains(&"engine.Status".to_string()), "got {qnames:?}");
+        let open = syms.iter().find(|s| s.qname == "engine.Engine.open").unwrap();
         assert_eq!(open.kind, SymbolKind::Method);
-        let top = syms.iter().find(|s| s.qname == "src.engine.top_level").unwrap();
+        let top = syms.iter().find(|s| s.qname == "engine.top_level").unwrap();
         assert_eq!(top.kind, SymbolKind::Function);
     }
 
@@ -942,7 +981,8 @@ pub trait Store {
         let a = RustAdapter::new();
         let syms = a.parse_symbols("src/store.rs", src).unwrap();
         let qnames: Vec<_> = syms.iter().map(|s| s.qname.clone()).collect();
-        assert!(qnames.contains(&"src.store.Store".to_string()), "got {qnames:?}");
-        assert!(qnames.contains(&"src.store.Store.load".to_string()), "got {qnames:?}");
+        // src/ is stripped
+        assert!(qnames.contains(&"store.Store".to_string()), "got {qnames:?}");
+        assert!(qnames.contains(&"store.Store.load".to_string()), "got {qnames:?}");
     }
 }

@@ -70,10 +70,33 @@ impl LanguageAdapter for RubyAdapter {
 // qname helpers
 // -----------------------------------------------------------------------------
 
-/// `app/models/payment.rb` → `app.models.payment`
+/// Walk path components and return the tail after the first `lib` segment.
+/// Falls back to the full path for non-gem layouts (e.g. Rails `app/`).
+///
+/// Examples:
+/// - `lib/myapp/parser.rb`      → `myapp/parser.rb`
+/// - `gems/foo/lib/foo/bar.rb`  → `foo/bar.rb`
+/// - `app/models/user.rb`       → `app/models/user.rb`  (no `lib`, unchanged)
+fn strip_lib_prefix(path: &str) -> &str {
+    let mut offset = 0usize;
+    for part in path.split('/') {
+        if part == "lib" {
+            let after = offset + part.len() + 1;
+            if after < path.len() {
+                return &path[after..];
+            }
+        }
+        offset += part.len() + 1;
+    }
+    path
+}
+
+/// `lib/myapp/parser.rb`   → `myapp.parser`  (gem convention, anchored at lib/)
+/// `app/models/payment.rb` → `app.models.payment`  (Rails — no lib/, fallback)
 fn file_qname_prefix(file: &str) -> String {
     let s = file.strip_prefix("./").unwrap_or(file);
     let s = s.strip_suffix(".rb").unwrap_or(s);
+    let s = strip_lib_prefix(s);
     s.replace('/', ".")
 }
 
@@ -814,9 +837,20 @@ end
 
     #[test]
     fn file_prefix_strips_rb_extension() {
+        // lib/ anchor — stable for gem convention
+        assert_eq!(file_qname_prefix("lib/myapp/parser.rb"), "myapp.parser");
+        assert_eq!(file_qname_prefix("gems/foo/lib/foo/bar.rb"), "foo.bar");
+        assert_eq!(file_qname_prefix("./lib/helpers.rb"), "helpers");
+        // no lib segment — full relative path (Rails app/ or bare files)
         assert_eq!(file_qname_prefix("app/models/user.rb"), "app.models.user");
-        assert_eq!(file_qname_prefix("./lib/helpers.rb"), "lib.helpers");
         assert_eq!(file_qname_prefix("charge.rb"), "charge");
+    }
+
+    #[test]
+    fn strip_lib_prefix_variants() {
+        assert_eq!(strip_lib_prefix("lib/foo/bar.rb"), "foo/bar.rb");
+        assert_eq!(strip_lib_prefix("gems/foo/lib/foo.rb"), "foo.rb");
+        assert_eq!(strip_lib_prefix("app/models/user.rb"), "app/models/user.rb");
     }
 
     #[test]

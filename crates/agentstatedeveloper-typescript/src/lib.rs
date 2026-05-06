@@ -84,11 +84,36 @@ impl LanguageAdapter for TypeScriptAdapter {
     }
 }
 
+/// Walk path components and return the tail after the first `src` segment.
+/// Falls back to the full path for projects without that convention.
+///
+/// Examples:
+/// - `src/components/Button.tsx` → `components/Button.tsx`
+/// - `packages/ui/src/index.ts`  → `index.ts`
+/// - `lib/util.ts`               → `lib/util.ts`  (no `src` segment, unchanged)
+fn strip_src_prefix(path: &str) -> &str {
+    let mut offset = 0usize;
+    for part in path.split('/') {
+        if part == "src" {
+            let after = offset + part.len() + 1;
+            if after < path.len() {
+                return &path[after..];
+            }
+        }
+        offset += part.len() + 1;
+    }
+    path
+}
+
 /// Derive the dotted module prefix for a file path.
 ///
-/// `foo/bar.ts` -> `foo.bar`
-/// `./foo/bar.tsx` -> `foo.bar`
-/// `bar.mts` -> `bar`
+/// Anchors at the `src/` boundary so the prefix is stable regardless of
+/// which directory `asd index` was invoked from.
+///
+/// `src/components/Button.tsx` -> `components.Button`
+/// `foo/bar.ts`                -> `foo.bar`  (no src segment, fallback)
+/// `./foo/bar.tsx`             -> `foo.bar`
+/// `bar.mts`                   -> `bar`
 fn module_qname_prefix(file: &str) -> String {
     let mut s = file;
     if let Some(stripped) = s.strip_prefix("./") {
@@ -100,6 +125,7 @@ fn module_qname_prefix(file: &str) -> String {
             break;
         }
     }
+    let s = strip_src_prefix(s);
     s.replace('\\', "/").replace('/', ".")
 }
 
@@ -1288,10 +1314,23 @@ mod tests {
 
     #[test]
     fn module_prefix_strips_extensions_and_leading_dot_slash() {
+        // src/ anchor — stable regardless of index root
+        assert_eq!(module_qname_prefix("src/components/Button.tsx"), "components.Button");
+        assert_eq!(module_qname_prefix("packages/ui/src/index.ts"), "index");
+        assert_eq!(module_qname_prefix("src/util.mts"), "util");
+        // no src segment — full relative path (fallback)
         assert_eq!(module_qname_prefix("foo/bar.ts"), "foo.bar");
         assert_eq!(module_qname_prefix("./foo/bar.tsx"), "foo.bar");
         assert_eq!(module_qname_prefix("bar.mts"), "bar");
         assert_eq!(module_qname_prefix("a/b/c.cts"), "a.b.c");
+    }
+
+    #[test]
+    fn strip_src_prefix_variants() {
+        assert_eq!(strip_src_prefix("src/util.ts"), "util.ts");
+        assert_eq!(strip_src_prefix("packages/ui/src/index.ts"), "index.ts");
+        assert_eq!(strip_src_prefix("lib/util.ts"), "lib/util.ts");
+        assert_eq!(strip_src_prefix("nosrc/foo.ts"), "nosrc/foo.ts");
     }
 
     #[test]
