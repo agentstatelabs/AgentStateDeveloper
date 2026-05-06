@@ -65,6 +65,15 @@ pub fn is_stopword(token: &str) -> bool {
 // Public types
 // ---------------------------------------------------------------------------
 
+/// Symbol tier — controls default inclusion and scoring penalty.
+///
+/// - `0` Production: app/core/library source; ranked highest, included by default.
+/// - `1` Utility: Preview, Sample, Editor extension, Generated, Mock, Stub, Fixture,
+///        Demo — included by default but penalised in hybrid_boost.
+/// - `2` Test: files in test/spec directories or with test naming conventions —
+///        excluded by default; shown with `--include-tests`.
+pub type SymbolTier = u8;
+
 /// A single ranked result from FTS search.
 #[derive(Debug, Clone)]
 pub struct FtsHit {
@@ -81,7 +90,8 @@ pub struct FtsHit {
     /// Original signature (not expanded).
     pub signature: Option<String>,
     pub doc: Option<String>,
-    pub is_test: bool,
+    /// Symbol tier: 0=production, 1=utility/preview/sample, 2=test.
+    pub tier: SymbolTier,
 }
 
 /// Filters applied before BM25 ranking.
@@ -113,9 +123,9 @@ impl SearchFtsDb {
     }
 
     fn ensure_schema(&self) -> rusqlite::Result<()> {
-        // Version 3: adds is_test UNINDEXED column.
+        // Version 4: replaces is_test UNINDEXED with tier UNINDEXED (0=prod, 1=utility, 2=test).
         // Any version mismatch drops and recreates — data is reproduced by next `asd index`.
-        const SCHEMA_VER: i64 = 3;
+        const SCHEMA_VER: i64 = 4;
 
         let current: i64 = self.conn.query_row(
             "SELECT version FROM asd_fts_meta LIMIT 1",
@@ -144,7 +154,7 @@ impl SearchFtsDb {
                 qname_orig UNINDEXED,
                 sig_orig   UNINDEXED,
                 file_orig  UNINDEXED,
-                is_test    UNINDEXED,
+                tier       UNINDEXED,
                 tokenize   = 'unicode61 remove_diacritics 1'
             );
             CREATE TABLE IF NOT EXISTS asd_search_meta (
@@ -178,12 +188,12 @@ impl SearchFtsDb {
         let doc = sym.doc.as_deref().unwrap_or("");
         let file_exp = expand_text(&sym.file);
         let kind = format!("{:?}", sym.kind).to_lowercase();
-        let is_test = if is_test_file(&sym.file) { "1" } else { "0" };
+        let tier = symbol_tier(&sym.file).to_string();
 
         self.conn.execute(
             "INSERT INTO asd_search_fts(
                  symbol_id, qname, signature, doc, file, language, kind, line,
-                 qname_orig, sig_orig, file_orig, is_test)
+                 qname_orig, sig_orig, file_orig, tier)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             params![
                 sym.symbol_id,
@@ -197,7 +207,7 @@ impl SearchFtsDb {
                 sym.qname,
                 sym.signature.as_deref().unwrap_or(""),
                 sym.file,
-                is_test,
+                tier,
             ],
         )?;
         Ok(())
@@ -245,16 +255,18 @@ impl SearchFtsDb {
             .as_deref()
             .map(|l| format!("AND language = '{}'", l.to_lowercase().replace('\'', "")))
             .unwrap_or_default();
-        let test_clause = if filters.include_tests { "" } else { "AND is_test != '1'" };
+        // Exclude tier=2 (tests) by default. Tier=1 (utility) is included but penalised
+        // in hybrid_boost so production symbols rank above them.
+        let test_clause = if filters.include_tests { "" } else { "AND tier != '2'" };
 
         // Fetch extra for hybrid ledger reranking.
         let fetch = (limit * 4).max(80);
 
         // Columns: 0=symbol_id,1=language,2=kind,3=line,4=doc,
-        //          5=qname_orig,6=sig_orig,7=file_orig,8=is_test,9=score
+        //          5=qname_orig,6=sig_orig,7=file_orig,8=tier,9=score
         let sql = format!(
             "SELECT symbol_id, language, kind, line, doc,
-                    qname_orig, sig_orig, file_orig, is_test,
+                    qname_orig, sig_orig, file_orig, tier,
                     bm25(asd_search_fts, 10.0, 5.0, 5.0, 2.0) AS score
              FROM asd_search_fts
              WHERE asd_search_fts MATCH ?1
@@ -269,7 +281,8 @@ impl SearchFtsDb {
         let hits = stmt.query_map(params![match_expr], |row| {
             let bm25_raw: f64 = row.get(9)?;
             let sig_orig: Option<String> = row.get(6)?;
-            let is_test_str: String = row.get(8).unwrap_or_default();
+            let tier_str: String = row.get(8).unwrap_or_default();
+            let tier: SymbolTier = tier_str.parse().unwrap_or(0);
             Ok(FtsHit {
                 bm25_score: -bm25_raw,
                 symbol_id: row.get(0)?,
@@ -280,7 +293,7 @@ impl SearchFtsDb {
                 qname: row.get(5)?,
                 signature: sig_orig.filter(|s| !s.is_empty()),
                 file: row.get(7)?,
-                is_test: is_test_str == "1",
+                tier,
             })
         })?
         .filter_map(|r| r.ok())
@@ -357,12 +370,77 @@ pub fn hybrid_boost(hit: &FtsHit, tokens: &[String]) -> f64 {
         .count() as f64
         * 2.0;
 
-    path_boost + name_boost
+    // Utility penalty: Preview/Sample/Editor/Generated symbols ranked below production.
+    let tier_penalty = if hit.tier == 1 { -2.0 } else { 0.0 };
+
+    path_boost + name_boost + tier_penalty
 }
 
 // ---------------------------------------------------------------------------
-// Test-file detection
+// Tier classification
 // ---------------------------------------------------------------------------
+
+/// Classify a source file into a symbol tier.
+///
+/// - `2` Test: excluded from results by default (`--include-tests` to include).
+/// - `1` Utility: Preview / Sample / Editor / Generated / Mock — included by
+///        default but penalised in `hybrid_boost` so production ranks first.
+/// - `0` Production: all other source files.
+pub fn symbol_tier(file: &str) -> SymbolTier {
+    if is_test_file(file) { 2 } else if is_utility_file(file) { 1 } else { 0 }
+}
+
+/// Heuristically determine whether a symbol's source file is a utility file
+/// (Preview, Sample, Editor extension, Generated, Mock, Stub, Fixture, Demo).
+/// These are compiled into the app but are not production logic.
+fn is_utility_file(file: &str) -> bool {
+    let lower = file.to_lowercase();
+    let segments: Vec<&str> = lower.split(|c| c == '/' || c == '\\').collect();
+
+    // Directory names that indicate non-production utility trees.
+    const UTILITY_DIRS: &[&str] = &[
+        "previews", "preview", "samples", "sample", "sampledata", "examples", "example",
+        "mocks", "mock", "stubs", "stub", "fixtures", "fixture",
+        "demo", "demos", "editor", "editors", "generated", "gen",
+        "sandbox", "playground", "playgrounds",
+    ];
+    // Also match compound directory names that start with a utility prefix.
+    const UTILITY_PREFIXES: &[&str] = &["mock", "stub", "fake", "sample", "preview", "generated"];
+    if segments.iter().rev().skip(1).any(|s| {
+        UTILITY_DIRS.contains(s) || UTILITY_PREFIXES.iter().any(|p| s.starts_with(p))
+    }) {
+        return true;
+    }
+
+    // Filename patterns.
+    if let Some(filename) = segments.last() {
+        // Swift Previews: FooView_Previews.swift, FooPreview.swift
+        if filename.contains("preview") || filename.contains("_previews") {
+            return true;
+        }
+        // SwiftUI canvas / sample data
+        if filename.contains("sampledata") || filename.contains("sample_data") {
+            return true;
+        }
+        // Generated files: Foo.generated.swift, Foo.g.swift, FooGenerated.swift
+        if filename.contains(".generated.") || filename.contains(".g.") || filename.ends_with("generated.swift") {
+            return true;
+        }
+        // Mock/Stub/Fake: MockFoo.swift, FooMock.kt, FakeBar.ts
+        if filename.starts_with("mock") || filename.contains("_mock.")
+            || filename.starts_with("stub") || filename.contains("_stub.")
+            || filename.starts_with("fake") || filename.contains("_fake.")
+        {
+            return true;
+        }
+        // Xcode Playground files
+        if filename.ends_with(".playground") {
+            return true;
+        }
+    }
+
+    false
+}
 
 /// Heuristically determine whether a symbol's source file is a test file.
 ///
@@ -567,6 +645,54 @@ mod tests {
     }
 
     #[test]
+    fn tier_classification() {
+        // Production — tier 0
+        assert_eq!(symbol_tier("App/ViewModel/DriftPlayheadViewModel.swift"), 0);
+        assert_eq!(symbol_tier("src/payments/charge.py"), 0);
+        assert_eq!(symbol_tier("Packages/AudioEngine/Sources/KarplusStrong.swift"), 0);
+
+        // Utility — tier 1
+        assert_eq!(symbol_tier("App/Previews/DriftView_Previews.swift"), 1);
+        assert_eq!(symbol_tier("App/ViewModel/DriftView_Previews.swift"), 1, "preview filename");
+        assert_eq!(symbol_tier("Mocks/MockAudioEngine.swift"), 1);
+        assert_eq!(symbol_tier("App/SampleData/TimelineFixture.swift"), 1);
+        assert_eq!(symbol_tier("App/Generated/Schema.generated.swift"), 1);
+
+        // Test — tier 2
+        assert_eq!(symbol_tier("Tests/DriftTests/PlayheadTests.swift"), 2);
+        assert_eq!(symbol_tier("tests/test_charge.py"), 2);
+        assert_eq!(symbol_tier("pkg/payments/charge_test.go"), 2);
+    }
+
+    #[test]
+    fn utility_symbols_rank_below_production() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let fts = SearchFtsDb::open(&db_path).unwrap();
+
+        use crate::schema::{Position, Symbol, SymbolKind};
+        let make = |id: &str, qname: &str, file: &str| Symbol {
+            symbol_id: id.into(), symbol_fp: format!("fp_{id}"),
+            qname: qname.into(), language: "swift".into(),
+            kind: SymbolKind::Method, file: file.into(),
+            start: Position { line: 1, col: 0 }, end: Position { line: 5, col: 0 },
+            signature: None, doc: None,
+        };
+
+        let prod = make("prod", "App.VM.refreshDriftPlayhead", "App/ViewModel.swift");
+        let preview = make("preview", "App.Previews.refreshDriftPlayhead", "App/Previews/DriftView_Previews.swift");
+
+        fts.rebuild(&[prod, preview]).unwrap();
+
+        let hits = fts.search("refresh drift playhead", &FtsFilters::default(), 10).unwrap();
+        assert_eq!(hits.len(), 2, "both prod and utility included by default");
+        // Production should rank first due to tier penalty on utility.
+        assert_eq!(hits[0].symbol_id, "prod", "production ranks before preview");
+        assert_eq!(hits[0].tier, 0);
+        assert_eq!(hits[1].tier, 1);
+    }
+
+    #[test]
     fn fts_excludes_tests_by_default() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
@@ -629,7 +755,7 @@ mod tests {
         assert!(!hits.is_empty(), "should find by qname fragment");
         assert_eq!(hits[0].symbol_id, "sym_abc");
         assert_eq!(hits[0].qname, "App.ViewModel.refreshDriftPlayhead", "orig qname preserved");
-        assert!(!hits[0].is_test, "production file not flagged as test");
+        assert_eq!(hits[0].tier, 0, "production file should be tier 0");
 
         let hits2 = fts.search("refresh drift", &FtsFilters::default(), 10).unwrap();
         assert!(!hits2.is_empty(), "should find multi-token");
