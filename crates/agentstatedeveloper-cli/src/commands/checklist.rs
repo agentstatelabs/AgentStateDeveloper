@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, FtsFilters, IndexStore,
-    LedgerKind, LedgerStore, classify_layer, intent_focus, load_layer_overrides, parse_intent,
-    stale_warning, symbol_tier,
+    LedgerKind, LedgerStore, classify_layer, estimate_tokens, intent_focus, load_layer_overrides,
+    parse_intent, stale_warning, symbol_tier, trim_for_agent,
 };
 
 use crate::commands::{
@@ -62,6 +62,14 @@ pub struct ChecklistArgs {
     /// Caller BFS depth for finding affected tests (default: 2).
     #[arg(long, default_value = "2")]
     pub test_depth: usize,
+
+    /// Emit token-budgeted JSON for LLM consumption (implies --json).
+    #[arg(long)]
+    pub agent: bool,
+
+    /// Token budget when --agent is set (default: 8000).
+    #[arg(long, default_value = "8000")]
+    pub agent_budget: usize,
 }
 
 pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
@@ -212,7 +220,7 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
 
     let focus = intent_focus(intent);
 
-    if args.json {
+    if args.agent || args.json {
         let out = json!({
             "query": args.query,
             "intent": if intent.is_empty() { Value::Null } else { json!(intent) },
@@ -223,6 +231,19 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
             "known_hazards": hazards,
             "effects_to_verify": effects_list,
         });
+        let out = if args.agent {
+            let max_list = (args.agent_budget / 500).max(3).min(20);
+            let trimmed = trim_for_agent(&out, max_list);
+            let json_str = serde_json::to_string_pretty(&trimmed)?;
+            let token_est = estimate_tokens(&json_str);
+            let mut v = trimmed;
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("token_estimate".into(), json!(token_est));
+            }
+            v
+        } else {
+            out
+        };
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
         print_markdown(

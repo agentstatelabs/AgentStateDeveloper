@@ -143,7 +143,8 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
                 "results": results,
             });
-            let trimmed = trim_for_agent(&raw, 5);
+            let max_list = (args.agent_budget / 500).max(3).min(20);
+            let trimmed = trim_for_agent(&raw, max_list);
             let json_str = serde_json::to_string_pretty(&trimmed)?;
             let token_est = estimate_tokens(&json_str);
             let mut out = trimmed.clone();

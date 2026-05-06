@@ -45,6 +45,10 @@ pub struct ImpactArgs {
     /// collapses low-signal fields, adds token_estimate.
     #[arg(long)]
     pub agent: bool,
+
+    /// Token budget when --agent is set (default: 8000).
+    #[arg(long, default_value = "8000")]
+    pub agent_budget: usize,
 }
 
 pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
@@ -184,7 +188,8 @@ pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
         "recently_touched": recently_touched,
     });
     let out = if args.agent {
-        let trimmed = trim_for_agent(&out, 5);
+        let max_list = (args.agent_budget / 500).max(3).min(20);
+        let trimmed = trim_for_agent(&out, max_list);
         let json_str = serde_json::to_string_pretty(&trimmed)?;
         let token_est = estimate_tokens(&json_str);
         let mut v = trimmed;
