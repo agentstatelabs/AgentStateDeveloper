@@ -1,0 +1,14 @@
+[package]
+name = "agentstatedeveloper-ruby"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Ruby language adapter for AgentStateDeveloper (tree-sitter-ruby)"
+
+[dependencies]
+agentstatedeveloper-core = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-ruby = "=0.23.0"
+serde_json = { workspace = true }
+thiserror = { workspace = true }

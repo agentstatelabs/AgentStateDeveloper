@@ -29,6 +29,10 @@ impl LanguageAdapter for PythonAdapter {
         "python"
     }
 
+    fn file_extensions(&self) -> &'static [&'static str] {
+        &["py"]
+    }
+
     fn parse_symbols(&self, file: &str, source: &str) -> Result<Vec<ParsedSymbol>> {
         let mut parser = Parser::new();
         parser
@@ -62,11 +66,37 @@ impl LanguageAdapter for PythonAdapter {
     }
 }
 
+/// Walk path components and return the tail after the first `src` segment.
+/// Falls back to the full path for projects without that convention.
+///
+/// Examples:
+/// - `src/mypackage/module.py`  → `mypackage/module.py`
+/// - `lib/src/utils.py`         → `utils.py`
+/// - `mypackage/module.py`      → `mypackage/module.py`  (no `src`, unchanged)
+fn strip_src_prefix(path: &str) -> &str {
+    let mut offset = 0usize;
+    for part in path.split('/') {
+        if part == "src" {
+            let after = offset + part.len() + 1;
+            if after < path.len() {
+                return &path[after..];
+            }
+        }
+        offset += part.len() + 1;
+    }
+    path
+}
+
 /// Derive the dotted module prefix for a file path.
 ///
-/// `foo/bar.py` -> `foo.bar`
-/// `./foo/bar.py` -> `foo.bar`
-/// `bar.py` -> `bar`
+/// Anchors at the `src/` boundary for src-layout projects (PEP 517/518)
+/// so the prefix is stable regardless of which directory `asd index` was
+/// invoked from. Falls back to the full relative path for flat layouts.
+///
+/// `src/mypackage/module.py`   -> `mypackage.module`
+/// `foo/bar.py`                -> `foo.bar`  (no src segment, fallback)
+/// `./foo/bar.py`              -> `foo.bar`
+/// `bar.py`                    -> `bar`
 fn module_qname_prefix(file: &str) -> String {
     let mut s = file;
     if let Some(stripped) = s.strip_prefix("./") {
@@ -74,6 +104,7 @@ fn module_qname_prefix(file: &str) -> String {
     }
     let s = s.strip_suffix(".py").unwrap_or(s);
     // Normalize both slash styles to dots.
+    let s = strip_src_prefix(s);
     s.replace('\\', "/").replace('/', ".")
 }
 
@@ -196,13 +227,7 @@ fn make_parsed_symbol(
     }
 }
 
-/// Extract leading doc from a Python symbol body.
-///
-/// Handles:
-/// - Triple-quoted docstrings: `"""..."""` or `'''...'''` after `def`/`class` header
-/// - Leading `#` comment block immediately before the body (uncommon but used)
 fn extract_python_doc(body: &str) -> Option<String> {
-    // Find the first triple-quoted string in the body (docstring convention).
     for quote in &[r#"""""#, "'''"] {
         if let Some(start) = body.find(quote) {
             let after = start + quote.len();
@@ -221,6 +246,15 @@ fn extract_python_doc(body: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn truncate_doc(s: &str) -> String {
+    const MAX: usize = 512;
+    if s.len() <= MAX {
+        return s.to_string();
+    }
+    let cut = s[..MAX].rfind(' ').unwrap_or(MAX);
+    s[..cut].to_string()
 }
 
 fn extract_function_signature(node: Node<'_>, src: &[u8], name: &str) -> Option<String> {
@@ -447,7 +481,14 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     }
 
     // time.time / time.monotonic / datetime.now -> TimeRead
-    let time_read_patterns = ["time.time", "time.monotonic", "datetime.now"];
+    let time_read_patterns = [
+        "time.time",
+        "time.monotonic",
+        "time.perf_counter",
+        "datetime.now",
+        "datetime.utcnow",
+        "datetime.today",
+    ];
     if let Some(note) = first_match_note(body, &time_read_patterns) {
         effects.push(Effect {
             effect: EffectCategory::TimeRead,
@@ -457,7 +498,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     }
 
     // random.* / secrets.* -> Random
-    let random_patterns = ["random.", "secrets."];
+    let random_patterns = ["random.", "secrets.", "os.urandom("];
     if let Some(note) = first_match_note(body, &random_patterns) {
         effects.push(Effect {
             effect: EffectCategory::Random,
@@ -1201,9 +1242,20 @@ mod tests {
 
     #[test]
     fn module_prefix_strips_py_and_leading_dot_slash() {
+        // src/ anchor — stable for PEP 517 src-layout projects
+        assert_eq!(module_qname_prefix("src/mypackage/module.py"), "mypackage.module");
+        assert_eq!(module_qname_prefix("src/utils.py"), "utils");
+        // no src segment — full relative path (fallback)
         assert_eq!(module_qname_prefix("foo/bar.py"), "foo.bar");
         assert_eq!(module_qname_prefix("./foo/bar.py"), "foo.bar");
         assert_eq!(module_qname_prefix("bar.py"), "bar");
+    }
+
+    #[test]
+    fn strip_src_prefix_variants() {
+        assert_eq!(strip_src_prefix("src/pkg/mod.py"), "pkg/mod.py");
+        assert_eq!(strip_src_prefix("lib/src/utils.py"), "utils.py");
+        assert_eq!(strip_src_prefix("pkg/mod.py"), "pkg/mod.py");
     }
 
     #[test]
@@ -1225,7 +1277,7 @@ mod tests {
     fn infers_fs_read_and_write_from_open() {
         let body = "def f():\n    with open('/tmp/a.txt', 'w') as f:\n        f.write('hi')\n";
         let effects = infer_effects_from_body(body);
-        let cats: Vec<_> = effects.iter().map(|e| e.effect).collect();
+        let cats: Vec<_> = effects.iter().map(|e| e.effect.clone()).collect();
         assert!(cats.contains(&EffectCategory::IoFsRead));
         assert!(cats.contains(&EffectCategory::IoFsWrite));
     }

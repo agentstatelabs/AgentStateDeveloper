@@ -4,12 +4,23 @@ members = [
     "crates/agentstatedeveloper-core",
     "crates/agentstatedeveloper-python",
     "crates/agentstatedeveloper-typescript",
+    "crates/agentstatedeveloper-rust",
+    "crates/agentstatedeveloper-go",
+    "crates/agentstatedeveloper-java",
+    "crates/agentstatedeveloper-csharp",
+    "crates/agentstatedeveloper-ruby",
+    "crates/agentstatedeveloper-kotlin",
+    "crates/agentstatedeveloper-swift",
+    "crates/agentstatedeveloper-adapters",
     "crates/agentstatedeveloper-cli",
     "crates/agentstatedeveloper-mcp",
+    "crates/agentstatedeveloper-audit-pro",
+    "crates/agentstatedeveloper-ratify",
+    "crates/agentstatedeveloper-pro",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.9.22"
 edition = "2024"
 authors = ["Craig Brown"]
 license = "BSL-1.1"
@@ -21,19 +32,23 @@ repository = "https://github.com/agentstatelabs/AgentStateDeveloper"
 agentstategraph = { path = "../stategraph/crates/agentstategraph" }
 agentstategraph-core = { path = "../stategraph/crates/agentstategraph-core" }
 agentstategraph-storage = { path = "../stategraph/crates/agentstategraph-storage" }
+agentstategraph-policy = { path = "../stategraph/crates/agentstategraph-policy" }
 
 # Common
+rusqlite = { version = "0.33", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 blake3 = "1"
 anyhow = "1"
 tokio = { version = "1", features = ["full"] }
+toml = "0.8"
 
 # Parsing
 tree-sitter = "0.24"
+tree-sitter-language = "0.1"
 tree-sitter-python = "0.23"
 tree-sitter-typescript = "0.23"
 
@@ -45,3 +60,16 @@ directories = "5"
 agentstatedeveloper-core = { path = "crates/agentstatedeveloper-core" }
 agentstatedeveloper-python = { path = "crates/agentstatedeveloper-python" }
 agentstatedeveloper-typescript = { path = "crates/agentstatedeveloper-typescript" }
+agentstatedeveloper-rust = { path = "crates/agentstatedeveloper-rust" }
+agentstatedeveloper-go = { path = "crates/agentstatedeveloper-go" }
+agentstatedeveloper-java = { path = "crates/agentstatedeveloper-java" }
+agentstatedeveloper-csharp = { path = "crates/agentstatedeveloper-csharp" }
+agentstatedeveloper-ruby = { path = "crates/agentstatedeveloper-ruby" }
+agentstatedeveloper-kotlin = { path = "crates/agentstatedeveloper-kotlin" }
+agentstatedeveloper-swift = { path = "crates/agentstatedeveloper-swift" }
+agentstatedeveloper-adapters = { path = "crates/agentstatedeveloper-adapters" }
+agentstatedeveloper-cli = { path = "crates/agentstatedeveloper-cli" }
+agentstatedeveloper-mcp = { path = "crates/agentstatedeveloper-mcp" }
+agentstatedeveloper-audit-pro = { path = "crates/agentstatedeveloper-audit-pro" }
+agentstatedeveloper-ratify = { path = "crates/agentstatedeveloper-ratify" }
+agentstatedeveloper-pro = { path = "crates/agentstatedeveloper-pro" }

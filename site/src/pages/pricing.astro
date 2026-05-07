@@ -1,0 +1,308 @@
+---
+import LandingLayout from '../layouts/LandingLayout.astro';
+---
+
+<LandingLayout
+  title="Pricing — AgentStateDeveloper"
+  description="AgentStateDeveloper is open-source at its core. Commercial tiers add the team workflow and forensic audit trail that enterprises need."
+>
+  <section class="pricing-hero">
+    <h1>Simple, transparent tiers</h1>
+    <p class="subtitle">
+      The OSS core is free forever. Pay only for the features that matter at
+      team or enterprise scale.
+    </p>
+  </section>
+
+  <section class="pricing-grid">
+
+    <!-- OSS -->
+    <div class="tier tier--oss">
+      <div class="tier-header">
+        <span class="tier-badge">Open Source</span>
+        <div class="tier-price">Free</div>
+        <div class="tier-price-note">MIT / BSL-1.1 · <code>asd</code> binary</div>
+      </div>
+      <ul class="tier-features">
+        <li>✓ Symbol index (9 languages)</li>
+        <li>✓ Decision ledger — append &amp; read</li>
+        <li>✓ Effect declarations &amp; static inference</li>
+        <li>✓ Call graph (intra + cross-module)</li>
+        <li>✓ Policy gate (file-based, permissive default)</li>
+        <li>✓ Runtime tracer</li>
+        <li>✓ Git sidecar sync / hydrate</li>
+        <li>✓ MCP tool surface (all read + append ops)</li>
+        <li>✓ HTTP API + Lens UI</li>
+        <li>✓ Audit event stream — read &amp; tail</li>
+      </ul>
+      <a class="tier-cta tier-cta--secondary" href="https://github.com/agentstatelabs/AgentStateDeveloper">
+        Get started on GitHub →
+      </a>
+    </div>
+
+    <!-- Team -->
+    <div class="tier tier--team tier--featured">
+      <div class="tier-badge-featured">Team</div>
+      <div class="tier-header">
+        <div class="tier-price">Contact us</div>
+        <div class="tier-price-note"><code>asd-pro</code> binary · ratify add-on</div>
+      </div>
+      <p class="tier-includes">Everything in OSS, plus:</p>
+      <ul class="tier-features">
+        <li>✓ <strong>Ledger approve / reject / withdraw</strong></li>
+        <li>✓ Approver-list enforcement (<code>approver:*</code> tags)</li>
+        <li>✓ Review workflow via CLI, MCP, and HTTP</li>
+        <li>✓ Audit events for every approval decision</li>
+        <li>✓ Policy-gate ratification rules</li>
+      </ul>
+      <a class="tier-cta tier-cta--primary" href="mailto:info@agentstatelabs.com?subject=ASD Team tier">
+        Talk to us →
+      </a>
+    </div>
+
+    <!-- Enterprise -->
+    <div class="tier tier--enterprise">
+      <div class="tier-header">
+        <span class="tier-badge">Enterprise</span>
+        <div class="tier-price">Contact us</div>
+        <div class="tier-price-note"><code>asd-pro</code> binary · audit-pro add-on</div>
+      </div>
+      <p class="tier-includes">Everything in Team, plus:</p>
+      <ul class="tier-features">
+        <li>✓ <strong>Hash-chained tamper-evident audit log</strong></li>
+        <li>✓ <code>audit verify</code> — blake3 chain integrity check</li>
+        <li>✓ SIEM-ready JSONL (Splunk / Datadog / Loki)</li>
+        <li>✓ Process-restart chain continuity</li>
+        <li>✓ Forward-compatible: OSS can read Enterprise logs</li>
+      </ul>
+      <a class="tier-cta tier-cta--primary" href="mailto:info@agentstatelabs.com?subject=ASD Enterprise tier">
+        Talk to us →
+      </a>
+    </div>
+
+  </section>
+
+  <section class="pricing-faq">
+    <h2>Questions</h2>
+    <dl>
+      <dt>What is the OSS license?</dt>
+      <dd>
+        The core crates use BSL-1.1 (Business Source License). Production use
+        by a single developer or for evaluation is free. The license converts
+        to Apache-2.0 after four years. The pro add-ons are commercial-only.
+      </dd>
+      <dt>Why are approve / reject / withdraw commercial?</dt>
+      <dd>
+        These operations require a human-in-the-loop workflow that only makes
+        sense in team settings. Solo developers appending and reading ledger
+        entries get everything they need from the OSS tier.
+      </dd>
+      <dt>Can I read an Enterprise audit log with the OSS binary?</dt>
+      <dd>
+        Yes. The <code>asd audit tail</code> command reads any JSONL log. The
+        OSS binary just can't <em>write</em> chain-signed events or run
+        <code>audit verify</code>.
+      </dd>
+      <dt>What's the upgrade path?</dt>
+      <dd>
+        Drop in the <code>asd-pro</code> binary in place of <code>asd</code>.
+        All existing state, sidecar files, and policy rules are compatible —
+        no migration needed.
+      </dd>
+    </dl>
+  </section>
+</LandingLayout>
+
+<style>
+  .pricing-hero {
+    text-align: center;
+    padding: 4rem 2rem 2rem;
+    max-width: var(--asd-max-width);
+    margin: 0 auto;
+  }
+
+  .pricing-hero h1 {
+    font-size: 2.5rem;
+    font-weight: 700;
+    color: var(--asd-text);
+    margin: 0 0 1rem;
+  }
+
+  .pricing-hero .subtitle {
+    font-size: 1.125rem;
+    color: var(--asd-text-dim);
+    max-width: 560px;
+    margin: 0 auto;
+  }
+
+  .pricing-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1.5rem;
+    max-width: var(--asd-max-width);
+    margin: 3rem auto;
+    padding: 0 2rem;
+  }
+
+  .tier {
+    background: var(--asd-panel);
+    border: 1px solid var(--asd-border);
+    border-radius: var(--asd-radius-lg);
+    padding: 2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  .tier--featured {
+    border-color: var(--asd-accent);
+    position: relative;
+  }
+
+  .tier-badge {
+    display: inline-block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--asd-text-dim);
+    background: var(--asd-panel-hi);
+    border: 1px solid var(--asd-border);
+    border-radius: var(--asd-radius-sm);
+    padding: 0.2em 0.6em;
+  }
+
+  .tier-badge-featured {
+    display: inline-block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #fff;
+    background: var(--asd-accent);
+    border-radius: var(--asd-radius-sm);
+    padding: 0.2em 0.6em;
+  }
+
+  .tier-price {
+    font-size: 2rem;
+    font-weight: 700;
+    color: var(--asd-text);
+    margin-top: 0.5rem;
+  }
+
+  .tier-price-note {
+    font-size: 0.8125rem;
+    color: var(--asd-text-dim);
+  }
+
+  .tier-price-note code {
+    font-family: var(--asd-font-mono);
+    color: var(--asd-accent-text);
+    background: var(--asd-accent-dim);
+    padding: 0.1em 0.35em;
+    border-radius: 3px;
+  }
+
+  .tier-includes {
+    font-size: 0.875rem;
+    color: var(--asd-text-dim);
+    margin: 0;
+  }
+
+  .tier-features {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    flex: 1;
+  }
+
+  .tier-features li {
+    font-size: 0.9rem;
+    color: var(--asd-text);
+    line-height: 1.5;
+  }
+
+  .tier-features code {
+    font-family: var(--asd-font-mono);
+    font-size: 0.8em;
+    color: var(--asd-accent-text);
+    background: var(--asd-accent-dim);
+    padding: 0.1em 0.35em;
+    border-radius: 3px;
+  }
+
+  .tier-cta {
+    display: block;
+    text-align: center;
+    padding: 0.75rem 1.5rem;
+    border-radius: var(--asd-radius-md);
+    font-weight: 600;
+    font-size: 0.9375rem;
+    text-decoration: none;
+    transition: background 0.15s, color 0.15s;
+    margin-top: auto;
+  }
+
+  .tier-cta--primary {
+    background: var(--asd-accent);
+    color: #fff;
+  }
+
+  .tier-cta--primary:hover {
+    background: var(--asd-accent-hover);
+  }
+
+  .tier-cta--secondary {
+    background: transparent;
+    color: var(--asd-accent);
+    border: 1px solid var(--asd-accent);
+  }
+
+  .tier-cta--secondary:hover {
+    background: var(--asd-accent-dim);
+  }
+
+  .pricing-faq {
+    max-width: 720px;
+    margin: 3rem auto 5rem;
+    padding: 0 2rem;
+  }
+
+  .pricing-faq h2 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--asd-text);
+    margin-bottom: 2rem;
+  }
+
+  .pricing-faq dl {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  .pricing-faq dt {
+    font-weight: 600;
+    color: var(--asd-text);
+    margin-bottom: 0.4rem;
+  }
+
+  .pricing-faq dd {
+    color: var(--asd-text-dim);
+    line-height: 1.65;
+    margin: 0;
+  }
+
+  .pricing-faq dd code {
+    font-family: var(--asd-font-mono);
+    font-size: 0.875em;
+    color: var(--asd-accent-text);
+    background: var(--asd-accent-dim);
+    padding: 0.1em 0.35em;
+    border-radius: 3px;
+  }
+</style>

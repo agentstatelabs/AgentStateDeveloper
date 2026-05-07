@@ -2,318 +2,232 @@
 //! adapters for, parse them, and write Symbol + EffectDecl records into
 //! the ASG.
 //!
-//! Extension -> adapter dispatch:
-//! - `.py`                         -> Python
-//! - `.ts` / `.tsx` / `.mts` / `.cts` -> TypeScript
-//!
-//! Files with unknown extensions are skipped silently.
+//! A full debug log is always written to `.asd/index.log` in the current
+//! directory. `--verbose` tees that same output to stderr in real time.
+//! Skipped files are capped at 100 lines on stderr but fully recorded in
+//! the log file.
 
-use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result};
-use chrono::Utc;
+use anyhow::Result;
 use clap::Args;
-use serde_json::json;
 
-use agentstategraph::CommitOptions;
-use agentstategraph_core::IntentCategory;
-
-use agentstatedeveloper_core::{
-    canonical_symbol_id, paths, propagate_transitive, symbol_fingerprint, AsgEffectStore,
-    AsgIndexStore, CallEdge, EffectDecl, EffectStore, Engine, IndexStore, LanguageAdapter,
-    ParsedSymbol, Position, Symbol, Verification, VerificationSource, VerificationStatus,
-    WorkspaceSymbols,
-};
-use agentstatedeveloper_python::PythonAdapter;
-use agentstatedeveloper_typescript::TypeScriptAdapter;
+use agentstatedeveloper_adapters::default_adapters;
+use agentstatedeveloper_core::{collect_source_files, run_index, Engine};
 
 use crate::config::Config;
+
+const SKIPPED_DISPLAY_LIMIT: usize = 100;
 
 #[derive(Debug, Args)]
 pub struct IndexArgs {
     /// Directory (or file) to index. Recursively walks for known source
-    /// extensions (`.py`, `.ts`, `.tsx`, `.mts`, `.cts`).
+    /// extensions (`.py`, `.ts`, `.tsx`, `.rs`, `.go`, `.java`, `.cs`, `.rb`, `.kt`, `.swift`).
     pub path: PathBuf,
+
+    /// Tee the full index log to stderr in real time.
+    #[arg(short, long)]
+    pub verbose: bool,
+}
+
+/// Always-on log that writes every line to `.asd/index.log` and
+/// optionally mirrors it to stderr when verbose is set.
+struct IndexLog {
+    file: std::fs::File,
+    verbose: bool,
+}
+
+impl IndexLog {
+    fn open(verbose: bool) -> Option<Self> {
+        let dir = PathBuf::from(".asd");
+        std::fs::create_dir_all(&dir).ok()?;
+        std::fs::File::create(dir.join("index.log")).ok().map(|f| Self { file: f, verbose })
+    }
+
+    fn line(&mut self, msg: &str) {
+        let _ = writeln!(self.file, "{}", msg);
+        if self.verbose {
+            eprintln!("{}", msg);
+        }
+    }
 }
 
 pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
-    let mut engine = Engine::open_sqlite(&cfg.db_path)?;
-    let python_adapter: Arc<dyn LanguageAdapter> = Arc::new(PythonAdapter::new());
-    let typescript_adapter: Arc<dyn LanguageAdapter> = Arc::new(TypeScriptAdapter::new());
-    engine.register_adapter(python_adapter.clone());
-    engine.register_adapter(typescript_adapter.clone());
+    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let adapters = default_adapters();
 
-    let files = collect_source_files(&args.path, &python_adapter, &typescript_adapter)?;
-    let index_root = if args.path.is_dir() {
-        args.path.clone()
-    } else {
-        args.path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."))
+    let mut log = IndexLog::open(args.verbose);
+    let log_path = PathBuf::from(".asd/index.log");
+
+    // Pre-scan so we know total counts before processing starts.
+    let collected = collect_source_files(&args.path, &adapters)?;
+    let total = collected.recognized.len();
+    let skipped = collected.skipped;
+
+    let header = format!(
+        "Indexing {} file{} under {} …",
+        total,
+        if total == 1 { "" } else { "s" },
+        args.path.display()
+    );
+
+    // Always print the header to stderr regardless of verbose.
+    eprintln!("{}", header);
+    if let Some(l) = &mut log { l.line(&header); }
+
+    if total == 0 {
+        let msg = format!(
+            "asd index: no recognized source files found under {}",
+            args.path.display()
+        );
+        eprintln!("{}", msg);
+        if let Some(l) = &mut log { l.line(&msg); }
+        log_skipped(&skipped, &mut log, true);
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "files": 0,
+            "skipped": skipped.len(),
+            "symbols": 0,
+            "effects": 0,
+            "edges": 0,
+            "intra_module_edges": 0,
+            "cross_module_edges": 0,
+            "transitive_updates": 0,
+            "orphaned_tagged": 0,
+        }))?);
+        return Ok(());
+    }
+
+    // Wrap log in Arc<Mutex> so the progress closure can borrow it.
+    let log = Arc::new(Mutex::new(log));
+    let log_clone = Arc::clone(&log);
+    let width = total.to_string().len();
+
+    let log_clone2 = Arc::clone(&log);
+
+    let progress: &dyn Fn(&Path, usize, usize) = &|file: &Path, idx: usize, total: usize| {
+        let msg = format!("  [{idx:>width$}/{total}] {}", file.display());
+        if let Ok(mut guard) = log_clone.lock() {
+            if let Some(l) = guard.as_mut() {
+                l.line(&msg);
+            }
+        }
     };
 
-    let index_store = AsgIndexStore { repo: &engine.repo };
-    let effect_store = AsgEffectStore { repo: &engine.repo };
-
-    let mut symbol_count: usize = 0;
-    let mut effect_count: usize = 0;
-    let mut all_symbol_ids: Vec<String> = Vec::new();
-    let mut all_edges: Vec<CallEdge> = Vec::new();
-
-    // Pass 1: per-file parse + persist symbols/effects. We also stash the
-    // parsed symbols and file source so pass 2 can resolve cross-module
-    // calls against a workspace-wide qname set.
-    struct FileCtx {
-        file_str: String,
-        source: String,
-        parsed: Vec<ParsedSymbol>,
-        adapter: Arc<dyn LanguageAdapter>,
-    }
-    let mut file_ctxs: Vec<FileCtx> = Vec::with_capacity(files.len());
-
-    for (file, adapter) in &files {
-        let source = std::fs::read_to_string(file)
-            .with_context(|| format!("read {}", file.display()))?;
-        let rel = file.strip_prefix(&index_root).unwrap_or(file);
-        let file_str = rel.to_string_lossy().replace('\\', "/");
-
-        let parsed = adapter.parse_symbols(&file_str, &source)?;
-
-        for p in &parsed {
-            let symbol_id = canonical_symbol_id(&p.qname, p.kind, &file_str);
-            let symbol_fp = symbol_fingerprint(&p.body);
-            let symbol = Symbol {
-                symbol_id: symbol_id.clone(),
-                symbol_fp,
-                qname: p.qname.clone(),
-                language: adapter.language().to_string(),
-                kind: p.kind,
-                file: file_str.clone(),
-                start: Position {
-                    line: p.start_line,
-                    col: p.start_col,
-                },
-                end: Position {
-                    line: p.end_line,
-                    col: p.end_col,
-                },
-                signature: p.signature.clone(),
-                doc: p.doc.clone(),
-            };
-
-            index_store.put_symbol(&engine.ref_name, &symbol, &cfg.agent_id)?;
-            symbol_count += 1;
-            all_symbol_ids.push(symbol_id.clone());
-
-            let declared = adapter.infer_effects(&source, p);
-            let decl = EffectDecl {
-                symbol_id: symbol_id.clone(),
-                declared,
-                transitive: Vec::new(),
-                verification: Some(Verification {
-                    by: VerificationSource::StaticChecker,
-                    at: Utc::now(),
-                    status: VerificationStatus::Unverified,
-                    mismatches: Vec::new(),
-                }),
-                confidence: None,
-                matched_policy: None,
-            };
-            effect_store.put_effects(&engine.ref_name, &symbol_id, &decl, &cfg.agent_id)?;
-            effect_count += 1;
+    // Phase messages always go to stderr (not just verbose) — they mark the
+    // boundary between file parsing and post-processing so the user knows
+    // the tool is still working on a large repo.
+    let on_phase: &dyn Fn(&str) = &|msg: &str| {
+        eprintln!("{}", msg);
+        if let Ok(mut guard) = log_clone2.lock() {
+            if let Some(l) = guard.as_mut() {
+                l.line(msg);
+            }
         }
+    };
 
-        file_ctxs.push(FileCtx {
-            file_str,
-            source,
-            parsed,
-            adapter: adapter.clone(),
-        });
+    let summary = run_index(
+        &engine.repo,
+        &engine.ref_name,
+        &args.path,
+        &cfg.agent_id,
+        &adapters,
+        Some(engine.audit.as_ref()),
+        Some(progress),
+        Some(on_phase),
+        Some(&cfg.db_path),
+    )?;
+
+    // Unwrap Arc — run_index is done, no other holders.
+    let mut log = Arc::try_unwrap(log).ok().and_then(|m| m.into_inner().ok()).flatten();
+
+    // Log all skipped files (no cap in log; capped on stderr).
+    log_skipped(&skipped, &mut log, args.verbose);
+
+    // Done summary — always to stderr.
+    let skipped_hint = if !skipped.is_empty() && !args.verbose {
+        format!(
+            " ({} file{} skipped — see {})",
+            skipped.len(),
+            if skipped.len() == 1 { "" } else { "s" },
+            log_path.display()
+        )
+    } else {
+        String::new()
+    };
+    let done_msg = format!(
+        "Done. {} symbol{}, {} effect{}.{}",
+        summary.symbols, if summary.symbols == 1 { "" } else { "s" },
+        summary.effects, if summary.effects == 1 { "" } else { "s" },
+        skipped_hint,
+    );
+    eprintln!("{}", done_msg);
+    if let Some(l) = &mut log { l.line(&done_msg); }
+
+    let log_note = format!("Full log: {}", log_path.display());
+    if let Some(l) = &mut log { l.line(&log_note); }
+    // Only print log path hint to stderr when not verbose (verbose already showed everything).
+    if !args.verbose {
+        eprintln!("{}", log_note);
     }
 
-    // Build WorkspaceSymbols from every parsed qname across every file.
-    let mut workspace = WorkspaceSymbols::default();
-    for ctx in &file_ctxs {
-        for p in &ctx.parsed {
-            workspace.qnames.insert(p.qname.clone());
-            workspace.kinds.insert(p.qname.clone(), p.kind);
-        }
-    }
-
-    // Pass 2: resolve call edges with full workspace context. Each file
-    // uses the adapter that parsed it, so Python and TypeScript files
-    // resolve independently but share a workspace for qname lookups.
-    for ctx in &file_ctxs {
-        let edges =
-            ctx.adapter
-                .extract_call_edges(&ctx.file_str, &ctx.source, &ctx.parsed, &workspace);
-        all_edges.extend(edges);
-    }
-
-    // Resolve qname -> symbol_id for both ends of each edge and aggregate
-    // into per-symbol callees / callers maps. Edges where either side can't
-    // be resolved (unknown name, etc.) are silently dropped.
-    let mut callees_of: HashMap<String, Vec<String>> = HashMap::new();
-    let mut callers_of: HashMap<String, Vec<String>> = HashMap::new();
-    let mut resolved_edge_count: usize = 0;
-    let mut cross_module_edges: usize = 0;
-    for edge in &all_edges {
-        let caller_sym = match index_store
-            .get_symbol_by_qname(&engine.ref_name, &edge.caller_qname)?
-        {
-            Some(s) => s.symbol_id,
-            None => continue,
-        };
-        let callee_sym = match index_store
-            .get_symbol_by_qname(&engine.ref_name, &edge.callee_qname)?
-        {
-            Some(s) => s.symbol_id,
-            None => continue,
-        };
-        let cs = callees_of.entry(caller_sym.clone()).or_default();
-        if !cs.contains(&callee_sym) {
-            cs.push(callee_sym.clone());
-        }
-        let rs = callers_of.entry(callee_sym).or_default();
-        if !rs.contains(&caller_sym) {
-            rs.push(caller_sym);
-        }
-        resolved_edge_count += 1;
-        if !same_module(&edge.caller_qname, &edge.callee_qname) {
-            cross_module_edges += 1;
-        }
-    }
-    let intra_module_edges = resolved_edge_count.saturating_sub(cross_module_edges);
-
-    // Sort each list for deterministic on-disk content (and friendlier diffs).
-    for v in callees_of.values_mut() {
-        v.sort();
-    }
-    for v in callers_of.values_mut() {
-        v.sort();
-    }
-
-    for (sym_id, callees) in &callees_of {
-        let path = paths::callees_path(sym_id);
-        let value = json!({ "callees": callees });
-        let opts = CommitOptions::new(
-            &cfg.agent_id,
-            IntentCategory::Refine,
-            format!("write callees for {sym_id}"),
-        );
-        engine
-            .repo
-            .set_json(&engine.ref_name, &path, &value, opts)?;
-    }
-    for (sym_id, callers) in &callers_of {
-        let path = paths::callers_path(sym_id);
-        let value = json!({ "callers": callers });
-        let opts = CommitOptions::new(
-            &cfg.agent_id,
-            IntentCategory::Refine,
-            format!("write callers for {sym_id}"),
-        );
-        engine
-            .repo
-            .set_json(&engine.ref_name, &path, &value, opts)?;
-    }
-
-    // Now that callees/callers are persisted, the transitive pass can walk
-    // the graph via AsgIndexStore::get_callees and surface real effects.
-    let transitive_updates =
-        propagate_transitive(&index_store, &effect_store, &engine.ref_name, &all_symbol_ids)?;
-
-    let summary = json!({
-        "files": files.len(),
-        "symbols": symbol_count,
-        "effects": effect_count,
-        "edges": resolved_edge_count,
-        "intra_module_edges": intra_module_edges,
-        "cross_module_edges": cross_module_edges,
-        "transitive_updates": transitive_updates,
-    });
-    println!("{}", serde_json::to_string_pretty(&summary)?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "files": summary.files,
+            "skipped": summary.skipped,
+            "symbols": summary.symbols,
+            "effects": summary.effects,
+            "edges": summary.edges,
+            "intra_module_edges": summary.intra_module_edges,
+            "cross_module_edges": summary.cross_module_edges,
+            "transitive_updates": summary.transitive_updates,
+            "orphaned_tagged": summary.orphaned_tagged,
+            "disambiguated": summary.disambiguated,
+            "cross_file_collisions": summary.top_collisions.iter().map(|(q, f1, f2)| {
+                serde_json::json!({ "qname": q, "first": f1, "second": f2 })
+            }).collect::<Vec<_>>(),
+        }))?
+    );
     Ok(())
 }
 
-/// Two qnames share a module when their dotted prefixes before the final
-/// segment match. Qnames like `mod.fn` and `mod.Class.m` share module
-/// `mod`; `a.f` vs `b.f` do not.
-fn same_module(caller: &str, callee: &str) -> bool {
-    let caller_mod = caller.split('.').next().unwrap_or("");
-    let callee_mod = callee.split('.').next().unwrap_or("");
-    !caller_mod.is_empty() && caller_mod == callee_mod
-}
-
-/// Route a filesystem path to the adapter that owns it, if any.
-fn adapter_for_path(
-    p: &Path,
-    python: &Arc<dyn LanguageAdapter>,
-    typescript: &Arc<dyn LanguageAdapter>,
-) -> Option<Arc<dyn LanguageAdapter>> {
-    let ext = p.extension().and_then(|s| s.to_str())?;
-    match ext {
-        "py" => Some(python.clone()),
-        "ts" | "tsx" | "mts" | "cts" => Some(typescript.clone()),
-        _ => None,
+/// Write skipped files to the log and conditionally to stderr.
+/// Log receives all files; stderr is capped at SKIPPED_DISPLAY_LIMIT.
+fn log_skipped(skipped: &[PathBuf], log: &mut Option<IndexLog>, show_on_stderr: bool) {
+    if skipped.is_empty() {
+        return;
     }
-}
 
-/// Recursively collect source files under `root`, each paired with the
-/// adapter that owns it. If `root` is itself a recognized source file,
-/// return just that.
-fn collect_source_files(
-    root: &Path,
-    python: &Arc<dyn LanguageAdapter>,
-    typescript: &Arc<dyn LanguageAdapter>,
-) -> Result<Vec<(PathBuf, Arc<dyn LanguageAdapter>)>> {
-    let mut out = Vec::new();
-    if root.is_file() {
-        if let Some(adapter) = adapter_for_path(root, python, typescript) {
-            out.push((root.to_path_buf(), adapter));
-        }
-        return Ok(out);
-    }
-    walk(root, python, typescript, &mut out)?;
-    Ok(out)
-}
+    let header = format!(
+        "  {} file{} skipped (no adapter):",
+        skipped.len(),
+        if skipped.len() == 1 { "" } else { "s" }
+    );
 
-fn walk(
-    dir: &Path,
-    python: &Arc<dyn LanguageAdapter>,
-    typescript: &Arc<dyn LanguageAdapter>,
-    out: &mut Vec<(PathBuf, Arc<dyn LanguageAdapter>)>,
-) -> Result<()> {
-    let rd = std::fs::read_dir(dir)
-        .with_context(|| format!("read_dir {}", dir.display()))?;
-    for entry in rd {
-        let entry = entry?;
-        let path = entry.path();
-        let ft = entry.file_type()?;
-        if ft.is_dir() {
-            // Skip common noise dirs.
-            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if matches!(
-                name,
-                ".git"
-                    | ".venv"
-                    | "venv"
-                    | "__pycache__"
-                    | "node_modules"
-                    | ".tox"
-                    | ".mypy_cache"
-                    | "dist"
-                    | "build"
-                    | ".next"
-            ) {
-                continue;
-            }
-            walk(&path, python, typescript, out)?;
-        } else if ft.is_file() {
-            if let Some(adapter) = adapter_for_path(&path, python, typescript) {
-                out.push((path, adapter));
-            }
+    // Log file always gets the header and all entries.
+    if let Some(l) = log.as_mut() {
+        l.line(&header);
+        for f in skipped {
+            l.line(&format!("  [skip] {}", f.display()));
         }
     }
-    Ok(())
+
+    if !show_on_stderr {
+        return;
+    }
+
+    // stderr: header + up to SKIPPED_DISPLAY_LIMIT entries.
+    eprintln!("{}", header);
+    let display = skipped.len().min(SKIPPED_DISPLAY_LIMIT);
+    for f in &skipped[..display] {
+        eprintln!("  [skip] {}", f.display());
+    }
+    if skipped.len() > SKIPPED_DISPLAY_LIMIT {
+        eprintln!(
+            "  … and {} more — see .asd/index.log for the full list",
+            skipped.len() - SKIPPED_DISPLAY_LIMIT
+        );
+    }
 }

@@ -1,7 +1,7 @@
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
 
-use crate::error::Result;
+use crate::error::{AsdError, Result};
 use crate::paths;
 use crate::schema::EffectDecl;
 
@@ -25,7 +25,8 @@ impl<'a> EffectStore for AsgEffectStore<'a> {
         let path = paths::effects_path(symbol_id);
         match self.repo.get_json(ref_name, &path) {
             Ok(value) => Ok(Some(serde_json::from_value(value)?)),
-            Err(_) => Ok(None),
+            Err(agentstategraph::RepoError::Tree(_)) => Ok(None),
+            Err(e) => Err(AsdError::Repo(e)),
         }
     }
 

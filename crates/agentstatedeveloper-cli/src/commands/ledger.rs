@@ -6,14 +6,21 @@ use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
 
 use agentstatedeveloper_core::{
-    actions, event_types, AsgIndexStore, AsgLedgerStore, AuditEvent, AuditSink, Author, AuthorKind,
-    Decision, Engine, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Situation,
+    actions, emit_audit, event_types, paths, AsgIndexStore, AsgLedgerStore, AuditEvent, Author,
+    AuthorKind, Decision, Engine, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Rebind,
+    Situation,
 };
+
 use serde_json::json;
 
 use crate::config::Config;
 
 /// Open the engine with optional policy + audit wiring based on cfg.
+/// If the process has installed a sink override (see
+/// `crate::set_audit_sink_override`), that sink is used. Otherwise
+/// events are swallowed by the default `NullSink`; when a log path
+/// was configured we surface a warning so the OSS user knows their
+/// `--audit-log` was a no-op.
 fn open_engine(cfg: &Config) -> anyhow::Result<Engine> {
     let mut engine = Engine::open_sqlite(&cfg.db_path)?;
     if let Some(ref p) = cfg.policy_path {
@@ -21,21 +28,29 @@ fn open_engine(cfg: &Config) -> anyhow::Result<Engine> {
             .load_policy_file(p)
             .map_err(|e| anyhow::anyhow!("failed to load policy file {}: {e}", p.display()))?;
     }
-    if let Some(ref p) = cfg.audit_log_path {
-        engine
-            .set_audit_log_file(p)
-            .map_err(|e| anyhow::anyhow!("failed to open audit log {}: {e}", p.display()))?;
+    if let Some(sink) = crate::audit_sink_override() {
+        engine.set_audit_sink(sink);
+    } else if cfg.audit_log_path.is_some() {
+        eprintln!(
+            "warning: audit log path configured but tamper-evident \
+             logging is a commercial feature — install asd-pro \
+             (Enterprise tier) to enable. Running with in-memory \
+             NullSink."
+        );
+    }
+    if let Some(ratify) = crate::ratify_ops_override() {
+        engine.set_ratify_ops(ratify);
     }
     Ok(engine)
 }
 
-/// Emit an audit event, logging any sink failure to stderr but never
-/// propagating — audit issues must never block the user's operation.
-fn emit_audit(sink: &dyn AuditSink, event: AuditEvent) {
-    if let Err(e) = sink.emit(&event) {
-        eprintln!("warning: audit emit failed: {}", e);
-    }
+/// Public variant of [`open_engine`] for downstream crates that want
+/// to reuse the same policy + audit wiring. Used by `asd-pro`'s
+/// commercial subcommand handlers.
+pub fn open_engine_public(cfg: &Config) -> anyhow::Result<Engine> {
+    open_engine(cfg)
 }
+
 
 #[derive(Debug, Subcommand)]
 pub enum LedgerCmd {
@@ -56,6 +71,12 @@ pub enum LedgerCmd {
     /// Non-superseded entries remain; superseded ones are filtered out
     /// of the default `list_entries` view.
     Supersede(SupersedeArgs),
+
+    /// Record that a symbol was renamed/moved so its ledger history follows.
+    /// Writes a rebind record and re-parents all ledger entries to the new
+    /// symbol_id. Use this when you rename a function/class with an ASD-aware
+    /// tool so context doesn't become orphaned.
+    Rebind(RebindArgs),
 }
 
 #[derive(Debug, Args)]
@@ -138,6 +159,21 @@ pub struct SupersedeArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct RebindArgs {
+    /// The old symbol_id (e.g., `sym_abc123…`) whose history should follow the rename.
+    #[arg(long)]
+    pub from: String,
+
+    /// The new qualified name the symbol was renamed to. Must already exist in the index.
+    #[arg(long)]
+    pub to: String,
+
+    /// Author/agent performing the rebind.
+    #[arg(long, default_value = "asd-cli-user")]
+    pub agent_id: String,
+}
+
+#[derive(Debug, Args)]
 pub struct AppendArgs {
     /// Fully-qualified symbol name.
     pub qname: String,
@@ -171,7 +207,12 @@ pub enum CliLedgerKind {
     Rationale,
     Hazard,
     Tradeoff,
+    /// Invariant that must always hold at this symbol.
     Invariant,
+    /// Ownership: which subsystem/team owns this symbol.
+    Ownership,
+    /// Proof that an invariant holds (test, review, trace).
+    Proof,
 }
 
 impl From<CliLedgerKind> for LedgerKind {
@@ -184,6 +225,8 @@ impl From<CliLedgerKind> for LedgerKind {
             CliLedgerKind::Hazard => LedgerKind::Hazard,
             CliLedgerKind::Tradeoff => LedgerKind::Tradeoff,
             CliLedgerKind::Invariant => LedgerKind::Invariant,
+            CliLedgerKind::Ownership => LedgerKind::Ownership,
+            CliLedgerKind::Proof => LedgerKind::Proof,
         }
     }
 }
@@ -210,20 +253,42 @@ pub fn run(cfg: &Config, cmd: LedgerCmd) -> Result<()> {
         LedgerCmd::Reject(args) => reject(cfg, args),
         LedgerCmd::Withdraw(args) => withdraw(cfg, args),
         LedgerCmd::Supersede(args) => supersede(cfg, args),
+        LedgerCmd::Rebind(args) => rebind(cfg, args),
     }
 }
 
 fn approve(cfg: &Config, args: ApproveArgs) -> Result<()> {
     let engine = open_engine(cfg)?;
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
-    let result = ledger_store.approve_entry(
-        &engine.ref_name,
-        &args.entry_id,
-        &args.approver,
-        &args.approver_kind,
-        args.message.as_deref(),
-        &cfg.agent_id,
-    );
+    let situation = Situation {
+        description: format!("ledger.approve {}", args.entry_id),
+        qualifiers: json!({ "entry_id": &args.entry_id }),
+    };
+    if let Decision::Deny { matched_policy, reason } =
+        engine.policy.evaluate(&situation, actions::LEDGER_APPROVE, &args.approver)?
+    {
+        anyhow::bail!("policy denied: {} (matched {})", reason, matched_policy);
+    }
+    let result = if let Some(ref ratify) = engine.ratify {
+        ratify.approve_entry(
+            &engine.repo,
+            &engine.ref_name,
+            &args.entry_id,
+            &args.approver,
+            &args.approver_kind,
+            args.message.as_deref(),
+            &cfg.agent_id,
+        )
+    } else {
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        ledger_store.approve_entry(
+            &engine.ref_name,
+            &args.entry_id,
+            &args.approver,
+            &args.approver_kind,
+            args.message.as_deref(),
+            &cfg.agent_id,
+        )
+    };
 
     match result {
         Ok(outcome) => {
@@ -272,15 +337,36 @@ fn approve(cfg: &Config, args: ApproveArgs) -> Result<()> {
 
 fn reject(cfg: &Config, args: RejectArgs) -> Result<()> {
     let engine = open_engine(cfg)?;
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
-    let result = ledger_store.reject_entry(
-        &engine.ref_name,
-        &args.entry_id,
-        &args.reviewer,
-        &args.reviewer_kind,
-        &args.reason,
-        &cfg.agent_id,
-    );
+    let situation = Situation {
+        description: format!("ledger.reject {}", args.entry_id),
+        qualifiers: json!({ "entry_id": &args.entry_id }),
+    };
+    if let Decision::Deny { matched_policy, reason } =
+        engine.policy.evaluate(&situation, actions::LEDGER_REJECT, &args.reviewer)?
+    {
+        anyhow::bail!("policy denied: {} (matched {})", reason, matched_policy);
+    }
+    let result = if let Some(ref ratify) = engine.ratify {
+        ratify.reject_entry(
+            &engine.repo,
+            &engine.ref_name,
+            &args.entry_id,
+            &args.reviewer,
+            &args.reviewer_kind,
+            &args.reason,
+            &cfg.agent_id,
+        )
+    } else {
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        ledger_store.reject_entry(
+            &engine.ref_name,
+            &args.entry_id,
+            &args.reviewer,
+            &args.reviewer_kind,
+            &args.reason,
+            &cfg.agent_id,
+        )
+    };
     match result {
         Ok(outcome) => {
             let status = if outcome.already_resolved {
@@ -329,13 +415,32 @@ fn reject(cfg: &Config, args: RejectArgs) -> Result<()> {
 
 fn withdraw(cfg: &Config, args: WithdrawArgs) -> Result<()> {
     let engine = open_engine(cfg)?;
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
-    let result = ledger_store.withdraw_entry(
-        &engine.ref_name,
-        &args.entry_id,
-        &args.author_id,
-        &cfg.agent_id,
-    );
+    let situation = Situation {
+        description: format!("ledger.withdraw {}", args.entry_id),
+        qualifiers: json!({ "entry_id": &args.entry_id }),
+    };
+    if let Decision::Deny { matched_policy, reason } =
+        engine.policy.evaluate(&situation, actions::LEDGER_WITHDRAW, &args.author_id)?
+    {
+        anyhow::bail!("policy denied: {} (matched {})", reason, matched_policy);
+    }
+    let result = if let Some(ref ratify) = engine.ratify {
+        ratify.withdraw_entry(
+            &engine.repo,
+            &engine.ref_name,
+            &args.entry_id,
+            &args.author_id,
+            &cfg.agent_id,
+        )
+    } else {
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        ledger_store.withdraw_entry(
+            &engine.ref_name,
+            &args.entry_id,
+            &args.author_id,
+            &cfg.agent_id,
+        )
+    };
     match result {
         Ok(outcome) => {
             let status = if outcome.already_resolved {
@@ -396,6 +501,21 @@ fn supersede(cfg: &Config, args: SupersedeArgs) -> Result<()> {
         kind: author_kind_str,
         id: args.author_id.clone(),
     };
+    let situation = Situation {
+        description: format!("ledger.supersede for {}", args.qname),
+        qualifiers: json!({
+            "qname": &args.qname,
+            "symbol_id": &symbol.symbol_id,
+            "file": &symbol.file,
+            "language": &symbol.language,
+        }),
+    };
+    if let Decision::Deny { matched_policy, reason } =
+        engine.policy.evaluate(&situation, actions::LEDGER_SUPERSEDE, &args.author_id)?
+    {
+        anyhow::bail!("policy denied: {} (matched {})", reason, matched_policy);
+    }
+
     let mut entry = LedgerEntry::new(&symbol.symbol_id, args.kind.into(), args.summary, author);
     if let Some(body_path) = args.body {
         entry.body = Some(std::fs::read_to_string(body_path)?);
@@ -463,7 +583,13 @@ fn append(cfg: &Config, args: AppendArgs) -> Result<()> {
     let action = actions::ledger_append_action(ledger_kind.as_str());
     let situation = Situation {
         description: format!("ledger.append for {}", args.qname),
-        qualifiers: json!({ "qname": &args.qname, "kind": ledger_kind.as_str() }),
+        qualifiers: json!({
+            "qname": &args.qname,
+            "kind": ledger_kind.as_str(),
+            "symbol_id": &symbol.symbol_id,
+            "file": &symbol.file,
+            "language": &symbol.language,
+        }),
     };
     let decision = engine
         .policy
@@ -554,6 +680,100 @@ fn append(cfg: &Config, args: AppendArgs) -> Result<()> {
             "entry_id": entry.entry_id,
             "matched_policy": entry.matched_policy,
             "status": status,
+        }))?
+    );
+    Ok(())
+}
+
+fn rebind(cfg: &Config, args: RebindArgs) -> Result<()> {
+    use agentstategraph::CommitOptions;
+    use agentstategraph_core::IntentCategory;
+    use chrono::Utc;
+
+    let engine = open_engine(cfg)?;
+
+    // Policy gate — must pass before any writes.
+    let situation = Situation::new("rebind symbol")
+        .with_qualifier("from_symbol_id", &args.from)
+        .with_qualifier("to_qname", &args.to);
+    match engine.policy.evaluate(&situation, actions::LEDGER_REBIND, &args.agent_id)? {
+        Decision::Deny { matched_policy, reason } => {
+            anyhow::bail!("policy denied by {matched_policy}: {reason}");
+        }
+        _ => {}
+    }
+
+    // Resolve qnames → symbol_ids.
+    let index_store = AsgIndexStore { repo: &engine.repo };
+    let from_symbol = index_store
+        .get_symbol_by_qname(&engine.ref_name, &args.from)?
+        .ok_or_else(|| anyhow::anyhow!("from qname not found in index: {} — run `asd index` first", args.from))?;
+    let new_symbol = index_store
+        .get_symbol_by_qname(&engine.ref_name, &args.to)?
+        .ok_or_else(|| anyhow::anyhow!("qname not found in index: {} — run `asd index` first", args.to))?;
+
+    if new_symbol.symbol_id == from_symbol.symbol_id {
+        anyhow::bail!("from and to resolve to the same symbol_id — nothing to rebind");
+    }
+
+    // Write the rebind record.
+    let rebind = Rebind {
+        from_symbol_id: from_symbol.symbol_id.clone(),
+        to_symbol_id: new_symbol.symbol_id.clone(),
+        to_qname: args.to.clone(),
+        at: Utc::now(),
+        by: args.agent_id.clone(),
+    };
+    let rebind_path = paths::rebind_path(&from_symbol.symbol_id);
+    let opts = CommitOptions::new(
+        &args.agent_id,
+        IntentCategory::Refine,
+        format!("rebind {} → {}", args.from, args.to),
+    );
+    engine
+        .repo
+        .set_json(&engine.ref_name, &rebind_path, &serde_json::to_value(&rebind)?, opts)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    // Re-parent all ledger entries from old symbol_id to new symbol_id.
+    let ledger_store = AsgLedgerStore { repo: &engine.repo };
+    let entries = ledger_store.list_entries_with_superseded(&engine.ref_name, &from_symbol.symbol_id)?;
+    let count = entries.len();
+    for mut entry in entries {
+        // Write under the new symbol_id path.
+        entry.symbol_id = new_symbol.symbol_id.clone();
+        let new_path = paths::ledger_entry_path(&new_symbol.symbol_id, &entry.entry_id);
+        let opts = CommitOptions::new(
+            &args.agent_id,
+            IntentCategory::Refine,
+            format!("rebind entry {} to {}", entry.entry_id, args.to),
+        );
+        engine
+            .repo
+            .set_json(&engine.ref_name, &new_path, &serde_json::to_value(&entry)?, opts)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+    }
+
+    let event = AuditEvent::new(event_types::LEDGER_REBIND, &args.agent_id, "agent", "allow")
+        .with_subject(from_symbol.symbol_id.clone())
+        .with_secondary(new_symbol.symbol_id.clone())
+        .with_payload(json!({
+            "from_qname": args.from,
+            "from_symbol_id": from_symbol.symbol_id,
+            "to_symbol_id": new_symbol.symbol_id,
+            "to_qname": args.to,
+            "entries_moved": count,
+        }));
+    emit_audit(engine.audit.as_ref(), event);
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "status": "rebound",
+            "from_symbol_id": from_symbol.symbol_id,
+            "to_symbol_id": new_symbol.symbol_id,
+            "to_qname": args.to,
+            "entries_moved": count,
         }))?
     );
     Ok(())

@@ -16,9 +16,6 @@ pub struct Symbol {
     pub start: Position,
     pub end: Position,
     pub signature: Option<String>,
-    /// Leading doc comment extracted by the language adapter (stripped of
-    /// comment markers, trimmed). Capped at 512 chars during indexing.
-    /// Used by `code_search` for concept-level discovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc: Option<String>,
 }
@@ -64,16 +61,24 @@ pub struct LedgerEntry {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LedgerKind {
+    /// A design or implementation decision that was made.
     Decision,
+    /// An assumption that was made (may need validation).
     Assumption,
+    /// A hard constraint this symbol must always satisfy.
     Constraint,
+    /// Rationale for why something was done a particular way.
     Rationale,
+    /// A known danger: what can go wrong if this changes.
     Hazard,
+    /// A tradeoff accepted to gain some benefit.
     Tradeoff,
-    /// A durable semantic invariant: a property that must always hold,
-    /// regardless of implementation changes. Surfaced prominently by
-    /// `code_read` and `investigate`.
+    /// An invariant that must always hold at this symbol.
     Invariant,
+    /// Ownership declaration: which subsystem/team owns this symbol.
+    Ownership,
+    /// Evidence that an invariant holds (test, review, trace, etc.).
+    Proof,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,46 +128,47 @@ pub struct Effect {
     pub note: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Effect category — either a well-known built-in or a user-defined domain
+/// string (e.g. `"midi.send"`, `"audio.graph.connect"`).
+///
+/// User-defined categories are declared with `asd effect declare --category`
+/// and are not inferred automatically by language adapters.  Well-known
+/// categories may be inferred.
+///
+/// # Extensibility
+/// The `Other(String)` variant accepts any dot-separated namespace string.
+/// Recommended namespaces for common domains:
+/// - `audio.*` — audio engine operations (`audio.graph.connect`, `audio.graph.disconnect`)
+/// - `midi.*` — MIDI I/O (`midi.send`, `midi.receive`)
+/// - `scheduler.*` — sequencer/lane control (`scheduler.restart`, `scheduler.stop`)
+/// - `ui.*` — UI state mutations (`ui.state.mutate`)
+/// - `file.*` — higher-level import/export (`file.import`, `file.export`)
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EffectCategory {
-    #[serde(rename = "io.fs.read")]
+    // Infrastructure effects (inferred by language adapters)
     IoFsRead,
-    #[serde(rename = "io.fs.write")]
     IoFsWrite,
-    #[serde(rename = "io.net.in")]
     IoNetIn,
-    #[serde(rename = "io.net.out")]
     IoNetOut,
-    #[serde(rename = "io.db.read")]
     IoDbRead,
-    #[serde(rename = "io.db.write")]
     IoDbWrite,
-    #[serde(rename = "state.global.read")]
     StateGlobalRead,
-    #[serde(rename = "state.global.write")]
     StateGlobalWrite,
-    #[serde(rename = "state.process")]
     StateProcess,
-    #[serde(rename = "env.read")]
     EnvRead,
-    #[serde(rename = "time.read")]
     TimeRead,
-    #[serde(rename = "time.sleep")]
     TimeSleep,
-    #[serde(rename = "random")]
     Random,
-    #[serde(rename = "proc.spawn")]
     ProcSpawn,
-    #[serde(rename = "throw")]
     Throw,
-    #[serde(rename = "log")]
     Log,
-    #[serde(rename = "pure")]
     Pure,
+    /// User-defined domain effect (e.g. `"midi.send"`, `"audio.graph.connect"`).
+    Other(String),
 }
 
 impl EffectCategory {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             EffectCategory::IoFsRead => "io.fs.read",
             EffectCategory::IoFsWrite => "io.fs.write",
@@ -181,7 +187,44 @@ impl EffectCategory {
             EffectCategory::Throw => "throw",
             EffectCategory::Log => "log",
             EffectCategory::Pure => "pure",
+            EffectCategory::Other(s) => s.as_str(),
         }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "io.fs.read" => EffectCategory::IoFsRead,
+            "io.fs.write" => EffectCategory::IoFsWrite,
+            "io.net.in" => EffectCategory::IoNetIn,
+            "io.net.out" => EffectCategory::IoNetOut,
+            "io.db.read" => EffectCategory::IoDbRead,
+            "io.db.write" => EffectCategory::IoDbWrite,
+            "state.global.read" => EffectCategory::StateGlobalRead,
+            "state.global.write" => EffectCategory::StateGlobalWrite,
+            "state.process" => EffectCategory::StateProcess,
+            "env.read" => EffectCategory::EnvRead,
+            "time.read" => EffectCategory::TimeRead,
+            "time.sleep" => EffectCategory::TimeSleep,
+            "random" => EffectCategory::Random,
+            "proc.spawn" => EffectCategory::ProcSpawn,
+            "throw" => EffectCategory::Throw,
+            "log" => EffectCategory::Log,
+            "pure" => EffectCategory::Pure,
+            other => EffectCategory::Other(other.to_string()),
+        }
+    }
+}
+
+impl serde::Serialize for EffectCategory {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for EffectCategory {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(EffectCategory::from_str(&s))
     }
 }
 
@@ -262,6 +305,94 @@ impl LedgerKind {
             LedgerKind::Hazard => "hazard",
             LedgerKind::Tradeoff => "tradeoff",
             LedgerKind::Invariant => "invariant",
+            LedgerKind::Ownership => "ownership",
+            LedgerKind::Proof => "proof",
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Scratchpad types
+// ---------------------------------------------------------------------------
+
+/// Status of a [`ScratchEntry`]. Transitions: Draft → Promoted or Discarded.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ScratchStatus {
+    /// Working note, not yet acted on.
+    Draft,
+    /// Promoted to a ledger entry; `promoted_to` holds the `entry_id`.
+    Promoted,
+    /// Explicitly discarded by the author.
+    Discarded,
+}
+
+/// Ephemeral working note scoped to a symbol and/or named workflow.
+///
+/// Scratch entries are stored locally at `/asd/v1/scratch/<scratch_id>`.
+/// They are **not** synced to the sidecar and not subject to policy gate.
+/// Use [`ScratchStatus::Promoted`] + `promoted_to` to link a note that
+/// has been elevated to a durable [`LedgerEntry`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScratchEntry {
+    /// Stable ID, format `"scr_<uuid-simple>"`.
+    pub scratch_id: String,
+    /// Optional: scope to an indexed symbol_id.
+    pub symbol_id: Option<String>,
+    /// Optional: named investigation context (e.g. `"tracing-sync-bug"`).
+    pub workflow: Option<String>,
+    /// Agent or user who wrote the note (`agent_id`).
+    pub session: String,
+    /// Markdown-friendly working notes.
+    pub content: String,
+    /// Current status.
+    pub status: ScratchStatus,
+    /// Set when status transitions to `Promoted`; holds the ledger `entry_id`.
+    pub promoted_to: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    /// When set, the entry is considered expired after this timestamp.
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Freeform tags for grouping.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+impl ScratchEntry {
+    /// Create a new draft entry with minimal fields. Caller fills in optional
+    /// `symbol_id`, `workflow`, `expires_at`, and `tags` after construction.
+    pub fn new(content: impl Into<String>, session: impl Into<String>) -> Self {
+        let now = Utc::now();
+        Self {
+            scratch_id: format!("scr_{}", Uuid::new_v4().simple()),
+            symbol_id: None,
+            workflow: None,
+            session: session.into(),
+            content: content.into(),
+            status: ScratchStatus::Draft,
+            promoted_to: None,
+            created_at: now,
+            updated_at: now,
+            expires_at: None,
+            tags: Vec::new(),
+        }
+    }
+
+    /// Returns `true` when `expires_at` is set and is in the past.
+    pub fn is_expired(&self) -> bool {
+        self.expires_at.map_or(false, |t| Utc::now() > t)
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+/// Record that a symbol was renamed/moved so its ledger history follows it.
+/// Written to `/asd/v1/rebinds/<from_symbol_id>` at rename time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Rebind {
+    pub from_symbol_id: String,
+    pub to_symbol_id: String,
+    pub to_qname: String,
+    pub at: DateTime<Utc>,
+    pub by: String,
 }

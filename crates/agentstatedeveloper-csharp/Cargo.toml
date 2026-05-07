@@ -1,0 +1,14 @@
+[package]
+name = "agentstatedeveloper-csharp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "C# language adapter for AgentStateDeveloper (tree-sitter-c-sharp)"
+
+[dependencies]
+agentstatedeveloper-core = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-c-sharp = "=0.23.1"
+serde_json = { workspace = true }
+thiserror = { workspace = true }

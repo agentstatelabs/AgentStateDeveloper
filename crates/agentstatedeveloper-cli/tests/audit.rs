@@ -2,6 +2,12 @@
 //! Spawns `asd` via CARGO_BIN_EXE_asd, exercises ledger ops with
 //! `--audit-log`, reads back the JSONL file, and verifies the expected
 //! events are there.
+//!
+//! NOTE (2026-04-20): this test exercises commercial features
+//! (ledger approve + hash-chained audit-log writes) which have been
+//! extracted to `AgentStateDeveloper-Enterprise` / `asd-pro`. It is
+//! retained here ignored; the equivalent live test lives in the
+//! enterprise workspace.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -34,6 +40,7 @@ fn run(cmd: &mut Command) -> std::process::Output {
 }
 
 #[test]
+#[ignore = "exercises commercial features (ledger approve + hash-chained audit) — runs against asd-pro in the enterprise workspace"]
 fn cli_emits_audit_events_for_ledger_ops() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let src = repo_root().join("examples/sample-py-repo");

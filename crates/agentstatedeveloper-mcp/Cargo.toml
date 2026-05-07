@@ -16,7 +16,7 @@ path = "src/bin/asd-serve.rs"
 
 [dependencies]
 agentstatedeveloper-core = { workspace = true }
-agentstatedeveloper-python = { workspace = true }
+agentstatedeveloper-adapters = { workspace = true }
 agentstategraph = { workspace = true }
 agentstategraph-core = { workspace = true }
 
@@ -33,7 +33,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 rmcp = { version = "1", features = ["server", "transport-io", "macros"] }
 schemars = "1"
+chrono = { workspace = true }
 
 [dev-dependencies]
+agentstatedeveloper-python = { workspace = true }
 http-body-util = "0.1"
 chrono = { workspace = true }

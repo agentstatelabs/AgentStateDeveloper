@@ -1,0 +1,159 @@
+---
+/**
+ * Ecosystem — positions ASD in the AgentStateLabs stack.
+ * ASG (substrate) → CTXone (project memory) + ASD (code-level) as peers.
+ */
+---
+
+<section class="section ecosystem">
+	<div class="container">
+		<div class="eyebrow">
+			<span class="eyebrow-text">ECOSYSTEM //</span>
+		</div>
+		<h2 class="section-title">A layer in the AgentStateLabs stack.</h2>
+		<p class="section-lede">
+			ASD is a peer to CTXone on top of the AgentStateGraph substrate.
+			Three products, one consistent mental model. Pick what you need —
+			they compose but don't require each other.
+		</p>
+
+		<div class="stack">
+			<div class="card substrate">
+				<div class="card-tag">SUBSTRATE</div>
+				<h4>AgentStateGraph</h4>
+				<div class="url">agentstategraph.dev</div>
+				<p>
+					Content-addressed, versioned, branchable state store.
+					Merkle DAG, intent chains, authority + confidence metadata.
+					ASD persists everything there — symbols, ledger entries,
+					effects, traces.
+				</p>
+			</div>
+
+			<div class="peers">
+				<div class="card peer">
+					<div class="card-tag">PROJECT MEMORY</div>
+					<h4>CTXone</h4>
+					<div class="url">ctxone.com</div>
+					<p>
+						Session memory, recall, project-level context for agents.
+						Code-agnostic. ASD's <code>matched_policy</code> and
+						<code>why_did_we</code> queries cross-reference naturally
+						with CTXone facts.
+					</p>
+				</div>
+
+				<div class="card peer self">
+					<div class="card-tag tag-self">YOU ARE HERE</div>
+					<h4>AgentStateDeveloper</h4>
+					<div class="url">agentstatedeveloper.dev</div>
+					<p>
+						Code-level context and audit overlay. Semantic index,
+						decision ledger, declared + observed effects, call graph,
+						policy gate, ratification workflow, audit event stream —
+						keyed to symbols in your source tree.
+					</p>
+				</div>
+			</div>
+		</div>
+	</div>
+</section>
+
+<style>
+	.ecosystem {
+		padding: 5rem 0;
+	}
+
+	.eyebrow {
+		font-family: var(--asd-font-mono);
+		font-size: 0.7rem;
+		letter-spacing: 0.1em;
+		color: var(--asd-accent-text);
+		text-transform: uppercase;
+		margin-bottom: 1rem;
+	}
+
+	.stack {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+		margin-top: 2rem;
+	}
+
+	.peers {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 1rem;
+	}
+
+	.card {
+		background: var(--asd-panel);
+		border: 1px solid var(--asd-border);
+		border-radius: var(--asd-radius-lg);
+		padding: 1.5rem;
+	}
+
+	.substrate {
+		border-left: 3px solid var(--asd-border-hi);
+	}
+
+	.peer {
+		border-left: 3px solid var(--asd-border-hi);
+	}
+
+	.self {
+		border-left: 3px solid var(--asd-accent);
+		background: rgba(249, 115, 22, 0.04);
+	}
+
+	.card-tag {
+		font-family: var(--asd-font-mono);
+		font-size: 0.62rem;
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+		color: var(--asd-text-faint);
+		margin-bottom: 0.5rem;
+		font-weight: 700;
+	}
+
+	.tag-self {
+		color: var(--asd-accent-text);
+	}
+
+	h4 {
+		font-size: 1rem;
+		font-weight: 700;
+		color: #ffffff;
+		margin: 0 0 0.25rem 0;
+	}
+
+	.url {
+		font-family: var(--asd-font-mono);
+		font-size: 0.75rem;
+		color: var(--asd-text-faint);
+		margin-bottom: 0.75rem;
+	}
+
+	p {
+		font-size: 0.875rem;
+		color: var(--asd-text-dim);
+		line-height: 1.6;
+		margin: 0;
+	}
+
+	p code {
+		background: var(--asd-panel-hi);
+		border: 1px solid var(--asd-border);
+		padding: 0.1rem 0.3rem;
+		border-radius: var(--asd-radius-sm);
+		font-size: 0.82em;
+		color: var(--asd-accent-text);
+		font-family: var(--asd-font-mono);
+	}
+
+	@media (max-width: 640px) {
+		.peers {
+			grid-template-columns: 1fr;
+		}
+	}
+</style>

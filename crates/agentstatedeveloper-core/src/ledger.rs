@@ -1,11 +1,53 @@
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
-use chrono::Utc;
 use std::collections::HashSet;
 
 use crate::error::{AsdError, Result};
 use crate::paths;
 use crate::schema::LedgerEntry;
+
+// ---------------------------------------------------------------------------
+// RatifyOps — narrower trait for the approve/reject/withdraw operations.
+// Lives in core so Engine can hold an Arc<dyn RatifyOps> without depending
+// on the commercial ratify crate. agentstatedeveloper-ratify implements this.
+// ---------------------------------------------------------------------------
+
+/// The three ledger review operations. Implemented by `RatifyOpsImpl`
+/// in `agentstatedeveloper-ratify` (Team tier). Methods take an explicit
+/// `repo: &Repository` so the impl can be a zero-sized struct — no lifetime
+/// or clone needed when stored as `Arc<dyn RatifyOps>` in `Engine`.
+pub trait RatifyOps: Send + Sync {
+    fn approve_entry(
+        &self,
+        repo: &Repository,
+        ref_name: &str,
+        entry_id: &str,
+        approver_id: &str,
+        approver_kind: &str,
+        message: Option<&str>,
+        agent_id: &str,
+    ) -> Result<ApprovalOutcome>;
+
+    fn reject_entry(
+        &self,
+        repo: &Repository,
+        ref_name: &str,
+        entry_id: &str,
+        reviewer_id: &str,
+        reviewer_kind: &str,
+        reason: &str,
+        agent_id: &str,
+    ) -> Result<ReviewOutcome>;
+
+    fn withdraw_entry(
+        &self,
+        repo: &Repository,
+        ref_name: &str,
+        entry_id: &str,
+        author_id: &str,
+        agent_id: &str,
+    ) -> Result<ReviewOutcome>;
+}
 
 /// Outcome of [`LedgerStore::approve_entry`]. Carries the updated entry
 /// and whether it was already approved (caller idempotency hint).
@@ -40,20 +82,16 @@ pub trait LedgerStore {
             .collect())
     }
 
-    /// Full list including superseded entries. Default impl just calls
-    /// list_entries — concrete stores should override for correctness.
+    /// Full list including superseded entries.
     fn list_entries_with_superseded(
         &self,
         ref_name: &str,
         symbol_id: &str,
     ) -> Result<Vec<LedgerEntry>>;
 
-    /// Locate an entry by id anywhere in the ledger tree, flip its
-    /// `awaiting-approval` tag to `approved`, record `approved-by:<id>`
-    /// and `approved-at:<iso>` tags, and rewrite it at the same path.
-    /// When `message` is Some it's appended to the entry body.
-    /// Returns an error if the entry has no `awaiting-approval` tag or
-    /// if the policy-declared `approver:*` list disallows the approver.
+    /// Approve an awaiting-approval entry. The OSS default returns a
+    /// "commercial feature" error — the real implementation lives in
+    /// the `agentstatedeveloper-ratify` crate (Team-tier).
     fn approve_entry(
         &self,
         _ref_name: &str,
@@ -64,15 +102,14 @@ pub trait LedgerStore {
         _agent_id: &str,
     ) -> Result<ApprovalOutcome> {
         Err(AsdError::Other(
-            "approve_entry not implemented for this store".into(),
+            "ledger approve is a commercial feature (Team tier) — \
+             install asd-pro to enable. See https://agentstatedeveloper.dev/pricing"
+                .into(),
         ))
     }
 
-    /// Reject an awaiting-approval entry. Flips `awaiting-approval` →
-    /// `rejected`, adds `rejected-by:<id>` + `rejected-at:<iso>`. The
-    /// `reason` is required and gets appended to `entry.body`.
-    /// Authority check matches approve_entry: reviewer kind/id must
-    /// match one of the entry's `approver:*` tags.
+    /// Reject an awaiting-approval entry. See `approve_entry` — OSS
+    /// default errors; real impl in `agentstatedeveloper-ratify`.
     fn reject_entry(
         &self,
         _ref_name: &str,
@@ -83,13 +120,14 @@ pub trait LedgerStore {
         _agent_id: &str,
     ) -> Result<ReviewOutcome> {
         Err(AsdError::Other(
-            "reject_entry not implemented for this store".into(),
+            "ledger reject is a commercial feature (Team tier) — \
+             install asd-pro to enable. See https://agentstatedeveloper.dev/pricing"
+                .into(),
         ))
     }
 
-    /// Withdraw an awaiting-approval entry. Only the original author
-    /// may withdraw (matched by `entry.author.id`). Flips
-    /// `awaiting-approval` → `withdrawn`, adds `withdrawn-at:<iso>`.
+    /// Withdraw an awaiting-approval entry. See `approve_entry` — OSS
+    /// default errors; real impl in `agentstatedeveloper-ratify`.
     fn withdraw_entry(
         &self,
         _ref_name: &str,
@@ -98,7 +136,9 @@ pub trait LedgerStore {
         _agent_id: &str,
     ) -> Result<ReviewOutcome> {
         Err(AsdError::Other(
-            "withdraw_entry not implemented for this store".into(),
+            "ledger withdraw is a commercial feature (Team tier) — \
+             install asd-pro to enable. See https://agentstatedeveloper.dev/pricing"
+                .into(),
         ))
     }
 }
@@ -117,6 +157,16 @@ impl<'a> LedgerStore for AsgLedgerStore<'a> {
             format!("ledger {} for {}", entry.kind.as_str(), entry.symbol_id),
         );
         self.repo.set_json(ref_name, &path, &value, opts)?;
+
+        // Write reverse index: entry_id → symbol_id for O(1) find_entry.
+        let idx_path = paths::ledger_entry_index_path(&entry.entry_id);
+        let idx_val = serde_json::Value::String(entry.symbol_id.clone());
+        let idx_opts = CommitOptions::new(
+            agent_id,
+            IntentCategory::Refine,
+            format!("ledger-idx {}", entry.entry_id),
+        );
+        self.repo.set_json(ref_name, &idx_path, &idx_val, idx_opts)?;
         Ok(())
     }
 
@@ -132,274 +182,134 @@ impl<'a> LedgerStore for AsgLedgerStore<'a> {
         };
         let mut entries = Vec::new();
         if let serde_json::Value::Object(map) = json {
-            for (_k, v) in map {
-                if let Ok(e) = serde_json::from_value::<LedgerEntry>(v) {
-                    entries.push(e);
+            for (k, v) in map {
+                match serde_json::from_value::<LedgerEntry>(v) {
+                    Ok(e) => entries.push(e),
+                    Err(err) => eprintln!(
+                        "warning: skipping malformed ledger entry {}/{}: {}",
+                        symbol_id, k, err
+                    ),
                 }
             }
         }
         entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(entries)
     }
-
-    fn approve_entry(
-        &self,
-        ref_name: &str,
-        entry_id: &str,
-        approver_id: &str,
-        approver_kind: &str,
-        message: Option<&str>,
-        agent_id: &str,
-    ) -> Result<ApprovalOutcome> {
-        let (symbol_id, mut entry) = self
-            .find_entry(ref_name, entry_id)?
-            .ok_or_else(|| AsdError::Other(format!("ledger entry not found: {}", entry_id)))?;
-
-        // Idempotency.
-        if entry.tags.iter().any(|t| t == "approved") {
-            return Ok(ApprovalOutcome {
-                entry,
-                already_approved: true,
-            });
-        }
-        // Can't approve a rejected or withdrawn entry.
-        if let Some(bad) = entry
-            .tags
-            .iter()
-            .find(|t| *t == "rejected" || *t == "withdrawn")
-        {
-            return Err(AsdError::Other(format!(
-                "entry {} is already {} and cannot be approved",
-                entry_id, bad
-            )));
-        }
-        // Must be awaiting approval.
-        if !entry.tags.iter().any(|t| t == "awaiting-approval") {
-            return Err(AsdError::Other(format!(
-                "entry {} is not awaiting approval",
-                entry_id
-            )));
-        }
-
-        Self::authorize_reviewer(&entry, approver_id, approver_kind)?;
-
-        // Flip tags.
-        entry.tags.retain(|t| t != "awaiting-approval");
-        entry.tags.push("approved".to_string());
-        entry.tags.push(format!("approved-by:{}", approver_id));
-        entry.tags.push(format!("approved-at:{}", iso_now()));
-
-        if let Some(msg) = message {
-            append_to_body(&mut entry, "Approver note", approver_id, msg);
-        }
-
-        self.rewrite(ref_name, &symbol_id, &entry, agent_id, "approve")?;
-        Ok(ApprovalOutcome {
-            entry,
-            already_approved: false,
-        })
-    }
-
-    fn reject_entry(
-        &self,
-        ref_name: &str,
-        entry_id: &str,
-        reviewer_id: &str,
-        reviewer_kind: &str,
-        reason: &str,
-        agent_id: &str,
-    ) -> Result<ReviewOutcome> {
-        let (symbol_id, mut entry) = self
-            .find_entry(ref_name, entry_id)?
-            .ok_or_else(|| AsdError::Other(format!("ledger entry not found: {}", entry_id)))?;
-
-        if entry.tags.iter().any(|t| t == "rejected") {
-            return Ok(ReviewOutcome {
-                entry,
-                already_resolved: true,
-            });
-        }
-        if let Some(bad) = entry
-            .tags
-            .iter()
-            .find(|t| *t == "approved" || *t == "withdrawn")
-        {
-            return Err(AsdError::Other(format!(
-                "entry {} is already {} and cannot be rejected",
-                entry_id, bad
-            )));
-        }
-        if !entry.tags.iter().any(|t| t == "awaiting-approval") {
-            return Err(AsdError::Other(format!(
-                "entry {} is not awaiting approval",
-                entry_id
-            )));
-        }
-        Self::authorize_reviewer(&entry, reviewer_id, reviewer_kind)?;
-        if reason.trim().is_empty() {
-            return Err(AsdError::Other(
-                "reject requires a non-empty reason".into(),
-            ));
-        }
-
-        entry.tags.retain(|t| t != "awaiting-approval");
-        entry.tags.push("rejected".to_string());
-        entry.tags.push(format!("rejected-by:{}", reviewer_id));
-        entry.tags.push(format!("rejected-at:{}", iso_now()));
-
-        append_to_body(&mut entry, "Rejection reason", reviewer_id, reason);
-
-        self.rewrite(ref_name, &symbol_id, &entry, agent_id, "reject")?;
-        Ok(ReviewOutcome {
-            entry,
-            already_resolved: false,
-        })
-    }
-
-    fn withdraw_entry(
-        &self,
-        ref_name: &str,
-        entry_id: &str,
-        author_id: &str,
-        agent_id: &str,
-    ) -> Result<ReviewOutcome> {
-        let (symbol_id, mut entry) = self
-            .find_entry(ref_name, entry_id)?
-            .ok_or_else(|| AsdError::Other(format!("ledger entry not found: {}", entry_id)))?;
-
-        if entry.tags.iter().any(|t| t == "withdrawn") {
-            return Ok(ReviewOutcome {
-                entry,
-                already_resolved: true,
-            });
-        }
-        if let Some(bad) = entry
-            .tags
-            .iter()
-            .find(|t| *t == "approved" || *t == "rejected")
-        {
-            return Err(AsdError::Other(format!(
-                "entry {} is already {} and cannot be withdrawn",
-                entry_id, bad
-            )));
-        }
-        if !entry.tags.iter().any(|t| t == "awaiting-approval") {
-            return Err(AsdError::Other(format!(
-                "entry {} is not awaiting approval",
-                entry_id
-            )));
-        }
-        if entry.author.id != author_id {
-            return Err(AsdError::Other(format!(
-                "withdraw requires the original author; entry author is {}",
-                entry.author.id
-            )));
-        }
-
-        entry.tags.retain(|t| t != "awaiting-approval");
-        entry.tags.push("withdrawn".to_string());
-        entry.tags.push(format!("withdrawn-at:{}", iso_now()));
-
-        self.rewrite(ref_name, &symbol_id, &entry, agent_id, "withdraw")?;
-        Ok(ReviewOutcome {
-            entry,
-            already_resolved: false,
-        })
-    }
 }
 
-impl<'a> AsgLedgerStore<'a> {
-    /// Walk the ledger tree and return the (symbol_id, entry) pair whose
-    /// entry_id matches. O(N) across all ledger entries; acceptable at
-    /// solo-dev scale.
-    fn find_entry(
-        &self,
-        ref_name: &str,
-        entry_id: &str,
-    ) -> Result<Option<(String, LedgerEntry)>> {
-        let root = format!("{}/ledger", crate::paths::ASD_ROOT);
-        let tree = match self.repo.get_tree(ref_name, &root) {
-            Ok(v) => v,
-            Err(_) => return Ok(None),
-        };
-        let serde_json::Value::Object(by_symbol) = tree else {
-            return Ok(None);
-        };
-        for (symbol_id, entries_json) in by_symbol {
-            let serde_json::Value::Object(entries) = entries_json else {
+// ---------------------------------------------------------------------------
+// Orphan detection
+// ---------------------------------------------------------------------------
+
+/// Walk every ledger entry and tag those whose `symbol_id` is no longer
+/// present in the qname index as `"orphaned"` and `"orphaned-at:<timestamp>"`.
+///
+/// Returns the number of entries newly tagged. Already-orphaned entries
+/// (already carrying the `"orphaned"` tag) are skipped. Runs in O(symbols +
+/// ledger_entries) — safe to call at the end of `asd index` or from `health`.
+pub fn detect_orphaned_entries(repo: &Repository, ref_name: &str, agent_id: &str) -> Result<usize> {
+    use chrono::Utc;
+
+    // Build set of all symbol_ids currently in the index.
+    let qname_prefix = format!("{}/index/by-qname", paths::ASD_ROOT);
+    let indexed: HashSet<String> = match repo.get_tree(ref_name, &qname_prefix) {
+        Ok(serde_json::Value::Object(map)) => map
+            .values()
+            .filter_map(|v| v.get("symbol_id")?.as_str().map(|s| s.to_string()))
+            .collect(),
+        _ => HashSet::new(),
+    };
+
+    // Walk every ledger entry.
+    let ledger_prefix = format!("{}/ledger", paths::ASD_ROOT);
+    let ledger_tree = match repo.get_tree(ref_name, &ledger_prefix) {
+        Ok(v) => v,
+        Err(_) => return Ok(0),
+    };
+
+    let mut tagged = 0usize;
+    let now_tag = format!("orphaned-at:{}", Utc::now().format("%Y-%m-%dT%H:%M:%SZ"));
+
+    if let serde_json::Value::Object(by_symbol) = ledger_tree {
+        for (sym_id, per_symbol) in by_symbol {
+            if indexed.contains(&sym_id) {
                 continue;
-            };
-            for (_, entry_json) in entries {
-                if let Ok(entry) = serde_json::from_value::<LedgerEntry>(entry_json) {
-                    if entry.entry_id == entry_id {
-                        return Ok(Some((symbol_id, entry)));
+            }
+            if let serde_json::Value::Object(entries_map) = per_symbol {
+                for (entry_id, v) in entries_map {
+                    if let Ok(mut entry) = serde_json::from_value::<LedgerEntry>(v) {
+                        if entry.tags.iter().any(|t| t == "orphaned") {
+                            continue;
+                        }
+                        entry.tags.push("orphaned".to_string());
+                        entry.tags.push(now_tag.clone());
+                        let path = paths::ledger_entry_path(&sym_id, &entry_id);
+                        let value = serde_json::to_value(&entry)?;
+                        let opts = CommitOptions::new(
+                            agent_id,
+                            IntentCategory::Refine,
+                            format!("tag orphaned entry {}", entry_id),
+                        );
+                        repo.set_json(ref_name, &path, &value, opts)
+                            .map_err(|e| AsdError::Other(e.to_string()))?;
+                        tagged += 1;
                     }
                 }
             }
         }
-        Ok(None)
     }
+    Ok(tagged)
+}
 
-    fn rewrite(
-        &self,
-        ref_name: &str,
-        symbol_id: &str,
-        entry: &LedgerEntry,
-        agent_id: &str,
-        op: &str,
-    ) -> Result<()> {
-        let path = paths::ledger_entry_path(symbol_id, &entry.entry_id);
-        let value = serde_json::to_value(entry)?;
-        let opts = CommitOptions::new(
-            agent_id,
-            IntentCategory::Refine,
-            format!("{} ledger entry {} for {}", op, entry.entry_id, symbol_id),
-        );
-        self.repo.set_json(ref_name, &path, &value, opts)?;
-        Ok(())
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    /// Enforce the approver-match rule shared by approve + reject.
-    /// Reviewer id OR kind must match one of the entry's `approver:*`
-    /// tags. When there are no `approver:*` tags (shouldn't normally
-    /// happen for awaiting-approval entries) the call is permitted.
-    fn authorize_reviewer(
-        entry: &LedgerEntry,
-        reviewer_id: &str,
-        reviewer_kind: &str,
-    ) -> Result<()> {
-        let required: Vec<&str> = entry
-            .tags
-            .iter()
-            .filter_map(|t| t.strip_prefix("approver:"))
-            .collect();
-        if required.is_empty() {
-            return Ok(());
-        }
-        let ok = required
-            .iter()
-            .any(|r| *r == reviewer_kind || *r == reviewer_id);
-        if ok {
+    struct NopStore;
+
+    impl LedgerStore for NopStore {
+        fn append_entry(&self, _: &str, _: &LedgerEntry, _: &str) -> crate::error::Result<()> {
             Ok(())
-        } else {
-            Err(AsdError::Other(format!(
-                "reviewer {} (kind={}) does not match any required approver: {:?}",
-                reviewer_id, reviewer_kind, required
-            )))
+        }
+        fn list_entries_with_superseded(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> crate::error::Result<Vec<LedgerEntry>> {
+            Ok(vec![])
         }
     }
-}
 
-fn iso_now() -> String {
-    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-}
+    #[test]
+    fn oss_approve_returns_commercial_error_with_url() {
+        let store = NopStore;
+        let err = store
+            .approve_entry("main", "e1", "alice", "human", None, "agent")
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("commercial feature"), "msg: {}", msg);
+        assert!(msg.contains("agentstatedeveloper.dev/pricing"), "msg: {}", msg);
+    }
 
-/// Append a labeled section to `entry.body`. Preserves prior body
-/// content; separates sections with `---`.
-fn append_to_body(entry: &mut LedgerEntry, label: &str, author: &str, message: &str) {
-    let section = format!("\n\n--- {} by {} ---\n{}", label, author, message);
-    match &mut entry.body {
-        Some(b) => b.push_str(&section),
-        None => entry.body = Some(section.trim_start().to_string()),
+    #[test]
+    fn oss_reject_returns_commercial_error_with_url() {
+        let store = NopStore;
+        let err = store
+            .reject_entry("main", "e1", "alice", "human", "reason", "agent")
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("commercial feature"), "msg: {}", msg);
+        assert!(msg.contains("agentstatedeveloper.dev/pricing"), "msg: {}", msg);
+    }
+
+    #[test]
+    fn oss_withdraw_returns_commercial_error_with_url() {
+        let store = NopStore;
+        let err = store
+            .withdraw_entry("main", "e1", "alice", "agent")
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("commercial feature"), "msg: {}", msg);
+        assert!(msg.contains("agentstatedeveloper.dev/pricing"), "msg: {}", msg);
     }
 }

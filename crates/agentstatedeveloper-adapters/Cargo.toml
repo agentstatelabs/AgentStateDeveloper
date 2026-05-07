@@ -1,0 +1,19 @@
+[package]
+name = "agentstatedeveloper-adapters"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Default language adapter bundle for AgentStateDeveloper"
+
+[dependencies]
+agentstatedeveloper-core = { workspace = true }
+agentstatedeveloper-python = { workspace = true }
+agentstatedeveloper-typescript = { workspace = true }
+agentstatedeveloper-rust = { workspace = true }
+agentstatedeveloper-go = { workspace = true }
+agentstatedeveloper-java = { workspace = true }
+agentstatedeveloper-csharp = { workspace = true }
+agentstatedeveloper-ruby = { workspace = true }
+agentstatedeveloper-kotlin = { workspace = true }
+agentstatedeveloper-swift = { workspace = true }

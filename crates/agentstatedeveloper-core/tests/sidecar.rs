@@ -10,9 +10,9 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use agentstatedeveloper_core::{
-    hydrate_from_dir, sync_to_dir, AsgEffectStore, AsgIndexStore, AsgLedgerStore, Author,
+    hydrate_from_dir, paths, sync_to_dir, AsgEffectStore, AsgIndexStore, AsgLedgerStore, Author,
     AuthorKind, Effect, EffectCategory, EffectDecl, EffectStore, Engine, IndexStore, LedgerEntry,
-    LedgerKind, LedgerStore, Position, Symbol, SymbolKind, Verification, VerificationSource,
+    LedgerKind, LedgerStore, Position, Rebind, Symbol, SymbolKind, Verification, VerificationSource,
     VerificationStatus, ASD_SCHEMA_VERSION,
 };
 use chrono::Utc;
@@ -180,6 +180,59 @@ fn resync_is_idempotent() {
 }
 
 #[test]
+fn invariant_survives_hydrate_roundtrip() {
+    // Regression guard: `asd invariant add` stores LedgerKind::Invariant entries.
+    // Verify they survive a sync → wipe → hydrate cycle so agents see them on a
+    // fresh clone without rerunning `asd index`.
+    let src = Engine::open_in_memory().expect("open src");
+    let index = AsgIndexStore { repo: &src.repo };
+    let ledger = AsgLedgerStore { repo: &src.repo };
+
+    let sym = Symbol {
+        symbol_id: "sym_refreshDriftPlayhead".to_string(),
+        symbol_fp: "fp_inv_test".to_string(),
+        qname: "ExampleFlowViewModel.refreshDriftPlayhead".to_string(),
+        language: "swift".to_string(),
+        kind: SymbolKind::Function,
+        file: "ExampleFlow.swift".to_string(),
+        start: Position { line: 42, col: 0 },
+        end: Position { line: 55, col: 0 },
+        signature: Some("func refreshDriftPlayhead()".to_string()),
+        doc: None,
+    };
+    index.put_symbol(&src.ref_name, &sym, "test").expect("put symbol");
+
+    let invariant = LedgerEntry::new(
+        &sym.symbol_id,
+        LedgerKind::Invariant,
+        "playhead must always reflect the current model state",
+        Author { kind: AuthorKind::Human, id: "craig".to_string() },
+    );
+    ledger.append_entry(&src.ref_name, &invariant, "test").expect("append invariant");
+
+    // Sync to sidecar.
+    let tmp = unique_tempdir("invariant-hydrate");
+    let sync_summary = sync_to_dir(&src.repo, &src.ref_name, &tmp).expect("sync");
+    assert_eq!(sync_summary.ledger_entries_written, 1, "invariant written to sidecar");
+
+    // Hydrate into a fresh engine (simulates fresh clone).
+    let dst = Engine::open_in_memory().expect("open dst");
+    let hydrate_summary = hydrate_from_dir(&dst.repo, &dst.ref_name, &tmp, "test").expect("hydrate");
+    assert_eq!(hydrate_summary.ledger_entries_loaded, 1, "invariant loaded from sidecar");
+
+    // Verify the invariant is present and correct.
+    let dst_ledger = AsgLedgerStore { repo: &dst.repo };
+    let entries = dst_ledger
+        .list_entries(&dst.ref_name, &sym.symbol_id)
+        .expect("list entries");
+    assert_eq!(entries.len(), 1, "exactly one invariant");
+    assert_eq!(entries[0].kind, LedgerKind::Invariant, "kind preserved");
+    assert_eq!(entries[0].summary, "playhead must always reflect the current model state", "summary preserved");
+    assert_eq!(entries[0].entry_id, invariant.entry_id, "entry_id stable");
+    assert_eq!(entries[0].author.id, "craig", "author preserved");
+}
+
+#[test]
 fn hydrate_errors_when_sidecar_missing() {
     let engine = Engine::open_in_memory().expect("open engine");
     let tmp = unique_tempdir("missing");
@@ -191,6 +244,121 @@ fn hydrate_errors_when_sidecar_missing() {
         msg.contains("no sidecar found") && msg.contains("asd sync"),
         "error message should suggest running `asd sync`: got {msg}"
     );
+}
+
+/// Helper: write a rebind record directly into the repo (same as CLI/MCP).
+fn write_rebind(engine: &Engine, from_id: &str, to_id: &str, to_qname: &str) {
+    use agentstategraph::CommitOptions;
+    use agentstategraph_core::IntentCategory;
+    use chrono::Utc;
+
+    let rebind = Rebind {
+        from_symbol_id: from_id.to_string(),
+        to_symbol_id: to_id.to_string(),
+        to_qname: to_qname.to_string(),
+        at: Utc::now(),
+        by: "test-agent".to_string(),
+    };
+    engine.repo.set_json(
+        &engine.ref_name,
+        &paths::rebind_path(from_id),
+        &serde_json::to_value(&rebind).unwrap(),
+        CommitOptions::new("test", IntentCategory::Refine, "rebind"),
+    ).expect("write rebind");
+}
+
+#[test]
+fn sidecar_roundtrip_with_chained_rebinds() {
+    // Set up: symbol A → B (rebind 1), then B → C (rebind 2).
+    // After both rebinds, entries are under C. Verify sync+hydrate preserves
+    // this: entries still under C, both rebind records restored.
+    use agentstatedeveloper_core::{AsgIndexStore, IndexStore, Position, SymbolKind};
+
+    let src = Engine::open_in_memory().expect("open src");
+    let index = AsgIndexStore { repo: &src.repo };
+    let ledger = AsgLedgerStore { repo: &src.repo };
+
+    // Create three symbols.
+    for (id, qname) in [("sym_a", "mod.fn_a"), ("sym_b", "mod.fn_b"), ("sym_c", "mod.fn_c")] {
+        let sym = Symbol {
+            symbol_id: id.to_string(),
+            symbol_fp: format!("fp_{id}"),
+            qname: qname.to_string(),
+            language: "python".to_string(),
+            kind: SymbolKind::Function,
+            file: "mod.py".to_string(),
+            start: Position { line: 1, col: 0 },
+            end: Position { line: 5, col: 0 },
+            signature: None,
+            doc: None,
+        };
+        index.put_symbol(&src.ref_name, &sym, "test").expect("put symbol");
+    }
+
+    // Append entry under A.
+    let mut entry = LedgerEntry::new(
+        "sym_a",
+        LedgerKind::Decision,
+        "original decision",
+        Author { kind: AuthorKind::Human, id: "alice".to_string() },
+    );
+    ledger.append_entry(&src.ref_name, &entry, "test").expect("append entry");
+
+    // Rebind A→B: move entry to B.
+    {
+        use agentstategraph::CommitOptions;
+        use agentstategraph_core::IntentCategory;
+        let entries = ledger.list_entries_with_superseded(&src.ref_name, "sym_a").unwrap();
+        for mut e in entries {
+            e.symbol_id = "sym_b".to_string();
+            src.repo.set_json(&src.ref_name, &paths::ledger_entry_path("sym_b", &e.entry_id),
+                &serde_json::to_value(&e).unwrap(),
+                CommitOptions::new("test", IntentCategory::Refine, "reparent")).unwrap();
+            let _ = src.repo.delete(&src.ref_name, &paths::ledger_entry_path("sym_a", &e.entry_id),
+                CommitOptions::new("test", IntentCategory::Refine, "delete old")).unwrap();
+        }
+    }
+    write_rebind(&src, "sym_a", "sym_b", "mod.fn_b");
+
+    // Rebind B→C: move entry to C.
+    {
+        use agentstategraph::CommitOptions;
+        use agentstategraph_core::IntentCategory;
+        let entries = ledger.list_entries_with_superseded(&src.ref_name, "sym_b").unwrap();
+        entry = entries.into_iter().next().expect("entry under B");
+        let mut e2 = entry.clone();
+        e2.symbol_id = "sym_c".to_string();
+        src.repo.set_json(&src.ref_name, &paths::ledger_entry_path("sym_c", &e2.entry_id),
+            &serde_json::to_value(&e2).unwrap(),
+            CommitOptions::new("test", IntentCategory::Refine, "reparent")).unwrap();
+        let _ = src.repo.delete(&src.ref_name, &paths::ledger_entry_path("sym_b", &e2.entry_id),
+            CommitOptions::new("test", IntentCategory::Refine, "delete old")).unwrap();
+    }
+    write_rebind(&src, "sym_b", "sym_c", "mod.fn_c");
+
+    // Sync.
+    let tmp = unique_tempdir("chained-rebind");
+    let sync_summary = sync_to_dir(&src.repo, &src.ref_name, &tmp).expect("sync");
+    assert_eq!(sync_summary.rebinds_synced, 2, "two rebind records synced");
+    assert!(tmp.join(".asd/v1/rebinds/sym_a.json").is_file(), "rebind A file");
+    assert!(tmp.join(".asd/v1/rebinds/sym_b.json").is_file(), "rebind B file");
+
+    // Hydrate into fresh engine.
+    let dst = Engine::open_in_memory().expect("open dst");
+    let hydrate_summary = hydrate_from_dir(&dst.repo, &dst.ref_name, &tmp, "test").expect("hydrate");
+    assert_eq!(hydrate_summary.rebinds_replayed, 2, "two rebind records replayed");
+
+    // Entry should be under C in the hydrated engine.
+    let dst_ledger = AsgLedgerStore { repo: &dst.repo };
+    let entries_c = dst_ledger.list_entries(&dst.ref_name, "sym_c").expect("list C");
+    assert_eq!(entries_c.len(), 1, "entry under C after hydrate");
+    assert_eq!(entries_c[0].summary, "original decision");
+
+    // Should be nothing under A or B.
+    let entries_a = dst_ledger.list_entries(&dst.ref_name, "sym_a").expect("list A");
+    let entries_b = dst_ledger.list_entries(&dst.ref_name, "sym_b").expect("list B");
+    assert_eq!(entries_a.len(), 0, "no entries under A");
+    assert_eq!(entries_b.len(), 0, "no entries under B");
 }
 
 fn collect_json_files(root: &std::path::Path) -> HashSet<PathBuf> {

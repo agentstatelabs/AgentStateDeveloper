@@ -25,10 +25,8 @@ fn prime_db(db_path: &std::path::Path) {
     };
     use agentstatedeveloper_python::PythonAdapter;
 
-    let mut engine = Engine::open_sqlite(db_path).expect("open engine");
+    let engine = Engine::open_sqlite(db_path).expect("open engine");
     let adapter = Arc::new(PythonAdapter::new());
-    let adapter_dyn: Arc<dyn agentstatedeveloper_core::LanguageAdapter> = adapter.clone();
-    engine.register_adapter(adapter_dyn);
 
     let sample_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/sample-py-repo")
@@ -63,7 +61,7 @@ fn prime_db(db_path: &std::path::Path) {
                 col: p.end_col,
             },
             signature: p.signature.clone(),
-            doc: p.doc.clone(),
+            doc: None,
         };
         index_store
             .put_symbol(&engine.ref_name, &symbol, "audit-test")
@@ -72,6 +70,7 @@ fn prime_db(db_path: &std::path::Path) {
 }
 
 #[test]
+#[ignore = "exercises commercial tamper-evident audit sink — runs against asd-pro in the enterprise workspace"]
 fn mcp_ledger_append_emits_audit_event() {
     let unique = format!(
         "asd-mcp-audit-{}-{}",

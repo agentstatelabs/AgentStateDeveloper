@@ -1,18 +1,18 @@
 //! `asd search <query>` — ranked concept search over indexed symbols.
 //!
-//! Scores every symbol across name, signature, doc comment, file path, and
-//! ledger summaries. Returns results sorted by relevance score, highest first.
+//! Primary path: BM25 via FTS5 table populated at `asd index` time.
+//! Hybrid reranking: FTS BM25 score + ledger-text token boost.
+//! Fallback: in-memory O(N) scoring when FTS table is empty or absent.
 
 use anyhow::Result;
 use clap::Args;
 
-use agentstatedeveloper_core::{AsgIndexStore, AsgLedgerStore, IndexStore, LedgerStore};
-use agentstatedeveloper_core::{Engine, LanguageAdapter};
-
-use agentstatedeveloper_python::PythonAdapter;
-use agentstatedeveloper_typescript::TypeScriptAdapter;
-
-use std::sync::Arc;
+use agentstatedeveloper_core::{
+    AGENT_DEFAULT_BUDGET, AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore,
+    LedgerStore, SearchFtsDb, SymbolKind, classify_layer_sym, estimate_tokens, extract_summary,
+    gather_recency, hybrid_boost, intent_focus, is_stopword, load_layer_overrides, parse_intent,
+    stale_warning, symbol_tier, trim_for_agent,
+};
 
 use crate::config::Config;
 
@@ -28,28 +28,156 @@ pub struct SearchArgs {
     #[arg(long)]
     pub kind: Option<String>,
 
-    /// Filter by language (e.g. "swift", "python", "typescript").
+    /// Filter by language (e.g. "swift", "python", "typescript", "rust").
     #[arg(long)]
     pub language: Option<String>,
 
     /// Maximum results to show (default: 20).
     #[arg(long, default_value = "20")]
     pub limit: usize,
+
+    /// Include symbols from test files in results. By default tests are
+    /// excluded so production entry points rank first.
+    #[arg(long)]
+    pub include_tests: bool,
+
+    /// Suppress the stale-index warning.
+    #[arg(long)]
+    pub quiet: bool,
+
+    /// Adjust guidance context for a specific intent.
+    /// Values: bugfix, feature, refactor, test, architecture, ui.
+    #[arg(long)]
+    pub intent: Option<String>,
+
+    /// Emit token-budgeted JSON for LLM consumption. Trims bodies and
+    /// collapses low-signal fields; adds token_estimate.
+    #[arg(long)]
+    pub agent: bool,
+
+    /// Token budget when --agent is set (default: 8000).
+    #[arg(long, default_value = "8000")]
+    pub agent_budget: usize,
 }
 
 pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
-    let mut engine = Engine::open_sqlite(&cfg.db_path)?;
-    engine.register_adapter(Arc::new(PythonAdapter::new()) as Arc<dyn LanguageAdapter>);
-    engine.register_adapter(Arc::new(TypeScriptAdapter::new()) as Arc<dyn LanguageAdapter>);
+    if !args.quiet {
+        if let Some(warn) = stale_warning(&cfg.db_path, 3600) {
+            eprintln!("{warn}");
+        }
+    }
+    let intent = args.intent.as_deref().and_then(parse_intent).unwrap_or("");
+    if !intent.is_empty() {
+        eprintln!("intent: {}", intent_focus(intent));
+    }
+    let layer_overrides = load_layer_overrides(&cfg.db_path);
+    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let ledger_store = AsgLedgerStore { repo: &engine.repo };
 
-    // Tokenise query.
-    let tokens: Vec<String> = args
-        .query
-        .split(|c: char| c.is_whitespace() || c == '_' || c == '-' || c == '.')
-        .map(|t| t.to_lowercase())
-        .filter(|t| t.len() >= 2)
-        .collect();
+    let filters = FtsFilters {
+        kind: args.kind.as_deref().map(|k| k.to_lowercase()),
+        language: args.language.as_deref().map(|l| l.to_lowercase()),
+        include_tests: args.include_tests,
+    };
 
+    // --- FTS path ---
+    let fts_result = SearchFtsDb::open(&cfg.db_path)
+        .ok()
+        .filter(|fts| fts.has_data())
+        .and_then(|fts| fts.search(&args.query, &filters, args.limit * 4).ok());
+
+    if let Some(hits) = fts_result {
+        let tokens = query_tokens(&args.query);
+
+        // Hybrid reranking: BM25 + path/name boost + ledger boost.
+        let mut scored: Vec<(f64, _)> = hits
+            .into_iter()
+            .map(|hit| {
+                let boost = hybrid_boost(&hit, &tokens);
+                let ledger_boost = {
+                    let entries = ledger_store
+                        .list_entries(&engine.ref_name, &hit.symbol_id)
+                        .unwrap_or_default();
+                    let text = entries
+                        .iter()
+                        .map(|e| e.summary.to_lowercase())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if text.is_empty() {
+                        0.0
+                    } else {
+                        tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
+                    }
+                };
+                (hit.bm25_score + boost + ledger_boost, hit)
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.1.qname.cmp(&b.1.qname)));
+        scored.truncate(args.limit);
+
+        if scored.is_empty() {
+            println!("No results for {:?}", args.query);
+            return Ok(());
+        }
+
+        // One git pass to annotate with recency (hot = changed in last 14 days).
+        let recency = gather_recency(200, 14.0);
+
+        if args.agent {
+            let results: Vec<serde_json::Value> = scored.iter().map(|(score, hit)| {
+                let rec = recency.get(&hit.file);
+                let tier = symbol_tier(&hit.file);
+                let layer = classify_layer_sym(&hit.file, &hit.qname, tier, &layer_overrides);
+                serde_json::json!({
+                    "score": score, "qname": hit.qname, "kind": hit.kind,
+                    "file": hit.file, "line": hit.line, "layer": layer,
+                    "summary": extract_summary(hit.doc.as_deref(), hit.signature.as_deref()),
+                    "last_touched_days": rec.and_then(|r| r.last_touched_days),
+                    "hot": rec.map(|r| r.hot).unwrap_or(false),
+                })
+            }).collect();
+            let raw = serde_json::json!({
+                "query": args.query,
+                "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
+                "results": results,
+            });
+            let max_list = (args.agent_budget / 500).max(3).min(20);
+            let trimmed = trim_for_agent(&raw, max_list);
+            let json_str = serde_json::to_string_pretty(&trimmed)?;
+            let token_est = estimate_tokens(&json_str);
+            let mut out = trimmed.clone();
+            if let Some(obj) = out.as_object_mut() {
+                obj.insert("token_estimate".into(), serde_json::json!(token_est));
+            }
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        } else {
+            for (score, hit) in &scored {
+                let rec = recency.get(&hit.file);
+                let hot_tag = if rec.map(|r| r.hot).unwrap_or(false) { " [hot]" } else { "" };
+                let age_tag = rec
+                    .and_then(|r| r.last_touched_days)
+                    .map(|d| format!(" ~{:.0}d ago", d))
+                    .unwrap_or_default();
+                println!(
+                    "[{:.1}] {} {}{}{} ({}:{})",
+                    score, hit.kind, hit.qname, hot_tag, age_tag, hit.file, hit.line
+                );
+                if let Some(sig) = &hit.signature {
+                    if !sig.is_empty() { println!("       sig: {}", sig); }
+                }
+                let summary = extract_summary(hit.doc.as_deref(), hit.signature.as_deref());
+                if !summary.is_empty() { println!("       {}", summary); }
+            }
+        }
+        return Ok(());
+    }
+
+    // --- Fallback: in-memory O(N) scoring ---
+    eprintln!("asd: FTS index not populated — falling back to in-memory search (run `asd index` to enable fast search)");
+
+    let tokens = query_tokens(&args.query);
     if tokens.is_empty() {
         println!("[]");
         return Ok(());
@@ -65,8 +193,6 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
     };
 
     let index = AsgIndexStore { repo: &engine.repo };
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
-
     let mut scored: Vec<(u32, agentstatedeveloper_core::Symbol)> = Vec::new();
 
     for qname in &qnames {
@@ -76,55 +202,14 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         };
 
         if let Some(ref k) = kind_filter {
-            let sym_kind = match sym.kind {
-                agentstatedeveloper_core::SymbolKind::Module => "module",
-                agentstatedeveloper_core::SymbolKind::Function => "function",
-                agentstatedeveloper_core::SymbolKind::Method => "method",
-                agentstatedeveloper_core::SymbolKind::Class => "class",
-                agentstatedeveloper_core::SymbolKind::Variable => "variable",
-            };
-            if sym_kind != k.as_str() {
-                continue;
-            }
+            let sym_kind = kind_str(&sym.kind);
+            if sym_kind != k.as_str() { continue; }
         }
         if let Some(lang) = lang_filter {
-            if sym.language != lang {
-                continue;
-            }
+            if sym.language != lang { continue; }
         }
 
-        let qname_lower = sym.qname.to_lowercase();
-        let sig_lower = sym.signature.as_deref().unwrap_or("").to_lowercase();
-        let doc_lower = sym.doc.as_deref().unwrap_or("").to_lowercase();
-        let file_lower = sym.file.to_lowercase();
-
-        let ledger_text: String = ledger_store
-            .list_entries(&engine.ref_name, &sym.symbol_id)
-            .unwrap_or_default()
-            .iter()
-            .map(|e| e.summary.to_lowercase())
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        let mut score: u32 = 0;
-        for token in &tokens {
-            if qname_lower.contains(token.as_str()) {
-                score += 4;
-            }
-            if !sig_lower.is_empty() && sig_lower.contains(token.as_str()) {
-                score += 3;
-            }
-            if !doc_lower.is_empty() && doc_lower.contains(token.as_str()) {
-                score += 3;
-            }
-            if !ledger_text.is_empty() && ledger_text.contains(token.as_str()) {
-                score += 2;
-            }
-            if file_lower.contains(token.as_str()) {
-                score += 1;
-            }
-        }
-
+        let score = in_memory_score(&sym, &tokens, &ledger_store, &engine);
         if score > 0 {
             scored.push((score, sym));
         }
@@ -139,28 +224,68 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
     }
 
     for (score, sym) in &scored {
-        let kind = format!("{:?}", sym.kind).to_lowercase();
-        let sig = sym.signature.as_deref().unwrap_or("");
-        let doc_preview = sym
-            .doc
-            .as_deref()
-            .map(|d| {
-                let s: String = d.chars().take(80).collect();
-                format!("  doc: {}", s)
-            })
-            .unwrap_or_default();
-
-        println!(
-            "[{:3}] {} {} ({})",
-            score, kind, sym.qname, sym.file
-        );
-        if !sig.is_empty() {
-            println!("       sig: {}", sig);
+        let kind = kind_str(&sym.kind);
+        println!("[{:3}] {} {} ({})", score, kind, sym.qname, sym.file);
+        if let Some(sig) = sym.signature.as_deref() {
+            if !sig.is_empty() { println!("       sig: {}", sig); }
         }
-        if !doc_preview.is_empty() {
-            println!("      {}", doc_preview);
+        let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
+        if !summary.is_empty() {
+            println!("       {}", summary);
         }
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+pub(crate) fn query_tokens(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| c.is_whitespace() || c == '_' || c == '-' || c == '.')
+        .map(|t| t.to_lowercase())
+        .filter(|t| t.len() >= 2 && !is_stopword(t))
+        .collect()
+}
+
+pub(crate) fn kind_str(kind: &SymbolKind) -> &'static str {
+    match kind {
+        SymbolKind::Module => "module",
+        SymbolKind::Function => "function",
+        SymbolKind::Method => "method",
+        SymbolKind::Class => "class",
+        SymbolKind::Variable => "variable",
+    }
+}
+
+pub(crate) fn in_memory_score(
+    sym: &agentstatedeveloper_core::Symbol,
+    tokens: &[String],
+    ledger_store: &AsgLedgerStore,
+    engine: &Engine,
+) -> u32 {
+    let qname_lower = sym.qname.to_lowercase();
+    let sig_lower = sym.signature.as_deref().unwrap_or("").to_lowercase();
+    let doc_lower = sym.doc.as_deref().unwrap_or("").to_lowercase();
+    let file_lower = sym.file.to_lowercase();
+
+    let ledger_text: String = ledger_store
+        .list_entries(&engine.ref_name, &sym.symbol_id)
+        .unwrap_or_default()
+        .iter()
+        .map(|e| e.summary.to_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let mut score: u32 = 0;
+    for token in tokens {
+        if qname_lower.contains(token.as_str()) { score += 4; }
+        if !sig_lower.is_empty() && sig_lower.contains(token.as_str()) { score += 3; }
+        if !doc_lower.is_empty() && doc_lower.contains(token.as_str()) { score += 3; }
+        if !ledger_text.is_empty() && ledger_text.contains(token.as_str()) { score += 2; }
+        if file_lower.contains(token.as_str()) { score += 1; }
+    }
+    score
 }

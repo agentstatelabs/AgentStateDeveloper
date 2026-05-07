@@ -129,16 +129,16 @@ pub fn run(cfg: &Config, args: TraceArgs) -> Result<()> {
             });
 
         let declared_set: HashSet<EffectCategory> =
-            decl.declared.iter().map(|e| e.effect).collect();
+            decl.declared.iter().map(|e| e.effect.clone()).collect();
         let observed_set: HashSet<EffectCategory> =
-            obs.observed_effects.iter().map(|e| e.effect).collect();
+            obs.observed_effects.iter().map(|e| e.effect.clone()).collect();
 
         let mut mismatches: Vec<Mismatch> = Vec::new();
         for obs_e in &obs.observed_effects {
             if !declared_set.contains(&obs_e.effect) && obs_e.effect != EffectCategory::Pure {
                 mismatches.push(Mismatch {
                     kind: "undeclared".to_string(),
-                    effect: obs_e.effect,
+                    effect: obs_e.effect.clone(),
                     detected_in: Some(obs.qname.clone()),
                     note: obs_e.note.clone(),
                 });
@@ -149,7 +149,7 @@ pub fn run(cfg: &Config, args: TraceArgs) -> Result<()> {
             {
                 mismatches.push(Mismatch {
                     kind: "unobserved".to_string(),
-                    effect: declared.effect,
+                    effect: declared.effect.clone(),
                     detected_in: Some(obs.qname.clone()),
                     note: Some("declared but not seen at runtime".to_string()),
                 });

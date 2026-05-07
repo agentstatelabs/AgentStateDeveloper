@@ -111,7 +111,7 @@ fn propagates_transitive_effects_with_via_chains() {
         .expect("get C")
         .expect("C exists");
     let cats: HashSet<EffectCategory> =
-        c_decl.transitive.iter().map(|t| t.effect).collect();
+        c_decl.transitive.iter().map(|t| t.effect.clone()).collect();
     assert!(
         cats.contains(&EffectCategory::IoFsRead),
         "C should surface io.fs.read via A, got {:?}",

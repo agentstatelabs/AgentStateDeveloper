@@ -3,7 +3,9 @@
 //!
 //! Patterns mirror `agentstategraph-mcp::server` (same `rmcp` version).
 
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
+use std::process::Command as Proc;
 use std::sync::Arc;
 
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -13,10 +15,15 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
+use agentstatedeveloper_adapters::default_adapters;
 use agentstatedeveloper_core::{
-    ASD_PATH_PREFIX, AsgEffectStore, AsgIndexStore, AsgLedgerStore, AuditEvent, AuditSink, Author,
-    AuthorKind, Decision, Effect, EffectCategory, EffectDecl, EffectStore, Engine, IndexStore,
-    LedgerEntry, LedgerKind, LedgerStore, Situation, actions, event_types,
+    ASD_PATH_PREFIX, AsgEffectStore, AsgIndexStore, AsgLedgerStore, AsgScratchStore, AuditEvent,
+    Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory, EffectDecl, EffectStore,
+    Engine, FtsFilters, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Rebind, ScratchEntry,
+    ScratchFilter, ScratchStatus, ScratchStore, SearchFtsDb, Situation, actions, classify_layer_sym,
+    derive_cold_hints, emit_audit, event_types, extract_summary, gather_recency, hybrid_boost,
+    intent_focus, intent_layer_order, is_stopword, load_layer_overrides, parse_intent, paths,
+    propose_test_path, symbol_tier,
 };
 
 /// The AgentStateDeveloper MCP server.
@@ -45,21 +52,138 @@ pub struct CodeQueryParams {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct CodeSearchParams {
-    /// Natural-language concept or keyword(s) to search for. Tokenised and
-    /// scored across symbol name, signature, doc comment, file path, and
-    /// ledger entry summaries. Returns ranked results.
+    /// Concept or keyword(s) to search for. BM25-ranked via FTS5.
     pub query: String,
     /// Filter by symbol kind: module, function, method, class, variable.
     pub kind: Option<String>,
-    /// Filter by language (e.g. "swift", "python").
+    /// Filter by language (e.g. "swift", "python", "typescript", "rust").
     pub language: Option<String>,
     /// Max results to return (default: 20).
     #[serde(default = "default_search_limit")]
     pub limit: u32,
+    /// Include test-file symbols in results (default: false — tests excluded so
+    /// production entry points rank first).
+    #[serde(default)]
+    pub include_tests: bool,
 }
 
-fn default_search_limit() -> u32 {
-    20
+fn default_search_limit() -> u32 { 20 }
+
+#[derive(Deserialize, JsonSchema)]
+pub struct InvestigateParams {
+    /// Natural-language or keyword query.
+    pub query: String,
+    /// Number of top entry-point symbols to fully expand (default: 5).
+    #[serde(default = "default_investigate_depth")]
+    pub depth: u32,
+    /// Filter by symbol kind: module, function, method, class, variable.
+    pub kind: Option<String>,
+    /// Filter by language (e.g. "swift", "python", "typescript", "rust").
+    pub language: Option<String>,
+    /// Include test-file symbols as entry-point candidates (default: false).
+    #[serde(default)]
+    pub include_tests: bool,
+    /// Adjust output ordering and guidance for a specific intent.
+    /// Values: bugfix, feature, refactor, test, architecture, ui.
+    pub intent: Option<String>,
+}
+
+fn default_investigate_depth() -> u32 { 10 }
+fn default_impact_depth() -> u32 { 3 }
+fn default_git_depth() -> u32 { 20 }
+fn default_checklist_depth() -> u32 { 10 }
+fn default_test_depth() -> u32 { 2 }
+fn default_prepare_depth() -> u32 { 10 }
+fn default_prepare_git_depth() -> u32 { 10 }
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PrepareChangeParams {
+    /// Free-form description of the intended change (treated as a search query).
+    pub description: String,
+    /// Number of top entry-point symbols to expand (default: 7).
+    #[serde(default = "default_prepare_depth")]
+    pub depth: u32,
+    /// Filter by symbol kind.
+    pub kind: Option<String>,
+    /// Filter by language.
+    pub language: Option<String>,
+    /// Include test-file symbols as entry-point candidates (default: false).
+    #[serde(default)]
+    pub include_tests: bool,
+    /// Adjust output for a specific intent.
+    /// Values: bugfix, feature, refactor, test, architecture, ui.
+    pub intent: Option<String>,
+    /// BFS depth for finding affected tests from the top entry point (default: 2).
+    #[serde(default = "default_test_depth")]
+    pub test_depth: u32,
+    /// Number of recent git commits to scan per file (default: 10).
+    #[serde(default = "default_prepare_git_depth")]
+    pub git_depth: u32,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ChecklistParams {
+    /// Natural-language or keyword query.
+    pub query: String,
+    /// Number of top entry-point symbols to analyse (default: 5).
+    #[serde(default = "default_checklist_depth")]
+    pub depth: u32,
+    /// Filter by symbol kind.
+    pub kind: Option<String>,
+    /// Filter by language.
+    pub language: Option<String>,
+    /// Include test-file symbols as entry-point candidates (default: false).
+    #[serde(default)]
+    pub include_tests: bool,
+    /// Adjust checklist framing for a specific intent.
+    /// Values: bugfix, feature, refactor, test, architecture, ui.
+    pub intent: Option<String>,
+    /// Caller BFS depth for finding affected tests (default: 2).
+    #[serde(default = "default_test_depth")]
+    pub test_depth: u32,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ImpactParams {
+    /// Fully-qualified symbol name to analyse.
+    pub qname: String,
+    /// Caller-graph traversal depth (default: 3).
+    #[serde(default = "default_impact_depth")]
+    pub depth: u32,
+    /// Number of recent git commits to look back per touched file (default: 20).
+    #[serde(default = "default_git_depth")]
+    pub git_depth: u32,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SinceParams {
+    /// Base commit SHA (or branch/tag) to diff against HEAD.
+    pub sha: String,
+    /// Caller-graph BFS depth for blast radius (default: 3).
+    #[serde(default = "default_impact_depth")]
+    pub depth: u32,
+    /// Number of recent git commits to scan per changed file (default: 10).
+    #[serde(default = "default_since_git_depth")]
+    pub git_depth: u32,
+}
+
+fn default_since_git_depth() -> u32 { 10 }
+
+#[derive(Deserialize, JsonSchema)]
+pub struct InvariantAddParams {
+    /// Fully-qualified symbol name.
+    pub qname: String,
+    /// One-line invariant summary.
+    pub summary: String,
+    /// Author identifier (default: "asd-mcp-agent").
+    #[serde(default = "default_author_id")]
+    pub author_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct InvariantListParams {
+    /// Filter to a single symbol's invariants. Omit to list all.
+    pub qname: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -192,6 +316,33 @@ fn default_approver_kind_mcp() -> String {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct TracesOfParams {
+    /// Fully-qualified symbol name.
+    pub qname: String,
+    /// Maximum number of trace records to return (default 20).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ReindexParams {
+    /// Absolute or relative path to a source file or directory to reindex.
+    /// Relative paths are resolved from the process working directory.
+    pub path: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct LedgerRebindParams {
+    /// symbol_id of the old symbol whose ledger entries should be re-parented.
+    pub from_symbol_id: String,
+    /// Fully-qualified name of the new symbol to resolve and bind to.
+    pub to_qname: String,
+    /// Agent or user performing the rebind.
+    #[serde(default = "default_author_id")]
+    pub agent_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct AuditTailParams {
     /// Substring match on event_type (e.g., `ledger.approve`,
     /// `ledger.` for all ledger events).
@@ -235,6 +386,95 @@ fn default_author_id() -> String {
     "asd-mcp".to_string()
 }
 
+// -- Scratch parameter types ------------------------------------------------
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ScratchWriteParams {
+    /// Working notes content (markdown OK).
+    pub content: String,
+    /// Optional: qualified name of the symbol to attach this note to.
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// Optional: named investigation context (e.g. "tracing-sync-bug").
+    #[serde(default)]
+    pub workflow: Option<String>,
+    /// Optional: time-to-live in hours. When not set, no expiry.
+    #[serde(default)]
+    pub ttl_hours: Option<i64>,
+    /// Optional: freeform tags.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ScratchListParams {
+    /// Filter by symbol qualified name.
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// Filter by workflow name.
+    #[serde(default)]
+    pub workflow: Option<String>,
+    /// Filter by session/agent_id.
+    #[serde(default)]
+    pub session: Option<String>,
+    /// Filter by status: "draft", "promoted", "discarded". Defaults to "draft".
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Max results to return (default: 50).
+    #[serde(default = "default_limit")]
+    pub limit: u32,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ScratchReadParams {
+    /// Scratch entry ID (`scr_…`).
+    pub scratch_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ScratchUpdateParams {
+    /// Scratch entry ID to update.
+    pub scratch_id: String,
+    /// Replacement content (replaces previous content entirely).
+    pub content: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ScratchDiscardParams {
+    /// Scratch entry ID to discard.
+    pub scratch_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ScratchPromoteParams {
+    /// Scratch entry ID to promote.
+    pub scratch_id: String,
+    /// Ledger kind: decision, assumption, constraint, rationale, hazard, tradeoff, invariant, ownership, proof.
+    pub kind: String,
+    /// Symbol qualified name. Required if the scratch entry has no symbol attached.
+    #[serde(default)]
+    pub qname: Option<String>,
+    /// One-line summary. Defaults to the first non-empty line of the scratch content.
+    #[serde(default)]
+    pub summary: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ScratchCleanParams {
+    /// Delete entries older than this many hours. Required.
+    pub older_than_hours: u32,
+    /// Comma-separated statuses to clean: "discarded,promoted" (default).
+    #[serde(default = "default_scratch_clean_statuses")]
+    pub statuses: String,
+    /// When true, report what would be deleted without removing anything.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+fn default_scratch_clean_statuses() -> String {
+    "discarded,promoted".to_string()
+}
+
 // -- Tool implementations ---------------------------------------------------
 
 #[tool_router]
@@ -275,10 +515,25 @@ impl AsdMcpServer {
             .unwrap_or_else(|_| self.db_path.clone())
             .to_string_lossy()
             .to_string();
+        let ledger_prefix = format!("{}/ledger", ASD_PATH_PREFIX);
+        let orphan_count = match engine.repo.get_tree(&ref_name, &ledger_prefix) {
+            Ok(serde_json::Value::Object(by_symbol)) => {
+                let indexed_prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+                let indexed: std::collections::HashSet<String> = match engine.repo.get_tree(&ref_name, &indexed_prefix) {
+                    Ok(serde_json::Value::Object(m)) => m.values()
+                        .filter_map(|v| v.get("symbol_id")?.as_str().map(|s| s.to_string()))
+                        .collect(),
+                    _ => std::collections::HashSet::new(),
+                };
+                by_symbol.keys().filter(|sym_id| !indexed.contains(*sym_id)).count()
+            }
+            _ => 0,
+        };
         let payload = serde_json::json!({
             "status": "ok",
             "db_path": db_path,
             "symbol_count": symbol_count,
+            "orphaned_symbol_count": orphan_count,
         });
         serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())
     }
@@ -342,132 +597,366 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Search symbols by concept or keyword(s). Unlike code_query (which filters by exact substring), code_search scores every symbol across its name, signature, doc comment, file path, and ledger summaries — returning the best matches ranked by relevance. Use this for the first 10 minutes of feature archaeology when you don't yet know the exact symbol names."
+        description = "Ranked concept search over indexed symbols using FTS5/BM25. Returns symbols sorted by relevance. Use this when you need to discover entry points for a feature or concept — 'playhead over clips', 'auth flow', 'export pipeline', etc."
     )]
     async fn code_search(&self, params: Parameters<CodeSearchParams>) -> String {
         let p = params.0;
+        let db_path = self.db_path.clone();
+        let layer_overrides = load_layer_overrides(&db_path);
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
-        let limit = p.limit.max(1) as usize;
 
-        // Tokenise the query: split on whitespace and common separators,
-        // lower-case each token, drop empties.
-        let tokens: Vec<String> = p
-            .query
+        let tokens: Vec<String> = p.query
             .split(|c: char| c.is_whitespace() || c == '_' || c == '-' || c == '.')
             .map(|t| t.to_lowercase())
-            .filter(|t| t.len() >= 2)
+            .filter(|t| t.len() >= 2 && !is_stopword(t))
             .collect();
 
         if tokens.is_empty() {
             return "[]".to_string();
         }
 
-        let kind_filter = p.kind.as_deref().map(|k| k.to_lowercase());
-        let lang_filter = p.language.as_deref();
+        let limit = p.limit.max(1) as usize;
+        let filters = FtsFilters {
+            kind: p.kind.as_deref().map(|k| k.to_lowercase()),
+            language: p.language.as_deref().map(|l| l.to_lowercase()),
+            include_tests: p.include_tests,
+        };
 
-        // Collect all qnames from the index.
+        // --- FTS path ---
+        let fts_result = SearchFtsDb::open(&db_path)
+            .ok()
+            .filter(|fts| fts.has_data())
+            .and_then(|fts| fts.search(&p.query, &filters, limit * 4).ok());
+
+        if let Some(hits) = fts_result {
+            let ledger_store = AsgLedgerStore { repo: &engine.repo };
+            let mut scored: Vec<(f64, _)> = hits
+                .into_iter()
+                .map(|hit| {
+                    let boost = hybrid_boost(&hit, &tokens);
+                    let entries = ledger_store
+                        .list_entries(&ref_name, &hit.symbol_id)
+                        .unwrap_or_default();
+                    let text = entries.iter().map(|e| e.summary.to_lowercase())
+                        .collect::<Vec<_>>().join(" ");
+                    let ledger_boost = if text.is_empty() { 0.0 } else {
+                        tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
+                    };
+                    (hit.bm25_score + boost + ledger_boost, hit)
+                })
+                .collect();
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.qname.cmp(&b.1.qname)));
+            scored.truncate(limit);
+
+            let recency = gather_recency(200, 14.0);
+            let results: Vec<serde_json::Value> = scored.iter().map(|(score, hit)| {
+                let tier = hit.tier;
+                let layer = classify_layer_sym(&hit.file, &hit.qname, tier, &layer_overrides);
+                let summary = extract_summary(hit.doc.as_deref(), hit.signature.as_deref());
+                let rec = recency.get(&hit.file);
+                serde_json::json!({
+                    "score": score,
+                    "qname": hit.qname,
+                    "kind": hit.kind,
+                    "language": hit.language,
+                    "file": hit.file,
+                    "line": hit.line,
+                    "tier": tier,
+                    "layer": layer,
+                    "summary": summary,
+                    "signature": hit.signature,
+                    "doc": hit.doc,
+                    "last_touched_days": rec.and_then(|r| r.last_touched_days),
+                    "hot": rec.map(|r| r.hot).unwrap_or(false),
+                })
+            }).collect();
+            return serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string());
+        }
+
+        // --- Fallback: in-memory O(N) scoring ---
+        let kind_filter = filters.kind;
+        let lang_filter = filters.language;
         let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
         let qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
             Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
             _ => return "[]".to_string(),
         };
-
         let index = AsgIndexStore { repo: &engine.repo };
         let ledger_store = AsgLedgerStore { repo: &engine.repo };
-
-        let mut scored: Vec<(u32, Symbol)> = Vec::new();
-
+        let mut scored: Vec<(u32, agentstatedeveloper_core::Symbol)> = Vec::new();
         for qname in &qnames {
             let sym = match index.get_symbol_by_qname(&ref_name, qname) {
                 Ok(Some(s)) => s,
                 _ => continue,
             };
-
-            // Kind filter.
-            if let Some(ref k) = kind_filter {
-                let sym_kind = match sym.kind {
-                    agentstatedeveloper_core::SymbolKind::Module => "module",
-                    agentstatedeveloper_core::SymbolKind::Function => "function",
-                    agentstatedeveloper_core::SymbolKind::Method => "method",
-                    agentstatedeveloper_core::SymbolKind::Class => "class",
-                    agentstatedeveloper_core::SymbolKind::Variable => "variable",
-                };
-                if sym_kind != k {
-                    continue;
-                }
-            }
-            // Language filter.
-            if let Some(lang) = lang_filter {
-                if sym.language != lang {
-                    continue;
-                }
-            }
-
-            // Build a searchable corpus for this symbol.
-            let qname_lower = sym.qname.to_lowercase();
-            let sig_lower = sym
-                .signature
-                .as_deref()
-                .unwrap_or("")
-                .to_lowercase();
-            let doc_lower = sym.doc.as_deref().unwrap_or("").to_lowercase();
-            let file_lower = sym.file.to_lowercase();
-
-            // Ledger summaries — fetch but don't fail the whole search on error.
-            let ledger_text: String = ledger_store
-                .list_entries(&ref_name, &sym.symbol_id)
-                .unwrap_or_default()
-                .iter()
-                .map(|e| e.summary.to_lowercase())
-                .collect::<Vec<_>>()
-                .join(" ");
-
-            // Score: count token hits per field with weights.
-            // qname: 4, signature: 3, doc: 3, ledger: 2, file: 1
+            let sk = format!("{:?}", sym.kind).to_lowercase();
+            if let Some(ref k) = kind_filter { if &sk != k { continue; } }
+            if let Some(ref lang) = lang_filter { if &sym.language != lang { continue; } }
+            let qn = sym.qname.to_lowercase();
+            let sig = sym.signature.as_deref().unwrap_or("").to_lowercase();
+            let doc = sym.doc.as_deref().unwrap_or("").to_lowercase();
+            let file = sym.file.to_lowercase();
+            let ledger_text: String = ledger_store.list_entries(&ref_name, &sym.symbol_id)
+                .unwrap_or_default().iter().map(|e| e.summary.to_lowercase())
+                .collect::<Vec<_>>().join(" ");
             let mut score: u32 = 0;
             for token in &tokens {
-                if qname_lower.contains(token.as_str()) {
-                    score += 4;
-                }
-                if !sig_lower.is_empty() && sig_lower.contains(token.as_str()) {
-                    score += 3;
-                }
-                if !doc_lower.is_empty() && doc_lower.contains(token.as_str()) {
-                    score += 3;
-                }
-                if !ledger_text.is_empty() && ledger_text.contains(token.as_str()) {
-                    score += 2;
-                }
-                if file_lower.contains(token.as_str()) {
-                    score += 1;
-                }
+                if qn.contains(token.as_str()) { score += 4; }
+                if !sig.is_empty() && sig.contains(token.as_str()) { score += 3; }
+                if !doc.is_empty() && doc.contains(token.as_str()) { score += 3; }
+                if !ledger_text.is_empty() && ledger_text.contains(token.as_str()) { score += 2; }
+                if file.contains(token.as_str()) { score += 1; }
             }
+            if score > 0 { scored.push((score, sym)); }
+        }
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.qname.cmp(&b.1.qname)));
+        scored.truncate(limit);
+        let recency = gather_recency(200, 14.0);
+        let results: Vec<serde_json::Value> = scored.iter().map(|(score, sym)| {
+            let tier = symbol_tier(&sym.file);
+            let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
+            let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
+            let rec = recency.get(&sym.file);
+            serde_json::json!({
+                "score": score,
+                "qname": sym.qname,
+                "kind": format!("{:?}", sym.kind).to_lowercase(),
+                "language": sym.language,
+                "file": sym.file,
+                "line": sym.start.line,
+                "tier": tier,
+                "layer": layer,
+                "summary": summary,
+                "signature": sym.signature,
+                "doc": sym.doc,
+                "last_touched_days": rec.and_then(|r| r.last_touched_days),
+                "hot": rec.map(|r| r.hot).unwrap_or(false),
+            })
+        }).collect();
+        serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string())
+    }
 
-            if score > 0 {
-                scored.push((score, sym));
+    #[tool(
+        description = "Feature archaeology in one pass: FTS5 search for entry points, then expand each with call chains, effects, invariants, and hazards. Use this at the start of any broad investigation — 'playhead over clips', 'auth flow', 'export pipeline', etc."
+    )]
+    async fn investigate(&self, params: Parameters<InvestigateParams>) -> String {
+        let p = params.0;
+        let intent = p.intent.as_deref().and_then(parse_intent).unwrap_or("");
+        let db_path = self.db_path.clone();
+        let layer_overrides = load_layer_overrides(&db_path);
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+
+        let tokens: Vec<String> = p.query
+            .split(|c: char| c.is_whitespace() || c == '_' || c == '-' || c == '.')
+            .map(|t| t.to_lowercase())
+            .filter(|t| t.len() >= 2 && !is_stopword(t))
+            .collect();
+
+        if tokens.is_empty() {
+            return serde_json::json!({ "query": p.query, "entry_points": [] }).to_string();
+        }
+
+        let depth = p.depth.max(1) as usize;
+        let filters = FtsFilters {
+            kind: p.kind.as_deref().map(|k| k.to_lowercase()),
+            language: p.language.as_deref().map(|l| l.to_lowercase()),
+            include_tests: p.include_tests,
+        };
+
+        let index = AsgIndexStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let effect_store = AsgEffectStore { repo: &engine.repo };
+
+        // Find top-N entry points using FTS with hybrid reranking.
+        let top_qnames: Vec<(f64, String)> = {
+            let fts_result = SearchFtsDb::open(&db_path)
+                .ok()
+                .filter(|fts| fts.has_data())
+                .and_then(|fts| fts.search(&p.query, &filters, depth * 8).ok());
+
+            if let Some(hits) = fts_result {
+                let mut sc: Vec<(f64, String)> = hits.into_iter().map(|hit| {
+                    let boost = hybrid_boost(&hit, &tokens);
+                    let entries = ledger_store.list_entries(&ref_name, &hit.symbol_id)
+                        .unwrap_or_default();
+                    let text = entries.iter().map(|e| e.summary.to_lowercase())
+                        .collect::<Vec<_>>().join(" ");
+                    let ledger_boost = if text.is_empty() { 0.0 } else {
+                        tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
+                    };
+                    (hit.bm25_score + boost + ledger_boost, hit.qname)
+                }).collect();
+                sc.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                inject_file_stem(&db_path, &tokens, &filters, &index, &ref_name, sc, depth)
+            } else {
+                // Fallback: in-memory scoring.
+                let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+                let qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
+                    Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
+                    _ => vec![],
+                };
+                let kind_filter = filters.kind.clone();
+                let lang_filter = filters.language.clone();
+                let mut sc: Vec<(f64, String)> = Vec::new();
+                for qname in &qnames {
+                    let sym = match index.get_symbol_by_qname(&ref_name, qname) {
+                        Ok(Some(s)) => s,
+                        _ => continue,
+                    };
+                    let sk = format!("{:?}", sym.kind).to_lowercase();
+                    if let Some(ref k) = kind_filter { if &sk != k { continue; } }
+                    if let Some(ref lang) = lang_filter { if &sym.language != lang { continue; } }
+                    let qn = sym.qname.to_lowercase();
+                    let sig = sym.signature.as_deref().unwrap_or("").to_lowercase();
+                    let doc = sym.doc.as_deref().unwrap_or("").to_lowercase();
+                    let file = sym.file.to_lowercase();
+                    let lt: String = ledger_store.list_entries(&ref_name, &sym.symbol_id)
+                        .unwrap_or_default().iter().map(|e| e.summary.to_lowercase())
+                        .collect::<Vec<_>>().join(" ");
+                    let mut score: u32 = 0;
+                    for t in &tokens {
+                        if qn.contains(t.as_str()) { score += 4; }
+                        if !sig.is_empty() && sig.contains(t.as_str()) { score += 3; }
+                        if !doc.is_empty() && doc.contains(t.as_str()) { score += 3; }
+                        if !lt.is_empty() && lt.contains(t.as_str()) { score += 2; }
+                        if file.contains(t.as_str()) { score += 1; }
+                    }
+                    if score > 0 { sc.push((score as f64, sym.qname)); }
+                }
+                sc.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                sc.truncate(depth);
+                sc
+            }
+        };
+
+        // Build id_map for call graph resolution.
+        let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+        let all_qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
+            Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
+            _ => vec![],
+        };
+        let mut id_map: std::collections::HashMap<String, agentstatedeveloper_core::Symbol> =
+            std::collections::HashMap::new();
+        for qn in &all_qnames {
+            if let Ok(Some(s)) = index.get_symbol_by_qname(&ref_name, qn) {
+                id_map.insert(s.symbol_id.clone(), s);
             }
         }
 
-        // Sort descending by score, then alphabetically by qname for ties.
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.qname.cmp(&b.1.qname)));
-        scored.truncate(limit);
+        let recency = gather_recency(200, 14.0);
 
-        let results: Vec<serde_json::Value> = scored
-            .into_iter()
-            .map(|(score, sym)| {
-                serde_json::json!({
-                    "score": score,
-                    "qname": sym.qname,
-                    "kind": format!("{:?}", sym.kind).to_lowercase(),
-                    "file": sym.file,
-                    "signature": sym.signature,
-                    "doc": sym.doc,
-                })
-            })
-            .collect();
+        let resolve_ids = |ids: Vec<String>| -> Vec<serde_json::Value> {
+            ids.iter().map(|id| {
+                if let Some(s) = id_map.get(id) {
+                    serde_json::json!({ "qname": s.qname, "file": s.file, "line": s.start.line })
+                } else {
+                    serde_json::json!({ "symbol_id": id })
+                }
+            }).collect()
+        };
 
-        serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string())
+        let mut entry_points: Vec<serde_json::Value> = Vec::new();
+        for (score, qname) in &top_qnames {
+            let sym = match index.get_symbol_by_qname(&ref_name, qname) {
+                Ok(Some(s)) => s,
+                _ => continue,
+            };
+            let callee_ids = index.get_callees(&ref_name, &sym.symbol_id).unwrap_or_default();
+            let caller_ids = index.get_callers(&ref_name, &sym.symbol_id).unwrap_or_default();
+            let effects = effect_store.get_effects(&ref_name, &sym.symbol_id).unwrap_or(None);
+            let ledger = ledger_store.list_entries(&ref_name, &sym.symbol_id).unwrap_or_default();
+
+            let mut invariants: Vec<serde_json::Value> = Vec::new();
+            let mut hazards: Vec<serde_json::Value> = Vec::new();
+            let mut other_ledger: Vec<serde_json::Value> = Vec::new();
+            for entry in &ledger {
+                let v = serde_json::to_value(entry).unwrap_or_default();
+                match entry.kind {
+                    LedgerKind::Invariant => invariants.push(v),
+                    LedgerKind::Hazard => hazards.push(v),
+                    _ => other_ledger.push(v),
+                }
+            }
+
+            let tier = symbol_tier(&sym.file);
+            let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
+            let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
+            let rec = recency.get(&sym.file);
+            entry_points.push(serde_json::json!({
+                "score": score,
+                "layer": layer,
+                "summary": summary,
+                "last_touched_days": rec.and_then(|r| r.last_touched_days),
+                "hot": rec.map(|r| r.hot).unwrap_or(false),
+                "qname": sym.qname,
+                "kind": format!("{:?}", sym.kind).to_lowercase(),
+                "language": sym.language,
+                "file": sym.file,
+                "line": sym.start.line,
+                "signature": sym.signature,
+                "invariants": invariants,
+                "hazards": hazards,
+                "callers": resolve_ids(caller_ids),
+                "callees": resolve_ids(callee_ids),
+                "effects": effects,
+                "notes": other_ledger,
+            }));
+        }
+
+        // Aggregate invariants/hazards across all entry points.
+        let mut all_invariants: Vec<serde_json::Value> = Vec::new();
+        let mut all_hazards: Vec<serde_json::Value> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for ep in &entry_points {
+            let qname = ep.get("qname").and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(invs) = ep.get("invariants").and_then(|v| v.as_array()) {
+                for inv in invs {
+                    let key = inv.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    if !key.is_empty() && seen.insert(key) {
+                        let mut v = inv.clone();
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.insert("source_qname".to_string(), serde_json::Value::String(qname.to_string()));
+                        }
+                        all_invariants.push(v);
+                    }
+                }
+            }
+            if let Some(hzs) = ep.get("hazards").and_then(|v| v.as_array()) {
+                for hz in hzs {
+                    let mut v = hz.clone();
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("source_qname".to_string(), serde_json::Value::String(qname.to_string()));
+                    }
+                    all_hazards.push(v);
+                }
+            }
+        }
+
+        // Group by layer (intent-aware ordering).
+        let layer_order = intent_layer_order(intent);
+        let mut by_layer = serde_json::Map::new();
+        for lk in layer_order {
+            let members: Vec<&serde_json::Value> = entry_points.iter()
+                .filter(|ep| ep.get("layer").and_then(|v| v.as_str()) == Some(*lk))
+                .collect();
+            if !members.is_empty() {
+                by_layer.insert(lk.to_string(), serde_json::Value::Array(members.into_iter().cloned().collect()));
+            }
+        }
+
+        let focus = intent_focus(intent);
+        serde_json::to_string(&serde_json::json!({
+            "query": p.query,
+            "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
+            "focus": if focus.is_empty() { serde_json::Value::Null } else { serde_json::json!(focus) },
+            "tokens": tokens,
+            "invariants": all_invariants,
+            "hazards": all_hazards,
+            "by_layer": by_layer,
+        })).unwrap_or_else(|_| "{}".to_string())
     }
 
     #[tool(
@@ -742,6 +1231,9 @@ impl AsdMcpServer {
             qualifiers: serde_json::json!({
                 "qname": &p.qname,
                 "kind": kind.as_str(),
+                "symbol_id": &symbol.symbol_id,
+                "file": &symbol.file,
+                "language": &symbol.language,
             }),
         };
         let decision = match engine.policy.evaluate(&situation, &action, &p.author_id) {
@@ -875,6 +1367,18 @@ impl AsdMcpServer {
         let p = params.0;
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
+        let situation = Situation {
+            description: format!("ledger.approve {}", p.entry_id),
+            qualifiers: serde_json::json!({ "entry_id": &p.entry_id }),
+        };
+        if let Ok(Decision::Deny { matched_policy, reason }) =
+            engine.policy.evaluate(&situation, actions::LEDGER_APPROVE, &p.approver)
+        {
+            return err_json(&format!(
+                "policy denied: {} (matched {})",
+                reason, matched_policy
+            ));
+        }
         let ledger_store = AsgLedgerStore { repo: &engine.repo };
         match ledger_store.approve_entry(
             &ref_name,
@@ -930,6 +1434,18 @@ impl AsdMcpServer {
         let p = params.0;
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
+        let situation = Situation {
+            description: format!("ledger.reject {}", p.entry_id),
+            qualifiers: serde_json::json!({ "entry_id": &p.entry_id }),
+        };
+        if let Ok(Decision::Deny { matched_policy, reason }) =
+            engine.policy.evaluate(&situation, actions::LEDGER_REJECT, &p.reviewer)
+        {
+            return err_json(&format!(
+                "policy denied: {} (matched {})",
+                reason, matched_policy
+            ));
+        }
         let ledger_store = AsgLedgerStore { repo: &engine.repo };
         match ledger_store.reject_entry(
             &ref_name,
@@ -986,6 +1502,18 @@ impl AsdMcpServer {
         let p = params.0;
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
+        let situation = Situation {
+            description: format!("ledger.withdraw {}", p.entry_id),
+            qualifiers: serde_json::json!({ "entry_id": &p.entry_id }),
+        };
+        if let Ok(Decision::Deny { matched_policy, reason }) =
+            engine.policy.evaluate(&situation, actions::LEDGER_WITHDRAW, &p.author_id)
+        {
+            return err_json(&format!(
+                "policy denied: {} (matched {})",
+                reason, matched_policy
+            ));
+        }
         let ledger_store = AsgLedgerStore { repo: &engine.repo };
         match ledger_store.withdraw_entry(&ref_name, &p.entry_id, &p.author_id, "asd-mcp") {
             Ok(outcome) => {
@@ -1077,6 +1605,24 @@ impl AsdMcpServer {
                 return err_json(&e.to_string());
             }
         };
+
+        let situation = Situation {
+            description: format!("ledger.supersede for {}", p.qname),
+            qualifiers: serde_json::json!({
+                "qname": &p.qname,
+                "symbol_id": &symbol.symbol_id,
+                "file": &symbol.file,
+                "language": &symbol.language,
+            }),
+        };
+        if let Ok(Decision::Deny { matched_policy, reason }) =
+            engine.policy.evaluate(&situation, actions::LEDGER_SUPERSEDE, &p.author_id)
+        {
+            return err_json(&format!(
+                "policy denied: {} (matched {})",
+                reason, matched_policy
+            ));
+        }
 
         let author = Author {
             kind: author_kind,
@@ -1200,7 +1746,7 @@ impl AsdMcpServer {
         // in the existing declared list, this call is broadening.
         let existing_set: std::collections::HashSet<EffectCategory> = existing
             .as_ref()
-            .map(|d| d.declared.iter().map(|e| e.effect).collect())
+            .map(|d| d.declared.iter().map(|e| e.effect.clone()).collect())
             .unwrap_or_default();
         let new_categories: Vec<String> =
             declared.iter().map(|e| e.effect.as_str().to_string()).collect();
@@ -1217,6 +1763,9 @@ impl AsdMcpServer {
                 "qname": &p.qname,
                 "declared": new_categories,
                 "broadens": broadens,
+                "symbol_id": &symbol.symbol_id,
+                "file": &symbol.file,
+                "language": &symbol.language,
             }),
         };
         let decision = match engine.policy.evaluate(&situation, action, &p.author_id) {
@@ -1334,6 +1883,200 @@ impl AsdMcpServer {
     }
 
     #[tool(
+        description = "Return execution trace records stored for a symbol (written by `asd trace`). Returns newest-first, up to `limit` (default 20)."
+    )]
+    async fn traces_of(&self, params: Parameters<TracesOfParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let index = AsgIndexStore { repo: &engine.repo };
+        let symbol = match index.get_symbol_by_qname(&ref_name, &p.qname) {
+            Ok(Some(s)) => s,
+            Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
+            Err(e) => return err_json(&e.to_string()),
+        };
+        let prefix = format!("{}/traces/{}", paths::ASD_ROOT, symbol.symbol_id);
+        let limit = p.limit.unwrap_or(20).min(200);
+        let leaf_paths = match engine.repo.list_paths(&ref_name, &prefix, None) {
+            Ok(v) => v,
+            Err(_) => Vec::new(),
+        };
+        let mut traces: Vec<serde_json::Value> = Vec::new();
+        for path in leaf_paths.iter().take(limit * 4) {
+            if let Ok(v) = engine.repo.get_json(&ref_name, path) {
+                if traces.len() < limit {
+                    traces.push(v);
+                }
+            }
+        }
+        serde_json::to_string(&serde_json::json!({
+            "symbol_id": symbol.symbol_id,
+            "qname": p.qname,
+            "count": traces.len(),
+            "traces": traces,
+        }))
+        .unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[tool(
+        description = "Re-parse a source file or directory and refresh the ASD symbol index, effects, and call graph. Accepts absolute or relative paths. Equivalent to running `asd index <path>` from the CLI. After indexing, run `asd sync --prune` (or the pre-commit hook does it automatically) to flush the updated state into the .asd/v1/ sidecar so it travels with the next git commit."
+    )]
+    async fn reindex(&self, params: Parameters<ReindexParams>) -> String {
+        let p = params.0;
+        let root = std::path::PathBuf::from(&p.path);
+        if !root.exists() {
+            return err_json(&format!("path does not exist: {}", p.path));
+        }
+        let adapters = default_adapters();
+        let engine = self.engine.lock().await;
+        match agentstatedeveloper_core::run_index(
+            &engine.repo,
+            &engine.ref_name,
+            &root,
+            "asd-mcp",
+            &adapters,
+            Some(engine.audit.as_ref()),
+            None,
+            None,
+            Some(&self.db_path),
+        ) {
+            Ok(s) => serde_json::json!({
+                "path": p.path,
+                "files": s.files,
+                "skipped": s.skipped,
+                "symbols": s.symbols,
+                "edges": s.edges,
+                "intra_module_edges": s.intra_module_edges,
+                "cross_module_edges": s.cross_module_edges,
+                "transitive_updates": s.transitive_updates,
+                "orphaned_tagged": s.orphaned_tagged,
+            })
+            .to_string(),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Record that a symbol was renamed or moved. Writes a rebind record so the old symbol_id maps to the new one, then re-parents all ledger entries from the old symbol_id to the new one. Use this whenever an agent or human renames a function, class, or method so its ledger history follows the rename."
+    )]
+    async fn ledger_rebind(&self, params: Parameters<LedgerRebindParams>) -> String {
+        use agentstategraph::CommitOptions;
+        use agentstategraph_core::IntentCategory;
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = &engine.ref_name;
+
+        // Policy gate — evaluate before any writes
+        let situation = Situation::new("rebind symbol")
+            .with_qualifier("from_symbol_id", &p.from_symbol_id)
+            .with_qualifier("to_qname", &p.to_qname);
+        match engine.policy.evaluate(&situation, actions::LEDGER_REBIND, &p.agent_id) {
+            Ok(Decision::Deny { matched_policy, reason }) => {
+                return serde_json::json!({
+                    "policy_denied": true,
+                    "matched_policy": matched_policy,
+                    "reason": reason,
+                })
+                .to_string();
+            }
+            Ok(_) => {}
+            Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+
+        // Resolve new qname → Symbol via index
+        let index_store = AsgIndexStore { repo: &engine.repo };
+        let new_symbol = match index_store.get_symbol_by_qname(ref_name, &p.to_qname) {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                return serde_json::json!({
+                    "error": format!("symbol not found for qname '{}'", p.to_qname)
+                })
+                .to_string();
+            }
+            Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
+        };
+
+        // Write rebind record
+        let rebind = Rebind {
+            from_symbol_id: p.from_symbol_id.clone(),
+            to_symbol_id: new_symbol.symbol_id.clone(),
+            to_qname: new_symbol.qname.clone(),
+            at: chrono::Utc::now(),
+            by: p.agent_id.clone(),
+        };
+        let rebind_path = paths::rebind_path(&p.from_symbol_id);
+        let rebind_val = match serde_json::to_value(&rebind) {
+            Ok(v) => v,
+            Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
+        };
+        if let Err(e) = engine.repo.set_json(
+            ref_name,
+            &rebind_path,
+            &rebind_val,
+            CommitOptions::new(
+                &p.agent_id,
+                IntentCategory::Refine,
+                format!("rebind {} → {}", p.from_symbol_id, new_symbol.symbol_id),
+            ),
+        ) {
+            return serde_json::json!({ "error": e.to_string() }).to_string();
+        }
+
+        // Re-parent ledger entries
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let entries = match ledger_store.list_entries_with_superseded(ref_name, &p.from_symbol_id) {
+            Ok(v) => v,
+            Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
+        };
+        let mut reparented = 0usize;
+        for mut entry in entries {
+            entry.symbol_id = new_symbol.symbol_id.clone();
+            let new_path = paths::ledger_entry_path(&new_symbol.symbol_id, &entry.entry_id);
+            let val = match serde_json::to_value(&entry) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if engine.repo.set_json(
+                ref_name,
+                &new_path,
+                &val,
+                CommitOptions::new(
+                    &p.agent_id,
+                    IntentCategory::Refine,
+                    format!("reparent ledger entry {} after rebind", entry.entry_id),
+                ),
+            ).is_ok() {
+                let old_path = paths::ledger_entry_path(&p.from_symbol_id, &entry.entry_id);
+                let _ = engine.repo.delete(ref_name, &old_path, CommitOptions::new(
+                    &p.agent_id,
+                    IntentCategory::Refine,
+                    format!("remove old ledger entry {} after rebind", entry.entry_id),
+                ));
+                reparented += 1;
+            }
+        }
+
+        let audit_event = AuditEvent::new(event_types::LEDGER_REBIND, &p.agent_id, "agent", "allow")
+            .with_subject(p.from_symbol_id.clone())
+            .with_secondary(new_symbol.symbol_id.clone())
+            .with_payload(serde_json::json!({
+                "from_symbol_id": p.from_symbol_id,
+                "to_symbol_id": new_symbol.symbol_id,
+                "to_qname": new_symbol.qname,
+                "entries_reparented": reparented,
+            }));
+        emit_audit(engine.audit.as_ref(), audit_event);
+
+        serde_json::json!({
+            "from_symbol_id": p.from_symbol_id,
+            "to_symbol_id": new_symbol.symbol_id,
+            "to_qname": new_symbol.qname,
+            "entries_reparented": reparented,
+        })
+        .to_string()
+    }
+
+    #[tool(
         description = "Read back audit events from the configured JSONL log. Supports filtering by event_type substring, exact actor_id, exact outcome, and a `since` cursor. Returns `configured: false` when ASD_AUDIT_LOG was not set at server startup."
     )]
     async fn audit_tail(&self, params: Parameters<AuditTailParams>) -> String {
@@ -1394,35 +2137,1090 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Verify the hash-chain integrity of the configured audit log. Recomputes each event's blake3 hash + back-link and reports any breaks (tampered content, deletions, reorderings). Returns `{configured, verified, total_events, signed_events, unsigned_events, chain_breaks}`."
+        description = "Verify the hash-chain integrity of the configured audit log. Commercial feature (Enterprise tier) — requires asd-pro."
     )]
     async fn audit_verify(&self) -> String {
-        let Some(path) = self.audit_log_path.as_ref() else {
-            return serde_json::to_string(&serde_json::json!({
-                "configured": false,
-                "verified": false,
-                "total_events": 0,
-                "signed_events": 0,
-                "unsigned_events": 0,
-                "chain_breaks": [],
-            }))
-            .unwrap_or_else(|_| "{}".to_string());
-        };
-        let events = match agentstatedeveloper_core::read_jsonl(path) {
-            Ok(v) => v,
-            Err(e) => return err_json(&format!("read audit log: {}", e)),
-        };
-        let report = agentstatedeveloper_core::verify_chain(&events);
         serde_json::to_string(&serde_json::json!({
-            "configured": true,
-            "path": path.display().to_string(),
-            "total_events": report.total_events,
-            "signed_events": report.signed_events,
-            "unsigned_events": report.unsigned_events,
-            "verified": report.verified,
-            "chain_breaks": report.chain_breaks,
+            "configured": self.audit_log_path.is_some(),
+            "verified": false,
+            "error": "audit verify is a commercial feature (Enterprise tier) — install asd-pro",
+            "upgrade_url": "https://agentstatedeveloper.dev/pricing",
         }))
         .unwrap_or_else(|_| "{}".to_string())
+    }
+
+    // -- Scratch tools -------------------------------------------------------
+
+    #[tool(
+        description = "Write a new draft scratch entry. Scratch entries are local-only working notes scoped to a symbol/workflow/session. No policy gate — write freely. Returns { scratch_id, status }."
+    )]
+    async fn scratch_write(&self, params: Parameters<ScratchWriteParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let store = AsgScratchStore { repo: &engine.repo };
+
+        let mut entry = ScratchEntry::new(&p.content, "asd-mcp");
+        entry.workflow = p.workflow;
+        entry.tags = p.tags.unwrap_or_default();
+
+        if let Some(ttl_h) = p.ttl_hours {
+            entry.expires_at = Some(chrono::Utc::now() + chrono::Duration::hours(ttl_h));
+        }
+
+        // Resolve --symbol to symbol_id.
+        if let Some(ref qname) = p.symbol {
+            let index = AsgIndexStore { repo: &engine.repo };
+            match index.get_symbol_by_qname(&ref_name, qname) {
+                Ok(Some(sym)) => { entry.symbol_id = Some(sym.symbol_id); }
+                Ok(None) => return err_json(&format!("symbol not found: {qname}")),
+                Err(e) => return err_json(&e.to_string()),
+            }
+        }
+
+        match store.write_entry(&ref_name, &entry, "asd-mcp") {
+            Ok(stored) => serde_json::to_string(&serde_json::json!({
+                "scratch_id": stored.scratch_id,
+                "status": "draft",
+            }))
+            .unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "List scratch entries. Default: draft status, non-expired. Use status=null to see all. Returns { entries: [...], count }."
+    )]
+    async fn scratch_list(&self, params: Parameters<ScratchListParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let store = AsgScratchStore { repo: &engine.repo };
+
+        let status = match p.status.as_deref() {
+            Some("promoted") => Some(ScratchStatus::Promoted),
+            Some("discarded") => Some(ScratchStatus::Discarded),
+            Some("draft") | None => Some(ScratchStatus::Draft),
+            Some(other) => return err_json(&format!("unknown status: {other}")),
+        };
+
+        let mut filter = ScratchFilter {
+            workflow: p.workflow,
+            session: p.session,
+            status,
+            exclude_expired: true,
+            symbol_id: None,
+        };
+
+        if let Some(ref qname) = p.symbol {
+            let index = AsgIndexStore { repo: &engine.repo };
+            match index.get_symbol_by_qname(&ref_name, qname) {
+                Ok(Some(sym)) => { filter.symbol_id = Some(sym.symbol_id); }
+                Ok(None) => return err_json(&format!("symbol not found: {qname}")),
+                Err(e) => return err_json(&e.to_string()),
+            }
+        }
+
+        match store.list_entries(&ref_name, &filter) {
+            Ok(mut entries) => {
+                entries.truncate(p.limit.max(1) as usize);
+                let count = entries.len();
+                serde_json::to_string(&serde_json::json!({
+                    "entries": entries,
+                    "count": count,
+                }))
+                .unwrap_or_else(|_| "{}".to_string())
+            }
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Read a single scratch entry by scratch_id. Returns the full ScratchEntry JSON."
+    )]
+    async fn scratch_read(&self, params: Parameters<ScratchReadParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let store = AsgScratchStore { repo: &engine.repo };
+        match store.read_entry(&ref_name, &p.scratch_id) {
+            Ok(entry) => serde_json::to_string(&entry).unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Replace the content of an existing draft scratch entry. Returns the updated ScratchEntry."
+    )]
+    async fn scratch_update(&self, params: Parameters<ScratchUpdateParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let store = AsgScratchStore { repo: &engine.repo };
+        match store.update_entry(&ref_name, &p.scratch_id, &p.content, "asd-mcp") {
+            Ok(entry) => serde_json::to_string(&entry).unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Mark a scratch entry as discarded (soft-delete). Use scratch_clean to permanently purge discarded entries. Returns { ok: true }."
+    )]
+    async fn scratch_discard(&self, params: Parameters<ScratchDiscardParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let store = AsgScratchStore { repo: &engine.repo };
+        match store.discard_entry(&ref_name, &p.scratch_id, "asd-mcp") {
+            Ok(()) => r#"{"ok":true}"#.to_string(),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Promote a draft scratch entry to a durable ledger entry. Requires `kind` and a symbol (via `qname` or the entry's existing symbol_id). Goes through policy + audit. Returns { scratch_id, promoted_to, entry_id }."
+    )]
+    async fn scratch_promote(&self, params: Parameters<ScratchPromoteParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let scratch_store = AsgScratchStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+
+        // 1. Read scratch entry.
+        let entry = match scratch_store.read_entry(&ref_name, &p.scratch_id) {
+            Ok(e) => e,
+            Err(e) => return err_json(&e.to_string()),
+        };
+
+        // 2. Resolve symbol_id.
+        let symbol_id = if let Some(ref qname) = p.qname {
+            let index = AsgIndexStore { repo: &engine.repo };
+            match index.get_symbol_by_qname(&ref_name, qname) {
+                Ok(Some(sym)) => sym.symbol_id,
+                Ok(None) => return err_json(&format!("symbol not found: {qname}")),
+                Err(e) => return err_json(&e.to_string()),
+            }
+        } else if let Some(ref sid) = entry.symbol_id {
+            sid.clone()
+        } else {
+            return err_json(
+                "no symbol attached to scratch entry and qname was not provided",
+            );
+        };
+
+        // 3. Parse ledger kind.
+        let kind = match parse_ledger_kind(&p.kind) {
+            Ok(k) => k,
+            Err(e) => return err_json(&e),
+        };
+
+        // 4. Build summary.
+        let summary = p.summary.unwrap_or_else(|| {
+            entry.content
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or(&entry.content)
+                .chars()
+                .take(140)
+                .collect()
+        });
+
+        // 5. Create LedgerEntry.
+        let author = Author { kind: AuthorKind::Agent, id: "asd-mcp".to_string() };
+        let mut ledger_entry = LedgerEntry::new(&symbol_id, kind, &summary, author);
+        ledger_entry.body = Some(entry.content.clone());
+
+        if let Err(e) = ledger_store.append_entry(&ref_name, &ledger_entry, "asd-mcp") {
+            return err_json(&e.to_string());
+        }
+
+        // 6. Mark scratch promoted.
+        match scratch_store.mark_promoted(&ref_name, &entry.scratch_id, &ledger_entry.entry_id, "asd-mcp") {
+            Ok(promoted) => serde_json::to_string(&serde_json::json!({
+                "scratch_id": promoted.scratch_id,
+                "promoted_to": ledger_entry.entry_id,
+                "entry_id": ledger_entry.entry_id,
+            }))
+            .unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Permanently delete scratch entries matching the filter. Returns { deleted: N }. Use dry_run=true to preview without deleting."
+    )]
+    async fn scratch_clean(&self, params: Parameters<ScratchCleanParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let store = AsgScratchStore { repo: &engine.repo };
+
+        let statuses: Vec<ScratchStatus> = p.statuses
+            .split(',')
+            .filter_map(|t| match t.trim() {
+                "draft" => Some(ScratchStatus::Draft),
+                "promoted" => Some(ScratchStatus::Promoted),
+                "discarded" => Some(ScratchStatus::Discarded),
+                _ => None,
+            })
+            .collect();
+
+        let filter = CleanFilter {
+            older_than: Some(chrono::Duration::hours(p.older_than_hours as i64)),
+            statuses,
+        };
+
+        match store.clean_entries(&ref_name, &filter, p.dry_run) {
+            Ok(count) => serde_json::to_string(&serde_json::json!({ "deleted": count, "dry_run": p.dry_run }))
+                .unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "One-call agent-ready context package for a planned change. Composes investigate + impact + checklist: design_invariants, known_hazards, entry_points by layer, likely_edit_files (with recency), affected_tests, effects_summary, and recently_touched git history. Use this as the first call before any non-trivial code change."
+    )]
+    async fn prepare_change(&self, params: Parameters<PrepareChangeParams>) -> String {
+        let p = params.0;
+        let intent = p.intent.as_deref().and_then(parse_intent).unwrap_or("");
+        let db_path = self.db_path.clone();
+        let layer_overrides = load_layer_overrides(&db_path);
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+
+        let tokens: Vec<String> = p.description
+            .split(|c: char| c.is_whitespace() || c == '_' || c == '-' || c == '.')
+            .map(|t| t.to_lowercase())
+            .filter(|t| t.len() >= 2 && !is_stopword(t))
+            .collect();
+
+        if tokens.is_empty() {
+            return serde_json::json!({ "description": p.description, "entry_points": {} }).to_string();
+        }
+
+        let depth = p.depth.max(1) as usize;
+        let test_depth = p.test_depth.max(1) as usize;
+        let git_depth = p.git_depth.max(1) as usize;
+        let filters = FtsFilters {
+            kind: p.kind.as_deref().map(|k| k.to_lowercase()),
+            language: p.language.as_deref().map(|l| l.to_lowercase()),
+            include_tests: p.include_tests,
+        };
+
+        let index = AsgIndexStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let effect_store = AsgEffectStore { repo: &engine.repo };
+
+        let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+        let all_qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
+            Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
+            _ => vec![],
+        };
+        let mut id_map: std::collections::HashMap<String, agentstatedeveloper_core::Symbol> =
+            std::collections::HashMap::new();
+        for qn in &all_qnames {
+            if let Ok(Some(s)) = index.get_symbol_by_qname(&ref_name, qn) {
+                id_map.insert(s.symbol_id.clone(), s);
+            }
+        }
+
+        // FTS / fallback candidate search.
+        let candidates: Vec<(f64, String)> = {
+            let fts_result = SearchFtsDb::open(&db_path)
+                .ok().filter(|fts| fts.has_data())
+                .and_then(|fts| fts.search(&p.description, &filters, depth * 8).ok());
+            if let Some(hits) = fts_result {
+                let mut sc: Vec<(f64, String)> = hits.into_iter().map(|hit| {
+                    let boost = hybrid_boost(&hit, &tokens);
+                    let entries = ledger_store.list_entries(&ref_name, &hit.symbol_id).unwrap_or_default();
+                    let text = entries.iter().map(|e| e.summary.to_lowercase()).collect::<Vec<_>>().join(" ");
+                    let lb = if text.is_empty() { 0.0 } else {
+                        tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
+                    };
+                    (hit.bm25_score + boost + lb, hit.qname)
+                }).collect();
+                sc.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                inject_file_stem(&db_path, &tokens, &filters, &index, &ref_name, sc, depth)
+            } else {
+                let kf = filters.kind.clone(); let lf = filters.language.clone();
+                let mut sc: Vec<(f64, String)> = Vec::new();
+                for qname in &all_qnames {
+                    let sym = match index.get_symbol_by_qname(&ref_name, qname) { Ok(Some(s)) => s, _ => continue };
+                    let sk = format!("{:?}", sym.kind).to_lowercase();
+                    if let Some(ref k) = kf { if &sk != k { continue; } }
+                    if let Some(ref l) = lf { if &sym.language != l { continue; } }
+                    let qn = sym.qname.to_lowercase();
+                    let sig = sym.signature.as_deref().unwrap_or("").to_lowercase();
+                    let doc = sym.doc.as_deref().unwrap_or("").to_lowercase();
+                    let file = sym.file.to_lowercase();
+                    let lt: String = ledger_store.list_entries(&ref_name, &sym.symbol_id)
+                        .unwrap_or_default().iter().map(|e| e.summary.to_lowercase()).collect::<Vec<_>>().join(" ");
+                    let mut score: u32 = 0;
+                    for t in &tokens {
+                        if qn.contains(t.as_str()) { score += 4; }
+                        if !sig.is_empty() && sig.contains(t.as_str()) { score += 3; }
+                        if !doc.is_empty() && doc.contains(t.as_str()) { score += 3; }
+                        if !lt.is_empty() && lt.contains(t.as_str()) { score += 2; }
+                        if file.contains(t.as_str()) { score += 1; }
+                    }
+                    if score > 0 { sc.push((score as f64, sym.qname)); }
+                }
+                sc.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                sc.truncate(depth); sc
+            }
+        };
+
+        let recency = gather_recency(200, 14.0);
+        let layer_order = intent_layer_order(intent);
+        let mut by_layer: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        let mut design_invariants: Vec<serde_json::Value> = Vec::new();
+        let mut known_hazards: Vec<serde_json::Value> = Vec::new();
+        let mut effects_summary: Vec<serde_json::Value> = Vec::new();
+        let mut file_scores: Vec<(f64, String, String, Option<f64>, bool)> = Vec::new();
+        let mut seen_files: HashSet<String> = HashSet::new();
+        let mut seen_inv: HashSet<String> = HashSet::new();
+        let mut seen_effect: HashSet<String> = HashSet::new();
+        let mut top_sym_id: Option<String> = None;
+
+        for (score, qname) in &candidates {
+            let sym = match index.get_symbol_by_qname(&ref_name, qname) { Ok(Some(s)) => s, _ => continue };
+            let tier = symbol_tier(&sym.file);
+            let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
+            let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
+            let rec = recency.get(&sym.file);
+            let ltd = rec.and_then(|r| r.last_touched_days);
+            let hot = rec.map(|r| r.hot).unwrap_or(false);
+            if top_sym_id.is_none() { top_sym_id = Some(sym.symbol_id.clone()); }
+            if seen_files.insert(sym.file.clone()) {
+                file_scores.push((*score, sym.file.clone(), layer.to_string(), ltd, hot));
+            }
+            let entries = ledger_store.list_entries(&ref_name, &sym.symbol_id).unwrap_or_default();
+            for entry in &entries {
+                match entry.kind {
+                    LedgerKind::Invariant => {
+                        if seen_inv.insert(entry.summary.clone()) {
+                            design_invariants.push(serde_json::json!({ "summary": entry.summary, "source": sym.qname }));
+                        }
+                    }
+                    LedgerKind::Hazard => {
+                        known_hazards.push(serde_json::json!({ "summary": entry.summary, "source": sym.qname }));
+                    }
+                    _ => {}
+                }
+            }
+            if let Ok(Some(decl)) = effect_store.get_effects(&ref_name, &sym.symbol_id) {
+                for eff in &decl.declared {
+                    let cat = format!("{:?}", eff.effect);
+                    let key = format!("{}:{}", cat, sym.qname);
+                    if seen_effect.insert(key) {
+                        effects_summary.push(serde_json::json!({ "category": cat, "source": sym.qname }));
+                    }
+                }
+            }
+            let ep = serde_json::json!({
+                "score": score, "qname": sym.qname, "file": sym.file,
+                "line": sym.start.line, "layer": layer, "summary": summary,
+                "last_touched_days": ltd, "hot": hot,
+            });
+            by_layer.entry(layer.to_string())
+                .or_insert_with(|| serde_json::Value::Array(vec![]))
+                .as_array_mut().unwrap().push(ep);
+        }
+
+        // Reorder by_layer.
+        let mut ordered: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        for lk in layer_order {
+            if let Some(v) = by_layer.remove(*lk) { ordered.insert(lk.to_string(), v); }
+        }
+
+        file_scores.sort_by(|a, b| b.4.cmp(&a.4).then_with(|| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)));
+        let likely_edit_files: Vec<serde_json::Value> = file_scores.iter().map(|(score, file, layer, days, hot)| {
+            serde_json::json!({ "file": file, "layer": layer, "score": score, "last_touched_days": days, "hot": hot })
+        }).collect();
+
+        // Affected tests via BFS from top entry point.
+        let mut affected_tests: Vec<serde_json::Value> = Vec::new();
+        if let Some(start_id) = top_sym_id {
+            let mut visited: HashSet<String> = HashSet::new();
+            let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+            let mut seen_tnames: HashSet<String> = HashSet::new();
+            visited.insert(start_id.clone());
+            queue.push_back((start_id, 0));
+            while let Some((sid, depth)) = queue.pop_front() {
+                if depth >= test_depth { continue; }
+                let callers = index.get_callers(&ref_name, &sid).unwrap_or_default();
+                for cid in callers {
+                    if visited.contains(&cid) { continue; }
+                    visited.insert(cid.clone());
+                    if let Some(s) = id_map.get(&cid) {
+                        if symbol_tier(&s.file) == 2 && seen_tnames.insert(s.qname.clone()) {
+                            affected_tests.push(serde_json::json!({ "qname": s.qname, "file": s.file, "line": s.start.line }));
+                        }
+                        if depth + 1 < test_depth { queue.push_back((cid, depth + 1)); }
+                    }
+                }
+            }
+        }
+
+        // Recent git touches on top 3 files.
+        let top_files: Vec<(String, usize)> = file_scores.iter().take(3).map(|(_, f, _, _, _)| (f.clone(), 0)).collect();
+        let recently_touched = mcp_git_recent_touches(&top_files, git_depth);
+
+        let test_gap = affected_tests.is_empty();
+        let proposed_test_path = test_gap.then(|| {
+            file_scores.first().map(|(_, f, _, _, _)| propose_test_path(f))
+        }).flatten();
+        let suggested_test_coverage: Vec<String> = if test_gap {
+            let mut hints: Vec<String> = design_invariants.iter()
+                .filter_map(|inv| inv.get("summary").and_then(serde_json::Value::as_str))
+                .map(|s| s.to_string())
+                .collect();
+            for eff in &effects_summary {
+                if let Some(cat) = eff.get("category").and_then(serde_json::Value::as_str) {
+                    let hint = format!("verify {} after change", cat.to_lowercase());
+                    if !hints.contains(&hint) { hints.push(hint); }
+                }
+            }
+            if design_invariants.is_empty() {
+                if let Some((_, qname)) = candidates.first() {
+                    if let Ok(Some(sym)) = index.get_symbol_by_qname(&ref_name, qname) {
+                        for h in derive_cold_hints(&sym.qname, sym.signature.as_deref(), sym.doc.as_deref()) {
+                            if !hints.contains(&h) { hints.push(h); }
+                        }
+                    }
+                }
+            }
+            hints
+        } else { vec![] };
+
+        let focus = intent_focus(intent);
+        serde_json::to_string(&serde_json::json!({
+            "description": p.description,
+            "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
+            "focus": if focus.is_empty() { serde_json::Value::Null } else { serde_json::json!(focus) },
+            "design_invariants": design_invariants,
+            "known_hazards": known_hazards,
+            "entry_points": { "by_layer": ordered },
+            "likely_edit_files": likely_edit_files,
+            "affected_tests": affected_tests,
+            "test_gap": test_gap,
+            "proposed_test_path": proposed_test_path,
+            "suggested_test_coverage": suggested_test_coverage,
+            "effects_summary": effects_summary,
+            "recently_touched": recently_touched,
+        })).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[tool(
+        description = "Pre-edit checklist for a query: files to inspect, invariants to preserve, tests to run, known hazards, and effects to verify. Returns structured JSON. Use this before any code edit to get a focused action list."
+    )]
+    async fn checklist(&self, params: Parameters<ChecklistParams>) -> String {
+        let p = params.0;
+        let intent = p.intent.as_deref().and_then(parse_intent).unwrap_or("");
+        let db_path = self.db_path.clone();
+        let layer_overrides = load_layer_overrides(&db_path);
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+
+        let tokens: Vec<String> = p.query
+            .split(|c: char| c.is_whitespace() || c == '_' || c == '-' || c == '.')
+            .map(|t| t.to_lowercase())
+            .filter(|t| t.len() >= 2 && !is_stopword(t))
+            .collect();
+
+        if tokens.is_empty() {
+            return serde_json::json!({ "query": p.query, "files_to_inspect": [] }).to_string();
+        }
+
+        let depth = p.depth.max(1) as usize;
+        let test_depth = p.test_depth.max(1) as usize;
+        let filters = FtsFilters {
+            kind: p.kind.as_deref().map(|k| k.to_lowercase()),
+            language: p.language.as_deref().map(|l| l.to_lowercase()),
+            include_tests: p.include_tests,
+        };
+
+        let index = AsgIndexStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let effect_store = AsgEffectStore { repo: &engine.repo };
+
+        // Build id_map for test BFS.
+        let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+        let all_qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
+            Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
+            _ => vec![],
+        };
+        let mut id_map: std::collections::HashMap<String, agentstatedeveloper_core::Symbol> =
+            std::collections::HashMap::new();
+        for qn in &all_qnames {
+            if let Ok(Some(s)) = index.get_symbol_by_qname(&ref_name, qn) {
+                id_map.insert(s.symbol_id.clone(), s);
+            }
+        }
+
+        // Find top-N entry points via FTS or fallback.
+        let candidates: Vec<(f64, String)> = {
+            let fts_result = SearchFtsDb::open(&db_path)
+                .ok()
+                .filter(|fts| fts.has_data())
+                .and_then(|fts| fts.search(&p.query, &filters, depth * 8).ok());
+            if let Some(hits) = fts_result {
+                let mut sc: Vec<(f64, String)> = hits.into_iter().map(|hit| {
+                    let boost = hybrid_boost(&hit, &tokens);
+                    let entries = ledger_store.list_entries(&ref_name, &hit.symbol_id).unwrap_or_default();
+                    let text = entries.iter().map(|e| e.summary.to_lowercase()).collect::<Vec<_>>().join(" ");
+                    let lb = if text.is_empty() { 0.0 } else {
+                        tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
+                    };
+                    (hit.bm25_score + boost + lb, hit.qname)
+                }).collect();
+                sc.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                inject_file_stem(&db_path, &tokens, &filters, &index, &ref_name, sc, depth)
+            } else {
+                let kf = filters.kind.clone();
+                let lf = filters.language.clone();
+                let mut sc: Vec<(f64, String)> = Vec::new();
+                for qname in &all_qnames {
+                    let sym = match index.get_symbol_by_qname(&ref_name, qname) { Ok(Some(s)) => s, _ => continue };
+                    let sk = format!("{:?}", sym.kind).to_lowercase();
+                    if let Some(ref k) = kf { if &sk != k { continue; } }
+                    if let Some(ref l) = lf { if &sym.language != l { continue; } }
+                    let qn = sym.qname.to_lowercase();
+                    let sig = sym.signature.as_deref().unwrap_or("").to_lowercase();
+                    let doc = sym.doc.as_deref().unwrap_or("").to_lowercase();
+                    let file = sym.file.to_lowercase();
+                    let lt: String = ledger_store.list_entries(&ref_name, &sym.symbol_id)
+                        .unwrap_or_default().iter().map(|e| e.summary.to_lowercase()).collect::<Vec<_>>().join(" ");
+                    let mut score: u32 = 0;
+                    for t in &tokens {
+                        if qn.contains(t.as_str()) { score += 4; }
+                        if !sig.is_empty() && sig.contains(t.as_str()) { score += 3; }
+                        if !doc.is_empty() && doc.contains(t.as_str()) { score += 3; }
+                        if !lt.is_empty() && lt.contains(t.as_str()) { score += 2; }
+                        if file.contains(t.as_str()) { score += 1; }
+                    }
+                    if score > 0 { sc.push((score as f64, sym.qname)); }
+                }
+                sc.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                sc.truncate(depth);
+                sc
+            }
+        };
+
+        let mut files_to_inspect: Vec<serde_json::Value> = Vec::new();
+        let mut seen_files: HashSet<String> = HashSet::new();
+        let mut invariants: Vec<serde_json::Value> = Vec::new();
+        let mut hazards: Vec<serde_json::Value> = Vec::new();
+        let mut effects_list: Vec<serde_json::Value> = Vec::new();
+        let mut test_rows: Vec<serde_json::Value> = Vec::new();
+        let mut seen_inv: HashSet<String> = HashSet::new();
+        let mut seen_tests: HashSet<String> = HashSet::new();
+
+        for (_score, qname) in &candidates {
+            let sym = match index.get_symbol_by_qname(&ref_name, qname) { Ok(Some(s)) => s, _ => continue };
+            let tier = symbol_tier(&sym.file);
+            let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
+
+            if seen_files.insert(sym.file.clone()) {
+                files_to_inspect.push(serde_json::json!({
+                    "file": sym.file, "qname": sym.qname, "layer": layer, "line": sym.start.line,
+                }));
+            }
+
+            let entries = ledger_store.list_entries(&ref_name, &sym.symbol_id).unwrap_or_default();
+            for entry in &entries {
+                match entry.kind {
+                    LedgerKind::Invariant => {
+                        if seen_inv.insert(entry.summary.clone()) {
+                            invariants.push(serde_json::json!({
+                                "summary": entry.summary, "source": sym.qname, "body": entry.body,
+                            }));
+                        }
+                    }
+                    LedgerKind::Hazard => {
+                        hazards.push(serde_json::json!({
+                            "summary": entry.summary, "source": sym.qname, "body": entry.body,
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+
+            if let Ok(Some(decl)) = effect_store.get_effects(&ref_name, &sym.symbol_id) {
+                for eff in &decl.declared {
+                    effects_list.push(serde_json::json!({
+                        "category": format!("{:?}", eff.effect), "source": sym.qname,
+                    }));
+                }
+            }
+
+            // BFS for test callers.
+            let mut visited: HashSet<String> = HashSet::new();
+            let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+            visited.insert(sym.symbol_id.clone());
+            queue.push_back((sym.symbol_id.clone(), 0));
+            while let Some((sid, depth)) = queue.pop_front() {
+                if depth >= test_depth { continue; }
+                let callers = index.get_callers(&ref_name, &sid).unwrap_or_default();
+                for cid in callers {
+                    if visited.contains(&cid) { continue; }
+                    visited.insert(cid.clone());
+                    if let Some(s) = id_map.get(&cid) {
+                        if symbol_tier(&s.file) == 2 && seen_tests.insert(s.qname.clone()) {
+                            test_rows.push(serde_json::json!({
+                                "qname": s.qname, "file": s.file, "line": s.start.line,
+                            }));
+                        }
+                        if depth + 1 < test_depth { queue.push_back((cid, depth + 1)); }
+                    }
+                }
+            }
+        }
+
+        let test_gap = test_rows.is_empty();
+        let proposed_test_path = test_gap.then(|| {
+            files_to_inspect.first()
+                .and_then(|v| v.get("file").and_then(serde_json::Value::as_str))
+                .map(propose_test_path)
+        }).flatten();
+        let suggested_test_coverage: Vec<String> = if test_gap {
+            let mut hints: Vec<String> = invariants.iter()
+                .filter_map(|inv| inv.get("summary").and_then(serde_json::Value::as_str))
+                .map(|s| s.to_string())
+                .collect();
+            for eff in &effects_list {
+                if let Some(cat) = eff.get("category").and_then(serde_json::Value::as_str) {
+                    let hint = format!("verify {} after change", cat.to_lowercase());
+                    if !hints.contains(&hint) { hints.push(hint); }
+                }
+            }
+            if invariants.is_empty() {
+                if let Some((_, qname)) = candidates.first() {
+                    if let Ok(Some(sym)) = index.get_symbol_by_qname(&ref_name, qname) {
+                        for h in derive_cold_hints(&sym.qname, sym.signature.as_deref(), sym.doc.as_deref()) {
+                            if !hints.contains(&h) { hints.push(h); }
+                        }
+                    }
+                }
+            }
+            hints
+        } else { vec![] };
+
+        let focus = intent_focus(intent);
+        serde_json::to_string(&serde_json::json!({
+            "query": p.query,
+            "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
+            "focus": if focus.is_empty() { serde_json::Value::Null } else { serde_json::json!(focus) },
+            "files_to_inspect": files_to_inspect,
+            "invariants_to_preserve": invariants,
+            "tests_to_run": test_rows,
+            "test_gap": test_gap,
+            "proposed_test_path": proposed_test_path,
+            "suggested_test_coverage": suggested_test_coverage,
+            "known_hazards": hazards,
+            "effects_to_verify": effects_list,
+        })).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[tool(
+        description = "Blast-radius analysis for a symbol before editing. Returns transitive callers (up to depth), aggregated effects, invariants/hazards from all callers, affected test symbols, and recent git touches per file. Use this before any code change to understand scope."
+    )]
+    async fn impact(&self, params: Parameters<ImpactParams>) -> String {
+        let p = params.0;
+        let db_path = self.db_path.clone();
+        let layer_overrides = load_layer_overrides(&db_path);
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+
+        let index = AsgIndexStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let effect_store = AsgEffectStore { repo: &engine.repo };
+
+        let symbol = match index.get_symbol_by_qname(&ref_name, &p.qname) {
+            Ok(Some(s)) => s,
+            Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
+            Err(e) => return err_json(&e.to_string()),
+        };
+
+        let tier = symbol_tier(&symbol.file);
+        let layer = classify_layer_sym(&symbol.file, &symbol.qname, tier, &layer_overrides);
+
+        // Build id_map for call graph resolution.
+        let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+        let all_qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
+            Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
+            _ => vec![],
+        };
+        let mut id_map: std::collections::HashMap<String, agentstatedeveloper_core::Symbol> =
+            std::collections::HashMap::new();
+        for qn in &all_qnames {
+            if let Ok(Some(s)) = index.get_symbol_by_qname(&ref_name, qn) {
+                id_map.insert(s.symbol_id.clone(), s);
+            }
+        }
+
+        // BFS transitive callers.
+        let max_depth = p.depth.max(1) as usize;
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+        visited.insert(symbol.symbol_id.clone());
+        queue.push_back((symbol.symbol_id.clone(), 0));
+
+        let mut caller_rows: Vec<serde_json::Value> = Vec::new();
+        let mut affected_test_rows: Vec<serde_json::Value> = Vec::new();
+        let mut touched_files: Vec<(String, usize)> = vec![(symbol.file.clone(), 0)];
+
+        while let Some((sym_id, depth)) = queue.pop_front() {
+            if depth >= max_depth { continue; }
+            let neighbors = index.get_callers(&ref_name, &sym_id).unwrap_or_default();
+            for nbr_id in neighbors {
+                if visited.contains(&nbr_id) { continue; }
+                visited.insert(nbr_id.clone());
+                if let Some(s) = id_map.get(&nbr_id) {
+                    let t = symbol_tier(&s.file);
+                    let l = classify_layer_sym(&s.file, &s.qname, t, &layer_overrides);
+                    let row = serde_json::json!({
+                        "qname": s.qname,
+                        "file": s.file,
+                        "line": s.start.line,
+                        "depth": depth + 1,
+                        "layer": l,
+                    });
+                    if t == 2 {
+                        affected_test_rows.push(row);
+                    } else {
+                        caller_rows.push(row);
+                    }
+                    if !touched_files.iter().any(|(f, _)| f == &s.file) {
+                        touched_files.push((s.file.clone(), depth + 1));
+                    }
+                    if depth + 1 < max_depth {
+                        queue.push_back((nbr_id, depth + 1));
+                    }
+                }
+            }
+        }
+
+        // Collect invariants/hazards from target + all callers.
+        let all_sym_ids: Vec<String> = std::iter::once(symbol.symbol_id.clone())
+            .chain(visited.iter().cloned())
+            .collect();
+        let mut all_invariants: Vec<serde_json::Value> = Vec::new();
+        let mut all_hazards: Vec<serde_json::Value> = Vec::new();
+        let mut seen_inv: HashSet<String> = HashSet::new();
+        for sym_id in &all_sym_ids {
+            let entries = ledger_store.list_entries(&ref_name, sym_id).unwrap_or_default();
+            for entry in entries {
+                let key = entry.summary.clone();
+                match entry.kind {
+                    LedgerKind::Invariant => {
+                        if seen_inv.insert(key) {
+                            let mut v = serde_json::to_value(&entry).unwrap_or_default();
+                            if let Some(obj) = v.as_object_mut() {
+                                obj.insert("source_symbol_id".to_string(), serde_json::json!(sym_id));
+                            }
+                            all_invariants.push(v);
+                        }
+                    }
+                    LedgerKind::Hazard => {
+                        let mut v = serde_json::to_value(&entry).unwrap_or_default();
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.insert("source_symbol_id".to_string(), serde_json::json!(sym_id));
+                        }
+                        all_hazards.push(v);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Effects for the target symbol.
+        let effects = effect_store.get_effects(&ref_name, &symbol.symbol_id).unwrap_or(None);
+
+        // Recent git touches.
+        let git_depth = p.git_depth.max(1) as usize;
+        let recently_touched = mcp_git_recent_touches(&touched_files, git_depth);
+
+        let mut sym_val = serde_json::to_value(&symbol).unwrap_or_default();
+        if let Some(obj) = sym_val.as_object_mut() { obj.remove("body"); }
+
+        serde_json::to_string(&serde_json::json!({
+            "symbol": sym_val,
+            "layer": layer,
+            "caller_count": caller_rows.len(),
+            "test_count": affected_test_rows.len(),
+            "invariants": all_invariants,
+            "hazards": all_hazards,
+            "effects": effects,
+            "callers": caller_rows,
+            "affected_tests": affected_test_rows,
+            "recently_touched": recently_touched,
+        })).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// Symbols in files changed since a commit + combined blast radius.
+    /// PR-review workflow: pass the base SHA to get full impact without knowing any symbol names.
+    #[tool(description = "Symbols in files changed since a commit and their combined blast radius. Pass the base SHA of a branch/PR to discover all symbols touched by the diff, their transitive callers, affected tests, invariants, hazards, and effects — without needing to know any symbol names upfront.")]
+    async fn since(&self, params: Parameters<SinceParams>) -> String {
+        let p = params.0;
+        let db_path = self.db_path.clone();
+        let layer_overrides = load_layer_overrides(&db_path);
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+
+        let index = AsgIndexStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let effect_store = AsgEffectStore { repo: &engine.repo };
+
+        // Build id_map.
+        let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+        let all_qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
+            Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
+            _ => vec![],
+        };
+        let mut id_map: std::collections::HashMap<String, agentstatedeveloper_core::Symbol> =
+            std::collections::HashMap::new();
+        for qn in &all_qnames {
+            if let Ok(Some(s)) = index.get_symbol_by_qname(&ref_name, qn) {
+                id_map.insert(s.symbol_id.clone(), s);
+            }
+        }
+
+        // Get changed files.
+        let changed_files: Vec<String> = {
+            let out = Proc::new("git")
+                .args(["diff", "--name-only", &format!("{}..HEAD", p.sha)])
+                .output();
+            match out {
+                Ok(o) if o.status.success() => {
+                    String::from_utf8_lossy(&o.stdout).lines()
+                        .filter(|l| !l.is_empty()).map(|l| l.to_string()).collect()
+                }
+                _ => vec![],
+            }
+        };
+
+        if changed_files.is_empty() {
+            return serde_json::to_string(&serde_json::json!({
+                "sha": p.sha, "changed_files": [], "touched_symbols": {},
+                "callers": [], "affected_tests": [], "invariants": [], "hazards": [], "effects": [],
+            })).unwrap_or_else(|_| "{}".to_string());
+        }
+
+        let changed_set: HashSet<&str> = changed_files.iter().map(String::as_str).collect();
+
+        // Seeds: all symbols in changed files.
+        let seed_ids: Vec<String> = id_map.values()
+            .filter(|s| changed_set.contains(s.file.as_str()))
+            .map(|s| s.symbol_id.clone())
+            .collect();
+
+        // Group touched symbols by layer.
+        let mut by_layer: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
+        for sid in &seed_ids {
+            if let Some(s) = id_map.get(sid) {
+                let tier = symbol_tier(&s.file);
+                let layer = classify_layer_sym(&s.file, &s.qname, tier, &layer_overrides);
+                by_layer.entry(layer.to_string()).or_default().push(serde_json::json!({
+                    "qname": s.qname, "file": s.file, "line": s.start.line, "layer": layer,
+                }));
+            }
+        }
+
+        // BFS blast radius.
+        let max_depth = p.depth.max(1) as usize;
+        let mut visited: HashSet<String> = seed_ids.iter().cloned().collect();
+        let mut queue: VecDeque<(String, usize)> = seed_ids.iter().map(|id| (id.clone(), 0)).collect();
+        let mut caller_rows: Vec<serde_json::Value> = Vec::new();
+        let mut affected_test_rows: Vec<serde_json::Value> = Vec::new();
+        let mut touched_files: Vec<(String, usize)> = changed_files.iter().map(|f| (f.clone(), 0)).collect();
+        let mut seen_files: HashSet<String> = changed_files.iter().cloned().collect();
+
+        while let Some((sym_id, depth)) = queue.pop_front() {
+            if depth >= max_depth { continue; }
+            let neighbors = index.get_callers(&ref_name, &sym_id).unwrap_or_default();
+            for nbr_id in neighbors {
+                if visited.contains(&nbr_id) { continue; }
+                visited.insert(nbr_id.clone());
+                if let Some(s) = id_map.get(&nbr_id) {
+                    let t = symbol_tier(&s.file);
+                    let l = classify_layer_sym(&s.file, &s.qname, t, &layer_overrides);
+                    let row = serde_json::json!({
+                        "qname": s.qname, "file": s.file, "line": s.start.line,
+                        "depth": depth + 1, "layer": l,
+                    });
+                    if t == 2 { affected_test_rows.push(row); } else { caller_rows.push(row); }
+                    if seen_files.insert(s.file.clone()) {
+                        touched_files.push((s.file.clone(), depth + 1));
+                    }
+                    if depth + 1 < max_depth { queue.push_back((nbr_id, depth + 1)); }
+                }
+            }
+        }
+
+        // Aggregate invariants/hazards/effects from seeds.
+        let mut all_invariants: Vec<serde_json::Value> = Vec::new();
+        let mut all_hazards: Vec<serde_json::Value> = Vec::new();
+        let mut all_effects: Vec<serde_json::Value> = Vec::new();
+        let mut seen_inv: HashSet<String> = HashSet::new();
+        for sym_id in &seed_ids {
+            let entries = ledger_store.list_entries(&ref_name, sym_id).unwrap_or_default();
+            let sym_qname = id_map.get(sym_id).map(|s| s.qname.as_str()).unwrap_or("");
+            for entry in entries {
+                let key = entry.summary.clone();
+                match entry.kind {
+                    LedgerKind::Invariant => {
+                        if seen_inv.insert(key) {
+                            all_invariants.push(serde_json::json!({ "summary": entry.summary, "source": sym_qname }));
+                        }
+                    }
+                    LedgerKind::Hazard => {
+                        all_hazards.push(serde_json::json!({ "summary": entry.summary, "source": sym_qname }));
+                    }
+                    _ => {}
+                }
+            }
+            if let Ok(Some(decl)) = effect_store.get_effects(&ref_name, sym_id) {
+                let qn = id_map.get(sym_id).map(|s| s.qname.clone()).unwrap_or_default();
+                for eff in &decl.declared {
+                    all_effects.push(serde_json::json!({ "category": format!("{:?}", eff.effect), "source": qn }));
+                }
+            }
+        }
+
+        let git_depth = p.git_depth.max(1) as usize;
+        let recently_touched = mcp_git_recent_touches(&touched_files[..touched_files.len().min(5)], git_depth);
+
+        serde_json::to_string(&serde_json::json!({
+            "sha": p.sha,
+            "changed_files": changed_files,
+            "touched_symbols": by_layer,
+            "caller_count": caller_rows.len(),
+            "test_count": affected_test_rows.len(),
+            "callers": caller_rows,
+            "affected_tests": affected_test_rows,
+            "invariants": all_invariants,
+            "hazards": all_hazards,
+            "effects": all_effects,
+            "recently_touched": recently_touched,
+        })).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[tool(
+        description = "Record an invariant that must hold at a symbol. Shortcut for `ledger_append` with kind=invariant. Invariants appear in investigate, checklist, and prepare_change outputs — record them here so future agents see them."
+    )]
+    async fn invariant_add(&self, params: Parameters<InvariantAddParams>) -> String {
+        let p = params.0;
+        let Ok(engine) = Engine::open_sqlite(&self.db_path) else {
+            return err_json("failed to open database");
+        };
+        let index_store = AsgIndexStore { repo: &engine.repo };
+        let Ok(Some(symbol)) = index_store.get_symbol_by_qname(&engine.ref_name, &p.qname) else {
+            return err_json(&format!("symbol not found: {}", p.qname));
+        };
+        let author = Author { kind: AuthorKind::Agent, id: p.author_id.clone() };
+        let entry = LedgerEntry::new(
+            &symbol.symbol_id,
+            LedgerKind::Invariant,
+            p.summary.clone(),
+            author,
+        );
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        match ledger_store.append_entry(&engine.ref_name, &entry, "asd-mcp") {
+            Ok(_) => serde_json::to_string(&serde_json::json!({
+                "status": "added",
+                "entry_id": entry.entry_id,
+                "symbol_id": entry.symbol_id,
+                "qname": p.qname,
+                "summary": p.summary,
+            })).unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "List invariants recorded against symbols. Pass qname to filter to one symbol; omit to list all invariants in the index."
+    )]
+    async fn invariant_list(&self, params: Parameters<InvariantListParams>) -> String {
+        let p = params.0;
+        let Ok(engine) = Engine::open_sqlite(&self.db_path) else {
+            return err_json("failed to open database");
+        };
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+
+        let rows: Vec<serde_json::Value> = if let Some(qname) = p.qname {
+            let index_store = AsgIndexStore { repo: &engine.repo };
+            match index_store.get_symbol_by_qname(&engine.ref_name, &qname) {
+                Ok(Some(symbol)) => {
+                    ledger_store
+                        .list_entries(&engine.ref_name, &symbol.symbol_id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|e| e.kind == LedgerKind::Invariant)
+                        .map(|e| serde_json::json!({
+                            "entry_id": e.entry_id,
+                            "qname": qname,
+                            "summary": e.summary,
+                            "created_at": e.created_at,
+                            "tags": e.tags,
+                        }))
+                        .collect()
+                }
+                _ => return err_json(&format!("symbol not found: {}", qname)),
+            }
+        } else {
+            let ref_name = &engine.ref_name;
+            let tree = match engine.repo.get_tree(ref_name, "/asd/v1/ledger") {
+                Ok(v) => v,
+                _ => return serde_json::to_string(&serde_json::json!({ "invariants": [] }))
+                    .unwrap_or_else(|_| "{}".to_string()),
+            };
+            let index_store_all = AsgIndexStore { repo: &engine.repo };
+            let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+            let all_qnames: Vec<String> = match engine.repo.get_tree(ref_name, &prefix) {
+                Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
+                _ => vec![],
+            };
+            let mut id_map: std::collections::HashMap<String, agentstatedeveloper_core::Symbol> =
+                std::collections::HashMap::new();
+            for qn in &all_qnames {
+                if let Ok(Some(s)) = index_store_all.get_symbol_by_qname(ref_name, qn) {
+                    id_map.insert(s.symbol_id.clone(), s);
+                }
+            }
+            let mut rows: Vec<serde_json::Value> = Vec::new();
+            if let Some(sym_map) = tree.as_object() {
+                for per_symbol in sym_map.values() {
+                    if let Some(entry_map) = per_symbol.as_object() {
+                        for entry_val in entry_map.values() {
+                            if let Ok(e) = serde_json::from_value::<LedgerEntry>(entry_val.clone()) {
+                                if e.kind == LedgerKind::Invariant {
+                                    let qname = id_map.get(&e.symbol_id)
+                                        .map(|s| s.qname.as_str())
+                                        .unwrap_or("");
+                                    rows.push(serde_json::json!({
+                                        "entry_id": e.entry_id,
+                                        "qname": qname,
+                                        "summary": e.summary,
+                                        "created_at": e.created_at,
+                                        "tags": e.tags,
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            rows.sort_by(|a, b| {
+                a.get("qname").and_then(serde_json::Value::as_str)
+                    .cmp(&b.get("qname").and_then(serde_json::Value::as_str))
+            });
+            rows
+        };
+
+        serde_json::to_string(&serde_json::json!({ "invariants": rows }))
+            .unwrap_or_else(|_| "{}".to_string())
     }
 }
 
@@ -1431,21 +3229,88 @@ impl ServerHandler for AsdMcpServer {}
 
 // -- Helpers ----------------------------------------------------------------
 
+fn mcp_git_recent_touches(files: &[(String, usize)], git_depth: usize) -> serde_json::Value {
+    let mut result: Vec<serde_json::Value> = Vec::new();
+    let mut sorted = files.to_vec();
+    sorted.sort_by_key(|(_, d)| *d);
+    for (file, _) in &sorted {
+        let output = Proc::new("git")
+            .args(["log", "--follow", &format!("-n{git_depth}"),
+                   "--pretty=format:%H\x1f%an\x1f%ad\x1f%s", "--date=short", "--", file])
+            .output();
+        let commits: Vec<serde_json::Value> = match output {
+            Ok(out) if out.status.success() => {
+                String::from_utf8_lossy(&out.stdout).lines()
+                    .filter(|l| !l.is_empty())
+                    .filter_map(|line| {
+                        let p: Vec<&str> = line.splitn(4, '\x1f').collect();
+                        if p.len() == 4 {
+                            Some(serde_json::json!({
+                                "sha": &p[0][..8.min(p[0].len())],
+                                "author": p[1], "date": p[2], "message": p[3],
+                            }))
+                        } else { None }
+                    }).collect()
+            }
+            _ => vec![],
+        };
+        if !commits.is_empty() {
+            result.push(serde_json::json!({ "file": file, "commits": commits }));
+        }
+    }
+    serde_json::json!(result)
+}
+
 fn err_json(msg: &str) -> String {
     serde_json::to_string(&serde_json::json!({ "error": msg }))
         .unwrap_or_else(|_| "{\"error\":\"unknown\"}".to_string())
 }
 
-/// Emit an audit event via the engine's configured sink. Mirrors the CLI's
-/// `emit_audit` helper: log sink failures to stderr but never propagate —
-/// audit issues must never block the user's operation. Called while
-/// `engine.lock().await` is held; sink impls are expected to be fast
-/// (JsonlFileSink does a single append-open + write).
-fn emit_audit(sink: &dyn AuditSink, event: AuditEvent) {
-    if let Err(e) = sink.emit(&event) {
-        eprintln!("warning: audit emit failed: {}", e);
+/// Inject file-stem candidates into an already-scored `(score, qname)` list.
+///
+/// For each query token, finds symbols whose file path contains that token but
+/// whose file is not yet represented in `scored`. Injects them with a baseline
+/// score (1.0 + hybrid_boost) so they appear but can still be outranked.
+/// Returns the merged list sorted by score and truncated to `depth`.
+fn inject_file_stem(
+    db_path: &std::path::Path,
+    tokens: &[String],
+    filters: &FtsFilters,
+    index: &AsgIndexStore<'_>,
+    ref_name: &str,
+    mut scored: Vec<(f64, String)>,
+    depth: usize,
+) -> Vec<(f64, String)> {
+    // Only protect files already in the top `depth` slots. Files ranked
+    // depth+1..depth*8 in FTS are still eligible for re-injection so a
+    // strong stem boost can displace a weak FTS match.
+    let covered_files: std::collections::HashSet<String> = scored
+        .iter()
+        .take(depth)
+        .filter_map(|(_, qn)| {
+            index.get_symbol_by_qname(ref_name, qn).ok().flatten().map(|s| s.file)
+        })
+        .collect();
+
+    if let Ok(fts) = SearchFtsDb::open(db_path) {
+        for token in tokens {
+            if let Ok(hits) = fts.file_stem_candidates(token, filters, depth * 2) {
+                for hit in hits {
+                    if !covered_files.contains(&hit.file) {
+                        let boost = hybrid_boost(&hit, tokens);
+                        scored.push((1.0 + boost, hit.qname));
+                    }
+                }
+            }
+        }
     }
+
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.dedup_by(|a, b| a.1 == b.1);
+    scored.truncate(depth);
+    scored
 }
+
 
 fn parse_ledger_kind(s: &str) -> Result<LedgerKind, String> {
     match s.to_lowercase().as_str() {
@@ -1499,3 +3364,4 @@ fn resolve_symbols_by_ids(
     out.sort_by(|a, b| a.qname.cmp(&b.qname));
     Ok(out)
 }
+

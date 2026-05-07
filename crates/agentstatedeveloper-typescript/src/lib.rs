@@ -47,6 +47,10 @@ impl LanguageAdapter for TypeScriptAdapter {
         "typescript"
     }
 
+    fn file_extensions(&self) -> &'static [&'static str] {
+        &["ts", "tsx", "mts", "cts"]
+    }
+
     fn parse_symbols(&self, file: &str, source: &str) -> Result<Vec<ParsedSymbol>> {
         let mut parser = Parser::new();
         parser
@@ -80,11 +84,36 @@ impl LanguageAdapter for TypeScriptAdapter {
     }
 }
 
+/// Walk path components and return the tail after the first `src` segment.
+/// Falls back to the full path for projects without that convention.
+///
+/// Examples:
+/// - `src/components/Button.tsx` → `components/Button.tsx`
+/// - `packages/ui/src/index.ts`  → `index.ts`
+/// - `lib/util.ts`               → `lib/util.ts`  (no `src` segment, unchanged)
+fn strip_src_prefix(path: &str) -> &str {
+    let mut offset = 0usize;
+    for part in path.split('/') {
+        if part == "src" {
+            let after = offset + part.len() + 1;
+            if after < path.len() {
+                return &path[after..];
+            }
+        }
+        offset += part.len() + 1;
+    }
+    path
+}
+
 /// Derive the dotted module prefix for a file path.
 ///
-/// `foo/bar.ts` -> `foo.bar`
-/// `./foo/bar.tsx` -> `foo.bar`
-/// `bar.mts` -> `bar`
+/// Anchors at the `src/` boundary so the prefix is stable regardless of
+/// which directory `asd index` was invoked from.
+///
+/// `src/components/Button.tsx` -> `components.Button`
+/// `foo/bar.ts`                -> `foo.bar`  (no src segment, fallback)
+/// `./foo/bar.tsx`             -> `foo.bar`
+/// `bar.mts`                   -> `bar`
 fn module_qname_prefix(file: &str) -> String {
     let mut s = file;
     if let Some(stripped) = s.strip_prefix("./") {
@@ -96,6 +125,7 @@ fn module_qname_prefix(file: &str) -> String {
             break;
         }
     }
+    let s = strip_src_prefix(s);
     s.replace('\\', "/").replace('/', ".")
 }
 
@@ -351,22 +381,9 @@ fn make_parsed_symbol(
     }
 }
 
-/// Look backwards from `start_byte` in `src` for a JSDoc block (`/** ... */`)
-/// or a run of `//` line comments immediately preceding the symbol.
-/// Returns the text stripped of comment markers and trimmed, or `None`.
 fn extract_preceding_doc(src: &[u8], start_byte: usize) -> Option<String> {
-    if start_byte == 0 {
-        return None;
-    }
     let before = std::str::from_utf8(&src[..start_byte]).ok()?;
-
-    // Strip trailing whitespace/blank lines to find the last non-blank line.
     let trimmed_end = before.trim_end();
-    if trimmed_end.is_empty() {
-        return None;
-    }
-
-    // Case 1: ends with `*/` — try to find the matching `/**`.
     if trimmed_end.ends_with("*/") {
         if let Some(block_start) = trimmed_end.rfind("/**") {
             let block = &trimmed_end[block_start + 3..trimmed_end.len() - 2];
@@ -381,8 +398,6 @@ fn extract_preceding_doc(src: &[u8], start_byte: usize) -> Option<String> {
             }
         }
     }
-
-    // Case 2: ends with a `//` comment line — collect the contiguous block.
     let lines: Vec<&str> = trimmed_end.lines().collect();
     let mut comment_lines: Vec<&str> = Vec::new();
     for line in lines.iter().rev() {
@@ -395,24 +410,18 @@ fn extract_preceding_doc(src: &[u8], start_byte: usize) -> Option<String> {
     }
     if !comment_lines.is_empty() {
         comment_lines.reverse();
-        let cleaned = comment_lines.join(" ");
-        return Some(truncate_doc(&cleaned));
+        return Some(truncate_doc(&comment_lines.join(" ")));
     }
-
     None
 }
 
-/// Cap a doc string at 512 characters, trimming at a word boundary when possible.
 fn truncate_doc(s: &str) -> String {
     const MAX: usize = 512;
     if s.len() <= MAX {
         return s.to_string();
     }
-    let truncated = &s[..MAX];
-    match truncated.rfind(' ') {
-        Some(pos) => format!("{}…", &truncated[..pos]),
-        None => format!("{}…", truncated),
-    }
+    let cut = s[..MAX].rfind(' ').unwrap_or(MAX);
+    s[..cut].to_string()
 }
 
 fn extract_function_signature(node: Node<'_>, src: &[u8], name: &str) -> Option<String> {
@@ -615,7 +624,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     }
 
     // Date.now / new Date / performance.now -> TimeRead
-    let time_read_needles = ["Date.now", "new Date(", "performance.now"];
+    let time_read_needles = ["Date.now", "new Date(", "performance.now", "Date.parse(", "Temporal.Now"];
     if let Some(note) = first_match_note(body, &time_read_needles) {
         effects.push(Effect {
             effect: EffectCategory::TimeRead,
@@ -630,6 +639,9 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
         "crypto.randomBytes",
         "crypto.randomUUID",
         "crypto.getRandomValues",
+        "nanoid(",
+        "uuidv4(",
+        "uuid.v4(",
     ];
     if let Some(note) = first_match_note(body, &random_needles) {
         effects.push(Effect {
@@ -1347,10 +1359,23 @@ mod tests {
 
     #[test]
     fn module_prefix_strips_extensions_and_leading_dot_slash() {
+        // src/ anchor — stable regardless of index root
+        assert_eq!(module_qname_prefix("src/components/Button.tsx"), "components.Button");
+        assert_eq!(module_qname_prefix("packages/ui/src/index.ts"), "index");
+        assert_eq!(module_qname_prefix("src/util.mts"), "util");
+        // no src segment — full relative path (fallback)
         assert_eq!(module_qname_prefix("foo/bar.ts"), "foo.bar");
         assert_eq!(module_qname_prefix("./foo/bar.tsx"), "foo.bar");
         assert_eq!(module_qname_prefix("bar.mts"), "bar");
         assert_eq!(module_qname_prefix("a/b/c.cts"), "a.b.c");
+    }
+
+    #[test]
+    fn strip_src_prefix_variants() {
+        assert_eq!(strip_src_prefix("src/util.ts"), "util.ts");
+        assert_eq!(strip_src_prefix("packages/ui/src/index.ts"), "index.ts");
+        assert_eq!(strip_src_prefix("lib/util.ts"), "lib/util.ts");
+        assert_eq!(strip_src_prefix("nosrc/foo.ts"), "nosrc/foo.ts");
     }
 
     #[test]
@@ -1392,7 +1417,7 @@ function f() {
 }
 "#;
         let effects = infer_effects_from_body(body);
-        let cats: Vec<_> = effects.iter().map(|e| e.effect).collect();
+        let cats: Vec<_> = effects.iter().map(|e| e.effect.clone()).collect();
         assert!(cats.contains(&EffectCategory::IoFsWrite));
     }
 
@@ -1404,7 +1429,7 @@ function f() {
 }
 "#;
         let effects = infer_effects_from_body(body);
-        let cats: Vec<_> = effects.iter().map(|e| e.effect).collect();
+        let cats: Vec<_> = effects.iter().map(|e| e.effect.clone()).collect();
         assert!(cats.contains(&EffectCategory::Log));
     }
 
@@ -1540,7 +1565,7 @@ function f() {
 }
 "#;
         let effects = infer_effects_from_body(body);
-        let cats: Vec<_> = effects.iter().map(|e| e.effect).collect();
+        let cats: Vec<_> = effects.iter().map(|e| e.effect.clone()).collect();
         assert!(cats.contains(&EffectCategory::Throw));
     }
 
