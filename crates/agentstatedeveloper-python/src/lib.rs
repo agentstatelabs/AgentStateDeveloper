@@ -248,15 +248,6 @@ fn extract_python_doc(body: &str) -> Option<String> {
     None
 }
 
-fn truncate_doc(s: &str) -> String {
-    const MAX: usize = 512;
-    if s.len() <= MAX {
-        return s.to_string();
-    }
-    let cut = s[..MAX].rfind(' ').unwrap_or(MAX);
-    s[..cut].to_string()
-}
-
 fn extract_function_signature(node: Node<'_>, src: &[u8], name: &str) -> Option<String> {
     let params = node.child_by_field_name("parameters")?;
     let params_text = node_text(params, src)?;
