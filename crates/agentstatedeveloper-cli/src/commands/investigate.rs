@@ -284,7 +284,7 @@ pub(crate) fn find_candidates(
     let fts_result = SearchFtsDb::open(db_path)
         .ok()
         .filter(|fts| fts.has_data())
-        .and_then(|fts| fts.search(query, filters, depth * 4).ok());
+        .and_then(|fts| fts.search(query, filters, depth * 8).ok());
 
     if let Some(hits) = fts_result {
         let mut scored: Vec<(f64, String)> = hits

@@ -180,6 +180,59 @@ fn resync_is_idempotent() {
 }
 
 #[test]
+fn invariant_survives_hydrate_roundtrip() {
+    // Regression guard: `asd invariant add` stores LedgerKind::Invariant entries.
+    // Verify they survive a sync → wipe → hydrate cycle so agents see them on a
+    // fresh clone without rerunning `asd index`.
+    let src = Engine::open_in_memory().expect("open src");
+    let index = AsgIndexStore { repo: &src.repo };
+    let ledger = AsgLedgerStore { repo: &src.repo };
+
+    let sym = Symbol {
+        symbol_id: "sym_refreshDriftPlayhead".to_string(),
+        symbol_fp: "fp_inv_test".to_string(),
+        qname: "ExampleFlowViewModel.refreshDriftPlayhead".to_string(),
+        language: "swift".to_string(),
+        kind: SymbolKind::Function,
+        file: "ExampleFlow.swift".to_string(),
+        start: Position { line: 42, col: 0 },
+        end: Position { line: 55, col: 0 },
+        signature: Some("func refreshDriftPlayhead()".to_string()),
+        doc: None,
+    };
+    index.put_symbol(&src.ref_name, &sym, "test").expect("put symbol");
+
+    let invariant = LedgerEntry::new(
+        &sym.symbol_id,
+        LedgerKind::Invariant,
+        "playhead must always reflect the current model state",
+        Author { kind: AuthorKind::Human, id: "craig".to_string() },
+    );
+    ledger.append_entry(&src.ref_name, &invariant, "test").expect("append invariant");
+
+    // Sync to sidecar.
+    let tmp = unique_tempdir("invariant-hydrate");
+    let sync_summary = sync_to_dir(&src.repo, &src.ref_name, &tmp).expect("sync");
+    assert_eq!(sync_summary.ledger_entries_written, 1, "invariant written to sidecar");
+
+    // Hydrate into a fresh engine (simulates fresh clone).
+    let dst = Engine::open_in_memory().expect("open dst");
+    let hydrate_summary = hydrate_from_dir(&dst.repo, &dst.ref_name, &tmp, "test").expect("hydrate");
+    assert_eq!(hydrate_summary.ledger_entries_loaded, 1, "invariant loaded from sidecar");
+
+    // Verify the invariant is present and correct.
+    let dst_ledger = AsgLedgerStore { repo: &dst.repo };
+    let entries = dst_ledger
+        .list_entries(&dst.ref_name, &sym.symbol_id)
+        .expect("list entries");
+    assert_eq!(entries.len(), 1, "exactly one invariant");
+    assert_eq!(entries[0].kind, LedgerKind::Invariant, "kind preserved");
+    assert_eq!(entries[0].summary, "playhead must always reflect the current model state", "summary preserved");
+    assert_eq!(entries[0].entry_id, invariant.entry_id, "entry_id stable");
+    assert_eq!(entries[0].author.id, "craig", "author preserved");
+}
+
+#[test]
 fn hydrate_errors_when_sidecar_missing() {
     let engine = Engine::open_in_memory().expect("open engine");
     let tmp = unique_tempdir("missing");

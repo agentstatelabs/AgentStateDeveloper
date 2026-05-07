@@ -182,6 +182,12 @@ impl SearchFtsDb {
     /// complete current-world snapshot, a full rebuild is cheaper than tracking
     /// which files changed and avoids stale rows from deleted files.
     pub fn rebuild(&self, symbols: &[Symbol]) -> rusqlite::Result<()> {
+        self.rebuild_refs(&symbols.iter().collect::<Vec<_>>())
+    }
+
+    /// Like [`rebuild`] but accepts a slice of references — avoids a copy when
+    /// the caller already has a deduplicated `Vec<&Symbol>`.
+    pub fn rebuild_refs(&self, symbols: &[&Symbol]) -> rusqlite::Result<()> {
         self.conn.execute_batch(
             "DELETE FROM asd_search_fts; DELETE FROM asd_search_meta;",
         )?;
@@ -391,7 +397,7 @@ pub fn hybrid_boost(hit: &FtsHit, tokens: &[String]) -> f64 {
         .iter()
         .filter(|t| path_words.iter().any(|w| w == t.as_str()))
         .count() as f64
-        * 1.5;
+        * 2.5;
 
     // Expand last qname segment (function name) into camelCase words.
     let last_seg = hit.qname.rsplit('.').next().unwrap_or(&hit.qname);
@@ -1001,43 +1007,58 @@ pub fn classify_layer_sym(
     if layer != "other" {
         return layer;
     }
-    // Secondary: check the last component of the qname (after `.`, `::`, or `/`).
-    let name = qname
-        .rsplit(|c| c == '.' || c == ':' || c == '/')
-        .next()
-        .unwrap_or(qname);
-    let n = name.to_lowercase();
-    if n.ends_with("viewmodel") || n.ends_with("controller") || n.ends_with("presenter")
-        || n.ends_with("coordinator") || n.ends_with("interactor") || n.ends_with("viewstate")
-        || n.ends_with("statemanager") || n.ends_with("router")
-    {
-        return "viewmodel";
+    // Secondary: walk all qname components (split on `.`, `::`, `/`).
+    // For method qnames like `ExampleFlowViewModel.refreshDriftPlayhead` the
+    // method leaf won't match, but the class component will — so we check every
+    // component and return the *highest-priority* layer found across any of them.
+    let components: Vec<&str> = qname
+        .split(|c| c == '.' || c == ':' || c == '/')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut found_viewmodel = false;
+    let mut found_ui = false;
+    let mut found_scheduler = false;
+    let mut found_persistence = false;
+    let mut found_core_model = false;
+
+    for component in &components {
+        let n = component.to_lowercase();
+        if n.ends_with("viewmodel") || n.ends_with("controller") || n.ends_with("presenter")
+            || n.ends_with("coordinator") || n.ends_with("interactor") || n.ends_with("viewstate")
+            || n.ends_with("statemanager") || n.ends_with("router")
+        {
+            found_viewmodel = true;
+        } else if n.ends_with("view") || n.ends_with("screen") || n.ends_with("page")
+            || n.ends_with("cell") || n.ends_with("widget") || n.ends_with("button")
+            || n.ends_with("label") || n.ends_with("panel") || n.ends_with("viewcontroller")
+            || n.ends_with("sheet") || n.ends_with("overlay") || n.ends_with("header")
+        {
+            found_ui = true;
+        } else if n.ends_with("scheduler") || n.ends_with("engine") || n.ends_with("compiler")
+            || n.ends_with("processor") || n.ends_with("renderer") || n.ends_with("clock")
+            || n.ends_with("timer") || n.ends_with("pipeline") || n.ends_with("worker")
+            || n.ends_with("synthesizer") || n.ends_with("transport")
+        {
+            found_scheduler = true;
+        } else if n.ends_with("repository") || n.ends_with("store") || n.ends_with("cache")
+            || n.ends_with("dao") || n.ends_with("database") || n.ends_with("datasource")
+        {
+            found_persistence = true;
+        } else if n.ends_with("model") || n.ends_with("entity") || n.ends_with("service")
+            || n.ends_with("manager") || n.ends_with("handler") || n.ends_with("factory")
+            || n.ends_with("validator") || n.ends_with("usecase") || n.ends_with("builder")
+        {
+            found_core_model = true;
+        }
     }
-    if n.ends_with("view") || n.ends_with("screen") || n.ends_with("page")
-        || n.ends_with("cell") || n.ends_with("widget") || n.ends_with("button")
-        || n.ends_with("label") || n.ends_with("panel") || n.ends_with("viewcontroller")
-        || n.ends_with("sheet") || n.ends_with("overlay") || n.ends_with("header")
-    {
-        return "ui";
-    }
-    if n.ends_with("scheduler") || n.ends_with("engine") || n.ends_with("compiler")
-        || n.ends_with("processor") || n.ends_with("renderer") || n.ends_with("clock")
-        || n.ends_with("timer") || n.ends_with("pipeline") || n.ends_with("worker")
-        || n.ends_with("synthesizer") || n.ends_with("transport")
-    {
-        return "scheduler";
-    }
-    if n.ends_with("repository") || n.ends_with("store") || n.ends_with("cache")
-        || n.ends_with("dao") || n.ends_with("database") || n.ends_with("datasource")
-    {
-        return "persistence";
-    }
-    if n.ends_with("model") || n.ends_with("entity") || n.ends_with("service")
-        || n.ends_with("manager") || n.ends_with("handler") || n.ends_with("factory")
-        || n.ends_with("validator") || n.ends_with("usecase") || n.ends_with("builder")
-    {
-        return "core_model";
-    }
+
+    // Return in priority order: most specific wins.
+    if found_viewmodel { return "viewmodel"; }
+    if found_ui { return "ui"; }
+    if found_scheduler { return "scheduler"; }
+    if found_persistence { return "persistence"; }
+    if found_core_model { return "core_model"; }
     "other"
 }
 
@@ -1486,6 +1507,12 @@ mod tests {
         assert_eq!(classify_layer_sym("App/Views/DriftView.swift", "DriftViewModel", 0, &[]), "ui");
         // Truly unclassifiable stays other.
         assert_eq!(classify_layer_sym("App/AppDelegate.swift", "AppDelegate", 0, &[]), "other");
+        // Method qnames: class component must propagate even when the method leaf doesn't match.
+        assert_eq!(classify_layer_sym("App/ExampleFlow.swift", "ExampleFlowViewModel.refreshDriftPlayhead", 0, &[]), "viewmodel");
+        assert_eq!(classify_layer_sym("App/ExampleFlow.swift", "DriftCompiler.compile", 0, &[]), "scheduler");
+        assert_eq!(classify_layer_sym("App/ExampleFlow.swift", "ClipStore.save", 0, &[]), "persistence");
+        // Rust-style :: separators.
+        assert_eq!(classify_layer_sym("src/drift.rs", "ExampleFlowViewModel::refresh", 0, &[]), "viewmodel");
     }
 
     #[test]

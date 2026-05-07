@@ -418,13 +418,25 @@ pub fn run_index(
     // Full rebuild avoids stale rows from deleted or renamed files; the indexer
     // already owns the complete world, so incremental tracking adds no benefit.
     // Errors are non-fatal; search falls back to in-memory until next index.
+    //
+    // Deduplicate by qname before rebuilding so FTS row count matches the ASG
+    // by-qname tree count (by_qname silently overwrites duplicates; FTS must
+    // mirror that behaviour so `asd status` and `asd list stats` agree).
     if let Some(db) = db_path {
         if let Some(f) = on_phase {
             f("  rebuilding FTS search index…");
         }
         match SearchFtsDb::open(db) {
             Ok(fts) => {
-                if let Err(e) = fts.rebuild(&indexed_symbols) {
+                // Keep last-seen symbol per qname, matching by_qname semantics.
+                let mut seen: std::collections::HashMap<&str, usize> =
+                    std::collections::HashMap::new();
+                for (i, sym) in indexed_symbols.iter().enumerate() {
+                    seen.insert(sym.qname.as_str(), i);
+                }
+                let mut deduped: Vec<&Symbol> = seen.values().map(|&i| &indexed_symbols[i]).collect();
+                deduped.sort_by(|a, b| a.qname.cmp(&b.qname));
+                if let Err(e) = fts.rebuild_refs(&deduped) {
                     eprintln!("asd: FTS rebuild warning: {e}");
                 }
             }
