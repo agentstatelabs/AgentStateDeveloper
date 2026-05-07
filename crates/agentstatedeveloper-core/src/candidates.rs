@@ -531,9 +531,14 @@ pub fn find_candidates(
 /// Explain why a symbol was returned for a query.
 ///
 /// Returns short reason strings like `"name:playhead"`, `"doc:transport"`,
-/// `"ledger:2 invariants"`. Useful as `match_reasons` in agent output so the
-/// caller can understand which signal drove ranking without re-reading scores.
-pub fn explain_match(sym: &Symbol, tokens: &[String], ledger_entries: &[LedgerEntry]) -> Vec<String> {
+/// `"ledger:2 invariants"`, `"recent-edit"`. Useful as `match_reasons` in
+/// agent output so the caller can understand which signal drove ranking.
+pub fn explain_match(
+    sym: &Symbol,
+    tokens: &[String],
+    ledger_entries: &[LedgerEntry],
+    is_hot: bool,
+) -> Vec<String> {
     let qname_lower = sym.qname.to_lowercase();
     let file_lower = sym.file.to_lowercase();
     let sig_lower = sym.signature.as_deref().unwrap_or("").to_lowercase();
@@ -561,6 +566,155 @@ pub fn explain_match(sym: &Symbol, tokens: &[String], ledger_entries: &[LedgerEn
     if haz_count > 0 {
         reasons.push(format!("ledger:{} hazard{}", haz_count, if haz_count == 1 { "" } else { "s" }));
     }
+    if is_hot {
+        reasons.push("recent-edit".to_string());
+    }
 
     reasons
+}
+
+// ---------------------------------------------------------------------------
+// Uncertainty model helpers
+// ---------------------------------------------------------------------------
+
+/// Normalize raw scores to [0.1, 1.0] confidence within the result set.
+/// The highest-scoring result gets 1.0; the lowest gets 0.1.
+pub fn confidence_scores(scores: &[f64]) -> Vec<f64> {
+    if scores.is_empty() { return vec![]; }
+    if scores.len() == 1 { return vec![1.0]; }
+    let max = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let min = scores.iter().cloned().fold(f64::INFINITY, f64::min);
+    let range = max - min;
+    if range < 1e-9 { return vec![1.0; scores.len()]; }
+    scores.iter().map(|&s| 0.1 + 0.9 * (s - min) / range).collect()
+}
+
+/// Classify a result into a semantic bucket.
+///
+/// - `core`      — has ledger entries AND high-signal match (name token or hot file)
+/// - `supporting`— has ledger, name match, or recent edit
+/// - `noisy`     — only file/sig/doc lexical match; no ledger, not hot
+/// - `test-only` — symbol lives in a test file
+pub fn result_bucket(
+    file: &str,
+    match_reasons: &[String],
+    has_ledger: bool,
+    is_hot: bool,
+) -> &'static str {
+    use crate::search_fts::symbol_tier;
+    if symbol_tier(file) == 2 { return "test-only"; }
+    let has_name = match_reasons.iter().any(|r| r.starts_with("name:"));
+    if has_ledger && (has_name || is_hot) { return "core"; }
+    if has_ledger || has_name || is_hot { return "supporting"; }
+    "noisy"
+}
+
+/// Detect query tokens that match too many unrelated files (broad/ambiguous terms).
+///
+/// Returns token strings whose FTS hit count across distinct files exceeds the
+/// threshold, indicating they will add noise rather than precision.
+pub fn detect_ambiguous_tokens(
+    tokens: &[String],
+    db_path: &Path,
+    filters: &FtsFilters,
+) -> Vec<String> {
+    const THRESHOLD: usize = 25;
+    let fts = match SearchFtsDb::open(db_path) {
+        Ok(f) if f.has_data() => f,
+        _ => return vec![],
+    };
+    tokens.iter()
+        .filter(|t| !is_stopword(t))
+        .filter(|token| {
+            fts.search(token, filters, THRESHOLD + 10)
+                .map(|hits| {
+                    hits.iter()
+                        .map(|h| h.file.as_str())
+                        .collect::<HashSet<_>>()
+                        .len() > THRESHOLD
+                })
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Heuristic possible-miss warnings for a result set.
+///
+/// Checks whether the result set covers the layers implied by the query.
+/// Returns human-readable warning strings for use in `possible_misses` output.
+pub fn detect_possible_misses(
+    query: &str,
+    layers_present: &HashSet<&str>,
+    result_count: usize,
+) -> Vec<String> {
+    let ql = query.to_lowercase();
+    let mut warnings = Vec::new();
+
+    // UI/view query with no view-layer results.
+    const VIEW_HINTS: &[&str] = &[
+        "view", " ui", "render", "display", "screen", "layout", "widget", "cell", "button", "pad",
+    ];
+    const VIEW_LAYERS: &[&str] = &["view", "ui", "presentation"];
+    if VIEW_HINTS.iter().any(|h| ql.contains(h))
+        && !VIEW_LAYERS.iter().any(|l| layers_present.contains(l))
+        && result_count > 0
+    {
+        warnings.push(
+            "no view-layer symbols found — query suggests UI involvement; \
+             check --scope or path coverage"
+                .to_string(),
+        );
+    }
+
+    // Very few results for a precise multi-word query.
+    if result_count > 0 && result_count < 3 && ql.split_whitespace().count() >= 3 {
+        warnings.push(format!(
+            "only {} result{} for a multi-term query — symbols may not be indexed yet",
+            result_count,
+            if result_count == 1 { "" } else { "s" }
+        ));
+    }
+
+    warnings
+}
+
+/// Apply feedback verdicts as score adjustments after candidate selection.
+///
+/// `Useful` entries add a boost; `Noisy` / `WrongLayer` entries demote the
+/// symbol to negative infinity (effectively removed). Called at CLI/MCP
+/// call sites after `find_candidates`.
+pub fn apply_feedback_adjustments(
+    engine: &Engine,
+    index_store: &AsgIndexStore,
+    query: &str,
+    scored: &mut Vec<(f64, String)>,
+    feedback_entries: &[(String, String, crate::schema::FeedbackVerdict)],
+) {
+    // feedback_entries: (symbol_id, query_pattern, verdict)
+    if feedback_entries.is_empty() { return; }
+    let query_norm = query.to_lowercase();
+
+    for (score, qname) in scored.iter_mut() {
+        let sym_id = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+            Ok(Some(s)) => s.symbol_id,
+            _ => continue,
+        };
+        for (fb_symbol_id, fb_query, verdict) in feedback_entries {
+            if fb_symbol_id != &sym_id { continue; }
+            let q_matches = fb_query.is_empty()
+                || query_norm.contains(fb_query.as_str())
+                || fb_query.contains(query_norm.as_str());
+            if !q_matches { continue; }
+            match verdict {
+                crate::schema::FeedbackVerdict::Useful => *score += 1.5,
+                crate::schema::FeedbackVerdict::Noisy
+                | crate::schema::FeedbackVerdict::WrongLayer => {
+                    *score = f64::NEG_INFINITY;
+                }
+                crate::schema::FeedbackVerdict::Missing => {}
+            }
+        }
+    }
+    scored.retain(|(s, _)| s.is_finite());
 }

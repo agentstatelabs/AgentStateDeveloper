@@ -5,20 +5,21 @@
 //! crates (e.g., `agentstatedeveloper-python`).
 
 pub mod adapter;
-pub mod candidates;
 pub mod audit;
-pub mod index_pipeline;
+pub mod candidates;
 pub mod effects;
 pub mod engine;
 pub mod error;
+pub mod feedback;
 pub mod index;
+pub mod index_pipeline;
 pub mod ledger;
 pub mod paths;
 pub mod policy;
 pub mod repair;
 pub mod schema;
-pub mod search_fts;
 pub mod scratch;
+pub mod search_fts;
 pub mod sidecar;
 pub mod symbol;
 pub mod transitive;
@@ -37,12 +38,17 @@ pub use policy::{
 };
 pub use schema::{
     ASD_PATH_PREFIX, ASD_SCHEMA_VERSION, Author, AuthorKind, Effect, EffectCategory, EffectDecl,
-    Evidence, LedgerEntry, LedgerKind, Mismatch, Position, Rebind, ScratchEntry, ScratchStatus,
-    Symbol, SymbolKind, TransitiveEffect, Verification, VerificationSource, VerificationStatus,
+    Evidence, FeedbackEntry, FeedbackVerdict, LedgerEntry, LedgerKind, Mismatch, Position, Rebind,
+    ScratchEntry, ScratchStatus, Symbol, SymbolKind, TransitiveEffect, Verification,
+    VerificationSource, VerificationStatus,
 };
 pub use scratch::{AsgScratchStore, CleanFilter, ScratchFilter, ScratchStore};
-pub use candidates::{explain_match, find_candidates, glob_match, in_memory_score, kind_str, load_scope_aliases,
-    matches_any_path_glob, parse_query, query_tokens, resolve_scope};
+pub use feedback::{AsgFeedbackStore, FeedbackStore};
+pub use candidates::{
+    apply_feedback_adjustments, confidence_scores, detect_ambiguous_tokens, detect_possible_misses,
+    explain_match, find_candidates, glob_match, in_memory_score, kind_str, load_scope_aliases,
+    matches_any_path_glob, parse_query, query_tokens, resolve_scope, result_bucket,
+};
 pub use repair::{IssueSeverity, RepairIssue, RepairReport, drop_orphaned_edge_refs, repair_asg, scan_asg};
 pub use search_fts::{AGENT_DEFAULT_BUDGET, FileRecency, FtsFilters, FtsHit, SearchFtsDb, SymbolTier, classify_layer, classify_layer_sym, derive_cold_hints, estimate_tokens, extract_summary, gather_recency, git_dirty_files, hybrid_boost, intent_focus, intent_layer_order, is_stopword, load_layer_overrides, parse_intent, propose_test_path, symbol_tier, trim_for_agent};
 pub use search_fts::{format_age, stale_warning};

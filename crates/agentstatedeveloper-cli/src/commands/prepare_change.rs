@@ -16,11 +16,12 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
-    AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, FtsFilters, IndexStore,
-    LedgerKind, LedgerStore, classify_layer_sym, derive_cold_hints, estimate_tokens, extract_summary,
-    find_candidates, gather_recency, git_dirty_files, intent_focus, intent_layer_order,
-    load_layer_overrides, parse_intent, parse_query, propose_test_path, resolve_scope,
-    stale_warning, symbol_tier, trim_for_agent,
+    AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine,
+    FeedbackStore, FtsFilters, IndexStore, LedgerKind, LedgerStore, apply_feedback_adjustments,
+    classify_layer_sym, derive_cold_hints, detect_ambiguous_tokens, detect_possible_misses,
+    estimate_tokens, extract_summary, find_candidates, gather_recency, git_dirty_files,
+    intent_focus, intent_layer_order, load_layer_overrides, parse_intent, parse_query,
+    propose_test_path, resolve_scope, stale_warning, symbol_tier, trim_for_agent,
 };
 
 use crate::commands::{
@@ -130,7 +131,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         paths_filter,
     };
 
-    let candidates = find_candidates(
+    let mut candidates = find_candidates(
         &engine,
         &cfg.db_path,
         &args.description,
@@ -140,6 +141,11 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         &index_store,
         args.depth,
     );
+
+    // Apply durable feedback adjustments (Useful/Noisy/WrongLayer verdicts).
+    let feedback_store = AsgFeedbackStore { repo: &engine.repo };
+    let feedback_verdicts = feedback_store.flat_verdicts(&engine.ref_name).unwrap_or_default();
+    apply_feedback_adjustments(&engine, &index_store, &args.description, &mut candidates, &feedback_verdicts);
 
     // Recency pass (one git call for all files).
     let recency = gather_recency(200, 14.0);
@@ -360,11 +366,19 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         .map(|s| json!(s))
         .collect();
 
+    let ambiguous_terms = detect_ambiguous_tokens(&tokens, &cfg.db_path, &filters);
+    let layers_present: std::collections::HashSet<&str> = file_scores.iter()
+        .map(|(_, _, layer, _, _)| layer.as_str())
+        .collect();
+    let possible_misses = detect_possible_misses(&args.description, &layers_present, file_scores.len());
+
     let focus = intent_focus(intent);
     let out = json!({
         "description": args.description,
         "intent": if intent.is_empty() { Value::Null } else { json!(intent) },
         "focus": if focus.is_empty() { Value::Null } else { json!(focus) },
+        "ambiguous_terms": ambiguous_terms,
+        "possible_misses": possible_misses,
         "design_invariants": design_invariants,
         "known_hazards": known_hazards,
         "entry_points": { "by_layer": ordered_by_layer },

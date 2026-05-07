@@ -172,6 +172,10 @@ pub enum Command {
     /// PR-review workflow: pass the base SHA to get full impact without knowing
     /// any symbol names upfront. Supports --agent, --intent, --depth.
     Since(commands::since::SinceArgs),
+
+    /// Record and list search-quality feedback verdicts for (query, symbol) pairs.
+    #[command(subcommand)]
+    Feedback(commands::feedback::FeedbackCmd),
 }
 
 /// Resolve [`Config`] from the parsed CLI flags.
@@ -217,5 +221,6 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Invariant(sub) => invariant::run(cfg, sub),
         Command::PrepareChange(args) => prepare_change::run(cfg, args),
         Command::Since(args) => since::run(cfg, args),
+        Command::Feedback(sub) => feedback::run(cfg, sub),
     }
 }

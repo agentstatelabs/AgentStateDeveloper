@@ -17,13 +17,15 @@ use tokio::sync::Mutex;
 
 use agentstatedeveloper_adapters::default_adapters;
 use agentstatedeveloper_core::{
-    ASD_PATH_PREFIX, AsgEffectStore, AsgIndexStore, AsgLedgerStore, AsgScratchStore, AuditEvent,
-    Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory, EffectDecl, EffectStore,
-    Engine, FtsFilters, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Rebind, ScratchEntry,
-    ScratchFilter, ScratchStatus, ScratchStore, SearchFtsDb, Situation, actions, classify_layer_sym,
-    derive_cold_hints, emit_audit, event_types, explain_match, extract_summary, find_candidates,
-    gather_recency, hybrid_boost, intent_focus, intent_layer_order, load_layer_overrides,
-    parse_intent, paths, parse_query, propose_test_path, resolve_scope, symbol_tier,
+    ASD_PATH_PREFIX, AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore,
+    AsgScratchStore, AuditEvent, Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory,
+    EffectDecl, EffectStore, Engine, FeedbackEntry, FeedbackStore, FeedbackVerdict, FtsFilters,
+    IndexStore, LedgerEntry, LedgerKind, LedgerStore, Rebind, ScratchEntry, ScratchFilter,
+    ScratchStatus, ScratchStore, SearchFtsDb, Situation, actions, classify_layer_sym,
+    confidence_scores, derive_cold_hints, detect_ambiguous_tokens, detect_possible_misses,
+    emit_audit, event_types, explain_match, extract_summary, find_candidates, gather_recency,
+    hybrid_boost, intent_focus, intent_layer_order, load_layer_overrides, parse_intent, paths,
+    parse_query, propose_test_path, resolve_scope, result_bucket, symbol_tier,
 };
 
 /// The AgentStateDeveloper MCP server.
@@ -211,6 +213,27 @@ pub struct InvariantAddParams {
 #[derive(Deserialize, JsonSchema)]
 pub struct InvariantListParams {
     /// Filter to a single symbol's invariants. Omit to list all.
+    pub qname: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct FeedbackMarkParams {
+    /// The search query that produced this result.
+    pub query: String,
+    /// Fully-qualified symbol name being rated.
+    pub qname: String,
+    /// Verdict: "useful", "noisy", "missing", or "wrong_layer".
+    pub verdict: String,
+    /// Optional free-text note explaining the verdict.
+    pub note: Option<String>,
+    /// Agent/author identifier (default: "asd-mcp-agent").
+    #[serde(default = "default_author_id")]
+    pub author_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct FeedbackListParams {
+    /// Filter to feedback for a specific symbol qname. Omit to list all.
     pub qname: Option<String>,
 }
 
@@ -700,21 +723,30 @@ impl AsdMcpServer {
 
             let recency = gather_recency(200, 14.0);
             let index_store = AsgIndexStore { repo: &engine.repo };
-            let results: Vec<serde_json::Value> = scored.iter().map(|(score, hit)| {
+            let raw_scores: Vec<f64> = scored.iter().map(|(s, _)| *s).collect();
+            let confidences = confidence_scores(&raw_scores);
+            let mut layers_present: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let results: Vec<serde_json::Value> = scored.iter().zip(confidences.iter()).map(|((score, hit), conf)| {
                 let tier = hit.tier;
                 let layer = classify_layer_sym(&hit.file, &hit.qname, tier, &layer_overrides);
+                layers_present.insert(layer.to_string());
                 let summary = extract_summary(hit.doc.as_deref(), hit.signature.as_deref());
                 let rec = recency.get(&hit.file);
+                let is_hot = rec.map(|r| r.hot).unwrap_or(false);
                 let entries = ledger_store
                     .list_entries(&ref_name, &hit.symbol_id)
                     .unwrap_or_default();
+                let has_ledger = !entries.is_empty();
                 let match_reasons = index_store
                     .get_symbol_by_qname(&ref_name, &hit.qname)
                     .ok().flatten()
-                    .map(|sym| explain_match(&sym, &tokens, &entries))
+                    .map(|sym| explain_match(&sym, &tokens, &entries, is_hot))
                     .unwrap_or_default();
+                let bucket = result_bucket(&hit.file, &match_reasons, has_ledger, is_hot);
                 serde_json::json!({
                     "score": score,
+                    "confidence": conf,
+                    "bucket": bucket,
                     "qname": hit.qname,
                     "kind": hit.kind,
                     "language": hit.language,
@@ -726,11 +758,20 @@ impl AsdMcpServer {
                     "signature": hit.signature,
                     "doc": hit.doc,
                     "last_touched_days": rec.and_then(|r| r.last_touched_days),
-                    "hot": rec.map(|r| r.hot).unwrap_or(false),
+                    "hot": is_hot,
                     "match_reasons": match_reasons,
                 })
             }).collect();
-            return serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string());
+            let layers_ref: std::collections::HashSet<&str> = layers_present.iter().map(|s| s.as_str()).collect();
+            let ambiguous_terms = detect_ambiguous_tokens(&tokens, &db_path, &filters);
+            let possible_misses = detect_possible_misses(&p.query, &layers_ref, results.len());
+            let out = serde_json::json!({
+                "query": p.query,
+                "ambiguous_terms": ambiguous_terms,
+                "possible_misses": possible_misses,
+                "results": results,
+            });
+            return serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string());
         }
 
         // --- Fallback: in-memory O(N) scoring ---
@@ -838,10 +879,18 @@ impl AsdMcpServer {
         let ledger_store = AsgLedgerStore { repo: &engine.repo };
         let effect_store = AsgEffectStore { repo: &engine.repo };
 
-        let top_qnames = find_candidates(
+        let mut top_qnames = find_candidates(
             &engine, &db_path, &p.query, &tokens, &filters,
             &ledger_store, &index, depth,
         );
+
+        // Apply durable feedback adjustments.
+        {
+            use agentstatedeveloper_core::{apply_feedback_adjustments, FeedbackStore};
+            let fb_store = AsgFeedbackStore { repo: &engine.repo };
+            let fb = fb_store.flat_verdicts(&ref_name).unwrap_or_default();
+            apply_feedback_adjustments(&engine, &index, &p.query, &mut top_qnames, &fb);
+        }
 
         // Build id_map for call graph resolution.
         let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
@@ -959,11 +1008,18 @@ impl AsdMcpServer {
         }
 
         let focus = intent_focus(intent);
+        let layers_present: std::collections::HashSet<&str> = entry_points.iter()
+            .filter_map(|ep| ep.get("layer").and_then(serde_json::Value::as_str))
+            .collect();
+        let ambiguous_terms = detect_ambiguous_tokens(&tokens, &db_path, &filters);
+        let possible_misses = detect_possible_misses(&p.query, &layers_present, entry_points.len());
         serde_json::to_string(&serde_json::json!({
             "query": p.query,
             "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
             "focus": if focus.is_empty() { serde_json::Value::Null } else { serde_json::json!(focus) },
             "tokens": tokens,
+            "ambiguous_terms": ambiguous_terms,
+            "possible_misses": possible_misses,
             "invariants": all_invariants,
             "hazards": all_hazards,
             "by_layer": by_layer,
@@ -2446,10 +2502,18 @@ impl AsdMcpServer {
             }
         }
 
-        let candidates = find_candidates(
+        let mut candidates = find_candidates(
             &engine, &db_path, &p.description, &tokens, &filters,
             &ledger_store, &index, depth,
         );
+
+        // Apply durable feedback adjustments.
+        {
+            use agentstatedeveloper_core::{apply_feedback_adjustments, FeedbackStore};
+            let fb_store = AsgFeedbackStore { repo: &engine.repo };
+            let fb = fb_store.flat_verdicts(&ref_name).unwrap_or_default();
+            apply_feedback_adjustments(&engine, &index, &p.description, &mut candidates, &fb);
+        }
 
         let recency = gather_recency(200, 14.0);
         let layer_order = intent_layer_order(intent);
@@ -2587,10 +2651,17 @@ impl AsdMcpServer {
             .collect();
 
         let focus = intent_focus(intent);
+        let layers_present_pc: std::collections::HashSet<&str> = file_scores.iter()
+            .map(|(_, _, layer, _, _)| layer.as_str())
+            .collect();
+        let ambiguous_terms = detect_ambiguous_tokens(&tokens, &db_path, &filters);
+        let possible_misses = detect_possible_misses(&p.description, &layers_present_pc, file_scores.len());
         serde_json::to_string(&serde_json::json!({
             "description": p.description,
             "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
             "focus": if focus.is_empty() { serde_json::Value::Null } else { serde_json::json!(focus) },
+            "ambiguous_terms": ambiguous_terms,
+            "possible_misses": possible_misses,
             "design_invariants": design_invariants,
             "known_hazards": known_hazards,
             "entry_points": { "by_layer": ordered },
@@ -2662,10 +2733,18 @@ impl AsdMcpServer {
             }
         }
 
-        let candidates = find_candidates(
+        let mut candidates = find_candidates(
             &engine, &db_path, &p.query, &tokens, &filters,
             &ledger_store, &index, depth,
         );
+
+        // Apply durable feedback adjustments.
+        {
+            use agentstatedeveloper_core::{apply_feedback_adjustments, FeedbackStore};
+            let fb_store = AsgFeedbackStore { repo: &engine.repo };
+            let fb = fb_store.flat_verdicts(&ref_name).unwrap_or_default();
+            apply_feedback_adjustments(&engine, &index, &p.query, &mut candidates, &fb);
+        }
 
         let mut files_to_inspect: Vec<serde_json::Value> = Vec::new();
         let mut seen_files: HashSet<String> = HashSet::new();
@@ -2779,10 +2858,17 @@ impl AsdMcpServer {
             .collect();
 
         let focus = intent_focus(intent);
+        let layers_present_cl: std::collections::HashSet<&str> = files_to_inspect.iter()
+            .filter_map(|f| f.get("layer").and_then(serde_json::Value::as_str))
+            .collect();
+        let ambiguous_terms_cl = detect_ambiguous_tokens(&tokens, &db_path, &filters);
+        let possible_misses_cl = detect_possible_misses(&p.query, &layers_present_cl, files_to_inspect.len());
         serde_json::to_string(&serde_json::json!({
             "query": p.query,
             "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
             "focus": if focus.is_empty() { serde_json::Value::Null } else { serde_json::json!(focus) },
+            "ambiguous_terms": ambiguous_terms_cl,
+            "possible_misses": possible_misses_cl,
             "files_to_inspect": files_to_inspect,
             "invariants_to_preserve": invariants,
             "tests_to_run": test_rows,
@@ -3192,6 +3278,83 @@ impl AsdMcpServer {
         };
 
         serde_json::to_string(&serde_json::json!({ "invariants": rows }))
+            .unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[tool(
+        description = "Record a verdict on a search result: useful (good match), noisy (irrelevant), missing (should have appeared), wrong_layer (architectural misclassification). Verdicts are persisted and applied as score adjustments in future searches."
+    )]
+    async fn feedback_mark(&self, params: Parameters<FeedbackMarkParams>) -> String {
+        let p = params.0;
+        let verdict = match p.verdict.to_lowercase().as_str() {
+            "useful" => FeedbackVerdict::Useful,
+            "noisy" => FeedbackVerdict::Noisy,
+            "missing" => FeedbackVerdict::Missing,
+            "wrong_layer" => FeedbackVerdict::WrongLayer,
+            other => return err_json(&format!(
+                "unknown verdict {:?}; valid: useful, noisy, missing, wrong_layer", other
+            )),
+        };
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let index_store = AsgIndexStore { repo: &engine.repo };
+        let symbol = match index_store.get_symbol_by_qname(&ref_name, &p.qname) {
+            Ok(Some(s)) => s,
+            Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
+            Err(e) => return err_json(&e.to_string()),
+        };
+        let entry_id = format!("fb_{}", uuid::Uuid::new_v4().simple());
+        let entry = FeedbackEntry {
+            entry_id: entry_id.clone(),
+            symbol_id: symbol.symbol_id.clone(),
+            symbol_qname: p.qname.clone(),
+            query: p.query.to_lowercase().trim().to_string(),
+            verdict,
+            note: p.note.clone(),
+            author: p.author_id.clone(),
+            created_at: chrono::Utc::now(),
+        };
+        let feedback_store = AsgFeedbackStore { repo: &engine.repo };
+        match feedback_store.record(&ref_name, &entry, &p.author_id) {
+            Ok(()) => serde_json::to_string(&serde_json::json!({
+                "ok": true,
+                "entry_id": entry_id,
+                "verdict": p.verdict,
+                "qname": p.qname,
+            })).unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "List recorded feedback verdicts. Pass qname to filter to one symbol; omit to list all. Use this to audit search quality signals or review past verdicts."
+    )]
+    async fn feedback_list(&self, params: Parameters<FeedbackListParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let feedback_store = AsgFeedbackStore { repo: &engine.repo };
+        let entries: Vec<serde_json::Value> = if let Some(ref qname) = p.qname {
+            let index_store = AsgIndexStore { repo: &engine.repo };
+            match index_store.get_symbol_by_qname(&ref_name, qname) {
+                Ok(Some(sym)) => feedback_store
+                    .list_for_symbol(&ref_name, &sym.symbol_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|e| serde_json::to_value(&e).unwrap_or_default())
+                    .collect(),
+                Ok(None) => return err_json(&format!("symbol not found: {}", qname)),
+                Err(e) => return err_json(&e.to_string()),
+            }
+        } else {
+            feedback_store
+                .list_all(&ref_name)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| serde_json::to_value(&e).unwrap_or_default())
+                .collect()
+        };
+        serde_json::to_string(&serde_json::json!({ "feedback": entries }))
             .unwrap_or_else(|_| "{}".to_string())
     }
 }

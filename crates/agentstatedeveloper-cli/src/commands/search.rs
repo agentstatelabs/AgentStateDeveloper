@@ -9,10 +9,10 @@ use clap::Args;
 
 use agentstatedeveloper_core::{
     AGENT_DEFAULT_BUDGET, AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore,
-    LedgerStore, SearchFtsDb, SymbolKind, classify_layer_sym, estimate_tokens, explain_match,
-    extract_summary, gather_recency, hybrid_boost, in_memory_score, intent_focus, kind_str,
-    load_layer_overrides, parse_intent, parse_query, resolve_scope, stale_warning, symbol_tier,
-    trim_for_agent,
+    LedgerStore, SearchFtsDb, classify_layer_sym, confidence_scores, detect_ambiguous_tokens,
+    detect_possible_misses, estimate_tokens, explain_match, extract_summary, gather_recency,
+    hybrid_boost, in_memory_score, intent_focus, kind_str, load_layer_overrides, parse_intent,
+    parse_query, resolve_scope, result_bucket, stale_warning, symbol_tier, trim_for_agent,
 };
 
 use crate::config::Config;
@@ -163,31 +163,45 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         let recency = gather_recency(200, 14.0);
 
         let index_store = AsgIndexStore { repo: &engine.repo };
+        // Uncertainty: compute confidence scores across the result set.
+        let raw_scores: Vec<f64> = scored.iter().map(|(s, _)| *s).collect();
+        let confidences = confidence_scores(&raw_scores);
+        // Uncertainty: detect ambiguous query tokens.
+        let ambiguous_terms = detect_ambiguous_tokens(&tokens, &cfg.db_path, &filters);
         if args.agent {
-            let results: Vec<serde_json::Value> = scored.iter().map(|(score, hit)| {
+            let mut layers_present: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            let results: Vec<serde_json::Value> = scored.iter().zip(confidences.iter()).map(|((score, hit), conf)| {
                 let rec = recency.get(&hit.file);
+                let is_hot = rec.map(|r| r.hot).unwrap_or(false);
                 let tier = symbol_tier(&hit.file);
                 let layer = classify_layer_sym(&hit.file, &hit.qname, tier, &layer_overrides);
+                layers_present.insert(Box::leak(layer.to_string().into_boxed_str()));
                 let ledger_entries = ledger_store
                     .list_entries(&engine.ref_name, &hit.symbol_id)
                     .unwrap_or_default();
+                let has_ledger = !ledger_entries.is_empty();
                 let match_reasons = if let Ok(Some(sym)) = index_store.get_symbol_by_qname(&engine.ref_name, &hit.qname) {
-                    explain_match(&sym, &tokens, &ledger_entries)
+                    explain_match(&sym, &tokens, &ledger_entries, is_hot)
                 } else {
                     vec![]
                 };
+                let bucket = result_bucket(&hit.file, &match_reasons, has_ledger, is_hot);
                 serde_json::json!({
-                    "score": score, "qname": hit.qname, "kind": hit.kind,
+                    "score": score, "confidence": conf, "bucket": bucket,
+                    "qname": hit.qname, "kind": hit.kind,
                     "file": hit.file, "line": hit.line, "layer": layer,
                     "summary": extract_summary(hit.doc.as_deref(), hit.signature.as_deref()),
                     "last_touched_days": rec.and_then(|r| r.last_touched_days),
-                    "hot": rec.map(|r| r.hot).unwrap_or(false),
+                    "hot": is_hot,
                     "match_reasons": match_reasons,
                 })
             }).collect();
+            let possible_misses = detect_possible_misses(&args.query, &layers_present, results.len());
             let raw = serde_json::json!({
                 "query": args.query,
                 "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
+                "ambiguous_terms": ambiguous_terms,
+                "possible_misses": possible_misses,
                 "results": results,
             });
             let max_list = (args.agent_budget / 500).max(3).min(20);
@@ -220,10 +234,11 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     let entries = ledger_store
                         .list_entries(&engine.ref_name, &hit.symbol_id)
                         .unwrap_or_default();
+                    let hit_is_hot = rec.map(|r| r.hot).unwrap_or(false);
                     let reasons = index_store
                         .get_symbol_by_qname(&engine.ref_name, &hit.qname)
                         .ok().flatten()
-                        .map(|sym| explain_match(&sym, &tokens, &entries))
+                        .map(|sym| explain_match(&sym, &tokens, &entries, hit_is_hot))
                         .unwrap_or_default();
                     if !reasons.is_empty() {
                         println!("       why: {}", reasons.join(", "));
@@ -297,7 +312,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             let entries = ledger_store
                 .list_entries(&engine.ref_name, &sym.symbol_id)
                 .unwrap_or_default();
-            let reasons = explain_match(sym, &tokens, &entries);
+            let reasons = explain_match(sym, &tokens, &entries, false);
             if !reasons.is_empty() {
                 println!("       why: {}", reasons.join(", "));
             }

@@ -396,3 +396,47 @@ pub struct Rebind {
     pub at: DateTime<Utc>,
     pub by: String,
 }
+
+// ---------------------------------------------------------------------------
+// Feedback model
+// ---------------------------------------------------------------------------
+
+/// Verdict an agent or user assigns to a search result.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackVerdict {
+    /// This result was relevant and useful for the query.
+    Useful,
+    /// This result appeared but was unrelated to the query intent.
+    Noisy,
+    /// This symbol was missing from results but should have appeared.
+    Missing,
+    /// This symbol appeared in the wrong architectural layer context.
+    WrongLayer,
+}
+
+impl FeedbackVerdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Useful => "useful",
+            Self::Noisy => "noisy",
+            Self::Missing => "missing",
+            Self::WrongLayer => "wrong-layer",
+        }
+    }
+}
+
+/// A single feedback record: a (query, symbol, verdict) triple stored durably.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedbackEntry {
+    pub entry_id: String,
+    pub symbol_id: String,
+    pub symbol_qname: String,
+    /// Normalized (lowercase, trimmed) query that produced this result.
+    pub query: String,
+    pub verdict: FeedbackVerdict,
+    pub author: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}

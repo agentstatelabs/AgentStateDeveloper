@@ -9,10 +9,12 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
-    AsgEffectStore, AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore, LedgerStore,
-    classify_layer_sym, estimate_tokens, explain_match, extract_summary, find_candidates,
-    gather_recency, git_dirty_files, intent_focus, intent_layer_order, load_layer_overrides,
-    parse_intent, parse_query, resolve_scope, stale_warning, symbol_tier, trim_for_agent,
+    AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, Engine, FeedbackStore,
+    FtsFilters, IndexStore, LedgerStore, apply_feedback_adjustments, classify_layer_sym,
+    confidence_scores, detect_ambiguous_tokens, detect_possible_misses, estimate_tokens,
+    explain_match, extract_summary, find_candidates, gather_recency, git_dirty_files,
+    intent_focus, intent_layer_order, load_layer_overrides, parse_intent, parse_query,
+    resolve_scope, result_bucket, stale_warning, symbol_tier, trim_for_agent,
 };
 
 use crate::commands::{
@@ -137,7 +139,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     // Each entry_point candidate: (combined_score, symbol_id, qname)
     // We resolve full Symbol via index_store for context assembly.
     // Returns (score, qname) pairs.
-    let candidates: Vec<(f64, String)> = find_candidates(
+    let mut candidates: Vec<(f64, String)> = find_candidates(
         &engine,
         &cfg.db_path,
         &args.query,
@@ -147,6 +149,11 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         &index_store,
         args.depth,
     );
+
+    // Apply durable feedback adjustments (Useful/Noisy/WrongLayer verdicts).
+    let feedback_store = AsgFeedbackStore { repo: &engine.repo };
+    let feedback_verdicts = feedback_store.flat_verdicts(&engine.ref_name).unwrap_or_default();
+    apply_feedback_adjustments(&engine, &index_store, &args.query, &mut candidates, &feedback_verdicts);
 
     // One git pass to gather recency for all candidate files (hot = 14 days).
     let recency = gather_recency(200, 14.0);
@@ -166,7 +173,8 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         let ledger_entries = ledger_store
             .list_entries(&engine.ref_name, &sym.symbol_id)
             .unwrap_or_default();
-        let match_reasons = explain_match(&sym, &tokens, &ledger_entries);
+        let has_ledger = !ledger_entries.is_empty();
+        let match_reasons = explain_match(&sym, &tokens, &ledger_entries, hot);
         let ctx = assemble_symbol_context(
             &engine,
             &index_store,
@@ -176,6 +184,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             &id_map,
             args.include_body,
         )?;
+        let bucket = result_bucket(&sym.file, &match_reasons, has_ledger, hot);
         let mut ep = json!({
             "score": score,
             "layer": layer,
@@ -183,6 +192,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             "last_touched_days": last_touched_days,
             "hot": hot,
             "match_reasons": match_reasons,
+            "bucket": bucket,
         });
         if let (Some(obj), Some(ctx_obj)) = (ep.as_object_mut(), ctx.as_object()) {
             for (k, v) in ctx_obj {
@@ -247,12 +257,28 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
 
     let focus = intent_focus(intent);
 
+    // --- Uncertainty model -----------------------------------------------
+    let raw_scores: Vec<f64> = candidates.iter().map(|(s, _)| *s).collect();
+    let confidences = confidence_scores(&raw_scores);
+    // Attach confidence to each entry_point in order.
+    for (ep, conf) in entry_points.iter_mut().zip(confidences.iter()) {
+        if let Some(obj) = ep.as_object_mut() {
+            obj.insert("confidence".to_string(), json!(conf));
+        }
+    }
     // --- Staleness warnings -----------------------------------------------
     let dirty = git_dirty_files();
-    let stale_symbols: Vec<&str> = entry_points.iter()
+    let stale_symbols: Vec<String> = entry_points.iter()
         .filter_map(|ep| ep.get("symbol").and_then(|s| s.get("file")).and_then(Value::as_str))
         .filter(|f| dirty.contains(*f))
+        .map(|s| s.to_string())
         .collect();
+
+    let ambiguous_terms = detect_ambiguous_tokens(&tokens, &cfg.db_path, &filters);
+    let layers_present: std::collections::HashSet<&str> = entry_points.iter()
+        .filter_map(|ep| ep.get("layer").and_then(Value::as_str))
+        .collect();
+    let possible_misses = detect_possible_misses(&args.query, &layers_present, entry_points.len());
 
     // Default: grouped by_layer output (compact, deduped by layer).
     // --flat restores the legacy flat entry_points array.
@@ -263,6 +289,8 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             "intent": if intent.is_empty() { Value::Null } else { Value::String(intent.to_string()) },
             "focus": if focus.is_empty() { Value::Null } else { Value::String(focus.to_string()) },
             "tokens": tokens,
+            "ambiguous_terms": ambiguous_terms,
+            "possible_misses": possible_misses,
             "stale_symbols": stale_symbols,
             "invariants": all_invariants,
             "hazards": all_hazards,
@@ -274,6 +302,8 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             "intent": if intent.is_empty() { Value::Null } else { Value::String(intent.to_string()) },
             "focus": if focus.is_empty() { Value::Null } else { Value::String(focus.to_string()) },
             "tokens": tokens,
+            "ambiguous_terms": ambiguous_terms,
+            "possible_misses": possible_misses,
             "stale_symbols": stale_symbols,
             "invariants": all_invariants,
             "hazards": all_hazards,

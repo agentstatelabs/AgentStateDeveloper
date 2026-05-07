@@ -77,3 +77,15 @@ pub fn scratch_root() -> &'static str {
 pub fn scratch_entry_path(scratch_id: &str) -> String {
     format!("/asd/v1/scratch/{}", scratch_id)
 }
+
+// ---------------------------------------------------------------------------
+// Feedback paths
+// ---------------------------------------------------------------------------
+
+pub fn feedback_entry_path(symbol_id: &str, entry_id: &str) -> String {
+    format!("{}/feedback/{}/{}", ASD_ROOT, symbol_id, entry_id)
+}
+
+pub fn feedback_symbol_path(symbol_id: &str) -> String {
+    format!("{}/feedback/{}", ASD_ROOT, symbol_id)
+}

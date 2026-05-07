@@ -13,10 +13,11 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
-    AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, FtsFilters, IndexStore,
-    LedgerKind, LedgerStore, classify_layer_sym, derive_cold_hints, estimate_tokens,
-    find_candidates, git_dirty_files, intent_focus, load_layer_overrides, parse_intent,
-    parse_query, propose_test_path, resolve_scope, stale_warning, symbol_tier, trim_for_agent,
+    AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine,
+    FeedbackStore, FtsFilters, IndexStore, LedgerKind, LedgerStore, apply_feedback_adjustments,
+    classify_layer_sym, derive_cold_hints, estimate_tokens, find_candidates, git_dirty_files,
+    intent_focus, load_layer_overrides, parse_intent, parse_query, propose_test_path, resolve_scope,
+    stale_warning, symbol_tier, trim_for_agent,
 };
 
 use crate::commands::graph::build_id_map;
@@ -126,7 +127,7 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
         paths_filter,
     };
 
-    let candidates = find_candidates(
+    let mut candidates = find_candidates(
         &engine,
         &cfg.db_path,
         &args.query,
@@ -136,6 +137,11 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
         &index_store,
         args.depth,
     );
+
+    // Apply durable feedback adjustments (Useful/Noisy/WrongLayer verdicts).
+    let feedback_store = AsgFeedbackStore { repo: &engine.repo };
+    let feedback_verdicts = feedback_store.flat_verdicts(&engine.ref_name).unwrap_or_default();
+    apply_feedback_adjustments(&engine, &index_store, &args.query, &mut candidates, &feedback_verdicts);
 
     // --- Files to inspect -------------------------------------------------
     let mut files_to_inspect: Vec<Value> = Vec::new();

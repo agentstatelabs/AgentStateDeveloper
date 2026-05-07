@@ -105,6 +105,10 @@ pub struct FtsFilters {
     /// Lowercase substring terms to exclude. Any candidate whose qname, file,
     /// doc, or signature contains one of these strings is dropped.
     pub exclude_terms: Vec<String>,
+    /// Glob patterns to restrict results to (e.g. "App/**/DriftPad*").
+    /// When non-empty, only symbols whose file matches at least one pattern
+    /// are kept. Patterns use `*` (within a segment) and `**` (any segments).
+    pub paths_filter: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
