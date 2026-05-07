@@ -142,6 +142,10 @@ pub struct PrepareChangeParams {
     pub paths: Option<String>,
     /// Named scope alias from .asd/scopes.toml.
     pub scope: Option<String>,
+    /// Active task context to enrich the query (e.g. a CTX task description).
+    /// Tokens are appended to the description before candidate scoring so the
+    /// result set is biased toward symbols relevant to the current task.
+    pub task_context: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -2465,10 +2469,18 @@ impl AsdMcpServer {
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
 
-        let (tokens, mut exclusions) = parse_query(&p.description);
+        let (mut tokens, mut exclusions) = parse_query(&p.description);
         if let Some(ref excl) = p.exclude {
             for term in excl.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()) {
                 exclusions.push(term);
+            }
+        }
+        if let Some(ref ctx_text) = p.task_context {
+            let (ctx_tokens, _) = parse_query(ctx_text);
+            for t in ctx_tokens {
+                if !tokens.contains(&t) {
+                    tokens.push(t);
+                }
             }
         }
 
@@ -2735,6 +2747,7 @@ impl AsdMcpServer {
         let possible_misses = detect_possible_misses(&p.description, &layers_present_pc, file_scores.len());
         serde_json::to_string(&serde_json::json!({
             "description": p.description,
+            "task_context": p.task_context,
             "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
             "focus": if focus.is_empty() { serde_json::Value::Null } else { serde_json::json!(focus) },
             "ambiguous_terms": ambiguous_terms,
@@ -2945,6 +2958,42 @@ impl AsdMcpServer {
             })
             .collect();
 
+        // T-004: task-close proof suggestions.
+        let task_close_suggestions: Vec<serde_json::Value> = {
+            let mut suggestions = Vec::new();
+            for inv in invariants.iter().take(4) {
+                let source = inv.get("source").and_then(serde_json::Value::as_str).unwrap_or("");
+                let summary = inv.get("summary").and_then(serde_json::Value::as_str).unwrap_or("");
+                if !source.is_empty() && !summary.is_empty() {
+                    suggestions.push(serde_json::json!({
+                        "action": "ledger_append", "kind": "proof", "symbol": source,
+                        "suggested_summary": format!("verified that {} holds after change", summary),
+                    }));
+                }
+            }
+            for h in hazards.iter().take(2) {
+                let source = h.get("source").and_then(serde_json::Value::as_str).unwrap_or("");
+                let summary = h.get("summary").and_then(serde_json::Value::as_str).unwrap_or("");
+                if !source.is_empty() && !summary.is_empty() {
+                    suggestions.push(serde_json::json!({
+                        "action": "ledger_append", "kind": "validation_scenario", "symbol": source,
+                        "suggested_summary": format!("validate that hazard '{}' was not triggered", summary),
+                    }));
+                }
+            }
+            for eff in effects_list.iter().take(2) {
+                let source = eff.get("source").and_then(serde_json::Value::as_str).unwrap_or("");
+                let cat = eff.get("category").and_then(serde_json::Value::as_str).unwrap_or("");
+                if !source.is_empty() && !cat.is_empty() {
+                    suggestions.push(serde_json::json!({
+                        "action": "ledger_append", "kind": "proof", "symbol": source,
+                        "suggested_summary": format!("verified {} side-effect is correct after change", cat.to_lowercase()),
+                    }));
+                }
+            }
+            suggestions
+        };
+
         let focus = intent_focus(intent);
         let layers_present_cl: std::collections::HashSet<&str> = files_to_inspect.iter()
             .filter_map(|f| f.get("layer").and_then(serde_json::Value::as_str))
@@ -2966,6 +3015,7 @@ impl AsdMcpServer {
             "scenario_tests": scenario_tests,
             "known_hazards": hazards,
             "effects_to_verify": effects_list,
+            "task_close_suggestions": task_close_suggestions,
         })).unwrap_or_else(|_| "{}".to_string())
     }
 

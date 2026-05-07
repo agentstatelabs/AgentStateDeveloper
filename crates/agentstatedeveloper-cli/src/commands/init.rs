@@ -78,6 +78,18 @@ asd hydrate
 asd index .
 ",
     },
+    HookDef {
+        filename: "post-commit",
+        trigger: "git commit",
+        command: "asd index .",
+        purpose: "rebuild semantic index after a commit so the next query is immediately fresh",
+        script: "#!/usr/bin/env sh
+# ASD post-commit hook — installed by `asd init`
+# Rebuilds the FTS semantic index after each commit so queries
+# immediately reflect the new state without a manual `asd index .`.
+asd index . 2>/dev/null || true
+",
+    },
 ];
 
 // ---------------------------------------------------------------------------

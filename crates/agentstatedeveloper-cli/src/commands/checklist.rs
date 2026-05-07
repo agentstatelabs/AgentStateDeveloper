@@ -309,6 +309,52 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
         .map(|s| s.to_string())
         .collect();
 
+    // T-004: task-close proof suggestions — what to record in the ledger before
+    // closing the task that produced this checklist.
+    let task_close_suggestions: Vec<Value> = {
+        let mut suggestions: Vec<Value> = Vec::new();
+        // For each invariant: suggest recording a proof that it held after the change.
+        for inv in invariants.iter().take(4) {
+            let source = inv.get("source").and_then(Value::as_str).unwrap_or("");
+            let summary = inv.get("summary").and_then(Value::as_str).unwrap_or("");
+            if !source.is_empty() && !summary.is_empty() {
+                suggestions.push(json!({
+                    "action": "ledger_append",
+                    "kind": "proof",
+                    "symbol": source,
+                    "suggested_summary": format!("verified that {} holds after change", summary),
+                }));
+            }
+        }
+        // For hazards: suggest recording a validation_scenario with expected outcome.
+        for h in hazards.iter().take(2) {
+            let source = h.get("source").and_then(Value::as_str).unwrap_or("");
+            let summary = h.get("summary").and_then(Value::as_str).unwrap_or("");
+            if !source.is_empty() && !summary.is_empty() {
+                suggestions.push(json!({
+                    "action": "ledger_append",
+                    "kind": "validation_scenario",
+                    "symbol": source,
+                    "suggested_summary": format!("validate that hazard '{}' was not triggered", summary),
+                }));
+            }
+        }
+        // For each effect: suggest recording that it was verified post-change.
+        for eff in effects_list.iter().take(2) {
+            let source = eff.get("source").and_then(Value::as_str).unwrap_or("");
+            let cat = eff.get("category").and_then(Value::as_str).unwrap_or("");
+            if !source.is_empty() && !cat.is_empty() {
+                suggestions.push(json!({
+                    "action": "ledger_append",
+                    "kind": "proof",
+                    "symbol": source,
+                    "suggested_summary": format!("verified {} side-effect is correct after change", cat.to_lowercase()),
+                }));
+            }
+        }
+        suggestions
+    };
+
     if args.agent || args.json {
         let out = json!({
             "query": args.query,
@@ -324,6 +370,7 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
             "stale_symbols": stale_symbols,
             "known_hazards": hazards,
             "effects_to_verify": effects_list,
+            "task_close_suggestions": task_close_suggestions,
         });
         let out = if args.agent {
             let max_list = (args.agent_budget / 500).max(3).min(20);
@@ -353,6 +400,7 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
             &stale_symbols,
             &hazards,
             &effects_list,
+            &task_close_suggestions,
         );
     }
     Ok(())
@@ -371,6 +419,7 @@ fn print_markdown(
     stale_symbols: &[&str],
     hazards: &[Value],
     effects: &[Value],
+    task_close_suggestions: &[Value],
 ) {
     println!("# Pre-edit checklist: {query}");
     if !intent.is_empty() {
@@ -453,6 +502,17 @@ fn print_markdown(
             if seen.insert(key) {
                 println!("- [ ] `{cat}` — declared by `{src}`");
             }
+        }
+    }
+
+    if !task_close_suggestions.is_empty() {
+        println!("\n## Before closing this task — record in ledger");
+        println!("_Run `asd ledger append` or `asd annotate-commit --write` to capture these:_");
+        for s in task_close_suggestions {
+            let kind = s.get("kind").and_then(Value::as_str).unwrap_or("");
+            let symbol = s.get("symbol").and_then(Value::as_str).unwrap_or("");
+            let summary = s.get("suggested_summary").and_then(Value::as_str).unwrap_or("");
+            println!("- [ ] `{kind}` on `{symbol}`: _{summary}_");
         }
     }
 }

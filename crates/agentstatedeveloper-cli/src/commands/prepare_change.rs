@@ -89,6 +89,13 @@ pub struct PrepareChangeArgs {
     /// Named scope alias from .asd/scopes.toml, e.g. --scope drift-pad.
     #[arg(long)]
     pub scope: Option<String>,
+
+    /// Inject active task context to enrich the search query.
+    /// Pass the description of the current CTX task (or any relevant context)
+    /// and its tokens are appended to the description before candidate scoring.
+    /// Example: --task-context "$(ctx task show --format plain)"
+    #[arg(long)]
+    pub task_context: Option<String>,
 }
 
 pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
@@ -105,10 +112,19 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     let effect_store = AsgEffectStore { repo: &engine.repo };
     let id_map = build_id_map(&engine);
 
-    let (tokens, mut exclusions) = parse_query(&args.description);
+    let (mut tokens, mut exclusions) = parse_query(&args.description);
     if let Some(ref excl) = args.exclude {
         for term in excl.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()) {
             exclusions.push(term);
+        }
+    }
+    // Enrich query with active task context (CTX task description, etc.).
+    if let Some(ref ctx_text) = args.task_context {
+        let (ctx_tokens, _) = parse_query(ctx_text);
+        for t in ctx_tokens {
+            if !tokens.contains(&t) {
+                tokens.push(t);
+            }
         }
     }
     if tokens.is_empty() {
@@ -453,6 +469,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     let focus = intent_focus(intent);
     let out = json!({
         "description": args.description,
+        "task_context": args.task_context,
         "intent": if intent.is_empty() { Value::Null } else { json!(intent) },
         "focus": if focus.is_empty() { Value::Null } else { json!(focus) },
         "ambiguous_terms": ambiguous_terms,

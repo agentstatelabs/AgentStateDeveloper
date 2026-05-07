@@ -176,6 +176,12 @@ pub enum Command {
     /// Record and list search-quality feedback verdicts for (query, symbol) pairs.
     #[command(subcommand)]
     Feedback(commands::feedback::FeedbackCmd),
+
+    /// Derive ledger annotations from a git commit and optionally write them.
+    /// Reads changed files and the commit message, resolves touched symbols,
+    /// and suggests (or records) decisions, invariants, proofs, and hazards.
+    #[command(name = "annotate-commit")]
+    AnnotateCommit(commands::annotate_commit::AnnotateCommitArgs),
 }
 
 /// Resolve [`Config`] from the parsed CLI flags.
@@ -222,5 +228,6 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::PrepareChange(args) => prepare_change::run(cfg, args),
         Command::Since(args) => since::run(cfg, args),
         Command::Feedback(sub) => feedback::run(cfg, sub),
+        Command::AnnotateCommit(args) => annotate_commit::run(cfg, args),
     }
 }
