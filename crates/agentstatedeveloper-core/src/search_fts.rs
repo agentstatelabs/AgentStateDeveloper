@@ -347,13 +347,71 @@ impl SearchFtsDb {
 
     /// True if the FTS table has at least one row.
     pub fn has_data(&self) -> bool {
-
         self.conn
             .query_row("SELECT COUNT(*) FROM asd_search_fts LIMIT 1", [], |r| {
                 r.get::<_, i64>(0)
             })
             .map(|n| n > 0)
             .unwrap_or(false)
+    }
+
+    /// Secondary file-stem scan: return one representative symbol per file
+    /// whose stored path contains `token` (case-insensitive substring match).
+    ///
+    /// Used to inject view/render files that BM25 misses when the query term
+    /// appears only in the file name and not in any indexed symbol text.
+    /// Returns at most `limit` (symbol_id, qname, file) triples.
+    pub fn file_stem_candidates(
+        &self,
+        token: &str,
+        filters: &FtsFilters,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<FtsHit>> {
+        if token.len() < 2 {
+            return Ok(vec![]);
+        }
+        let test_clause = if filters.include_tests { "" } else { "AND tier != '2'" };
+        let kind_clause = filters
+            .kind
+            .as_deref()
+            .map(|k| format!("AND kind = '{}'", k.to_lowercase().replace('\'', "")))
+            .unwrap_or_default();
+        // One row per distinct file_orig; pick the lowest line number (class/module
+        // declaration) as the representative symbol for that file.
+        let sql = format!(
+            "SELECT symbol_id, language, kind, line, doc,
+                    qname_orig, sig_orig, file_orig, tier
+             FROM asd_search_fts
+             WHERE lower(file_orig) LIKE '%' || lower(?1) || '%'
+             {test_clause}
+             {kind_clause}
+             GROUP BY file_orig
+             HAVING line = MIN(line)
+             LIMIT {limit}"
+        );
+        let token_owned = token.to_lowercase();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let hits = stmt
+            .query_map(params![token_owned], |row| {
+                let sig_orig: Option<String> = row.get(6)?;
+                let tier_str: String = row.get(8).unwrap_or_default();
+                let tier: SymbolTier = tier_str.parse().unwrap_or(0);
+                Ok(FtsHit {
+                    bm25_score: 0.0,
+                    symbol_id: row.get(0)?,
+                    language: row.get(1)?,
+                    kind: row.get(2)?,
+                    line: row.get::<_, u32>(3).unwrap_or(0),
+                    doc: row.get(4)?,
+                    qname: row.get(5)?,
+                    signature: sig_orig.filter(|s| !s.is_empty()),
+                    file: row.get(7)?,
+                    tier,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(hits)
     }
 }
 

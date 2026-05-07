@@ -789,8 +789,7 @@ impl AsdMcpServer {
                     (hit.bm25_score + boost + ledger_boost, hit.qname)
                 }).collect();
                 sc.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                sc.truncate(depth);
-                sc
+                inject_file_stem(&db_path, &tokens, &filters, &index, &ref_name, sc, depth)
             } else {
                 // Fallback: in-memory scoring.
                 let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
@@ -2441,7 +2440,7 @@ impl AsdMcpServer {
                     (hit.bm25_score + boost + lb, hit.qname)
                 }).collect();
                 sc.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                sc.truncate(depth); sc
+                inject_file_stem(&db_path, &tokens, &filters, &index, &ref_name, sc, depth)
             } else {
                 let kf = filters.kind.clone(); let lf = filters.language.clone();
                 let mut sc: Vec<(f64, String)> = Vec::new();
@@ -2646,8 +2645,7 @@ impl AsdMcpServer {
                     (hit.bm25_score + boost + lb, hit.qname)
                 }).collect();
                 sc.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                sc.truncate(depth);
-                sc
+                inject_file_stem(&db_path, &tokens, &filters, &index, &ref_name, sc, depth)
             } else {
                 let kf = filters.kind.clone();
                 let lf = filters.language.clone();
@@ -3203,6 +3201,47 @@ fn mcp_git_recent_touches(files: &[(String, usize)], git_depth: usize) -> serde_
 fn err_json(msg: &str) -> String {
     serde_json::to_string(&serde_json::json!({ "error": msg }))
         .unwrap_or_else(|_| "{\"error\":\"unknown\"}".to_string())
+}
+
+/// Inject file-stem candidates into an already-scored `(score, qname)` list.
+///
+/// For each query token, finds symbols whose file path contains that token but
+/// whose file is not yet represented in `scored`. Injects them with a baseline
+/// score (1.0 + hybrid_boost) so they appear but can still be outranked.
+/// Returns the merged list sorted by score and truncated to `depth`.
+fn inject_file_stem(
+    db_path: &std::path::Path,
+    tokens: &[String],
+    filters: &FtsFilters,
+    index: &AsgIndexStore<'_>,
+    ref_name: &str,
+    mut scored: Vec<(f64, String)>,
+    depth: usize,
+) -> Vec<(f64, String)> {
+    let covered_files: std::collections::HashSet<String> = scored
+        .iter()
+        .filter_map(|(_, qn)| {
+            index.get_symbol_by_qname(ref_name, qn).ok().flatten().map(|s| s.file)
+        })
+        .collect();
+
+    if let Ok(fts) = SearchFtsDb::open(db_path) {
+        for token in tokens {
+            if let Ok(hits) = fts.file_stem_candidates(token, filters, depth * 2) {
+                for hit in hits {
+                    if !covered_files.contains(&hit.file) {
+                        let boost = hybrid_boost(&hit, tokens);
+                        scored.push((1.0 + boost, hit.qname));
+                    }
+                }
+            }
+        }
+    }
+
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.dedup_by(|a, b| a.1 == b.1);
+    scored.truncate(depth);
+    scored
 }
 
 
