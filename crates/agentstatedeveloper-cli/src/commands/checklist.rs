@@ -31,8 +31,8 @@ pub struct ChecklistArgs {
     /// Natural-language or keyword query (same as `asd investigate`).
     pub query: String,
 
-    /// Number of top entry-point symbols to analyse (default: 5).
-    #[arg(long, default_value = "5")]
+    /// Number of top entry-point symbols to analyse (default: 10).
+    #[arg(long, default_value = "10")]
     pub depth: usize,
 
     /// Filter by symbol kind.

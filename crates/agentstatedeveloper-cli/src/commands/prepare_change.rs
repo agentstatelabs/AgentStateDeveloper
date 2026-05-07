@@ -36,8 +36,8 @@ pub struct PrepareChangeArgs {
     /// Free-form description of the intended change (treated as a search query).
     pub description: String,
 
-    /// Number of top entry-point symbols to expand (default: 7).
-    #[arg(long, default_value = "7")]
+    /// Number of top entry-point symbols to expand (default: 10).
+    #[arg(long, default_value = "10")]
     pub depth: usize,
 
     /// Filter by symbol kind.

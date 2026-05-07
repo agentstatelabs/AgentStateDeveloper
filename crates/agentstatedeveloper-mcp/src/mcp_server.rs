@@ -88,12 +88,12 @@ pub struct InvestigateParams {
     pub intent: Option<String>,
 }
 
-fn default_investigate_depth() -> u32 { 5 }
+fn default_investigate_depth() -> u32 { 10 }
 fn default_impact_depth() -> u32 { 3 }
 fn default_git_depth() -> u32 { 20 }
-fn default_checklist_depth() -> u32 { 5 }
+fn default_checklist_depth() -> u32 { 10 }
 fn default_test_depth() -> u32 { 2 }
-fn default_prepare_depth() -> u32 { 7 }
+fn default_prepare_depth() -> u32 { 10 }
 fn default_prepare_git_depth() -> u32 { 10 }
 
 #[derive(Deserialize, JsonSchema)]
