@@ -110,10 +110,11 @@ fn strip_src_prefix(path: &str) -> &str {
 /// Anchors at the `src/` boundary so the prefix is stable regardless of
 /// which directory `asd index` was invoked from.
 ///
-/// `src/components/Button.tsx` -> `components.Button`
-/// `foo/bar.ts`                -> `foo.bar`  (no src segment, fallback)
-/// `./foo/bar.tsx`             -> `foo.bar`
-/// `bar.mts`                   -> `bar`
+/// `src/components/Button.tsx`      -> `components.Button`
+/// `packages/ui/src/index.ts`       -> `ui.index`   (package-name disambiguates)
+/// `foo/bar.ts`                     -> `foo.bar`    (no src segment, fallback)
+/// `./foo/bar.tsx`                  -> `foo.bar`
+/// `bar.mts`                        -> `bar`
 fn module_qname_prefix(file: &str) -> String {
     let mut s = file;
     if let Some(stripped) = s.strip_prefix("./") {
@@ -125,8 +126,27 @@ fn module_qname_prefix(file: &str) -> String {
             break;
         }
     }
-    let s = strip_src_prefix(s);
-    s.replace('\\', "/").replace('/', ".")
+    let after_src = strip_src_prefix(s);
+    // index.ts at the root of a package's src/ dir is not unique across packages.
+    // Prepend the package directory name (the segment before `src/`).
+    if after_src == "index" {
+        if let Some(pkg_name) = package_name_from_path(s) {
+            return format!("{}.index", pkg_name.replace('-', "_"));
+        }
+    }
+    after_src.replace('\\', "/").replace('/', ".")
+}
+
+/// Extract the package name from a path like `packages/my-pkg/src/index.ts`
+/// by finding the segment immediately before a `src` component.
+fn package_name_from_path(path: &str) -> Option<&str> {
+    let parts: Vec<&str> = path.split('/').collect();
+    for (i, &part) in parts.iter().enumerate() {
+        if part == "src" && i > 0 {
+            return Some(parts[i - 1]);
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1361,7 +1381,8 @@ mod tests {
     fn module_prefix_strips_extensions_and_leading_dot_slash() {
         // src/ anchor — stable regardless of index root
         assert_eq!(module_qname_prefix("src/components/Button.tsx"), "components.Button");
-        assert_eq!(module_qname_prefix("packages/ui/src/index.ts"), "index");
+        assert_eq!(module_qname_prefix("packages/ui/src/index.ts"), "ui.index");
+        assert_eq!(module_qname_prefix("packages/my-pkg/src/index.tsx"), "my_pkg.index");
         assert_eq!(module_qname_prefix("src/util.mts"), "util");
         // no src segment — full relative path (fallback)
         assert_eq!(module_qname_prefix("foo/bar.ts"), "foo.bar");

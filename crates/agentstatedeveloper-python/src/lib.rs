@@ -93,19 +93,38 @@ fn strip_src_prefix(path: &str) -> &str {
 /// so the prefix is stable regardless of which directory `asd index` was
 /// invoked from. Falls back to the full relative path for flat layouts.
 ///
-/// `src/mypackage/module.py`   -> `mypackage.module`
-/// `foo/bar.py`                -> `foo.bar`  (no src segment, fallback)
-/// `./foo/bar.py`              -> `foo.bar`
-/// `bar.py`                    -> `bar`
+/// `src/mypackage/module.py`        -> `mypackage.module`
+/// `packages/mypkg/src/__init__.py` -> `mypkg.__init__`  (package-name disambiguates)
+/// `foo/bar.py`                     -> `foo.bar`          (no src segment, fallback)
+/// `./foo/bar.py`                   -> `foo.bar`
+/// `bar.py`                         -> `bar`
 fn module_qname_prefix(file: &str) -> String {
     let mut s = file;
     if let Some(stripped) = s.strip_prefix("./") {
         s = stripped;
     }
     let s = s.strip_suffix(".py").unwrap_or(s);
-    // Normalize both slash styles to dots.
-    let s = strip_src_prefix(s);
-    s.replace('\\', "/").replace('/', ".")
+    let after_src = strip_src_prefix(s);
+    // __init__.py at the root of a package's src/ dir is not unique across packages.
+    // Prepend the package directory name (the segment before `src/`).
+    if after_src == "__init__" {
+        if let Some(pkg_name) = package_name_from_path(s) {
+            return format!("{}.__init__", pkg_name.replace('-', "_"));
+        }
+    }
+    after_src.replace('\\', "/").replace('/', ".")
+}
+
+/// Extract the package name from a path like `packages/my-pkg/src/__init__.py`
+/// by finding the segment immediately before a `src` component.
+fn package_name_from_path(path: &str) -> Option<&str> {
+    let parts: Vec<&str> = path.split('/').collect();
+    for (i, &part) in parts.iter().enumerate() {
+        if part == "src" && i > 0 {
+            return Some(parts[i - 1]);
+        }
+    }
+    None
 }
 
 /// Recursive descent over the Python tree. We enumerate:
@@ -1236,6 +1255,9 @@ mod tests {
         // src/ anchor — stable for PEP 517 src-layout projects
         assert_eq!(module_qname_prefix("src/mypackage/module.py"), "mypackage.module");
         assert_eq!(module_qname_prefix("src/utils.py"), "utils");
+        // __init__.py at root of package src/ gets package-name prefix
+        assert_eq!(module_qname_prefix("packages/mypkg/src/__init__.py"), "mypkg.__init__");
+        assert_eq!(module_qname_prefix("packages/my-pkg/src/__init__.py"), "my_pkg.__init__");
         // no src segment — full relative path (fallback)
         assert_eq!(module_qname_prefix("foo/bar.py"), "foo.bar");
         assert_eq!(module_qname_prefix("./foo/bar.py"), "foo.bar");
