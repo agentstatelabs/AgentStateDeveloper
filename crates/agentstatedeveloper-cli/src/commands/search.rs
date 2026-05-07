@@ -75,6 +75,11 @@ pub struct SearchArgs {
     /// Expanded to the path globs defined in the scopes file.
     #[arg(long)]
     pub scope: Option<String>,
+
+    /// Print match reasons for each result (which token matched which field,
+    /// ledger involvement). Implied by --agent; this shows it in terminal output.
+    #[arg(long)]
+    pub explain: bool,
 }
 
 pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
@@ -211,6 +216,19 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 }
                 let summary = extract_summary(hit.doc.as_deref(), hit.signature.as_deref());
                 if !summary.is_empty() { println!("       {}", summary); }
+                if args.explain {
+                    let entries = ledger_store
+                        .list_entries(&engine.ref_name, &hit.symbol_id)
+                        .unwrap_or_default();
+                    let reasons = index_store
+                        .get_symbol_by_qname(&engine.ref_name, &hit.qname)
+                        .ok().flatten()
+                        .map(|sym| explain_match(&sym, &tokens, &entries))
+                        .unwrap_or_default();
+                    if !reasons.is_empty() {
+                        println!("       why: {}", reasons.join(", "));
+                    }
+                }
             }
         }
         return Ok(());
@@ -274,6 +292,15 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
         if !summary.is_empty() {
             println!("       {}", summary);
+        }
+        if args.explain {
+            let entries = ledger_store
+                .list_entries(&engine.ref_name, &sym.symbol_id)
+                .unwrap_or_default();
+            let reasons = explain_match(sym, &tokens, &entries);
+            if !reasons.is_empty() {
+                println!("       why: {}", reasons.join(", "));
+            }
         }
     }
 
