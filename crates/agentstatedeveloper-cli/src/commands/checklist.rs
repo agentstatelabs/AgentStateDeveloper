@@ -233,6 +233,23 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
             .and_then(|v| v.get("file").and_then(Value::as_str))
             .map(propose_test_path)
     }).flatten();
+    let suggested_test_coverage: Vec<String> = if test_gap {
+        let mut hints: Vec<String> = invariants.iter()
+            .filter_map(|inv| inv.get("summary").and_then(Value::as_str))
+            .map(|s| s.to_string())
+            .collect();
+        for eff in &effects_list {
+            if let Some(cat) = eff.get("category").and_then(Value::as_str) {
+                let hint = format!("verify {} after change", cat.to_lowercase());
+                if !hints.contains(&hint) {
+                    hints.push(hint);
+                }
+            }
+        }
+        hints
+    } else {
+        vec![]
+    };
 
     if args.agent || args.json {
         let out = json!({
@@ -244,6 +261,7 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
             "tests_to_run": test_rows,
             "test_gap": test_gap,
             "proposed_test_path": proposed_test_path,
+            "suggested_test_coverage": suggested_test_coverage,
             "stale_symbols": stale_symbols,
             "known_hazards": hazards,
             "effects_to_verify": effects_list,
@@ -272,6 +290,7 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
             &test_rows,
             test_gap,
             proposed_test_path.as_deref(),
+            &suggested_test_coverage,
             &stale_symbols,
             &hazards,
             &effects_list,
@@ -289,6 +308,7 @@ fn print_markdown(
     tests: &[Value],
     test_gap: bool,
     proposed_test_path: Option<&str>,
+    suggested_coverage: &[String],
     stale_symbols: &[&str],
     hazards: &[Value],
     effects: &[Value],
@@ -329,6 +349,12 @@ fn print_markdown(
             println!("_(no test callers found — test gap detected)_");
             if let Some(path) = proposed_test_path {
                 println!("_Suggested test file: `{path}`_");
+            }
+            if !suggested_coverage.is_empty() {
+                println!("\n_Suggested behaviours to cover:_");
+                for hint in suggested_coverage {
+                    println!("- [ ] {hint}");
+                }
             }
         } else {
             println!("_(no test callers found within BFS depth)_");

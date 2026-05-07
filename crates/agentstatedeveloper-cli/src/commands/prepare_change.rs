@@ -291,6 +291,23 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     let proposed_test_path = test_gap.then(|| {
         file_scores.first().map(|(_, f, _, _, _)| propose_test_path(f))
     }).flatten();
+    let suggested_test_coverage: Vec<String> = if test_gap {
+        let mut hints: Vec<String> = design_invariants.iter()
+            .filter_map(|inv| inv.get("summary").and_then(Value::as_str))
+            .map(|s| s.to_string())
+            .collect();
+        for eff in &effects_summary {
+            if let Some(cat) = eff.get("category").and_then(Value::as_str) {
+                let hint = format!("verify {} after change", cat.to_lowercase());
+                if !hints.contains(&hint) {
+                    hints.push(hint);
+                }
+            }
+        }
+        hints
+    } else {
+        vec![]
+    };
 
     let focus = intent_focus(intent);
     let out = json!({
@@ -304,6 +321,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         "affected_tests": affected_tests,
         "test_gap": test_gap,
         "proposed_test_path": proposed_test_path,
+        "suggested_test_coverage": suggested_test_coverage,
         "stale_symbols": stale_symbols,
         "effects_summary": effects_summary,
         "recently_touched": recently_touched,

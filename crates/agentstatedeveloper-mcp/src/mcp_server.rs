@@ -22,7 +22,8 @@ use agentstatedeveloper_core::{
     Engine, FtsFilters, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Rebind, ScratchEntry,
     ScratchFilter, ScratchStatus, ScratchStore, SearchFtsDb, Situation, actions, classify_layer_sym,
     emit_audit, event_types, extract_summary, gather_recency, hybrid_boost, intent_focus,
-    intent_layer_order, is_stopword, load_layer_overrides, parse_intent, paths, symbol_tier,
+    intent_layer_order, is_stopword, load_layer_overrides, parse_intent, paths, propose_test_path,
+    symbol_tier,
 };
 
 /// The AgentStateDeveloper MCP server.
@@ -2566,6 +2567,24 @@ impl AsdMcpServer {
         let top_files: Vec<(String, usize)> = file_scores.iter().take(3).map(|(_, f, _, _, _)| (f.clone(), 0)).collect();
         let recently_touched = mcp_git_recent_touches(&top_files, git_depth);
 
+        let test_gap = affected_tests.is_empty();
+        let proposed_test_path = test_gap.then(|| {
+            file_scores.first().map(|(_, f, _, _, _)| propose_test_path(f))
+        }).flatten();
+        let suggested_test_coverage: Vec<String> = if test_gap {
+            let mut hints: Vec<String> = design_invariants.iter()
+                .filter_map(|inv| inv.get("summary").and_then(serde_json::Value::as_str))
+                .map(|s| s.to_string())
+                .collect();
+            for eff in &effects_summary {
+                if let Some(cat) = eff.get("category").and_then(serde_json::Value::as_str) {
+                    let hint = format!("verify {} after change", cat.to_lowercase());
+                    if !hints.contains(&hint) { hints.push(hint); }
+                }
+            }
+            hints
+        } else { vec![] };
+
         let focus = intent_focus(intent);
         serde_json::to_string(&serde_json::json!({
             "description": p.description,
@@ -2576,6 +2595,9 @@ impl AsdMcpServer {
             "entry_points": { "by_layer": ordered },
             "likely_edit_files": likely_edit_files,
             "affected_tests": affected_tests,
+            "test_gap": test_gap,
+            "proposed_test_path": proposed_test_path,
+            "suggested_test_coverage": suggested_test_coverage,
             "effects_summary": effects_summary,
             "recently_touched": recently_touched,
         })).unwrap_or_else(|_| "{}".to_string())
@@ -2747,6 +2769,26 @@ impl AsdMcpServer {
             }
         }
 
+        let test_gap = test_rows.is_empty();
+        let proposed_test_path = test_gap.then(|| {
+            files_to_inspect.first()
+                .and_then(|v| v.get("file").and_then(serde_json::Value::as_str))
+                .map(propose_test_path)
+        }).flatten();
+        let suggested_test_coverage: Vec<String> = if test_gap {
+            let mut hints: Vec<String> = invariants.iter()
+                .filter_map(|inv| inv.get("summary").and_then(serde_json::Value::as_str))
+                .map(|s| s.to_string())
+                .collect();
+            for eff in &effects_list {
+                if let Some(cat) = eff.get("category").and_then(serde_json::Value::as_str) {
+                    let hint = format!("verify {} after change", cat.to_lowercase());
+                    if !hints.contains(&hint) { hints.push(hint); }
+                }
+            }
+            hints
+        } else { vec![] };
+
         let focus = intent_focus(intent);
         serde_json::to_string(&serde_json::json!({
             "query": p.query,
@@ -2755,6 +2797,9 @@ impl AsdMcpServer {
             "files_to_inspect": files_to_inspect,
             "invariants_to_preserve": invariants,
             "tests_to_run": test_rows,
+            "test_gap": test_gap,
+            "proposed_test_path": proposed_test_path,
+            "suggested_test_coverage": suggested_test_coverage,
             "known_hazards": hazards,
             "effects_to_verify": effects_list,
         })).unwrap_or_else(|_| "{}".to_string())
