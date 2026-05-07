@@ -14,8 +14,9 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, FtsFilters, IndexStore,
-    LedgerKind, LedgerStore, classify_layer_sym, estimate_tokens, git_dirty_files, intent_focus,
-    load_layer_overrides, parse_intent, propose_test_path, stale_warning, symbol_tier, trim_for_agent,
+    LedgerKind, LedgerStore, classify_layer_sym, derive_cold_hints, estimate_tokens, git_dirty_files,
+    intent_focus, load_layer_overrides, parse_intent, propose_test_path, stale_warning, symbol_tier,
+    trim_for_agent,
 };
 
 use crate::commands::{
@@ -243,6 +244,19 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
                 let hint = format!("verify {} after change", cat.to_lowercase());
                 if !hints.contains(&hint) {
                     hints.push(hint);
+                }
+            }
+        }
+        // Cold-start fallback: if no recorded invariants, derive hints from
+        // the top candidate symbol's own name, signature, and doc comment.
+        if invariants.is_empty() {
+            if let Some((_, qname)) = candidates.first() {
+                if let Ok(Some(sym)) = index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+                    for h in derive_cold_hints(&sym.qname, sym.signature.as_deref(), sym.doc.as_deref()) {
+                        if !hints.contains(&h) {
+                            hints.push(h);
+                        }
+                    }
                 }
             }
         }

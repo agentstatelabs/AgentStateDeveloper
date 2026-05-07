@@ -21,9 +21,9 @@ use agentstatedeveloper_core::{
     Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory, EffectDecl, EffectStore,
     Engine, FtsFilters, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Rebind, ScratchEntry,
     ScratchFilter, ScratchStatus, ScratchStore, SearchFtsDb, Situation, actions, classify_layer_sym,
-    emit_audit, event_types, extract_summary, gather_recency, hybrid_boost, intent_focus,
-    intent_layer_order, is_stopword, load_layer_overrides, parse_intent, paths, propose_test_path,
-    symbol_tier,
+    derive_cold_hints, emit_audit, event_types, extract_summary, gather_recency, hybrid_boost,
+    intent_focus, intent_layer_order, is_stopword, load_layer_overrides, parse_intent, paths,
+    propose_test_path, symbol_tier,
 };
 
 /// The AgentStateDeveloper MCP server.
@@ -2582,6 +2582,15 @@ impl AsdMcpServer {
                     if !hints.contains(&hint) { hints.push(hint); }
                 }
             }
+            if design_invariants.is_empty() {
+                if let Some((_, qname)) = candidates.first() {
+                    if let Ok(Some(sym)) = index.get_symbol_by_qname(&ref_name, qname) {
+                        for h in derive_cold_hints(&sym.qname, sym.signature.as_deref(), sym.doc.as_deref()) {
+                            if !hints.contains(&h) { hints.push(h); }
+                        }
+                    }
+                }
+            }
             hints
         } else { vec![] };
 
@@ -2784,6 +2793,15 @@ impl AsdMcpServer {
                 if let Some(cat) = eff.get("category").and_then(serde_json::Value::as_str) {
                     let hint = format!("verify {} after change", cat.to_lowercase());
                     if !hints.contains(&hint) { hints.push(hint); }
+                }
+            }
+            if invariants.is_empty() {
+                if let Some((_, qname)) = candidates.first() {
+                    if let Ok(Some(sym)) = index.get_symbol_by_qname(&ref_name, qname) {
+                        for h in derive_cold_hints(&sym.qname, sym.signature.as_deref(), sym.doc.as_deref()) {
+                            if !hints.contains(&h) { hints.push(h); }
+                        }
+                    }
                 }
             }
             hints

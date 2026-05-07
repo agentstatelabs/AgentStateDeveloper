@@ -716,6 +716,94 @@ pub fn git_dirty_files() -> std::collections::HashSet<String> {
 /// Replaces `Sources/` → `Tests/` (or `src/` → `tests/`) and appends `Tests`
 /// to the filename stem. Falls back to `Tests/<Stem>Tests.<ext>` when no
 /// recognisable source directory is found.
+/// Derive behavioural test hints from a symbol's own metadata (qname, signature,
+/// doc) when no invariants or effects have been recorded yet (cold-start).
+///
+/// Returns up to 3 hints suitable for inclusion in `suggested_test_coverage`.
+/// Callers should append these after invariant/effect hints, not replace them.
+pub fn derive_cold_hints(qname: &str, signature: Option<&str>, doc: Option<&str>) -> Vec<String> {
+    let mut hints: Vec<String> = Vec::new();
+
+    // 1. Doc first sentence → "verify: <sentence>"
+    if let Some(d) = doc {
+        let first = d.lines().next().unwrap_or("").trim();
+        let first = first.split('.').next().unwrap_or("").trim();
+        // Only use if it reads like a description (starts with verb-ish word).
+        if first.len() > 12 {
+            hints.push(format!("verify: {}", first.to_lowercase()));
+        }
+    }
+
+    // 2. Function/method name words → "verify <words> behavior"
+    let leaf = qname
+        .split(|c: char| c == '.' || c == ':' || c == '/')
+        .last()
+        .unwrap_or(qname);
+    let words = split_identifier_words(leaf);
+    if words.len() >= 2 {
+        hints.push(format!("verify {} behavior", words.join(" ").to_lowercase()));
+    } else if words.len() == 1 && hints.is_empty() {
+        hints.push(format!("verify {} is correct", words[0].to_lowercase()));
+    }
+
+    // 3. Parameter names from signature → "verify effect of <params>"
+    if let Some(sig) = signature {
+        let params = extract_sig_param_names(sig);
+        if !params.is_empty() && params.len() <= 4 {
+            hints.push(format!("verify effect of {} on output", params.join(", ")));
+        }
+    }
+
+    hints.truncate(3);
+    hints
+}
+
+/// Split a camelCase or snake_case identifier into lowercase words.
+fn split_identifier_words(s: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for ch in s.chars() {
+        if ch == '_' || ch == '-' {
+            if !cur.is_empty() { words.push(cur.clone()); cur.clear(); }
+        } else if ch.is_uppercase() && !cur.is_empty() {
+            words.push(cur.clone());
+            cur.clear();
+            cur.push(ch);
+        } else {
+            cur.push(ch);
+        }
+    }
+    if !cur.is_empty() { words.push(cur); }
+    words.into_iter().filter(|w| w.len() > 1).collect()
+}
+
+/// Extract meaningful parameter names from a function signature string.
+/// Handles Swift, Rust, TypeScript, Python styles heuristically.
+fn extract_sig_param_names(sig: &str) -> Vec<String> {
+    // Grab what's between the outermost parens.
+    let inner = match (sig.find('('), sig.rfind(')')) {
+        (Some(a), Some(b)) if b > a + 1 => &sig[a + 1..b],
+        _ => return vec![],
+    };
+    let mut names: Vec<String> = Vec::new();
+    for part in inner.split(',') {
+        let part = part.trim();
+        if part.is_empty() { continue; }
+        // Take first token, strip leading `_` (Swift external labels), `&`, `mut`.
+        let token = part
+            .split(|c: char| c.is_whitespace() || c == ':')
+            .find(|t| !t.is_empty())
+            .unwrap_or("")
+            .trim_start_matches(['_', '&'])
+            .trim_start_matches("mut ")
+            .to_string();
+        if token.len() > 1 && token.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            names.push(token.to_lowercase());
+        }
+    }
+    names
+}
+
 pub fn propose_test_path(source_file: &str) -> String {
     let path = std::path::Path::new(source_file);
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown");
