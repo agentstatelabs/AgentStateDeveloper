@@ -343,8 +343,27 @@ pub(crate) fn find_candidates(
 
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         scored.dedup_by(|a, b| a.1 == b.1);
-        // File-level dedup: keep only the highest-scoring symbol per file so
-        // duplicate-file entries don't consume multiple result slots.
+        // File-level dedup: one slot per file.  Symbols with ledger entries
+        // (invariants, hazards, decisions) are promoted above same-file
+        // competitors that only have a score advantage, so an invariant-bearing
+        // method isn't silently dropped in favour of a higher-scoring sibling.
+        let has_ledger: std::collections::HashSet<String> = scored
+            .iter()
+            .filter_map(|(_, qname)| {
+                let sym = index_store.get_symbol_by_qname(&engine.ref_name, qname)
+                    .ok().flatten()?;
+                let entries = ledger_store
+                    .list_entries(&engine.ref_name, &sym.symbol_id)
+                    .unwrap_or_default();
+                if entries.is_empty() { None } else { Some(qname.clone()) }
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            let a_ledger = has_ledger.contains(&a.1);
+            let b_ledger = has_ledger.contains(&b.1);
+            b_ledger.cmp(&a_ledger)
+                .then_with(|| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal))
+        });
         let mut seen_files: std::collections::HashSet<String> = std::collections::HashSet::new();
         scored.retain(|(_, qname)| {
             match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
@@ -352,6 +371,8 @@ pub(crate) fn find_candidates(
                 _ => true,
             }
         });
+        // Restore score order for the final result.
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(depth);
         return scored;
     }
