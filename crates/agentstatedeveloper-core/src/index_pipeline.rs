@@ -61,6 +61,9 @@ pub struct IndexSummary {
     pub cross_module_edges: usize,
     pub transitive_updates: usize,
     pub orphaned_tagged: usize,
+    /// Top qname collisions: (qname, first_file, second_file).
+    /// Only populated when collisions occur; capped at 10 for display.
+    pub top_collisions: Vec<(String, String, String)>,
 }
 
 /// Result of collecting source files under a path.
@@ -134,6 +137,10 @@ pub fn run_index(
 
     let mut symbol_count = 0usize;
     let mut all_edges: Vec<CallEdge> = Vec::new();
+    // Track first-seen file for each qname parsed in this run so we can report
+    // which files are colliding rather than just a raw count.
+    let mut qname_first_file: HashMap<String, String> = HashMap::new();
+    let mut collision_log: Vec<(String, String, String)> = Vec::new();
 
     // Pre-populate qname_to_sym_id from previously-indexed symbols so that
     // cross-package call edges (caller in this run → callee from a prior run)
@@ -188,6 +195,14 @@ pub fn run_index(
                 .map_err(|e| AsdError::Other(e.to_string()))?;
 
             // Accumulate into in-memory maps — no repo writes yet.
+            // Detect collisions: same qname parsed from two different files.
+            if let Some(prev_file) = qname_first_file.get(&p.qname) {
+                if prev_file != &file_str {
+                    collision_log.push((p.qname.clone(), prev_file.clone(), file_str.clone()));
+                }
+            } else {
+                qname_first_file.insert(p.qname.clone(), file_str.clone());
+            }
             by_qname.insert(p.qname.clone(), sym_val.clone());
             by_effects.insert(
                 symbol_id.clone(),
@@ -230,14 +245,18 @@ pub fn run_index(
     let unique_symbol_count = by_qname.len();
     let unique_effect_count = by_effects.len();
     if symbol_count != unique_symbol_count {
-        // More parsed than written — qname collisions (e.g. test doubles that
-        // shadow a production type's qname).  Not an error; just report it.
         eprintln!(
             "  note: {} qname collision(s) — {} symbols parsed, {} unique written",
             symbol_count - unique_symbol_count,
             symbol_count,
             unique_symbol_count,
         );
+        for (qname, f1, f2) in collision_log.iter().take(5) {
+            eprintln!("    collision: {qname:?}  {f1}  ↔  {f2}");
+        }
+        if collision_log.len() > 5 {
+            eprintln!("    … and {} more (pass --diagnose-collisions to see all)", collision_log.len() - 5);
+        }
     }
 
     if let Some(f) = on_phase {
@@ -446,6 +465,7 @@ pub fn run_index(
         }
     }
 
+    let top_collisions = collision_log.into_iter().take(10).collect();
     Ok(IndexSummary {
         files: files.len(),
         skipped: skipped_files.len(),
@@ -456,6 +476,7 @@ pub fn run_index(
         cross_module_edges,
         transitive_updates,
         orphaned_tagged,
+        top_collisions,
     })
 }
 
