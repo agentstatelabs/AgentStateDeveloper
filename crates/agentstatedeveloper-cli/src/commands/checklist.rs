@@ -16,7 +16,7 @@ use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, FtsFilters, IndexStore,
     LedgerKind, LedgerStore, classify_layer_sym, derive_cold_hints, estimate_tokens,
     find_candidates, git_dirty_files, intent_focus, load_layer_overrides, parse_intent,
-    parse_query, propose_test_path, stale_warning, symbol_tier, trim_for_agent,
+    parse_query, propose_test_path, resolve_scope, stale_warning, symbol_tier, trim_for_agent,
 };
 
 use crate::commands::graph::build_id_map;
@@ -72,6 +72,14 @@ pub struct ChecklistArgs {
     /// syntax in the query, e.g. "drift playhead -sample -waveform".
     #[arg(long)]
     pub exclude: Option<String>,
+
+    /// Comma-separated glob patterns to restrict results to specific paths.
+    #[arg(long)]
+    pub paths: Option<String>,
+
+    /// Named scope alias from .asd/scopes.toml, e.g. --scope drift-pad.
+    #[arg(long)]
+    pub scope: Option<String>,
 }
 
 pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
@@ -103,11 +111,19 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
         return Ok(());
     }
 
+    let mut paths_filter: Vec<String> = Vec::new();
+    if let Some(ref scope) = args.scope {
+        paths_filter.extend(resolve_scope(scope, &cfg.db_path));
+    }
+    if let Some(ref paths) = args.paths {
+        paths_filter.extend(paths.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()));
+    }
     let filters = FtsFilters {
         kind: args.kind.as_deref().map(|k| k.to_lowercase()),
         language: args.language.as_deref().map(|l| l.to_lowercase()),
         include_tests: args.include_tests,
         exclude_terms: exclusions,
+        paths_filter,
     };
 
     let candidates = find_candidates(
@@ -272,6 +288,21 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
         vec![]
     };
 
+    // Scenario tests: invariants with constraint language are directly actionable
+    // test scenarios and are emitted regardless of test_gap.
+    const CONSTRAINT_WORDS: &[&str] = &[
+        "must", "never", "shall", "always", "only", "cannot", "no ", "not ",
+        "require", "ensure", "prevent", "guarantee", "invariant", "forbidden",
+    ];
+    let scenario_tests: Vec<String> = invariants.iter()
+        .filter_map(|inv| inv.get("summary").and_then(Value::as_str))
+        .filter(|s| {
+            let sl = s.to_lowercase();
+            CONSTRAINT_WORDS.iter().any(|w| sl.contains(w))
+        })
+        .map(|s| s.to_string())
+        .collect();
+
     if args.agent || args.json {
         let out = json!({
             "query": args.query,
@@ -283,6 +314,7 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
             "test_gap": test_gap,
             "proposed_test_path": proposed_test_path,
             "suggested_test_coverage": suggested_test_coverage,
+            "scenario_tests": scenario_tests,
             "stale_symbols": stale_symbols,
             "known_hazards": hazards,
             "effects_to_verify": effects_list,

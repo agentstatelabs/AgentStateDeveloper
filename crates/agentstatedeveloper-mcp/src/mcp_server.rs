@@ -2574,6 +2574,18 @@ impl AsdMcpServer {
             hints
         } else { vec![] };
 
+        const CONSTRAINT_WORDS: &[&str] = &[
+            "must", "never", "shall", "always", "only", "cannot", "no ", "not ",
+            "require", "ensure", "prevent", "guarantee", "invariant", "forbidden",
+        ];
+        let scenario_tests: Vec<&str> = design_invariants.iter()
+            .filter_map(|inv| inv.get("summary").and_then(serde_json::Value::as_str))
+            .filter(|s| {
+                let sl = s.to_lowercase();
+                CONSTRAINT_WORDS.iter().any(|w| sl.contains(w))
+            })
+            .collect();
+
         let focus = intent_focus(intent);
         serde_json::to_string(&serde_json::json!({
             "description": p.description,
@@ -2587,6 +2599,7 @@ impl AsdMcpServer {
             "test_gap": test_gap,
             "proposed_test_path": proposed_test_path,
             "suggested_test_coverage": suggested_test_coverage,
+            "scenario_tests": scenario_tests,
             "effects_summary": effects_summary,
             "recently_touched": recently_touched,
         })).unwrap_or_else(|_| "{}".to_string())
@@ -2753,6 +2766,18 @@ impl AsdMcpServer {
             hints
         } else { vec![] };
 
+        const CONSTRAINT_WORDS_CL: &[&str] = &[
+            "must", "never", "shall", "always", "only", "cannot", "no ", "not ",
+            "require", "ensure", "prevent", "guarantee", "invariant", "forbidden",
+        ];
+        let scenario_tests: Vec<&str> = invariants.iter()
+            .filter_map(|inv| inv.get("summary").and_then(serde_json::Value::as_str))
+            .filter(|s| {
+                let sl = s.to_lowercase();
+                CONSTRAINT_WORDS_CL.iter().any(|w| sl.contains(w))
+            })
+            .collect();
+
         let focus = intent_focus(intent);
         serde_json::to_string(&serde_json::json!({
             "query": p.query,
@@ -2764,6 +2789,7 @@ impl AsdMcpServer {
             "test_gap": test_gap,
             "proposed_test_path": proposed_test_path,
             "suggested_test_coverage": suggested_test_coverage,
+            "scenario_tests": scenario_tests,
             "known_hazards": hazards,
             "effects_to_verify": effects_list,
         })).unwrap_or_else(|_| "{}".to_string())
