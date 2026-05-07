@@ -5,6 +5,7 @@
 //! crates (e.g., `agentstatedeveloper-python`).
 
 pub mod adapter;
+pub mod candidates;
 pub mod audit;
 pub mod index_pipeline;
 pub mod effects;
@@ -40,6 +41,7 @@ pub use schema::{
     Symbol, SymbolKind, TransitiveEffect, Verification, VerificationSource, VerificationStatus,
 };
 pub use scratch::{AsgScratchStore, CleanFilter, ScratchFilter, ScratchStore};
+pub use candidates::{find_candidates, in_memory_score, kind_str, parse_query, query_tokens};
 pub use repair::{IssueSeverity, RepairIssue, RepairReport, drop_orphaned_edge_refs, repair_asg, scan_asg};
 pub use search_fts::{AGENT_DEFAULT_BUDGET, FileRecency, FtsFilters, FtsHit, SearchFtsDb, SymbolTier, classify_layer, classify_layer_sym, derive_cold_hints, estimate_tokens, extract_summary, gather_recency, git_dirty_files, hybrid_boost, intent_focus, intent_layer_order, is_stopword, load_layer_overrides, parse_intent, propose_test_path, symbol_tier, trim_for_agent};
 pub use search_fts::{format_age, stale_warning};

@@ -21,9 +21,9 @@ use agentstatedeveloper_core::{
     Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory, EffectDecl, EffectStore,
     Engine, FtsFilters, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Rebind, ScratchEntry,
     ScratchFilter, ScratchStatus, ScratchStore, SearchFtsDb, Situation, actions, classify_layer_sym,
-    derive_cold_hints, emit_audit, event_types, extract_summary, gather_recency, hybrid_boost,
-    intent_focus, intent_layer_order, is_stopword, load_layer_overrides, parse_intent, paths,
-    propose_test_path, symbol_tier,
+    derive_cold_hints, emit_audit, event_types, extract_summary, find_candidates, gather_recency,
+    hybrid_boost, intent_focus, intent_layer_order, load_layer_overrides, parse_intent, paths,
+    parse_query, propose_test_path, query_tokens, symbol_tier,
 };
 
 /// The AgentStateDeveloper MCP server.
@@ -53,6 +53,7 @@ pub struct CodeQueryParams {
 #[derive(Deserialize, JsonSchema)]
 pub struct CodeSearchParams {
     /// Concept or keyword(s) to search for. BM25-ranked via FTS5.
+    /// Supports inline exclusion syntax: "drift playhead -sample -waveform".
     pub query: String,
     /// Filter by symbol kind: module, function, method, class, variable.
     pub kind: Option<String>,
@@ -65,6 +66,8 @@ pub struct CodeSearchParams {
     /// production entry points rank first).
     #[serde(default)]
     pub include_tests: bool,
+    /// Comma-separated terms to exclude (e.g. "sample editor,waveform").
+    pub exclude: Option<String>,
 }
 
 fn default_search_limit() -> u32 { 20 }
@@ -72,6 +75,7 @@ fn default_search_limit() -> u32 { 20 }
 #[derive(Deserialize, JsonSchema)]
 pub struct InvestigateParams {
     /// Natural-language or keyword query.
+    /// Supports inline exclusion syntax: "drift playhead -sample -waveform".
     pub query: String,
     /// Number of top entry-point symbols to fully expand (default: 5).
     #[serde(default = "default_investigate_depth")]
@@ -86,6 +90,8 @@ pub struct InvestigateParams {
     /// Adjust output ordering and guidance for a specific intent.
     /// Values: bugfix, feature, refactor, test, architecture, ui.
     pub intent: Option<String>,
+    /// Comma-separated terms to exclude (e.g. "sample editor,waveform").
+    pub exclude: Option<String>,
 }
 
 fn default_investigate_depth() -> u32 { 10 }
@@ -99,6 +105,7 @@ fn default_prepare_git_depth() -> u32 { 10 }
 #[derive(Deserialize, JsonSchema)]
 pub struct PrepareChangeParams {
     /// Free-form description of the intended change (treated as a search query).
+    /// Supports inline exclusion syntax: "drift playhead -sample -waveform".
     pub description: String,
     /// Number of top entry-point symbols to expand (default: 7).
     #[serde(default = "default_prepare_depth")]
@@ -119,11 +126,14 @@ pub struct PrepareChangeParams {
     /// Number of recent git commits to scan per file (default: 10).
     #[serde(default = "default_prepare_git_depth")]
     pub git_depth: u32,
+    /// Comma-separated terms to exclude (e.g. "sample editor,waveform").
+    pub exclude: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ChecklistParams {
     /// Natural-language or keyword query.
+    /// Supports inline exclusion syntax: "drift playhead -sample -waveform".
     pub query: String,
     /// Number of top entry-point symbols to analyse (default: 5).
     #[serde(default = "default_checklist_depth")]
@@ -141,6 +151,8 @@ pub struct ChecklistParams {
     /// Caller BFS depth for finding affected tests (default: 2).
     #[serde(default = "default_test_depth")]
     pub test_depth: u32,
+    /// Comma-separated terms to exclude (e.g. "sample editor,waveform").
+    pub exclude: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -606,11 +618,12 @@ impl AsdMcpServer {
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
 
-        let tokens: Vec<String> = p.query
-            .split(|c: char| c.is_whitespace() || c == '_' || c == '-' || c == '.')
-            .map(|t| t.to_lowercase())
-            .filter(|t| t.len() >= 2 && !is_stopword(t))
-            .collect();
+        let (tokens, mut exclusions) = parse_query(&p.query);
+        if let Some(ref excl) = p.exclude {
+            for term in excl.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()) {
+                exclusions.push(term);
+            }
+        }
 
         if tokens.is_empty() {
             return "[]".to_string();
@@ -621,6 +634,7 @@ impl AsdMcpServer {
             kind: p.kind.as_deref().map(|k| k.to_lowercase()),
             language: p.language.as_deref().map(|l| l.to_lowercase()),
             include_tests: p.include_tests,
+            exclude_terms: exclusions.clone(),
         };
 
         // --- FTS path ---
@@ -648,6 +662,16 @@ impl AsdMcpServer {
                 .collect();
             scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.1.qname.cmp(&b.1.qname)));
+            if !exclusions.is_empty() {
+                scored.retain(|(_, hit)| {
+                    let qn = hit.qname.to_lowercase();
+                    let fl = hit.file.to_lowercase();
+                    let doc = hit.doc.as_deref().unwrap_or("").to_lowercase();
+                    let sig = hit.signature.as_deref().unwrap_or("").to_lowercase();
+                    !exclusions.iter().any(|e| qn.contains(e.as_str()) || fl.contains(e.as_str())
+                        || doc.contains(e.as_str()) || sig.contains(e.as_str()))
+                });
+            }
             scored.truncate(limit);
 
             let recency = gather_recency(200, 14.0);
@@ -749,11 +773,12 @@ impl AsdMcpServer {
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
 
-        let tokens: Vec<String> = p.query
-            .split(|c: char| c.is_whitespace() || c == '_' || c == '-' || c == '.')
-            .map(|t| t.to_lowercase())
-            .filter(|t| t.len() >= 2 && !is_stopword(t))
-            .collect();
+        let (tokens, mut exclusions) = parse_query(&p.query);
+        if let Some(ref excl) = p.exclude {
+            for term in excl.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()) {
+                exclusions.push(term);
+            }
+        }
 
         if tokens.is_empty() {
             return serde_json::json!({ "query": p.query, "entry_points": [] }).to_string();
@@ -764,73 +789,17 @@ impl AsdMcpServer {
             kind: p.kind.as_deref().map(|k| k.to_lowercase()),
             language: p.language.as_deref().map(|l| l.to_lowercase()),
             include_tests: p.include_tests,
+            exclude_terms: exclusions,
         };
 
         let index = AsgIndexStore { repo: &engine.repo };
         let ledger_store = AsgLedgerStore { repo: &engine.repo };
         let effect_store = AsgEffectStore { repo: &engine.repo };
 
-        // Find top-N entry points using FTS with hybrid reranking.
-        let top_qnames: Vec<(f64, String)> = {
-            let fts_result = SearchFtsDb::open(&db_path)
-                .ok()
-                .filter(|fts| fts.has_data())
-                .and_then(|fts| fts.search(&p.query, &filters, depth * 8).ok());
-
-            if let Some(hits) = fts_result {
-                let mut sc: Vec<(f64, String)> = hits.into_iter().map(|hit| {
-                    let boost = hybrid_boost(&hit, &tokens);
-                    let entries = ledger_store.list_entries(&ref_name, &hit.symbol_id)
-                        .unwrap_or_default();
-                    let text = entries.iter().map(|e| e.summary.to_lowercase())
-                        .collect::<Vec<_>>().join(" ");
-                    let ledger_boost = if text.is_empty() { 0.0 } else {
-                        tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
-                    };
-                    (hit.bm25_score + boost + ledger_boost, hit.qname)
-                }).collect();
-                sc.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                inject_file_stem(&db_path, &tokens, &filters, &index, &ref_name, sc, depth)
-            } else {
-                // Fallback: in-memory scoring.
-                let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-                let qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
-                    Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
-                    _ => vec![],
-                };
-                let kind_filter = filters.kind.clone();
-                let lang_filter = filters.language.clone();
-                let mut sc: Vec<(f64, String)> = Vec::new();
-                for qname in &qnames {
-                    let sym = match index.get_symbol_by_qname(&ref_name, qname) {
-                        Ok(Some(s)) => s,
-                        _ => continue,
-                    };
-                    let sk = format!("{:?}", sym.kind).to_lowercase();
-                    if let Some(ref k) = kind_filter { if &sk != k { continue; } }
-                    if let Some(ref lang) = lang_filter { if &sym.language != lang { continue; } }
-                    let qn = sym.qname.to_lowercase();
-                    let sig = sym.signature.as_deref().unwrap_or("").to_lowercase();
-                    let doc = sym.doc.as_deref().unwrap_or("").to_lowercase();
-                    let file = sym.file.to_lowercase();
-                    let lt: String = ledger_store.list_entries(&ref_name, &sym.symbol_id)
-                        .unwrap_or_default().iter().map(|e| e.summary.to_lowercase())
-                        .collect::<Vec<_>>().join(" ");
-                    let mut score: u32 = 0;
-                    for t in &tokens {
-                        if qn.contains(t.as_str()) { score += 4; }
-                        if !sig.is_empty() && sig.contains(t.as_str()) { score += 3; }
-                        if !doc.is_empty() && doc.contains(t.as_str()) { score += 3; }
-                        if !lt.is_empty() && lt.contains(t.as_str()) { score += 2; }
-                        if file.contains(t.as_str()) { score += 1; }
-                    }
-                    if score > 0 { sc.push((score as f64, sym.qname)); }
-                }
-                sc.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                sc.truncate(depth);
-                sc
-            }
-        };
+        let top_qnames = find_candidates(
+            &engine, &db_path, &p.query, &tokens, &filters,
+            &ledger_store, &index, depth,
+        );
 
         // Build id_map for call graph resolution.
         let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
@@ -2389,11 +2358,12 @@ impl AsdMcpServer {
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
 
-        let tokens: Vec<String> = p.description
-            .split(|c: char| c.is_whitespace() || c == '_' || c == '-' || c == '.')
-            .map(|t| t.to_lowercase())
-            .filter(|t| t.len() >= 2 && !is_stopword(t))
-            .collect();
+        let (tokens, mut exclusions) = parse_query(&p.description);
+        if let Some(ref excl) = p.exclude {
+            for term in excl.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()) {
+                exclusions.push(term);
+            }
+        }
 
         if tokens.is_empty() {
             return serde_json::json!({ "description": p.description, "entry_points": {} }).to_string();
@@ -2406,6 +2376,7 @@ impl AsdMcpServer {
             kind: p.kind.as_deref().map(|k| k.to_lowercase()),
             language: p.language.as_deref().map(|l| l.to_lowercase()),
             include_tests: p.include_tests,
+            exclude_terms: exclusions,
         };
 
         let index = AsgIndexStore { repo: &engine.repo };
@@ -2425,51 +2396,10 @@ impl AsdMcpServer {
             }
         }
 
-        // FTS / fallback candidate search.
-        let candidates: Vec<(f64, String)> = {
-            let fts_result = SearchFtsDb::open(&db_path)
-                .ok().filter(|fts| fts.has_data())
-                .and_then(|fts| fts.search(&p.description, &filters, depth * 8).ok());
-            if let Some(hits) = fts_result {
-                let mut sc: Vec<(f64, String)> = hits.into_iter().map(|hit| {
-                    let boost = hybrid_boost(&hit, &tokens);
-                    let entries = ledger_store.list_entries(&ref_name, &hit.symbol_id).unwrap_or_default();
-                    let text = entries.iter().map(|e| e.summary.to_lowercase()).collect::<Vec<_>>().join(" ");
-                    let lb = if text.is_empty() { 0.0 } else {
-                        tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
-                    };
-                    (hit.bm25_score + boost + lb, hit.qname)
-                }).collect();
-                sc.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                inject_file_stem(&db_path, &tokens, &filters, &index, &ref_name, sc, depth)
-            } else {
-                let kf = filters.kind.clone(); let lf = filters.language.clone();
-                let mut sc: Vec<(f64, String)> = Vec::new();
-                for qname in &all_qnames {
-                    let sym = match index.get_symbol_by_qname(&ref_name, qname) { Ok(Some(s)) => s, _ => continue };
-                    let sk = format!("{:?}", sym.kind).to_lowercase();
-                    if let Some(ref k) = kf { if &sk != k { continue; } }
-                    if let Some(ref l) = lf { if &sym.language != l { continue; } }
-                    let qn = sym.qname.to_lowercase();
-                    let sig = sym.signature.as_deref().unwrap_or("").to_lowercase();
-                    let doc = sym.doc.as_deref().unwrap_or("").to_lowercase();
-                    let file = sym.file.to_lowercase();
-                    let lt: String = ledger_store.list_entries(&ref_name, &sym.symbol_id)
-                        .unwrap_or_default().iter().map(|e| e.summary.to_lowercase()).collect::<Vec<_>>().join(" ");
-                    let mut score: u32 = 0;
-                    for t in &tokens {
-                        if qn.contains(t.as_str()) { score += 4; }
-                        if !sig.is_empty() && sig.contains(t.as_str()) { score += 3; }
-                        if !doc.is_empty() && doc.contains(t.as_str()) { score += 3; }
-                        if !lt.is_empty() && lt.contains(t.as_str()) { score += 2; }
-                        if file.contains(t.as_str()) { score += 1; }
-                    }
-                    if score > 0 { sc.push((score as f64, sym.qname)); }
-                }
-                sc.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                sc.truncate(depth); sc
-            }
-        };
+        let candidates = find_candidates(
+            &engine, &db_path, &p.description, &tokens, &filters,
+            &ledger_store, &index, depth,
+        );
 
         let recency = gather_recency(200, 14.0);
         let layer_order = intent_layer_order(intent);
@@ -2623,11 +2553,12 @@ impl AsdMcpServer {
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
 
-        let tokens: Vec<String> = p.query
-            .split(|c: char| c.is_whitespace() || c == '_' || c == '-' || c == '.')
-            .map(|t| t.to_lowercase())
-            .filter(|t| t.len() >= 2 && !is_stopword(t))
-            .collect();
+        let (tokens, mut exclusions) = parse_query(&p.query);
+        if let Some(ref excl) = p.exclude {
+            for term in excl.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()) {
+                exclusions.push(term);
+            }
+        }
 
         if tokens.is_empty() {
             return serde_json::json!({ "query": p.query, "files_to_inspect": [] }).to_string();
@@ -2639,6 +2570,7 @@ impl AsdMcpServer {
             kind: p.kind.as_deref().map(|k| k.to_lowercase()),
             language: p.language.as_deref().map(|l| l.to_lowercase()),
             include_tests: p.include_tests,
+            exclude_terms: exclusions,
         };
 
         let index = AsgIndexStore { repo: &engine.repo };
@@ -2659,54 +2591,10 @@ impl AsdMcpServer {
             }
         }
 
-        // Find top-N entry points via FTS or fallback.
-        let candidates: Vec<(f64, String)> = {
-            let fts_result = SearchFtsDb::open(&db_path)
-                .ok()
-                .filter(|fts| fts.has_data())
-                .and_then(|fts| fts.search(&p.query, &filters, depth * 8).ok());
-            if let Some(hits) = fts_result {
-                let mut sc: Vec<(f64, String)> = hits.into_iter().map(|hit| {
-                    let boost = hybrid_boost(&hit, &tokens);
-                    let entries = ledger_store.list_entries(&ref_name, &hit.symbol_id).unwrap_or_default();
-                    let text = entries.iter().map(|e| e.summary.to_lowercase()).collect::<Vec<_>>().join(" ");
-                    let lb = if text.is_empty() { 0.0 } else {
-                        tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
-                    };
-                    (hit.bm25_score + boost + lb, hit.qname)
-                }).collect();
-                sc.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                inject_file_stem(&db_path, &tokens, &filters, &index, &ref_name, sc, depth)
-            } else {
-                let kf = filters.kind.clone();
-                let lf = filters.language.clone();
-                let mut sc: Vec<(f64, String)> = Vec::new();
-                for qname in &all_qnames {
-                    let sym = match index.get_symbol_by_qname(&ref_name, qname) { Ok(Some(s)) => s, _ => continue };
-                    let sk = format!("{:?}", sym.kind).to_lowercase();
-                    if let Some(ref k) = kf { if &sk != k { continue; } }
-                    if let Some(ref l) = lf { if &sym.language != l { continue; } }
-                    let qn = sym.qname.to_lowercase();
-                    let sig = sym.signature.as_deref().unwrap_or("").to_lowercase();
-                    let doc = sym.doc.as_deref().unwrap_or("").to_lowercase();
-                    let file = sym.file.to_lowercase();
-                    let lt: String = ledger_store.list_entries(&ref_name, &sym.symbol_id)
-                        .unwrap_or_default().iter().map(|e| e.summary.to_lowercase()).collect::<Vec<_>>().join(" ");
-                    let mut score: u32 = 0;
-                    for t in &tokens {
-                        if qn.contains(t.as_str()) { score += 4; }
-                        if !sig.is_empty() && sig.contains(t.as_str()) { score += 3; }
-                        if !doc.is_empty() && doc.contains(t.as_str()) { score += 3; }
-                        if !lt.is_empty() && lt.contains(t.as_str()) { score += 2; }
-                        if file.contains(t.as_str()) { score += 1; }
-                    }
-                    if score > 0 { sc.push((score as f64, sym.qname)); }
-                }
-                sc.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                sc.truncate(depth);
-                sc
-            }
-        };
+        let candidates = find_candidates(
+            &engine, &db_path, &p.query, &tokens, &filters,
+            &ledger_store, &index, depth,
+        );
 
         let mut files_to_inspect: Vec<serde_json::Value> = Vec::new();
         let mut seen_files: HashSet<String> = HashSet::new();
@@ -3266,50 +3154,6 @@ fn err_json(msg: &str) -> String {
         .unwrap_or_else(|_| "{\"error\":\"unknown\"}".to_string())
 }
 
-/// Inject file-stem candidates into an already-scored `(score, qname)` list.
-///
-/// For each query token, finds symbols whose file path contains that token but
-/// whose file is not yet represented in `scored`. Injects them with a baseline
-/// score (1.0 + hybrid_boost) so they appear but can still be outranked.
-/// Returns the merged list sorted by score and truncated to `depth`.
-fn inject_file_stem(
-    db_path: &std::path::Path,
-    tokens: &[String],
-    filters: &FtsFilters,
-    index: &AsgIndexStore<'_>,
-    ref_name: &str,
-    mut scored: Vec<(f64, String)>,
-    depth: usize,
-) -> Vec<(f64, String)> {
-    // Only protect files already in the top `depth` slots. Files ranked
-    // depth+1..depth*8 in FTS are still eligible for re-injection so a
-    // strong stem boost can displace a weak FTS match.
-    let covered_files: std::collections::HashSet<String> = scored
-        .iter()
-        .take(depth)
-        .filter_map(|(_, qn)| {
-            index.get_symbol_by_qname(ref_name, qn).ok().flatten().map(|s| s.file)
-        })
-        .collect();
-
-    if let Ok(fts) = SearchFtsDb::open(db_path) {
-        for token in tokens {
-            if let Ok(hits) = fts.file_stem_candidates(token, filters, depth * 2) {
-                for hit in hits {
-                    if !covered_files.contains(&hit.file) {
-                        let boost = hybrid_boost(&hit, tokens);
-                        scored.push((1.0 + boost, hit.qname));
-                    }
-                }
-            }
-        }
-    }
-
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    scored.dedup_by(|a, b| a.1 == b.1);
-    scored.truncate(depth);
-    scored
-}
 
 
 fn parse_ledger_kind(s: &str) -> Result<LedgerKind, String> {

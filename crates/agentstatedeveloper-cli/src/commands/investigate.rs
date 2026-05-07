@@ -10,20 +10,16 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore, LedgerStore,
-    SearchFtsDb, classify_layer_sym, estimate_tokens, extract_summary, gather_recency, git_dirty_files,
-    hybrid_boost,
-    intent_focus, intent_layer_order, load_layer_overrides, parse_intent, stale_warning,
-    symbol_tier, trim_for_agent,
+    classify_layer_sym, estimate_tokens, extract_summary, find_candidates, gather_recency,
+    git_dirty_files, intent_focus, intent_layer_order, load_layer_overrides, parse_intent,
+    parse_query, stale_warning, symbol_tier, trim_for_agent,
 };
 
 use crate::commands::{
     context_for::assemble_symbol_context,
     graph::build_id_map,
-    search::{in_memory_score, kind_str, query_tokens},
 };
 use crate::config::Config;
-
-const ASD_PATH_PREFIX: &str = "/asd/v1";
 
 #[derive(Debug, Args)]
 pub struct InvestigateArgs {
@@ -76,6 +72,11 @@ pub struct InvestigateArgs {
     /// Token budget when --agent is set (default: 8000).
     #[arg(long, default_value = "8000")]
     pub agent_budget: usize,
+
+    /// Comma-separated terms to exclude. Also supports inline minus-prefix
+    /// syntax in the query, e.g. "drift playhead -sample -waveform".
+    #[arg(long)]
+    pub exclude: Option<String>,
 }
 
 pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
@@ -98,7 +99,12 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     let effect_store = AsgEffectStore { repo: &engine.repo };
     let id_map = build_id_map(&engine);
 
-    let tokens = query_tokens(&args.query);
+    let (tokens, mut exclusions) = parse_query(&args.query);
+    if let Some(ref excl) = args.exclude {
+        for term in excl.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()) {
+            exclusions.push(term);
+        }
+    }
     if tokens.is_empty() {
         println!("{}", json!({ "query": args.query, "entry_points": [] }));
         return Ok(());
@@ -108,6 +114,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         kind: args.kind.as_deref().map(|k| k.to_lowercase()),
         language: args.language.as_deref().map(|l| l.to_lowercase()),
         include_tests: args.include_tests,
+        exclude_terms: exclusions,
     };
 
     // Each entry_point candidate: (combined_score, symbol_id, qname)
@@ -268,145 +275,3 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     Ok(())
 }
 
-/// Returns top-`depth` (score, qname) pairs using FTS when available,
-/// falling back to in-memory scoring.
-pub(crate) fn find_candidates(
-    engine: &Engine,
-    db_path: &std::path::Path,
-    query: &str,
-    tokens: &[String],
-    filters: &FtsFilters,
-    ledger_store: &AsgLedgerStore,
-    index_store: &AsgIndexStore,
-    depth: usize,
-) -> Vec<(f64, String)> {
-    // --- FTS path ---
-    let fts_result = SearchFtsDb::open(db_path)
-        .ok()
-        .filter(|fts| fts.has_data())
-        .and_then(|fts| fts.search(query, filters, depth * 8).ok());
-
-    if let Some(hits) = fts_result {
-        let mut scored: Vec<(f64, String)> = hits
-            .into_iter()
-            .map(|hit| {
-                let boost = hybrid_boost(&hit, tokens);
-                let ledger_boost = {
-                    let entries = ledger_store
-                        .list_entries(&engine.ref_name, &hit.symbol_id)
-                        .unwrap_or_default();
-                    let text = entries
-                        .iter()
-                        .map(|e| e.summary.to_lowercase())
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    if text.is_empty() {
-                        0.0
-                    } else {
-                        tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
-                    }
-                };
-                (hit.bm25_score + boost + ledger_boost, hit.qname)
-            })
-            .collect();
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-        // File-stem injection: for each query token, find files whose stem
-        // contains that token and ensure they appear in the final top-depth
-        // results.  covered_files only protects the files already in the TOP
-        // `depth` slots — files ranked depth+1..depth*8 in FTS are still
-        // eligible for re-injection so a strong stem boost can displace a
-        // weak FTS match.
-        let covered_files: std::collections::HashSet<String> = scored
-            .iter()
-            .take(depth)
-            .filter_map(|(_, qname)| {
-                index_store.get_symbol_by_qname(&engine.ref_name, qname)
-                    .ok()
-                    .flatten()
-                    .map(|s| s.file)
-            })
-            .collect();
-
-        if let Ok(fts) = SearchFtsDb::open(db_path) {
-            for token in tokens {
-                if let Ok(stem_hits) = fts.file_stem_candidates(token, filters, depth * 2) {
-                    for hit in stem_hits {
-                        if !covered_files.contains(&hit.file) {
-                            let boost = hybrid_boost(&hit, tokens);
-                            scored.push((1.0 + boost, hit.qname));
-                        }
-                    }
-                }
-            }
-        }
-
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.dedup_by(|a, b| a.1 == b.1);
-        // File-level dedup: one slot per file.  Symbols with ledger entries
-        // (invariants, hazards, decisions) are promoted above same-file
-        // competitors that only have a score advantage, so an invariant-bearing
-        // method isn't silently dropped in favour of a higher-scoring sibling.
-        let has_ledger: std::collections::HashSet<String> = scored
-            .iter()
-            .filter_map(|(_, qname)| {
-                let sym = index_store.get_symbol_by_qname(&engine.ref_name, qname)
-                    .ok().flatten()?;
-                let entries = ledger_store
-                    .list_entries(&engine.ref_name, &sym.symbol_id)
-                    .unwrap_or_default();
-                if entries.is_empty() { None } else { Some(qname.clone()) }
-            })
-            .collect();
-        scored.sort_by(|a, b| {
-            let a_ledger = has_ledger.contains(&a.1);
-            let b_ledger = has_ledger.contains(&b.1);
-            b_ledger.cmp(&a_ledger)
-                .then_with(|| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal))
-        });
-        let mut seen_files: std::collections::HashSet<String> = std::collections::HashSet::new();
-        scored.retain(|(_, qname)| {
-            match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
-                Ok(Some(sym)) => seen_files.insert(sym.file),
-                _ => true,
-            }
-        });
-        // Restore score order for the final result.
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(depth);
-        return scored;
-    }
-
-    // --- Fallback: in-memory O(N) scoring ---
-    eprintln!("asd: FTS index not populated — falling back to in-memory search");
-
-    let kind_filter = filters.kind.as_deref().map(|k| k.to_lowercase());
-    let lang_filter = filters.language.as_deref();
-
-    let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-    let qnames: Vec<String> = match engine.repo.get_tree(&engine.ref_name, &prefix) {
-        Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
-        _ => vec![],
-    };
-
-    let mut scored: Vec<(f64, String)> = Vec::new();
-    for qname in &qnames {
-        let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
-            Ok(Some(s)) => s,
-            _ => continue,
-        };
-        if let Some(ref k) = kind_filter {
-            if kind_str(&sym.kind) != k.as_str() { continue; }
-        }
-        if let Some(lang) = lang_filter {
-            if sym.language != lang { continue; }
-        }
-        let s = in_memory_score(&sym, tokens, ledger_store, engine);
-        if s > 0 {
-            scored.push((s as f64, sym.qname));
-        }
-    }
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(depth);
-    scored
-}

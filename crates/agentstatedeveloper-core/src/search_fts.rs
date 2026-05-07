@@ -102,6 +102,9 @@ pub struct FtsFilters {
     /// Include test symbols (files under test/tests/spec directories, etc.).
     /// Default: false — tests are excluded so production entry points rank first.
     pub include_tests: bool,
+    /// Lowercase substring terms to exclude. Any candidate whose qname, file,
+    /// doc, or signature contains one of these strings is dropped.
+    pub exclude_terms: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

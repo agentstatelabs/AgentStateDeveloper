@@ -10,8 +10,8 @@ use clap::Args;
 use agentstatedeveloper_core::{
     AGENT_DEFAULT_BUDGET, AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore,
     LedgerStore, SearchFtsDb, SymbolKind, classify_layer_sym, estimate_tokens, extract_summary,
-    gather_recency, hybrid_boost, intent_focus, is_stopword, load_layer_overrides, parse_intent,
-    stale_warning, symbol_tier, trim_for_agent,
+    gather_recency, hybrid_boost, in_memory_score, intent_focus, kind_str, load_layer_overrides,
+    parse_intent, parse_query, stale_warning, symbol_tier, trim_for_agent,
 };
 
 use crate::config::Config;
@@ -58,6 +58,12 @@ pub struct SearchArgs {
     /// Token budget when --agent is set (default: 8000).
     #[arg(long, default_value = "8000")]
     pub agent_budget: usize,
+
+    /// Comma-separated terms to exclude. Candidates whose qname, file, doc,
+    /// or signature contain any term are dropped. Also supports inline
+    /// minus-prefix syntax in the query, e.g. "drift playhead -sample".
+    #[arg(long)]
+    pub exclude: Option<String>,
 }
 
 pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
@@ -74,10 +80,17 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let ledger_store = AsgLedgerStore { repo: &engine.repo };
 
+    let (tokens_from_query, mut inline_exclusions) = parse_query(&args.query);
+    if let Some(ref excl) = args.exclude {
+        for term in excl.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()) {
+            inline_exclusions.push(term);
+        }
+    }
     let filters = FtsFilters {
         kind: args.kind.as_deref().map(|k| k.to_lowercase()),
         language: args.language.as_deref().map(|l| l.to_lowercase()),
         include_tests: args.include_tests,
+        exclude_terms: inline_exclusions,
     };
 
     // --- FTS path ---
@@ -87,7 +100,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         .and_then(|fts| fts.search(&args.query, &filters, args.limit * 4).ok());
 
     if let Some(hits) = fts_result {
-        let tokens = query_tokens(&args.query);
+        let tokens = tokens_from_query.clone();
 
         // Hybrid reranking: BM25 + path/name boost + ledger boost.
         let mut scored: Vec<(f64, _)> = hits
@@ -177,7 +190,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
     // --- Fallback: in-memory O(N) scoring ---
     eprintln!("asd: FTS index not populated — falling back to in-memory search (run `asd index` to enable fast search)");
 
-    let tokens = query_tokens(&args.query);
+    let tokens = tokens_from_query;
     if tokens.is_empty() {
         println!("[]");
         return Ok(());
@@ -242,50 +255,3 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-pub(crate) fn query_tokens(query: &str) -> Vec<String> {
-    query
-        .split(|c: char| c.is_whitespace() || c == '_' || c == '-' || c == '.')
-        .map(|t| t.to_lowercase())
-        .filter(|t| t.len() >= 2 && !is_stopword(t))
-        .collect()
-}
-
-pub(crate) fn kind_str(kind: &SymbolKind) -> &'static str {
-    match kind {
-        SymbolKind::Module => "module",
-        SymbolKind::Function => "function",
-        SymbolKind::Method => "method",
-        SymbolKind::Class => "class",
-        SymbolKind::Variable => "variable",
-    }
-}
-
-pub(crate) fn in_memory_score(
-    sym: &agentstatedeveloper_core::Symbol,
-    tokens: &[String],
-    ledger_store: &AsgLedgerStore,
-    engine: &Engine,
-) -> u32 {
-    let qname_lower = sym.qname.to_lowercase();
-    let sig_lower = sym.signature.as_deref().unwrap_or("").to_lowercase();
-    let doc_lower = sym.doc.as_deref().unwrap_or("").to_lowercase();
-    let file_lower = sym.file.to_lowercase();
-
-    let ledger_text: String = ledger_store
-        .list_entries(&engine.ref_name, &sym.symbol_id)
-        .unwrap_or_default()
-        .iter()
-        .map(|e| e.summary.to_lowercase())
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    let mut score: u32 = 0;
-    for token in tokens {
-        if qname_lower.contains(token.as_str()) { score += 4; }
-        if !sig_lower.is_empty() && sig_lower.contains(token.as_str()) { score += 3; }
-        if !doc_lower.is_empty() && doc_lower.contains(token.as_str()) { score += 3; }
-        if !ledger_text.is_empty() && ledger_text.contains(token.as_str()) { score += 2; }
-        if file_lower.contains(token.as_str()) { score += 1; }
-    }
-    score
-}

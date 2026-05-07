@@ -29,6 +29,38 @@ pub fn query_tokens(query: &str) -> Vec<String> {
         .collect()
 }
 
+/// Parse a query string into `(positive_tokens, exclusion_terms)`.
+///
+/// Words prefixed with `-` (e.g. `-sample`) are treated as exclusions.
+/// The rest are tokenised with the same rules as `query_tokens`.
+///
+/// Example: `"drift playhead -sample -waveform"` →
+///   tokens: `["drift", "playhead"]`, exclusions: `["sample", "waveform"]`
+pub fn parse_query(query: &str) -> (Vec<String>, Vec<String>) {
+    let mut positive_words: Vec<&str> = Vec::new();
+    let mut exclusions: Vec<String> = Vec::new();
+
+    for word in query.split_whitespace() {
+        if let Some(excl) = word.strip_prefix('-') {
+            let term = excl.to_lowercase();
+            if term.len() >= 2 {
+                exclusions.push(term);
+            }
+        } else {
+            positive_words.push(word);
+        }
+    }
+
+    let tokens = positive_words
+        .join(" ")
+        .split(|c: char| c.is_whitespace() || c == '_' || c == '-' || c == '.')
+        .map(|t| t.to_lowercase())
+        .filter(|t| t.len() >= 2 && !is_stopword(t))
+        .collect();
+
+    (tokens, exclusions)
+}
+
 // ---------------------------------------------------------------------------
 // Kind helpers
 // ---------------------------------------------------------------------------
@@ -77,6 +109,37 @@ pub fn in_memory_score(
         if file_lower.contains(token.as_str()) { score += 1; }
     }
     score
+}
+
+// ---------------------------------------------------------------------------
+// Exclusion filter
+// ---------------------------------------------------------------------------
+
+/// Remove candidates that match any exclusion term (case-insensitive substring)
+/// in their qname, file path, doc comment, or signature.
+fn apply_exclusions(
+    engine: &Engine,
+    index_store: &AsgIndexStore,
+    exclude_terms: &[String],
+    scored: &mut Vec<(f64, String)>,
+) {
+    if exclude_terms.is_empty() { return; }
+    scored.retain(|(_, qname)| {
+        let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+            Ok(Some(s)) => s,
+            _ => return true,
+        };
+        let qname_lower = qname.to_lowercase();
+        let file_lower = sym.file.to_lowercase();
+        let doc_lower = sym.doc.as_deref().unwrap_or("").to_lowercase();
+        let sig_lower = sym.signature.as_deref().unwrap_or("").to_lowercase();
+        !exclude_terms.iter().any(|excl| {
+            qname_lower.contains(excl.as_str())
+                || file_lower.contains(excl.as_str())
+                || doc_lower.contains(excl.as_str())
+                || sig_lower.contains(excl.as_str())
+        })
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -285,6 +348,8 @@ pub fn find_candidates(
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(depth);
 
+        apply_exclusions(engine, index_store, &filters.exclude_terms, &mut scored);
+
         // Ledger-anchor pass: inject invariant/hazard-bearing symbols that
         // matched query tokens but were dropped by dedup or FTS ranking.
         ledger_anchor_pass(engine, tokens, &mut scored);
@@ -323,6 +388,7 @@ pub fn find_candidates(
     }
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(depth);
+    apply_exclusions(engine, index_store, &filters.exclude_terms, &mut scored);
     ledger_anchor_pass(engine, tokens, &mut scored);
     scored
 }

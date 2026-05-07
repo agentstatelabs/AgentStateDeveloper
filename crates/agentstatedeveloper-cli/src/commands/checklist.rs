@@ -14,16 +14,12 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, FtsFilters, IndexStore,
-    LedgerKind, LedgerStore, classify_layer_sym, derive_cold_hints, estimate_tokens, git_dirty_files,
-    intent_focus, load_layer_overrides, parse_intent, propose_test_path, stale_warning, symbol_tier,
-    trim_for_agent,
+    LedgerKind, LedgerStore, classify_layer_sym, derive_cold_hints, estimate_tokens,
+    find_candidates, git_dirty_files, intent_focus, load_layer_overrides, parse_intent,
+    parse_query, propose_test_path, stale_warning, symbol_tier, trim_for_agent,
 };
 
-use crate::commands::{
-    graph::build_id_map,
-    investigate::find_candidates,
-    search::query_tokens,
-};
+use crate::commands::graph::build_id_map;
 use crate::config::Config;
 
 #[derive(Debug, Args)]
@@ -71,6 +67,11 @@ pub struct ChecklistArgs {
     /// Token budget when --agent is set (default: 8000).
     #[arg(long, default_value = "8000")]
     pub agent_budget: usize,
+
+    /// Comma-separated terms to exclude. Also supports inline minus-prefix
+    /// syntax in the query, e.g. "drift playhead -sample -waveform".
+    #[arg(long)]
+    pub exclude: Option<String>,
 }
 
 pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
@@ -87,7 +88,12 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
     let effect_store = AsgEffectStore { repo: &engine.repo };
     let id_map = build_id_map(&engine);
 
-    let tokens = query_tokens(&args.query);
+    let (tokens, mut exclusions) = parse_query(&args.query);
+    if let Some(ref excl) = args.exclude {
+        for term in excl.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()) {
+            exclusions.push(term);
+        }
+    }
     if tokens.is_empty() {
         if args.json {
             println!("{}", json!({"query": args.query, "items": {}}));
@@ -101,6 +107,7 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
         kind: args.kind.as_deref().map(|k| k.to_lowercase()),
         language: args.language.as_deref().map(|l| l.to_lowercase()),
         include_tests: args.include_tests,
+        exclude_terms: exclusions,
     };
 
     let candidates = find_candidates(
