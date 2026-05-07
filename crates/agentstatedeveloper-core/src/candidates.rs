@@ -15,7 +15,7 @@ use crate::engine::Engine;
 use crate::index::{AsgIndexStore, IndexStore};
 use crate::ledger::{AsgLedgerStore, LedgerStore};
 use crate::schema::{LedgerEntry, LedgerKind, Symbol, SymbolKind};
-use crate::search_fts::{FtsFilters, SearchFtsDb, hybrid_boost, is_stopword};
+use crate::search_fts::{FtsFilters, SearchFtsDb, classify_layer_sym, hybrid_boost, is_stopword};
 
 // ---------------------------------------------------------------------------
 // Query tokenisation
@@ -395,7 +395,7 @@ pub fn find_candidates(
             .into_iter()
             .map(|hit| {
                 let boost = hybrid_boost(&hit, tokens);
-                let ledger_boost = {
+                let (ledger_boost, ownership_boost) = {
                     let entries = ledger_store
                         .list_entries(&engine.ref_name, &hit.symbol_id)
                         .unwrap_or_default();
@@ -404,13 +404,21 @@ pub fn find_candidates(
                         .map(|e| e.summary.to_lowercase())
                         .collect::<Vec<_>>()
                         .join(" ");
-                    if text.is_empty() {
+                    let lb = if text.is_empty() {
                         0.0
                     } else {
                         tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
-                    }
+                    };
+                    // Extra boost for symbols explicitly designated as owners of
+                    // a domain concept that overlaps the query.
+                    let ob = entries.iter()
+                        .filter(|e| e.kind == crate::schema::LedgerKind::Ownership)
+                        .map(|e| e.summary.to_lowercase())
+                        .filter(|s| tokens.iter().any(|t| s.contains(t.as_str())))
+                        .count() as f64 * 2.0;
+                    (lb, ob)
                 };
-                (hit.bm25_score + boost + ledger_boost, hit.qname)
+                (hit.bm25_score + boost + ledger_boost + ownership_boost, hit.qname)
             })
             .collect();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -434,13 +442,23 @@ pub fn find_candidates(
             })
             .collect();
 
+        const VIEW_STEM_HINTS: &[&str] = &[
+            "view", "ui", "render", "display", "screen", "layout", "widget", "cell", "button", "pad",
+        ];
+        let query_lower = query.to_lowercase();
+        let is_view_query = VIEW_STEM_HINTS.iter().any(|h| query_lower.contains(h));
         if let Ok(fts) = SearchFtsDb::open(db_path) {
             for token in tokens {
                 if let Ok(stem_hits) = fts.file_stem_candidates(token, filters, depth * 2) {
                     for hit in stem_hits {
                         if !covered_files.contains(&hit.file) {
                             let boost = hybrid_boost(&hit, tokens);
-                            scored.push((1.0 + boost, hit.qname));
+                            let tier = hit.tier;
+                            let layer = classify_layer_sym(&hit.file, &hit.qname, tier, &[]);
+                            let view_boost = if is_view_query
+                                && (layer == "ui" || layer == "viewmodel")
+                            { 2.0 } else { 0.0 };
+                            scored.push((1.0 + boost + view_boost, hit.qname));
                         }
                     }
                 }

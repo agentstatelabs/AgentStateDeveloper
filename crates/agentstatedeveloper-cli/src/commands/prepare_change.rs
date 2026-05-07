@@ -155,9 +155,13 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     let mut by_layer: serde_json::Map<String, Value> = serde_json::Map::new();
     let mut design_invariants: Vec<Value> = Vec::new();
     let mut known_hazards: Vec<Value> = Vec::new();
+    let mut validation_scenarios_ledger: Vec<Value> = Vec::new();
     let mut effects_summary: Vec<Value> = Vec::new();
     let mut seen_inv: HashSet<String> = HashSet::new();
+    let mut seen_vs: HashSet<String> = HashSet::new();
     let mut seen_effect: HashSet<String> = HashSet::new();
+    // Only include effects from symbols scoring ≥25% of the top score to reduce noise.
+    let effect_score_floor = candidates.first().map(|(s, _)| s * 0.25).unwrap_or(0.0);
 
     // likely_edit_files: file → (score, layer, recency)
     let mut file_scores: Vec<(f64, String, String, Option<f64>, bool)> = Vec::new();
@@ -208,20 +212,30 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
                         "source": sym.qname,
                     }));
                 }
+                LedgerKind::ValidationScenario => {
+                    if seen_vs.insert(key) {
+                        validation_scenarios_ledger.push(json!({
+                            "scenario": entry.summary,
+                            "source": sym.qname,
+                        }));
+                    }
+                }
                 _ => {}
             }
         }
 
-        // Effects.
-        if let Ok(Some(decl)) = effect_store.get_effects(&engine.ref_name, &sym.symbol_id) {
-            for eff in &decl.declared {
-                let cat = format!("{:?}", eff.effect);
-                let key = format!("{}:{}", cat, sym.qname);
-                if seen_effect.insert(key) {
-                    effects_summary.push(json!({
-                        "category": cat,
-                        "source": sym.qname,
-                    }));
+        // Effects — only from sufficiently-scoring candidates to reduce noise.
+        if *score >= effect_score_floor {
+            if let Ok(Some(decl)) = effect_store.get_effects(&engine.ref_name, &sym.symbol_id) {
+                for eff in &decl.declared {
+                    let cat = format!("{:?}", eff.effect);
+                    let key = format!("{}:{}", cat, sym.qname);
+                    if seen_effect.insert(key) {
+                        effects_summary.push(json!({
+                            "category": cat,
+                            "source": sym.qname,
+                        }));
+                    }
                 }
             }
         }
@@ -258,15 +272,29 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         b.4.cmp(&a.4) // hot first
             .then_with(|| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal))
     });
+    let dirty_files = git_dirty_files();
     let likely_edit_files: Vec<Value> = file_scores
         .iter()
-        .map(|(score, file, layer, days, hot)| json!({
-            "file": file,
-            "layer": layer,
-            "score": score,
-            "last_touched_days": days,
-            "hot": hot,
-        }))
+        .map(|(score, file, layer, days, hot)| {
+            let fl = file.to_lowercase();
+            let file_role = if fl.contains("/example") || fl.contains("/examples")
+                || fl.contains("/sample") || fl.contains("/demo")
+            { "example" } else if fl.contains("/test") || fl.contains("/spec")
+                || fl.contains("_test.") || fl.contains("spec.") || fl.ends_with("tests.swift")
+            { "test" } else if fl.contains("/reference") || fl.contains("/doc")
+                || fl.contains("readme") || fl.ends_with(".md")
+            { "reference" } else { "impl" };
+            let conflict_risk = dirty_files.contains(file.as_str());
+            json!({
+                "file": file,
+                "layer": layer,
+                "score": score,
+                "last_touched_days": days,
+                "hot": hot,
+                "file_role": file_role,
+                "conflict_risk": conflict_risk,
+            })
+        })
         .collect();
 
     // ---- Affected tests via BFS from the top entry point ----------------
@@ -287,10 +315,21 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
                 visited.insert(cid.clone());
                 if let Some(s) = id_map.get(&cid) {
                     if symbol_tier(&s.file) == 2 && seen_test_names.insert(s.qname.clone()) {
+                        let test_tokens: Vec<&str> = s.qname.split(|c: char| !c.is_alphabetic())
+                            .filter(|t| t.len() > 2)
+                            .collect();
+                        let covers: Vec<&str> = design_invariants.iter()
+                            .filter_map(|inv| inv.get("summary").and_then(Value::as_str))
+                            .filter(|summary| {
+                                let sl = summary.to_lowercase();
+                                test_tokens.iter().any(|t| sl.contains(&t.to_lowercase()[..]))
+                            })
+                            .collect();
                         affected_tests.push(json!({
                             "qname": s.qname,
                             "file": s.file,
                             "line": s.start.line,
+                            "covers_invariants": covers,
                         }));
                     }
                     if depth + 1 < args.test_depth {
@@ -372,6 +411,45 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         .collect();
     let possible_misses = detect_possible_misses(&args.description, &layers_present, file_scores.len());
 
+    // T1: safe-change recipe — actionable sections for an agent or developer.
+    // T4: manually_validate includes concrete ValidationScenario entries.
+    let recipe_inspect: Vec<Value> = file_scores.iter()
+        .map(|(score, file, layer, days, hot)| json!({
+            "file": file, "layer": layer, "score": score,
+            "last_touched_days": days, "hot": hot,
+        }))
+        .collect();
+    let recipe_preserve: Vec<Value> = design_invariants.iter()
+        .map(|inv| json!({ "constraint": inv["summary"], "source": inv["source"], "kind": "invariant" }))
+        .chain(known_hazards.iter().map(|h| json!({ "constraint": h["summary"], "source": h["source"], "kind": "hazard" })))
+        .collect();
+    // edit: impl files first (most likely to change), then other roles
+    let recipe_edit: Vec<Value> = likely_edit_files.iter()
+        .filter(|f| f["file_role"].as_str() == Some("impl"))
+        .cloned()
+        .chain(likely_edit_files.iter().filter(|f| f["file_role"].as_str() != Some("impl")).cloned())
+        .collect();
+    let recipe_run: Vec<Value> = affected_tests.iter()
+        .map(|t| json!({ "qname": t["qname"], "file": t["file"], "covers_invariants": t["covers_invariants"] }))
+        .collect();
+    // manually_validate: concrete ValidationScenario entries (T4) + constraint-word invariants + effects
+    let mut recipe_manually_validate: Vec<Value> = validation_scenarios_ledger.clone();
+    for s in &scenario_tests {
+        recipe_manually_validate.push(json!({ "scenario": s, "source": "invariant", "kind": "constraint_check" }));
+    }
+    for eff in &effects_summary {
+        let desc = format!("verify {} side-effect still correct after change",
+            eff["category"].as_str().unwrap_or("").to_lowercase());
+        recipe_manually_validate.push(json!({ "scenario": desc, "source": eff["source"], "kind": "effect_check" }));
+    }
+    let safe_change_recipe = json!({
+        "inspect": recipe_inspect,
+        "preserve": recipe_preserve,
+        "edit": recipe_edit,
+        "run": recipe_run,
+        "manually_validate": recipe_manually_validate,
+    });
+
     let focus = intent_focus(intent);
     let out = json!({
         "description": args.description,
@@ -379,8 +457,10 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         "focus": if focus.is_empty() { Value::Null } else { json!(focus) },
         "ambiguous_terms": ambiguous_terms,
         "possible_misses": possible_misses,
+        "safe_change_recipe": safe_change_recipe,
         "design_invariants": design_invariants,
         "known_hazards": known_hazards,
+        "validation_scenarios": validation_scenarios_ledger,
         "entry_points": { "by_layer": ordered_by_layer },
         "likely_edit_files": likely_edit_files,
         "affected_tests": affected_tests,

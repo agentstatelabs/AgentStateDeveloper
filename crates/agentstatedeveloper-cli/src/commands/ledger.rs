@@ -213,6 +213,12 @@ pub enum CliLedgerKind {
     Ownership,
     /// Proof that an invariant holds (test, review, trace).
     Proof,
+    /// Concrete scenario to validate (behaviour + expected outcome).
+    #[value(name = "validation_scenario")]
+    ValidationScenario,
+    /// Known bug or defect not yet fixed.
+    #[value(name = "known_bug")]
+    KnownBug,
 }
 
 impl From<CliLedgerKind> for LedgerKind {
@@ -227,6 +233,8 @@ impl From<CliLedgerKind> for LedgerKind {
             CliLedgerKind::Invariant => LedgerKind::Invariant,
             CliLedgerKind::Ownership => LedgerKind::Ownership,
             CliLedgerKind::Proof => LedgerKind::Proof,
+            CliLedgerKind::ValidationScenario => LedgerKind::ValidationScenario,
+            CliLedgerKind::KnownBug => LedgerKind::KnownBug,
         }
     }
 }

@@ -24,8 +24,8 @@ use agentstatedeveloper_core::{
     ScratchStatus, ScratchStore, SearchFtsDb, Situation, actions, classify_layer_sym,
     confidence_scores, derive_cold_hints, detect_ambiguous_tokens, detect_possible_misses,
     emit_audit, event_types, explain_match, extract_summary, find_candidates, gather_recency,
-    hybrid_boost, intent_focus, intent_layer_order, load_layer_overrides, parse_intent, paths,
-    parse_query, propose_test_path, resolve_scope, result_bucket, symbol_tier,
+    git_dirty_files, hybrid_boost, intent_focus, intent_layer_order, load_layer_overrides,
+    parse_intent, paths, parse_query, propose_test_path, resolve_scope, result_bucket, symbol_tier,
 };
 
 /// The AgentStateDeveloper MCP server.
@@ -500,7 +500,7 @@ pub struct ScratchDiscardParams {
 pub struct ScratchPromoteParams {
     /// Scratch entry ID to promote.
     pub scratch_id: String,
-    /// Ledger kind: decision, assumption, constraint, rationale, hazard, tradeoff, invariant, ownership, proof.
+    /// Ledger kind: decision, assumption, constraint, rationale, hazard, tradeoff, invariant, ownership, proof, validation_scenario, known_bug.
     pub kind: String,
     /// Symbol qualified name. Required if the scratch entry has no symbol attached.
     #[serde(default)]
@@ -931,12 +931,18 @@ impl AsdMcpServer {
 
             let mut invariants: Vec<serde_json::Value> = Vec::new();
             let mut hazards: Vec<serde_json::Value> = Vec::new();
+            let mut ownership: Vec<serde_json::Value> = Vec::new();
+            let mut validation_scenarios: Vec<serde_json::Value> = Vec::new();
+            let mut known_bugs: Vec<serde_json::Value> = Vec::new();
             let mut other_ledger: Vec<serde_json::Value> = Vec::new();
             for entry in &ledger {
                 let v = serde_json::to_value(entry).unwrap_or_default();
                 match entry.kind {
                     LedgerKind::Invariant => invariants.push(v),
                     LedgerKind::Hazard => hazards.push(v),
+                    LedgerKind::Ownership => ownership.push(v),
+                    LedgerKind::ValidationScenario => validation_scenarios.push(v),
+                    LedgerKind::KnownBug => known_bugs.push(v),
                     _ => other_ledger.push(v),
                 }
             }
@@ -959,6 +965,9 @@ impl AsdMcpServer {
                 "signature": sym.signature,
                 "invariants": invariants,
                 "hazards": hazards,
+                "known_bugs": known_bugs,
+                "ownership": ownership,
+                "validation_scenarios": validation_scenarios,
                 "callers": resolve_ids(caller_ids),
                 "callees": resolve_ids(callee_ids),
                 "effects": effects,
@@ -2520,12 +2529,15 @@ impl AsdMcpServer {
         let mut by_layer: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
         let mut design_invariants: Vec<serde_json::Value> = Vec::new();
         let mut known_hazards: Vec<serde_json::Value> = Vec::new();
+        let mut validation_scenarios_ledger: Vec<serde_json::Value> = Vec::new();
         let mut effects_summary: Vec<serde_json::Value> = Vec::new();
         let mut file_scores: Vec<(f64, String, String, Option<f64>, bool)> = Vec::new();
         let mut seen_files: HashSet<String> = HashSet::new();
         let mut seen_inv: HashSet<String> = HashSet::new();
+        let mut seen_vs: HashSet<String> = HashSet::new();
         let mut seen_effect: HashSet<String> = HashSet::new();
         let mut top_sym_id: Option<String> = None;
+        let effect_score_floor = candidates.first().map(|(s, _)| s * 0.25).unwrap_or(0.0);
 
         for (score, qname) in &candidates {
             let sym = match index.get_symbol_by_qname(&ref_name, qname) { Ok(Some(s)) => s, _ => continue };
@@ -2550,15 +2562,22 @@ impl AsdMcpServer {
                     LedgerKind::Hazard => {
                         known_hazards.push(serde_json::json!({ "summary": entry.summary, "source": sym.qname }));
                     }
+                    LedgerKind::ValidationScenario => {
+                        if seen_vs.insert(entry.summary.clone()) {
+                            validation_scenarios_ledger.push(serde_json::json!({ "scenario": entry.summary, "source": sym.qname }));
+                        }
+                    }
                     _ => {}
                 }
             }
-            if let Ok(Some(decl)) = effect_store.get_effects(&ref_name, &sym.symbol_id) {
-                for eff in &decl.declared {
-                    let cat = format!("{:?}", eff.effect);
-                    let key = format!("{}:{}", cat, sym.qname);
-                    if seen_effect.insert(key) {
-                        effects_summary.push(serde_json::json!({ "category": cat, "source": sym.qname }));
+            if *score >= effect_score_floor {
+                if let Ok(Some(decl)) = effect_store.get_effects(&ref_name, &sym.symbol_id) {
+                    for eff in &decl.declared {
+                        let cat = format!("{:?}", eff.effect);
+                        let key = format!("{}:{}", cat, sym.qname);
+                        if seen_effect.insert(key) {
+                            effects_summary.push(serde_json::json!({ "category": cat, "source": sym.qname }));
+                        }
                     }
                 }
             }
@@ -2579,8 +2598,19 @@ impl AsdMcpServer {
         }
 
         file_scores.sort_by(|a, b| b.4.cmp(&a.4).then_with(|| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)));
+        let dirty_files_pc = git_dirty_files();
         let likely_edit_files: Vec<serde_json::Value> = file_scores.iter().map(|(score, file, layer, days, hot)| {
-            serde_json::json!({ "file": file, "layer": layer, "score": score, "last_touched_days": days, "hot": hot })
+            let fl = file.to_lowercase();
+            let file_role = if fl.contains("/example") || fl.contains("/sample") || fl.contains("/demo") { "example" }
+                else if fl.contains("/test") || fl.contains("/spec") || fl.contains("_test.") || fl.contains("spec.") { "test" }
+                else if fl.contains("/reference") || fl.contains("/doc") || fl.ends_with(".md") { "reference" }
+                else { "impl" };
+            let conflict_risk = dirty_files_pc.contains(file.as_str());
+            serde_json::json!({
+                "file": file, "layer": layer, "score": score,
+                "last_touched_days": days, "hot": hot,
+                "file_role": file_role, "conflict_risk": conflict_risk,
+            })
         }).collect();
 
         // Affected tests via BFS from top entry point.
@@ -2599,7 +2629,19 @@ impl AsdMcpServer {
                     visited.insert(cid.clone());
                     if let Some(s) = id_map.get(&cid) {
                         if symbol_tier(&s.file) == 2 && seen_tnames.insert(s.qname.clone()) {
-                            affected_tests.push(serde_json::json!({ "qname": s.qname, "file": s.file, "line": s.start.line }));
+                            let test_tokens: Vec<&str> = s.qname.split(|c: char| !c.is_alphabetic())
+                                .filter(|t: &&str| t.len() > 2).collect();
+                            let covers: Vec<&str> = design_invariants.iter()
+                                .filter_map(|inv| inv.get("summary").and_then(serde_json::Value::as_str))
+                                .filter(|sum| {
+                                    let sl = sum.to_lowercase();
+                                    test_tokens.iter().any(|t| sl.contains(&t.to_lowercase()[..]))
+                                })
+                                .collect();
+                            affected_tests.push(serde_json::json!({
+                                "qname": s.qname, "file": s.file, "line": s.start.line,
+                                "covers_invariants": covers,
+                            }));
                         }
                         if depth + 1 < test_depth { queue.push_back((cid, depth + 1)); }
                     }
@@ -2650,6 +2692,41 @@ impl AsdMcpServer {
             })
             .collect();
 
+        // T1: safe-change recipe.  T4: manually_validate includes ValidationScenario entries.
+        let recipe_inspect: Vec<serde_json::Value> = file_scores.iter()
+            .map(|(score, file, layer, days, hot)| serde_json::json!({
+                "file": file, "layer": layer, "score": score, "last_touched_days": days, "hot": hot,
+            }))
+            .collect();
+        let recipe_preserve: Vec<serde_json::Value> = design_invariants.iter()
+            .map(|inv| serde_json::json!({ "constraint": inv["summary"], "source": inv["source"], "kind": "invariant" }))
+            .chain(known_hazards.iter().map(|h| serde_json::json!({ "constraint": h["summary"], "source": h["source"], "kind": "hazard" })))
+            .collect();
+        let recipe_edit: Vec<serde_json::Value> = likely_edit_files.iter()
+            .filter(|f| f["file_role"].as_str() == Some("impl"))
+            .cloned()
+            .chain(likely_edit_files.iter().filter(|f| f["file_role"].as_str() != Some("impl")).cloned())
+            .collect();
+        let recipe_run: Vec<serde_json::Value> = affected_tests.iter()
+            .map(|t| serde_json::json!({ "qname": t["qname"], "file": t["file"], "covers_invariants": t["covers_invariants"] }))
+            .collect();
+        let mut recipe_manually_validate: Vec<serde_json::Value> = validation_scenarios_ledger.clone();
+        for s in &scenario_tests {
+            recipe_manually_validate.push(serde_json::json!({ "scenario": s, "source": "invariant", "kind": "constraint_check" }));
+        }
+        for eff in &effects_summary {
+            let desc = format!("verify {} side-effect still correct after change",
+                eff["category"].as_str().unwrap_or("").to_lowercase());
+            recipe_manually_validate.push(serde_json::json!({ "scenario": desc, "source": eff["source"], "kind": "effect_check" }));
+        }
+        let safe_change_recipe = serde_json::json!({
+            "inspect": recipe_inspect,
+            "preserve": recipe_preserve,
+            "edit": recipe_edit,
+            "run": recipe_run,
+            "manually_validate": recipe_manually_validate,
+        });
+
         let focus = intent_focus(intent);
         let layers_present_pc: std::collections::HashSet<&str> = file_scores.iter()
             .map(|(_, _, layer, _, _)| layer.as_str())
@@ -2662,8 +2739,10 @@ impl AsdMcpServer {
             "focus": if focus.is_empty() { serde_json::Value::Null } else { serde_json::json!(focus) },
             "ambiguous_terms": ambiguous_terms,
             "possible_misses": possible_misses,
+            "safe_change_recipe": safe_change_recipe,
             "design_invariants": design_invariants,
             "known_hazards": known_hazards,
+            "validation_scenarios": validation_scenarios_ledger,
             "entry_points": { "by_layer": ordered },
             "likely_edit_files": likely_edit_files,
             "affected_tests": affected_tests,
@@ -2776,10 +2855,19 @@ impl AsdMcpServer {
                             }));
                         }
                     }
-                    LedgerKind::Hazard => {
+                    LedgerKind::Hazard | LedgerKind::KnownBug => {
                         hazards.push(serde_json::json!({
-                            "summary": entry.summary, "source": sym.qname, "body": entry.body,
+                            "summary": entry.summary, "source": sym.qname,
+                            "kind": entry.kind.as_str(), "body": entry.body,
                         }));
+                    }
+                    LedgerKind::ValidationScenario => {
+                        if seen_inv.insert(entry.summary.clone()) {
+                            invariants.push(serde_json::json!({
+                                "summary": entry.summary, "source": sym.qname,
+                                "kind": "validation_scenario", "body": entry.body,
+                            }));
+                        }
                     }
                     _ => {}
                 }
@@ -3412,8 +3500,12 @@ fn parse_ledger_kind(s: &str) -> Result<LedgerKind, String> {
         "hazard" => Ok(LedgerKind::Hazard),
         "tradeoff" => Ok(LedgerKind::Tradeoff),
         "invariant" => Ok(LedgerKind::Invariant),
+        "ownership" => Ok(LedgerKind::Ownership),
+        "proof" => Ok(LedgerKind::Proof),
+        "validation_scenario" | "validationscenario" => Ok(LedgerKind::ValidationScenario),
+        "known_bug" | "knownbug" => Ok(LedgerKind::KnownBug),
         other => Err(format!(
-            "unknown ledger kind: {}. Valid: decision, assumption, constraint, rationale, hazard, tradeoff, invariant",
+            "unknown ledger kind: {}. Valid: decision, assumption, constraint, rationale, hazard, tradeoff, invariant, ownership, proof, validation_scenario, known_bug",
             other
         )),
     }

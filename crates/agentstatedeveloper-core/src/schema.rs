@@ -79,6 +79,10 @@ pub enum LedgerKind {
     Ownership,
     /// Evidence that an invariant holds (test, review, trace, etc.).
     Proof,
+    /// A concrete scenario that should be validated (behaviour + expected outcome).
+    ValidationScenario,
+    /// A known bug or defect that has not been fixed yet.
+    KnownBug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -307,6 +311,8 @@ impl LedgerKind {
             LedgerKind::Invariant => "invariant",
             LedgerKind::Ownership => "ownership",
             LedgerKind::Proof => "proof",
+            LedgerKind::ValidationScenario => "validation_scenario",
+            LedgerKind::KnownBug => "known_bug",
         }
     }
 }

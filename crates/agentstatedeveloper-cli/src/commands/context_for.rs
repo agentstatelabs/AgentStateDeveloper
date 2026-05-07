@@ -129,6 +129,8 @@ pub(crate) fn assemble_symbol_context(
     let mut hazards: Vec<Value> = Vec::new();
     let mut ownership: Vec<Value> = Vec::new();
     let mut proofs: Vec<Value> = Vec::new();
+    let mut validation_scenarios: Vec<Value> = Vec::new();
+    let mut known_bugs: Vec<Value> = Vec::new();
     let mut other_ledger: Vec<Value> = Vec::new();
 
     for entry in &ledger {
@@ -138,6 +140,8 @@ pub(crate) fn assemble_symbol_context(
             agentstatedeveloper_core::LedgerKind::Hazard => hazards.push(v),
             agentstatedeveloper_core::LedgerKind::Ownership => ownership.push(v),
             agentstatedeveloper_core::LedgerKind::Proof => proofs.push(v),
+            agentstatedeveloper_core::LedgerKind::ValidationScenario => validation_scenarios.push(v),
+            agentstatedeveloper_core::LedgerKind::KnownBug => known_bugs.push(v),
             _ => other_ledger.push(v),
         }
     }
@@ -157,10 +161,12 @@ pub(crate) fn assemble_symbol_context(
         "symbol": sym_val,
         "invariants": invariants,
         "hazards": hazards,
+        "known_bugs": known_bugs,
+        "ownership": ownership,
+        "validation_scenarios": validation_scenarios,
         "callers": resolve(&caller_ids),
         "callees": resolve(&callee_ids),
         "effects": effects,
-        "ownership": ownership,
         "proofs": proofs,
         "decisions_and_notes": other_ledger,
     }))
