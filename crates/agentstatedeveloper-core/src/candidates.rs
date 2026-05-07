@@ -219,17 +219,22 @@ pub fn find_candidates(
             .collect();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        // File-stem injection: only protect files already in the top `depth`
-        // slots — files ranked depth+1..depth*8 in FTS are still eligible for
-        // re-injection so a strong stem boost can displace a weak FTS match.
+        // File-stem injection: a file is "covered" only when the claiming
+        // symbol in the top-`depth` results itself has ledger entries.  If a
+        // non-ledger symbol holds the slot, the file stays open so a
+        // ledger-bearing sibling can be injected via stem.  Files ranked
+        // depth+1..depth*8 are always eligible for re-injection.
         let covered_files: HashSet<String> = scored
             .iter()
             .take(depth)
             .filter_map(|(_, qname)| {
-                index_store.get_symbol_by_qname(&engine.ref_name, qname)
-                    .ok()
-                    .flatten()
-                    .map(|s| s.file)
+                let sym = index_store.get_symbol_by_qname(&engine.ref_name, qname)
+                    .ok().flatten()?;
+                let has_ledger = !ledger_store
+                    .list_entries(&engine.ref_name, &sym.symbol_id)
+                    .unwrap_or_default()
+                    .is_empty();
+                if has_ledger { Some(sym.file) } else { None }
             })
             .collect();
 
