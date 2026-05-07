@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore, LedgerStore,
-    SearchFtsDb, classify_layer, estimate_tokens, extract_summary, gather_recency, hybrid_boost,
+    SearchFtsDb, classify_layer_sym, estimate_tokens, extract_summary, gather_recency, hybrid_boost,
     intent_focus, intent_layer_order, load_layer_overrides, parse_intent, stale_warning,
     symbol_tier, trim_for_agent,
 };
@@ -133,7 +133,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             _ => continue,
         };
         let tier = symbol_tier(&sym.file);
-        let layer = classify_layer(&sym.file, tier, &layer_overrides);
+        let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
         let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
         let rec = recency.get(&sym.file);
         let last_touched_days = rec.and_then(|r| r.last_touched_days);

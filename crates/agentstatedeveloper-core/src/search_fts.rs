@@ -885,14 +885,16 @@ pub fn classify_layer(file: &str, tier: SymbolTier, overrides: &[(String, String
         return "persistence";
     }
 
-    // --- ViewModel / Presenter ---
+    // --- ViewModel / Presenter / Controller ---
     const VM_DIRS: &[&str] = &[
         "viewmodels", "viewmodel", "presenters", "presenter",
         "coordinators", "coordinator", "interactors", "interactor",
+        "controllers", "controller", "states", "state", "routers", "router",
     ];
     const VM_SUFFIXES: &[&str] = &[
         "viewmodel", "viewstate", "presenter", "coordinator",
-        "interactor", "statemanager",
+        "interactor", "statemanager", "controller", "observable",
+        "environment", "router",
     ];
     if dirs.iter().any(|d| VM_DIRS.contains(d))
         || VM_SUFFIXES.iter().any(|s| stem.ends_with(s))
@@ -933,6 +935,60 @@ pub fn classify_layer(file: &str, tier: SymbolTier, overrides: &[(String, String
         return "core_model";
     }
 
+    "other"
+}
+
+/// Like [`classify_layer`] but uses the symbol's qualified name as a secondary
+/// hint when the file path alone yields `"other"`. Catches common cases where a
+/// class named `FooViewModel` lives in a file named after the app rather than
+/// the ViewModel.
+pub fn classify_layer_sym(
+    file: &str,
+    qname: &str,
+    tier: SymbolTier,
+    overrides: &[(String, String)],
+) -> &'static str {
+    let layer = classify_layer(file, tier, overrides);
+    if layer != "other" {
+        return layer;
+    }
+    // Secondary: check the last component of the qname (after `.`, `::`, or `/`).
+    let name = qname
+        .rsplit(|c| c == '.' || c == ':' || c == '/')
+        .next()
+        .unwrap_or(qname);
+    let n = name.to_lowercase();
+    if n.ends_with("viewmodel") || n.ends_with("controller") || n.ends_with("presenter")
+        || n.ends_with("coordinator") || n.ends_with("interactor") || n.ends_with("viewstate")
+        || n.ends_with("statemanager") || n.ends_with("router")
+    {
+        return "viewmodel";
+    }
+    if n.ends_with("view") || n.ends_with("screen") || n.ends_with("page")
+        || n.ends_with("cell") || n.ends_with("widget") || n.ends_with("button")
+        || n.ends_with("label") || n.ends_with("panel") || n.ends_with("viewcontroller")
+        || n.ends_with("sheet") || n.ends_with("overlay") || n.ends_with("header")
+    {
+        return "ui";
+    }
+    if n.ends_with("scheduler") || n.ends_with("engine") || n.ends_with("compiler")
+        || n.ends_with("processor") || n.ends_with("renderer") || n.ends_with("clock")
+        || n.ends_with("timer") || n.ends_with("pipeline") || n.ends_with("worker")
+        || n.ends_with("synthesizer") || n.ends_with("transport")
+    {
+        return "scheduler";
+    }
+    if n.ends_with("repository") || n.ends_with("store") || n.ends_with("cache")
+        || n.ends_with("dao") || n.ends_with("database") || n.ends_with("datasource")
+    {
+        return "persistence";
+    }
+    if n.ends_with("model") || n.ends_with("entity") || n.ends_with("service")
+        || n.ends_with("manager") || n.ends_with("handler") || n.ends_with("factory")
+        || n.ends_with("validator") || n.ends_with("usecase") || n.ends_with("builder")
+    {
+        return "core_model";
+    }
     "other"
 }
 
@@ -1367,6 +1423,20 @@ mod tests {
         assert_eq!(classify_layer("App/Previews/DriftView_Previews.swift", 1, &[]), "utility");
         assert_eq!(classify_layer("Tests/DriftTests.swift", 2, &[]), "tests");
         assert_eq!(classify_layer("App/AppDelegate.swift", 0, &[]), "other");
+    }
+
+    #[test]
+    fn layer_classification_qname_fallback() {
+        // File named after app, but qname carries the ViewModel suffix.
+        assert_eq!(classify_layer_sym("App/ExampleFlow.swift", "ExampleFlowViewModel", 0, &[]), "viewmodel");
+        assert_eq!(classify_layer_sym("App/ExampleFlow.swift", "ExampleFlowController", 0, &[]), "viewmodel");
+        assert_eq!(classify_layer_sym("App/ExampleFlow.swift", "DriftCompiler", 0, &[]), "scheduler");
+        assert_eq!(classify_layer_sym("App/ExampleFlow.swift", "ClipStore", 0, &[]), "persistence");
+        assert_eq!(classify_layer_sym("App/ExampleFlow.swift", "DriftEngine", 0, &[]), "scheduler");
+        // File-based classification still wins when it fires.
+        assert_eq!(classify_layer_sym("App/Views/DriftView.swift", "DriftViewModel", 0, &[]), "ui");
+        // Truly unclassifiable stays other.
+        assert_eq!(classify_layer_sym("App/AppDelegate.swift", "AppDelegate", 0, &[]), "other");
     }
 
     #[test]

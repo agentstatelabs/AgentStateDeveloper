@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, FtsFilters, IndexStore,
-    LedgerKind, LedgerStore, classify_layer, estimate_tokens, intent_focus, load_layer_overrides,
+    LedgerKind, LedgerStore, classify_layer_sym, estimate_tokens, intent_focus, load_layer_overrides,
     parse_intent, stale_warning, symbol_tier, trim_for_agent,
 };
 
@@ -133,7 +133,7 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
             _ => continue,
         };
         let tier = symbol_tier(&sym.file);
-        let layer = classify_layer(&sym.file, tier, &layer_overrides);
+        let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
 
         // Files to inspect.
         if seen_files.insert(sym.file.clone()) {

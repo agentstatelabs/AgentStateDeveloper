@@ -9,7 +9,7 @@ use clap::Args;
 
 use agentstatedeveloper_core::{
     AGENT_DEFAULT_BUDGET, AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore,
-    LedgerStore, SearchFtsDb, SymbolKind, classify_layer, estimate_tokens, extract_summary,
+    LedgerStore, SearchFtsDb, SymbolKind, classify_layer_sym, estimate_tokens, extract_summary,
     gather_recency, hybrid_boost, intent_focus, is_stopword, load_layer_overrides, parse_intent,
     stale_warning, symbol_tier, trim_for_agent,
 };
@@ -129,7 +129,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             let results: Vec<serde_json::Value> = scored.iter().map(|(score, hit)| {
                 let rec = recency.get(&hit.file);
                 let tier = symbol_tier(&hit.file);
-                let layer = classify_layer(&hit.file, tier, &layer_overrides);
+                let layer = classify_layer_sym(&hit.file, &hit.qname, tier, &layer_overrides);
                 serde_json::json!({
                     "score": score, "qname": hit.qname, "kind": hit.kind,
                     "file": hit.file, "line": hit.line, "layer": layer,

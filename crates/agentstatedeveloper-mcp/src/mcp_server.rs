@@ -20,7 +20,7 @@ use agentstatedeveloper_core::{
     ASD_PATH_PREFIX, AsgEffectStore, AsgIndexStore, AsgLedgerStore, AsgScratchStore, AuditEvent,
     Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory, EffectDecl, EffectStore,
     Engine, FtsFilters, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Rebind, ScratchEntry,
-    ScratchFilter, ScratchStatus, ScratchStore, SearchFtsDb, Situation, actions, classify_layer,
+    ScratchFilter, ScratchStatus, ScratchStore, SearchFtsDb, Situation, actions, classify_layer_sym,
     emit_audit, event_types, extract_summary, gather_recency, hybrid_boost, intent_focus,
     intent_layer_order, is_stopword, load_layer_overrides, parse_intent, paths, symbol_tier,
 };
@@ -635,7 +635,7 @@ impl AsdMcpServer {
             let recency = gather_recency(200, 14.0);
             let results: Vec<serde_json::Value> = scored.iter().map(|(score, hit)| {
                 let tier = hit.tier;
-                let layer = classify_layer(&hit.file, tier, &layer_overrides);
+                let layer = classify_layer_sym(&hit.file, &hit.qname, tier, &layer_overrides);
                 let summary = extract_summary(hit.doc.as_deref(), hit.signature.as_deref());
                 let rec = recency.get(&hit.file);
                 serde_json::json!({
@@ -698,7 +698,7 @@ impl AsdMcpServer {
         let recency = gather_recency(200, 14.0);
         let results: Vec<serde_json::Value> = scored.iter().map(|(score, sym)| {
             let tier = symbol_tier(&sym.file);
-            let layer = classify_layer(&sym.file, tier, &layer_overrides);
+            let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
             let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
             let rec = recency.get(&sym.file);
             serde_json::json!({
@@ -865,7 +865,7 @@ impl AsdMcpServer {
             }
 
             let tier = symbol_tier(&sym.file);
-            let layer = classify_layer(&sym.file, tier, &layer_overrides);
+            let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
             let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
             let rec = recency.get(&sym.file);
             entry_points.push(serde_json::json!({
@@ -2469,7 +2469,7 @@ impl AsdMcpServer {
         for (score, qname) in &candidates {
             let sym = match index.get_symbol_by_qname(&ref_name, qname) { Ok(Some(s)) => s, _ => continue };
             let tier = symbol_tier(&sym.file);
-            let layer = classify_layer(&sym.file, tier, &layer_overrides);
+            let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
             let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
             let rec = recency.get(&sym.file);
             let ltd = rec.and_then(|r| r.last_touched_days);
@@ -2674,7 +2674,7 @@ impl AsdMcpServer {
         for (_score, qname) in &candidates {
             let sym = match index.get_symbol_by_qname(&ref_name, qname) { Ok(Some(s)) => s, _ => continue };
             let tier = symbol_tier(&sym.file);
-            let layer = classify_layer(&sym.file, tier, &layer_overrides);
+            let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
 
             if seen_files.insert(sym.file.clone()) {
                 files_to_inspect.push(serde_json::json!({
@@ -2766,7 +2766,7 @@ impl AsdMcpServer {
         };
 
         let tier = symbol_tier(&symbol.file);
-        let layer = classify_layer(&symbol.file, tier, &layer_overrides);
+        let layer = classify_layer_sym(&symbol.file, &symbol.qname, tier, &layer_overrides);
 
         // Build id_map for call graph resolution.
         let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
@@ -2801,7 +2801,7 @@ impl AsdMcpServer {
                 visited.insert(nbr_id.clone());
                 if let Some(s) = id_map.get(&nbr_id) {
                     let t = symbol_tier(&s.file);
-                    let l = classify_layer(&s.file, t, &layer_overrides);
+                    let l = classify_layer_sym(&s.file, &s.qname, t, &layer_overrides);
                     let row = serde_json::json!({
                         "qname": s.qname,
                         "file": s.file,
@@ -2943,7 +2943,7 @@ impl AsdMcpServer {
         for sid in &seed_ids {
             if let Some(s) = id_map.get(sid) {
                 let tier = symbol_tier(&s.file);
-                let layer = classify_layer(&s.file, tier, &layer_overrides);
+                let layer = classify_layer_sym(&s.file, &s.qname, tier, &layer_overrides);
                 by_layer.entry(layer.to_string()).or_default().push(serde_json::json!({
                     "qname": s.qname, "file": s.file, "line": s.start.line, "layer": layer,
                 }));
@@ -2967,7 +2967,7 @@ impl AsdMcpServer {
                 visited.insert(nbr_id.clone());
                 if let Some(s) = id_map.get(&nbr_id) {
                     let t = symbol_tier(&s.file);
-                    let l = classify_layer(&s.file, t, &layer_overrides);
+                    let l = classify_layer_sym(&s.file, &s.qname, t, &layer_overrides);
                     let row = serde_json::json!({
                         "qname": s.qname, "file": s.file, "line": s.start.line,
                         "depth": depth + 1, "layer": l,

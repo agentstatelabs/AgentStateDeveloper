@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, IndexStore, LedgerKind,
-    LedgerStore, classify_layer, estimate_tokens, intent_focus, load_layer_overrides, parse_intent,
+    LedgerStore, classify_layer_sym, estimate_tokens, intent_focus, load_layer_overrides, parse_intent,
     stale_warning, symbol_tier, trim_for_agent,
 };
 
@@ -95,7 +95,7 @@ pub fn run(cfg: &Config, args: SinceArgs) -> Result<()> {
     let mut by_layer: HashMap<String, Vec<Value>> = HashMap::new();
     for sym in &seed_symbols {
         let tier = symbol_tier(&sym.file);
-        let layer = classify_layer(&sym.file, tier, &layer_overrides);
+        let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
         let entry = json!({
             "qname": sym.qname,
             "file": sym.file,
@@ -127,7 +127,7 @@ pub fn run(cfg: &Config, args: SinceArgs) -> Result<()> {
             visited.insert(nbr_id.clone());
             if let Some(s) = id_map.get(&nbr_id) {
                 let tier = symbol_tier(&s.file);
-                let layer = classify_layer(&s.file, tier, &layer_overrides);
+                let layer = classify_layer_sym(&s.file, &s.qname, tier, &layer_overrides);
                 let row = json!({
                     "qname": s.qname,
                     "file": s.file,

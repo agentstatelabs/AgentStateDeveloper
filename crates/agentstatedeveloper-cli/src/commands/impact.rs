@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, IndexStore, LedgerKind,
-    LedgerStore, classify_layer, estimate_tokens, intent_focus, load_layer_overrides, parse_intent,
+    LedgerStore, classify_layer_sym, estimate_tokens, intent_focus, load_layer_overrides, parse_intent,
     stale_warning, symbol_tier, trim_for_agent,
 };
 
@@ -70,7 +70,7 @@ pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("symbol not found: {}", args.qname))?;
 
     let tier = symbol_tier(&symbol.file);
-    let layer = classify_layer(&symbol.file, tier, &layer_overrides);
+    let layer = classify_layer_sym(&symbol.file, &symbol.qname, tier, &layer_overrides);
 
     // --- Transitive callers (BFS) -----------------------------------------
     let mut visited: HashSet<String> = HashSet::new();
@@ -98,7 +98,7 @@ pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
             visited.insert(nbr_id.clone());
             if let Some(s) = id_map.get(&nbr_id) {
                 let t = symbol_tier(&s.file);
-                let l = classify_layer(&s.file, t, &layer_overrides);
+                let l = classify_layer_sym(&s.file, &s.qname, t, &layer_overrides);
                 let row = json!({
                     "qname": s.qname,
                     "file": s.file,
