@@ -21,9 +21,9 @@ use agentstatedeveloper_core::{
     Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory, EffectDecl, EffectStore,
     Engine, FtsFilters, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Rebind, ScratchEntry,
     ScratchFilter, ScratchStatus, ScratchStore, SearchFtsDb, Situation, actions, classify_layer_sym,
-    derive_cold_hints, emit_audit, event_types, extract_summary, find_candidates, gather_recency,
-    hybrid_boost, intent_focus, intent_layer_order, load_layer_overrides, parse_intent, paths,
-    parse_query, propose_test_path, resolve_scope, symbol_tier,
+    derive_cold_hints, emit_audit, event_types, explain_match, extract_summary, find_candidates,
+    gather_recency, hybrid_boost, intent_focus, intent_layer_order, load_layer_overrides,
+    parse_intent, paths, parse_query, propose_test_path, resolve_scope, symbol_tier,
 };
 
 /// The AgentStateDeveloper MCP server.
@@ -699,11 +699,20 @@ impl AsdMcpServer {
             scored.truncate(limit);
 
             let recency = gather_recency(200, 14.0);
+            let index_store = AsgIndexStore { repo: &engine.repo };
             let results: Vec<serde_json::Value> = scored.iter().map(|(score, hit)| {
                 let tier = hit.tier;
                 let layer = classify_layer_sym(&hit.file, &hit.qname, tier, &layer_overrides);
                 let summary = extract_summary(hit.doc.as_deref(), hit.signature.as_deref());
                 let rec = recency.get(&hit.file);
+                let entries = ledger_store
+                    .list_entries(&ref_name, &hit.symbol_id)
+                    .unwrap_or_default();
+                let match_reasons = index_store
+                    .get_symbol_by_qname(&ref_name, &hit.qname)
+                    .ok().flatten()
+                    .map(|sym| explain_match(&sym, &tokens, &entries))
+                    .unwrap_or_default();
                 serde_json::json!({
                     "score": score,
                     "qname": hit.qname,
@@ -718,6 +727,7 @@ impl AsdMcpServer {
                     "doc": hit.doc,
                     "last_touched_days": rec.and_then(|r| r.last_touched_days),
                     "hot": rec.map(|r| r.hot).unwrap_or(false),
+                    "match_reasons": match_reasons,
                 })
             }).collect();
             return serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string());

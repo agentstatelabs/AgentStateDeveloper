@@ -41,7 +41,8 @@ pub use schema::{
     Symbol, SymbolKind, TransitiveEffect, Verification, VerificationSource, VerificationStatus,
 };
 pub use scratch::{AsgScratchStore, CleanFilter, ScratchFilter, ScratchStore};
-pub use candidates::{find_candidates, in_memory_score, kind_str, parse_query, query_tokens};
+pub use candidates::{explain_match, find_candidates, glob_match, in_memory_score, kind_str, load_scope_aliases,
+    matches_any_path_glob, parse_query, query_tokens, resolve_scope};
 pub use repair::{IssueSeverity, RepairIssue, RepairReport, drop_orphaned_edge_refs, repair_asg, scan_asg};
 pub use search_fts::{AGENT_DEFAULT_BUDGET, FileRecency, FtsFilters, FtsHit, SearchFtsDb, SymbolTier, classify_layer, classify_layer_sym, derive_cold_hints, estimate_tokens, extract_summary, gather_recency, git_dirty_files, hybrid_boost, intent_focus, intent_layer_order, is_stopword, load_layer_overrides, parse_intent, propose_test_path, symbol_tier, trim_for_agent};
 pub use search_fts::{format_age, stale_warning};

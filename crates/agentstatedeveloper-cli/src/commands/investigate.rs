@@ -10,9 +10,9 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore, LedgerStore,
-    classify_layer_sym, estimate_tokens, extract_summary, find_candidates, gather_recency,
-    git_dirty_files, intent_focus, intent_layer_order, load_layer_overrides, parse_intent,
-    parse_query, stale_warning, symbol_tier, trim_for_agent,
+    classify_layer_sym, estimate_tokens, explain_match, extract_summary, find_candidates,
+    gather_recency, git_dirty_files, intent_focus, intent_layer_order, load_layer_overrides,
+    parse_intent, parse_query, resolve_scope, stale_warning, symbol_tier, trim_for_agent,
 };
 
 use crate::commands::{
@@ -77,6 +77,15 @@ pub struct InvestigateArgs {
     /// syntax in the query, e.g. "drift playhead -sample -waveform".
     #[arg(long)]
     pub exclude: Option<String>,
+
+    /// Comma-separated glob patterns to restrict results to specific paths,
+    /// e.g. --paths "App/**/DriftPad*,Packages/SequencerCore/**".
+    #[arg(long)]
+    pub paths: Option<String>,
+
+    /// Named scope alias from .asd/scopes.toml, e.g. --scope drift-pad.
+    #[arg(long)]
+    pub scope: Option<String>,
 }
 
 pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
@@ -110,11 +119,19 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         return Ok(());
     }
 
+    let mut paths_filter: Vec<String> = Vec::new();
+    if let Some(ref scope) = args.scope {
+        paths_filter.extend(resolve_scope(scope, &cfg.db_path));
+    }
+    if let Some(ref paths) = args.paths {
+        paths_filter.extend(paths.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()));
+    }
     let filters = FtsFilters {
         kind: args.kind.as_deref().map(|k| k.to_lowercase()),
         language: args.language.as_deref().map(|l| l.to_lowercase()),
         include_tests: args.include_tests,
         exclude_terms: exclusions,
+        paths_filter,
     };
 
     // Each entry_point candidate: (combined_score, symbol_id, qname)
@@ -146,6 +163,10 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         let rec = recency.get(&sym.file);
         let last_touched_days = rec.and_then(|r| r.last_touched_days);
         let hot = rec.map(|r| r.hot).unwrap_or(false);
+        let ledger_entries = ledger_store
+            .list_entries(&engine.ref_name, &sym.symbol_id)
+            .unwrap_or_default();
+        let match_reasons = explain_match(&sym, &tokens, &ledger_entries);
         let ctx = assemble_symbol_context(
             &engine,
             &index_store,
@@ -161,6 +182,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             "summary": summary,
             "last_touched_days": last_touched_days,
             "hot": hot,
+            "match_reasons": match_reasons,
         });
         if let (Some(obj), Some(ctx_obj)) = (ep.as_object_mut(), ctx.as_object()) {
             for (k, v) in ctx_obj {

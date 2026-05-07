@@ -9,9 +9,10 @@ use clap::Args;
 
 use agentstatedeveloper_core::{
     AGENT_DEFAULT_BUDGET, AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore,
-    LedgerStore, SearchFtsDb, SymbolKind, classify_layer_sym, estimate_tokens, extract_summary,
-    gather_recency, hybrid_boost, in_memory_score, intent_focus, kind_str, load_layer_overrides,
-    parse_intent, parse_query, stale_warning, symbol_tier, trim_for_agent,
+    LedgerStore, SearchFtsDb, SymbolKind, classify_layer_sym, estimate_tokens, explain_match,
+    extract_summary, gather_recency, hybrid_boost, in_memory_score, intent_focus, kind_str,
+    load_layer_overrides, parse_intent, parse_query, resolve_scope, stale_warning, symbol_tier,
+    trim_for_agent,
 };
 
 use crate::config::Config;
@@ -64,6 +65,16 @@ pub struct SearchArgs {
     /// minus-prefix syntax in the query, e.g. "drift playhead -sample".
     #[arg(long)]
     pub exclude: Option<String>,
+
+    /// Comma-separated glob patterns to restrict results to specific paths,
+    /// e.g. --paths "App/**/DriftPad*,Packages/SequencerCore/**".
+    #[arg(long)]
+    pub paths: Option<String>,
+
+    /// Named scope alias from .asd/scopes.toml, e.g. --scope drift-pad.
+    /// Expanded to the path globs defined in the scopes file.
+    #[arg(long)]
+    pub scope: Option<String>,
 }
 
 pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
@@ -86,11 +97,19 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             inline_exclusions.push(term);
         }
     }
+    let mut paths_filter: Vec<String> = Vec::new();
+    if let Some(ref scope) = args.scope {
+        paths_filter.extend(resolve_scope(scope, &cfg.db_path));
+    }
+    if let Some(ref paths) = args.paths {
+        paths_filter.extend(paths.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()));
+    }
     let filters = FtsFilters {
         kind: args.kind.as_deref().map(|k| k.to_lowercase()),
         language: args.language.as_deref().map(|l| l.to_lowercase()),
         include_tests: args.include_tests,
         exclude_terms: inline_exclusions,
+        paths_filter,
     };
 
     // --- FTS path ---
@@ -138,17 +157,27 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         // One git pass to annotate with recency (hot = changed in last 14 days).
         let recency = gather_recency(200, 14.0);
 
+        let index_store = AsgIndexStore { repo: &engine.repo };
         if args.agent {
             let results: Vec<serde_json::Value> = scored.iter().map(|(score, hit)| {
                 let rec = recency.get(&hit.file);
                 let tier = symbol_tier(&hit.file);
                 let layer = classify_layer_sym(&hit.file, &hit.qname, tier, &layer_overrides);
+                let ledger_entries = ledger_store
+                    .list_entries(&engine.ref_name, &hit.symbol_id)
+                    .unwrap_or_default();
+                let match_reasons = if let Ok(Some(sym)) = index_store.get_symbol_by_qname(&engine.ref_name, &hit.qname) {
+                    explain_match(&sym, &tokens, &ledger_entries)
+                } else {
+                    vec![]
+                };
                 serde_json::json!({
                     "score": score, "qname": hit.qname, "kind": hit.kind,
                     "file": hit.file, "line": hit.line, "layer": layer,
                     "summary": extract_summary(hit.doc.as_deref(), hit.signature.as_deref()),
                     "last_touched_days": rec.and_then(|r| r.last_touched_days),
                     "hot": rec.map(|r| r.hot).unwrap_or(false),
+                    "match_reasons": match_reasons,
                 })
             }).collect();
             let raw = serde_json::json!({

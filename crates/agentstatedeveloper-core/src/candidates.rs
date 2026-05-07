@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::path::PathBuf;
 
 use crate::engine::Engine;
 use crate::index::{AsgIndexStore, IndexStore};
@@ -109,6 +110,138 @@ pub fn in_memory_score(
         if file_lower.contains(token.as_str()) { score += 1; }
     }
     score
+}
+
+// ---------------------------------------------------------------------------
+// Glob path matching
+// ---------------------------------------------------------------------------
+
+/// Match a file path against a glob pattern.
+///
+/// Supports:
+///   `**`  — matches zero or more path segments
+///   `*`   — matches any characters within a single segment (no `/`)
+///   all other characters match literally (case-sensitive)
+pub fn glob_match(pattern: &str, path: &str) -> bool {
+    glob_match_parts(
+        &pattern.split('/').collect::<Vec<_>>(),
+        &path.split('/').collect::<Vec<_>>(),
+    )
+}
+
+fn glob_match_parts(pat: &[&str], path: &[&str]) -> bool {
+    match (pat.first(), path.first()) {
+        (None, None) => true,
+        (None, _) | (_, None) => {
+            // Pattern exhausted with path remaining, or path exhausted but
+            // pattern has non-** remaining — check if remaining pattern is all **
+            pat.is_empty() && path.is_empty()
+                || pat.iter().all(|p| *p == "**") && path.is_empty()
+                || pat.is_empty() && path.is_empty()
+        }
+        (Some(&"**"), _) => {
+            // ** matches zero segments (skip it) or one segment (consume path head)
+            glob_match_parts(&pat[1..], path)
+                || glob_match_parts(pat, &path[1..])
+        }
+        (Some(p), Some(s)) => {
+            segment_match(p, s) && glob_match_parts(&pat[1..], &path[1..])
+        }
+    }
+}
+
+/// Match a single path segment against a pattern segment (supports `*`).
+fn segment_match(pat: &str, seg: &str) -> bool {
+    let parts: Vec<&str> = pat.split('*').collect();
+    if parts.len() == 1 {
+        return pat == seg;
+    }
+    let mut remaining = seg;
+    for (i, part) in parts.iter().enumerate() {
+        if i == 0 {
+            if !remaining.starts_with(part) { return false; }
+            remaining = &remaining[part.len()..];
+        } else if i == parts.len() - 1 {
+            if !remaining.ends_with(part) { return false; }
+        } else {
+            match remaining.find(part) {
+                Some(pos) => remaining = &remaining[pos + part.len()..],
+                None => return false,
+            }
+        }
+    }
+    true
+}
+
+/// Return true if `file` matches any of the given glob patterns.
+pub fn matches_any_path_glob(globs: &[String], file: &str) -> bool {
+    globs.iter().any(|g| glob_match(g.as_str(), file))
+}
+
+// ---------------------------------------------------------------------------
+// Scope alias resolution
+// ---------------------------------------------------------------------------
+
+/// Load named scope aliases from `.asd/scopes.toml` in the current directory.
+///
+/// Format:
+/// ```toml
+/// drift-pad = ["App/**/DriftPad*", "Packages/SequencerCore/**"]
+/// sequencer-core = ["Packages/SequencerCore/**"]
+/// ```
+///
+/// Returns an empty map if the file is absent or unparseable.
+pub fn load_scope_aliases(db_path: &Path) -> HashMap<String, Vec<String>> {
+    let scopes_path = db_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("scopes.toml");
+    let contents = match std::fs::read_to_string(&scopes_path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    let table: toml::Table = match toml::from_str(&contents) {
+        Ok(t) => t,
+        Err(_) => return HashMap::new(),
+    };
+    table.into_iter().filter_map(|(k, v)| {
+        let globs = match v {
+            toml::Value::Array(arr) => arr.into_iter().filter_map(|v| {
+                if let toml::Value::String(s) = v { Some(s) } else { None }
+            }).collect(),
+            toml::Value::String(s) => vec![s],
+            _ => return None,
+        };
+        Some((k, globs))
+    }).collect()
+}
+
+/// Resolve a `--scope` name to path globs.
+/// Falls back to treating the scope name itself as a path glob if not in the map.
+pub fn resolve_scope(scope: &str, db_path: &Path) -> Vec<String> {
+    let aliases = load_scope_aliases(db_path);
+    aliases.get(scope).cloned().unwrap_or_else(|| vec![scope.to_string()])
+}
+
+// ---------------------------------------------------------------------------
+// Path filter
+// ---------------------------------------------------------------------------
+
+/// Retain only candidates whose file matches at least one of the path globs.
+/// No-op when `paths_filter` is empty.
+fn apply_paths_filter(
+    engine: &Engine,
+    index_store: &AsgIndexStore,
+    paths_filter: &[String],
+    scored: &mut Vec<(f64, String)>,
+) {
+    if paths_filter.is_empty() { return; }
+    scored.retain(|(_, qname)| {
+        match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+            Ok(Some(sym)) => matches_any_path_glob(paths_filter, &sym.file),
+            _ => true,
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -348,6 +481,7 @@ pub fn find_candidates(
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(depth);
 
+        apply_paths_filter(engine, index_store, &filters.paths_filter, &mut scored);
         apply_exclusions(engine, index_store, &filters.exclude_terms, &mut scored);
 
         // Ledger-anchor pass: inject invariant/hazard-bearing symbols that
@@ -388,7 +522,45 @@ pub fn find_candidates(
     }
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(depth);
+    apply_paths_filter(engine, index_store, &filters.paths_filter, &mut scored);
     apply_exclusions(engine, index_store, &filters.exclude_terms, &mut scored);
     ledger_anchor_pass(engine, tokens, &mut scored);
     scored
+}
+
+/// Explain why a symbol was returned for a query.
+///
+/// Returns short reason strings like `"name:playhead"`, `"doc:transport"`,
+/// `"ledger:2 invariants"`. Useful as `match_reasons` in agent output so the
+/// caller can understand which signal drove ranking without re-reading scores.
+pub fn explain_match(sym: &Symbol, tokens: &[String], ledger_entries: &[LedgerEntry]) -> Vec<String> {
+    let qname_lower = sym.qname.to_lowercase();
+    let file_lower = sym.file.to_lowercase();
+    let sig_lower = sym.signature.as_deref().unwrap_or("").to_lowercase();
+    let doc_lower = sym.doc.as_deref().unwrap_or("").to_lowercase();
+
+    let mut reasons: Vec<String> = Vec::new();
+    for token in tokens {
+        let t = token.as_str();
+        if qname_lower.contains(t) {
+            reasons.push(format!("name:{}", token));
+        } else if file_lower.contains(t) {
+            reasons.push(format!("file:{}", token));
+        } else if sig_lower.contains(t) {
+            reasons.push(format!("sig:{}", token));
+        } else if doc_lower.contains(t) {
+            reasons.push(format!("doc:{}", token));
+        }
+    }
+
+    let inv_count = ledger_entries.iter().filter(|e| matches!(e.kind, LedgerKind::Invariant)).count();
+    let haz_count = ledger_entries.iter().filter(|e| matches!(e.kind, LedgerKind::Hazard)).count();
+    if inv_count > 0 {
+        reasons.push(format!("ledger:{} invariant{}", inv_count, if inv_count == 1 { "" } else { "s" }));
+    }
+    if haz_count > 0 {
+        reasons.push(format!("ledger:{} hazard{}", haz_count, if haz_count == 1 { "" } else { "s" }));
+    }
+
+    reasons
 }
