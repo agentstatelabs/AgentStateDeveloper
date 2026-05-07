@@ -94,7 +94,8 @@ fn strip_src_prefix(path: &str) -> &str {
 /// which directory `asd index` was invoked from.
 ///
 /// `src/engine.rs`              -> `engine`
-/// `crates/mylib/src/lib.rs`    -> `lib`
+/// `crates/mylib/src/lib.rs`    -> `mylib.lib`   (crate-name disambiguates)
+/// `crates/mylib/src/main.rs`   -> `mylib.main`
 /// `./foo/bar.rs`               -> `foo.bar`  (no src segment, fallback)
 /// `main.rs`                    -> `main`
 /// `lib.rs`                     -> `lib`
@@ -104,8 +105,27 @@ fn module_qname_prefix(file: &str) -> String {
         s = stripped;
     }
     let s = s.strip_suffix(".rs").unwrap_or(s);
-    let s = strip_src_prefix(s);
-    s.replace('\\', "/").replace('/', ".")
+    let after_src = strip_src_prefix(s);
+    // For lib.rs / main.rs, the module name alone is not unique across crates.
+    // Prepend the crate directory name (the segment before `src/`).
+    if after_src == "lib" || after_src == "main" {
+        if let Some(crate_name) = crate_name_from_path(s) {
+            return format!("{}.{}", crate_name.replace('-', "_"), after_src);
+        }
+    }
+    after_src.replace('\\', "/").replace('/', ".")
+}
+
+/// Extract the crate name from a path like `crates/my-crate/src/lib.rs`
+/// by finding the segment immediately before a `src` component.
+fn crate_name_from_path(path: &str) -> Option<&str> {
+    let parts: Vec<&str> = path.split('/').collect();
+    for (i, &part) in parts.iter().enumerate() {
+        if part == "src" && i > 0 {
+            return Some(parts[i - 1]);
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
