@@ -378,15 +378,16 @@ impl SearchFtsDb {
             .unwrap_or_default();
         // One row per distinct file_orig; pick the lowest line number (class/module
         // declaration) as the representative symbol for that file.
+        // Use MIN(line) in SELECT — SQLite picks the other non-aggregated columns
+        // from the same row that has the minimum, so no HAVING clause is needed.
         let sql = format!(
-            "SELECT symbol_id, language, kind, line, doc,
+            "SELECT symbol_id, language, kind, MIN(line) as line, doc,
                     qname_orig, sig_orig, file_orig, tier
              FROM asd_search_fts
              WHERE lower(file_orig) LIKE '%' || lower(?1) || '%'
              {test_clause}
              {kind_clause}
              GROUP BY file_orig
-             HAVING line = MIN(line)
              LIMIT {limit}"
         );
         let token_owned = token.to_lowercase();
