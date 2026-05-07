@@ -624,6 +624,55 @@ pub struct FileRecency {
     pub hot: bool,
 }
 
+/// Return source file paths that are modified (dirty) since the last commit.
+///
+/// Uses `git status --short --untracked-files=no`. Returns an empty set when
+/// git is unavailable or the working tree is clean.
+pub fn git_dirty_files() -> std::collections::HashSet<String> {
+    use std::process::Command as Proc;
+    let out = Proc::new("git")
+        .args(["status", "--short", "--untracked-files=no"])
+        .output();
+    let Ok(o) = out else { return std::collections::HashSet::new(); };
+    if !o.status.success() { return std::collections::HashSet::new(); }
+    const SRC_EXTS: &[&str] = &[
+        ".swift", ".py", ".ts", ".tsx", ".js", ".rs", ".go",
+        ".kt", ".java", ".rb", ".cs", ".m", ".mm", ".cpp", ".c",
+    ];
+    String::from_utf8_lossy(&o.stdout)
+        .lines()
+        // git status --short lines: "XY path" — path starts at index 3
+        .filter(|l| l.len() > 3 && SRC_EXTS.iter().any(|ext| l.ends_with(ext)))
+        .map(|l| l[3..].trim().to_string())
+        .collect()
+}
+
+/// Heuristically propose a parallel test file path for a given source file.
+///
+/// Replaces `Sources/` → `Tests/` (or `src/` → `tests/`) and appends `Tests`
+/// to the filename stem. Falls back to `Tests/<Stem>Tests.<ext>` when no
+/// recognisable source directory is found.
+pub fn propose_test_path(source_file: &str) -> String {
+    let path = std::path::Path::new(source_file);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown");
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("swift");
+    // Try parallel test path by substituting common source dirs.
+    let candidate = source_file
+        .replace("/Sources/", "/Tests/")
+        .replace("/Source/", "/Tests/")
+        .replace("/src/", "/tests/");
+    let parent = if candidate != source_file {
+        std::path::Path::new(&candidate)
+            .parent()
+            .and_then(|p| p.to_str())
+            .unwrap_or("Tests")
+            .to_string()
+    } else {
+        "Tests".to_string()
+    };
+    format!("{parent}/{stem}Tests.{ext}")
+}
+
 /// Run one `git log` pass covering up to `scan_commits` commits and return
 /// a map of relative file path → `FileRecency`.
 ///

@@ -12,8 +12,8 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, IndexStore, LedgerKind,
-    LedgerStore, classify_layer_sym, estimate_tokens, intent_focus, load_layer_overrides, parse_intent,
-    stale_warning, symbol_tier, trim_for_agent,
+    LedgerStore, classify_layer_sym, estimate_tokens, git_dirty_files, intent_focus,
+    load_layer_overrides, parse_intent, propose_test_path, stale_warning, symbol_tier, trim_for_agent,
 };
 
 use crate::commands::graph::build_id_map;
@@ -166,6 +166,22 @@ pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
     // --- Recent git touches -----------------------------------------------
     let recently_touched = git_recent_touches(&touched_files, args.git_depth);
 
+    // --- Staleness warnings -----------------------------------------------
+    let dirty = git_dirty_files();
+    let stale_symbols: Vec<&str> = touched_files
+        .keys()
+        .filter(|f| dirty.contains(*f))
+        .map(String::as_str)
+        .collect();
+
+    // --- Test-gap detection -----------------------------------------------
+    let test_gap = affected_test_rows.is_empty() && tier != 2;
+    let proposed_test_path = if test_gap {
+        Some(propose_test_path(&symbol.file))
+    } else {
+        None
+    };
+
     // --- Symbol summary ---------------------------------------------------
     let mut sym_val = serde_json::to_value(&symbol)?;
     if let Some(obj) = sym_val.as_object_mut() {
@@ -180,6 +196,9 @@ pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
         "focus": if focus.is_empty() { Value::Null } else { Value::String(focus.to_string()) },
         "caller_count": caller_rows.len(),
         "test_count": affected_test_rows.len(),
+        "test_gap": test_gap,
+        "proposed_test_path": proposed_test_path,
+        "stale_symbols": stale_symbols,
         "invariants": all_invariants,
         "hazards": all_hazards,
         "effects": effects_out,

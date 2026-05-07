@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, FtsFilters, IndexStore,
     LedgerKind, LedgerStore, classify_layer_sym, estimate_tokens, extract_summary, gather_recency,
+    git_dirty_files, propose_test_path,
     intent_focus, intent_layer_order, load_layer_overrides, parse_intent, stale_warning,
     symbol_tier, trim_for_agent,
 };
@@ -277,6 +278,20 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         .collect();
     let recently_touched = git_recent_touches_pub(&top_files, args.git_depth);
 
+    // --- Staleness warnings -----------------------------------------------
+    let dirty = git_dirty_files();
+    let stale_symbols: Vec<&str> = file_scores
+        .iter()
+        .filter(|(_, f, _, _, _)| dirty.contains(f.as_str()))
+        .map(|(_, f, _, _, _)| f.as_str())
+        .collect();
+
+    // --- Test-gap detection -----------------------------------------------
+    let test_gap = affected_tests.is_empty();
+    let proposed_test_path = test_gap.then(|| {
+        file_scores.first().map(|(_, f, _, _, _)| propose_test_path(f))
+    }).flatten();
+
     let focus = intent_focus(intent);
     let out = json!({
         "description": args.description,
@@ -287,6 +302,9 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         "entry_points": { "by_layer": ordered_by_layer },
         "likely_edit_files": likely_edit_files,
         "affected_tests": affected_tests,
+        "test_gap": test_gap,
+        "proposed_test_path": proposed_test_path,
+        "stale_symbols": stale_symbols,
         "effects_summary": effects_summary,
         "recently_touched": recently_touched,
     });

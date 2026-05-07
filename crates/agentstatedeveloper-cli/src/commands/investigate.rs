@@ -10,7 +10,8 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore, LedgerStore,
-    SearchFtsDb, classify_layer_sym, estimate_tokens, extract_summary, gather_recency, hybrid_boost,
+    SearchFtsDb, classify_layer_sym, estimate_tokens, extract_summary, gather_recency, git_dirty_files,
+    hybrid_boost,
     intent_focus, intent_layer_order, load_layer_overrides, parse_intent, stale_warning,
     symbol_tier, trim_for_agent,
 };
@@ -217,6 +218,13 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
 
     let focus = intent_focus(intent);
 
+    // --- Staleness warnings -----------------------------------------------
+    let dirty = git_dirty_files();
+    let stale_symbols: Vec<&str> = entry_points.iter()
+        .filter_map(|ep| ep.get("symbol").and_then(|s| s.get("file")).and_then(Value::as_str))
+        .filter(|f| dirty.contains(*f))
+        .collect();
+
     // Default: grouped by_layer output (compact, deduped by layer).
     // --flat restores the legacy flat entry_points array.
     // Invariants/hazards surfaced first so agents see constraints before call graphs.
@@ -226,6 +234,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             "intent": if intent.is_empty() { Value::Null } else { Value::String(intent.to_string()) },
             "focus": if focus.is_empty() { Value::Null } else { Value::String(focus.to_string()) },
             "tokens": tokens,
+            "stale_symbols": stale_symbols,
             "invariants": all_invariants,
             "hazards": all_hazards,
             "entry_points": entry_points,
@@ -236,6 +245,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             "intent": if intent.is_empty() { Value::Null } else { Value::String(intent.to_string()) },
             "focus": if focus.is_empty() { Value::Null } else { Value::String(focus.to_string()) },
             "tokens": tokens,
+            "stale_symbols": stale_symbols,
             "invariants": all_invariants,
             "hazards": all_hazards,
             "by_layer": by_layer,

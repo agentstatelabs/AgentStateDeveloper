@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, IndexStore, LedgerKind,
-    LedgerStore, classify_layer_sym, estimate_tokens, intent_focus, load_layer_overrides, parse_intent,
-    stale_warning, symbol_tier, trim_for_agent,
+    LedgerStore, classify_layer_sym, estimate_tokens, git_dirty_files, intent_focus,
+    load_layer_overrides, parse_intent, propose_test_path, stale_warning, symbol_tier, trim_for_agent,
 };
 
 use crate::commands::{graph::build_id_map, impact::git_recent_touches_pub};
@@ -196,6 +196,19 @@ pub fn run(cfg: &Config, args: SinceArgs) -> Result<()> {
     let top_files: Vec<(String, usize)> = touched_files.iter().take(5).cloned().collect();
     let recently_touched = git_recent_touches_pub(&top_files, args.git_depth);
 
+    // --- Staleness warnings -----------------------------------------------
+    let dirty = git_dirty_files();
+    let stale_symbols: Vec<&str> = changed_files.iter()
+        .filter(|f| dirty.contains(f.as_str()))
+        .map(String::as_str)
+        .collect();
+
+    // --- Test-gap detection -----------------------------------------------
+    let test_gap = affected_test_rows.is_empty();
+    let proposed_test_path = test_gap.then(|| {
+        changed_files.first().map(|f| propose_test_path(f))
+    }).flatten();
+
     let focus = intent_focus(intent);
     let out = json!({
         "sha": args.sha,
@@ -205,6 +218,9 @@ pub fn run(cfg: &Config, args: SinceArgs) -> Result<()> {
         "touched_symbols": by_layer,
         "caller_count": caller_rows.len(),
         "test_count": affected_test_rows.len(),
+        "test_gap": test_gap,
+        "proposed_test_path": proposed_test_path,
+        "stale_symbols": stale_symbols,
         "callers": caller_rows,
         "affected_tests": affected_test_rows,
         "invariants": all_invariants,

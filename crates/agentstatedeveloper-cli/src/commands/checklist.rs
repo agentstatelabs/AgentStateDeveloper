@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, FtsFilters, IndexStore,
-    LedgerKind, LedgerStore, classify_layer_sym, estimate_tokens, intent_focus, load_layer_overrides,
-    parse_intent, stale_warning, symbol_tier, trim_for_agent,
+    LedgerKind, LedgerStore, classify_layer_sym, estimate_tokens, git_dirty_files, intent_focus,
+    load_layer_overrides, parse_intent, propose_test_path, stale_warning, symbol_tier, trim_for_agent,
 };
 
 use crate::commands::{
@@ -220,6 +220,20 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
 
     let focus = intent_focus(intent);
 
+    // --- Staleness + test-gap -------------------------------------------
+    let dirty = git_dirty_files();
+    let stale_symbols: Vec<&str> = files_to_inspect
+        .iter()
+        .filter_map(|v| v.get("file").and_then(Value::as_str))
+        .filter(|f| dirty.contains(*f))
+        .collect();
+    let test_gap = test_rows.is_empty();
+    let proposed_test_path = test_gap.then(|| {
+        files_to_inspect.first()
+            .and_then(|v| v.get("file").and_then(Value::as_str))
+            .map(propose_test_path)
+    }).flatten();
+
     if args.agent || args.json {
         let out = json!({
             "query": args.query,
@@ -228,6 +242,9 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
             "files_to_inspect": files_to_inspect,
             "invariants_to_preserve": invariants,
             "tests_to_run": test_rows,
+            "test_gap": test_gap,
+            "proposed_test_path": proposed_test_path,
+            "stale_symbols": stale_symbols,
             "known_hazards": hazards,
             "effects_to_verify": effects_list,
         });
@@ -253,6 +270,9 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
             &files_to_inspect,
             &invariants,
             &test_rows,
+            test_gap,
+            proposed_test_path.as_deref(),
+            &stale_symbols,
             &hazards,
             &effects_list,
         );
@@ -267,6 +287,9 @@ fn print_markdown(
     files: &[Value],
     invariants: &[Value],
     tests: &[Value],
+    test_gap: bool,
+    proposed_test_path: Option<&str>,
+    stale_symbols: &[&str],
     hazards: &[Value],
     effects: &[Value],
 ) {
@@ -302,12 +325,27 @@ fn print_markdown(
 
     println!("\n## Tests to run");
     if tests.is_empty() {
-        println!("_(no test callers found within BFS depth)_");
+        if test_gap {
+            println!("_(no test callers found — test gap detected)_");
+            if let Some(path) = proposed_test_path {
+                println!("_Suggested test file: `{path}`_");
+            }
+        } else {
+            println!("_(no test callers found within BFS depth)_");
+        }
     } else {
         for t in tests {
             let qname = t.get("qname").and_then(Value::as_str).unwrap_or("");
             let file = t.get("file").and_then(Value::as_str).unwrap_or("");
             println!("- [ ] `{qname}` — {file}");
+        }
+    }
+
+    if !stale_symbols.is_empty() {
+        println!("\n## Staleness warning");
+        println!("_The following files are modified since the last index — symbol ranges may be stale:_");
+        for f in stale_symbols {
+            println!("- `{f}`");
         }
     }
 
