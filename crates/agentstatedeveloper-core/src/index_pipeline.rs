@@ -44,7 +44,8 @@ use crate::schema::{
     EffectCategory, EffectDecl, Position, Symbol, TransitiveEffect, Verification,
     VerificationSource, VerificationStatus,
 };
-use crate::search_fts::SearchFtsDb;
+use crate::doc_adapters::{adapt_document, is_doc_file};
+use crate::search_fts::{SearchDocsDb, SearchFtsDb};
 use crate::symbol::{canonical_symbol_id, symbol_fingerprint};
 
 use agentstategraph::Repository;
@@ -67,6 +68,10 @@ pub struct IndexSummary {
     /// Top cross-file qname collisions: (qname, first_file, second_file).
     /// Only populated when collisions occur; capped at 10 for display.
     pub top_collisions: Vec<(String, String, String)>,
+    /// Number of document files processed by document adapters.
+    pub doc_files: usize,
+    /// Total document chunks indexed into asd_search_docs.
+    pub docs_indexed: usize,
 }
 
 /// Result of collecting source files under a path.
@@ -467,6 +472,29 @@ pub fn run_index(
         }
     }
 
+    // Document search index — walk the index root for doc-adapter files and
+    // rebuild asd_search_docs in one atomic pass (full replace, like symbol FTS).
+    let mut doc_files_count = 0usize;
+    let mut docs_indexed_count = 0usize;
+    if let Some(db) = db_path {
+        if let Some(f) = on_phase {
+            f("  rebuilding document search index…");
+        }
+        let mut all_docs = Vec::new();
+        collect_doc_files_recursive(&index_root, &mut all_docs, &mut doc_files_count);
+        docs_indexed_count = all_docs.len();
+        match SearchDocsDb::open(db) {
+            Ok(docs_db) => {
+                if let Err(e) = docs_db.rebuild(&all_docs) {
+                    eprintln!("asd: document index rebuild warning: {e}");
+                }
+            }
+            Err(e) => {
+                eprintln!("asd: document index unavailable (non-fatal): {e}");
+            }
+        }
+    }
+
     let top_collisions = collision_log.into_iter().take(10).collect();
     Ok(IndexSummary {
         files: files.len(),
@@ -480,7 +508,35 @@ pub fn run_index(
         orphaned_tagged,
         disambiguated: disambiguated_count,
         top_collisions,
+        doc_files: doc_files_count,
+        docs_indexed: docs_indexed_count,
     })
+}
+
+/// Walk a directory recursively, collect doc chunks from all recognised document files.
+/// Skips hidden dirs, .git, target/, node_modules/, and binary-looking files.
+fn collect_doc_files_recursive(root: &Path, out: &mut Vec<crate::search_fts::SearchDoc>, file_count: &mut usize) {
+    let skip_dirs = ["target", "node_modules", ".git", ".build", "DerivedData", "dist", ".cache"];
+    let dir = match std::fs::read_dir(root) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    for entry in dir.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if name.starts_with('.') { continue; }
+        if path.is_dir() {
+            if skip_dirs.contains(&name.as_str()) { continue; }
+            collect_doc_files_recursive(&path, out, file_count);
+        } else if is_doc_file(&path) {
+            *file_count += 1;
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Some(docs) = adapt_document(&path, &content) {
+                    out.extend(docs);
+                }
+            }
+        }
+    }
 }
 
 /// Append `:line` to the qname of every symbol that collides within a single

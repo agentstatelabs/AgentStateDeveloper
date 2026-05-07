@@ -7,6 +7,7 @@
 pub mod adapter;
 pub mod audit;
 pub mod candidates;
+pub mod doc_adapters;
 pub mod effects;
 pub mod engine;
 pub mod error;
@@ -52,6 +53,8 @@ pub use candidates::{
 pub use repair::{IssueSeverity, RepairIssue, RepairReport, drop_orphaned_edge_refs, repair_asg, scan_asg};
 pub use search_fts::{AGENT_DEFAULT_BUDGET, FileRecency, FtsFilters, FtsHit, SearchFtsDb, SymbolTier, classify_layer, classify_layer_sym, derive_cold_hints, estimate_tokens, extract_summary, gather_recency, git_dirty_files, hybrid_boost, intent_focus, intent_layer_order, is_stopword, load_layer_overrides, parse_intent, propose_test_path, symbol_tier, trim_for_agent};
 pub use search_fts::{format_age, stale_warning};
+pub use search_fts::{DocHit, DocKind, SearchDoc, SearchDocsDb};
+pub use doc_adapters::{adapt_document, is_doc_file};
 pub use sidecar::{hydrate_from_dir, prune_sidecar, sync_to_dir, HydrateSummary, SyncSummary};
 pub use symbol::{canonical_symbol_id, symbol_fingerprint};
 pub use transitive::propagate_transitive;

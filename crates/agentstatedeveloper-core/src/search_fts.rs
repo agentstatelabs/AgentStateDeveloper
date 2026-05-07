@@ -1408,6 +1408,207 @@ fn split_camel(s: &str) -> Vec<&str> {
 // Tests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Document search — broad corpus beyond semantic symbols
+// ---------------------------------------------------------------------------
+
+/// A searchable chunk from a non-code file (markdown, config, manifest, etc.).
+#[derive(Debug, Clone)]
+pub struct SearchDoc {
+    /// Stable content-addressable id: sha256 hex of "{path}:{span_start}".
+    pub doc_id: String,
+    /// Broad kind category.
+    pub kind: DocKind,
+    /// Relative file path from project root.
+    pub path: String,
+    /// Optional start line (1-based). None = whole-file chunk.
+    pub span_start: Option<u32>,
+    /// Human-readable title (heading text, target name, key path, etc.).
+    pub title: String,
+    /// Searchable body text (stripped of formatting).
+    pub body_text: String,
+    /// qname of the nearest semantic symbol that "owns" this doc, if known.
+    pub owner_symbol_id: Option<String>,
+}
+
+impl SearchDoc {
+    pub fn new(kind: DocKind, path: impl Into<String>, span_start: Option<u32>, title: impl Into<String>, body_text: impl Into<String>) -> Self {
+        let path = path.into();
+        let span_str = span_start.map(|l| l.to_string()).unwrap_or_default();
+        let raw = format!("{}:{}", path, span_str);
+        // Simple djb2-style deterministic id — no external dep needed.
+        let mut hash: u64 = 5381;
+        for b in raw.bytes() { hash = hash.wrapping_mul(33).wrapping_add(b as u64); }
+        let doc_id = format!("doc_{:016x}", hash);
+        Self { doc_id, kind, path, span_start, title: title.into(), body_text: body_text.into(), owner_symbol_id: None }
+    }
+}
+
+/// Broad category for a document chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocKind {
+    Markdown,
+    Config,   // JSON, TOML, YAML, plist
+    Html,
+    Css,
+    Manifest, // Package.swift, Cargo.toml, pubspec.yaml, package.json (as manifests)
+    BuildScript, // Makefile, Fastfile, Podfile, Gemfile
+    Other,
+}
+
+impl DocKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DocKind::Markdown => "markdown",
+            DocKind::Config => "config",
+            DocKind::Html => "html",
+            DocKind::Css => "css",
+            DocKind::Manifest => "manifest",
+            DocKind::BuildScript => "build_script",
+            DocKind::Other => "other",
+        }
+    }
+}
+
+/// A ranked document search hit.
+#[derive(Debug, Clone)]
+pub struct DocHit {
+    pub bm25_score: f64,
+    pub doc_id: String,
+    pub kind: String,
+    pub path: String,
+    pub span_start: Option<u32>,
+    pub title: String,
+    /// First 200 chars of body_text for preview.
+    pub preview: String,
+    pub owner_symbol_id: Option<String>,
+}
+
+/// FTS index for document/resource chunks (separate from symbol FTS).
+pub struct SearchDocsDb {
+    conn: Connection,
+}
+
+impl SearchDocsDb {
+    const SCHEMA_VER: i64 = 1;
+
+    pub fn open(db_path: &Path) -> rusqlite::Result<Self> {
+        let conn = Connection::open(db_path)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        let db = Self { conn };
+        db.ensure_schema()?;
+        Ok(db)
+    }
+
+    fn ensure_schema(&self) -> rusqlite::Result<()> {
+        let current: i64 = self.conn.query_row(
+            "SELECT version FROM asd_docs_meta LIMIT 1",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        if current != Self::SCHEMA_VER {
+            self.conn.execute_batch(
+                "DROP TABLE IF EXISTS asd_search_docs;
+                 DROP TABLE IF EXISTS asd_docs_meta;"
+            )?;
+        }
+
+        self.conn.execute_batch(&format!(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS asd_search_docs USING fts5(
+                doc_id          UNINDEXED,
+                kind            UNINDEXED,
+                path            UNINDEXED,
+                span_start      UNINDEXED,
+                owner_symbol_id UNINDEXED,
+                title,
+                body_text,
+                tokenize = 'unicode61 remove_diacritics 1'
+            );
+            CREATE TABLE IF NOT EXISTS asd_docs_meta (version INTEGER PRIMARY KEY);
+            INSERT OR IGNORE INTO asd_docs_meta VALUES ({});",
+            Self::SCHEMA_VER
+        ))
+    }
+
+    /// Atomically replace all document chunks.
+    pub fn rebuild(&self, docs: &[SearchDoc]) -> rusqlite::Result<()> {
+        self.conn.execute_batch("DELETE FROM asd_search_docs;")?;
+        for doc in docs {
+            self.conn.execute(
+                "INSERT INTO asd_search_docs(doc_id, kind, path, span_start, owner_symbol_id, title, body_text)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    doc.doc_id,
+                    doc.kind.as_str(),
+                    doc.path,
+                    doc.span_start,
+                    doc.owner_symbol_id,
+                    doc.title,
+                    doc.body_text,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn count(&self) -> rusqlite::Result<i64> {
+        self.conn.query_row("SELECT COUNT(*) FROM asd_search_docs", [], |r| r.get(0))
+    }
+
+    /// Full-text search over document chunks. Returns up to `limit` hits ranked by BM25.
+    pub fn search(
+        &self,
+        tokens: &[String],
+        limit: usize,
+        kinds: Option<&[&str]>,
+    ) -> rusqlite::Result<Vec<DocHit>> {
+        let filtered: Vec<&String> = tokens.iter().filter(|t| !is_stopword(t)).collect();
+        if filtered.is_empty() { return Ok(vec![]); }
+        let match_expr = filtered.iter()
+            .map(|t| format!("\"{}\"", t.replace('"', "")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+
+        let kind_filter = kinds.map(|ks| {
+            let list = ks.iter().map(|k| format!("'{}'", k)).collect::<Vec<_>>().join(",");
+            format!(" AND kind IN ({})", list)
+        }).unwrap_or_default();
+
+        let sql = format!(
+            "SELECT doc_id, kind, path, span_start, owner_symbol_id, title, body_text,
+                    -bm25(asd_search_docs, 5.0, 3.0) AS score
+             FROM asd_search_docs
+             WHERE asd_search_docs MATCH ?1{kind_filter}
+             ORDER BY score DESC
+             LIMIT {limit}"
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let hits = stmt.query_map(params![match_expr], |row| {
+            let body: String = row.get(6)?;
+            let preview = body.chars().take(200).collect::<String>();
+            Ok(DocHit {
+                doc_id: row.get(0)?,
+                kind: row.get(1)?,
+                path: row.get(2)?,
+                span_start: row.get(3)?,
+                owner_symbol_id: row.get(4)?,
+                title: row.get(5)?,
+                preview,
+                bm25_score: row.get(7)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+        Ok(hits)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count().unwrap_or(0) == 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

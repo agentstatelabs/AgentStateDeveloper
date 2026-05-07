@@ -156,10 +156,14 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
     } else {
         String::new()
     };
+    let doc_hint = if summary.doc_files > 0 {
+        format!(", {} doc chunk{} from {} file{}", summary.docs_indexed, if summary.docs_indexed == 1 { "" } else { "s" }, summary.doc_files, if summary.doc_files == 1 { "" } else { "s" })
+    } else { String::new() };
     let done_msg = format!(
-        "Done. {} symbol{}, {} effect{}.{}",
+        "Done. {} symbol{}, {} effect{}{}.{}",
         summary.symbols, if summary.symbols == 1 { "" } else { "s" },
         summary.effects, if summary.effects == 1 { "" } else { "s" },
+        doc_hint,
         skipped_hint,
     );
     eprintln!("{}", done_msg);
@@ -185,6 +189,8 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
             "transitive_updates": summary.transitive_updates,
             "orphaned_tagged": summary.orphaned_tagged,
             "disambiguated": summary.disambiguated,
+            "doc_files": summary.doc_files,
+            "docs_indexed": summary.docs_indexed,
             "cross_file_collisions": summary.top_collisions.iter().map(|(q, f1, f2)| {
                 serde_json::json!({ "qname": q, "first": f1, "second": f2 })
             }).collect::<Vec<_>>(),

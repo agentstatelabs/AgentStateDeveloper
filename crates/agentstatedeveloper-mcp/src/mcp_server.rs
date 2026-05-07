@@ -21,7 +21,7 @@ use agentstatedeveloper_core::{
     AsgScratchStore, AuditEvent, Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory,
     EffectDecl, EffectStore, Engine, FeedbackEntry, FeedbackStore, FeedbackVerdict, FtsFilters,
     IndexStore, LedgerEntry, LedgerKind, LedgerStore, Rebind, ScratchEntry, ScratchFilter,
-    ScratchStatus, ScratchStore, SearchFtsDb, Situation, actions, classify_layer_sym,
+    ScratchStatus, ScratchStore, SearchDocsDb, SearchFtsDb, Situation, actions, classify_layer_sym,
     confidence_scores, derive_cold_hints, detect_ambiguous_tokens, detect_possible_misses,
     emit_audit, event_types, explain_match, extract_summary, find_candidates, gather_recency,
     git_dirty_files, hybrid_boost, intent_focus, intent_layer_order, load_layer_overrides,
@@ -769,11 +769,30 @@ impl AsdMcpServer {
             let layers_ref: std::collections::HashSet<&str> = layers_present.iter().map(|s| s.as_str()).collect();
             let ambiguous_terms = detect_ambiguous_tokens(&tokens, &db_path, &filters);
             let possible_misses = detect_possible_misses(&p.query, &layers_ref, results.len());
+            // Document hits from the broad corpus (markdown, config, manifests, etc.)
+            let doc_hits: Vec<serde_json::Value> = SearchDocsDb::open(&db_path)
+                .ok()
+                .filter(|db| !db.is_empty())
+                .and_then(|db| db.search(&tokens, limit, None).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|h| serde_json::json!({
+                    "source": "document",
+                    "score": h.bm25_score,
+                    "kind": h.kind,
+                    "path": h.path,
+                    "line": h.span_start,
+                    "title": h.title,
+                    "preview": h.preview,
+                    "owner_symbol_id": h.owner_symbol_id,
+                }))
+                .collect();
             let out = serde_json::json!({
                 "query": p.query,
                 "ambiguous_terms": ambiguous_terms,
                 "possible_misses": possible_misses,
                 "results": results,
+                "document_hits": doc_hits,
             });
             return serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string());
         }

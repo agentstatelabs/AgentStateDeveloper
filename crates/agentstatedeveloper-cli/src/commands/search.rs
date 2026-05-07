@@ -9,10 +9,11 @@ use clap::Args;
 
 use agentstatedeveloper_core::{
     AGENT_DEFAULT_BUDGET, AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore,
-    LedgerStore, SearchFtsDb, classify_layer_sym, confidence_scores, detect_ambiguous_tokens,
-    detect_possible_misses, estimate_tokens, explain_match, extract_summary, gather_recency,
-    hybrid_boost, in_memory_score, intent_focus, kind_str, load_layer_overrides, parse_intent,
-    parse_query, resolve_scope, result_bucket, stale_warning, symbol_tier, trim_for_agent,
+    LedgerStore, SearchDocsDb, SearchFtsDb, classify_layer_sym, confidence_scores,
+    detect_ambiguous_tokens, detect_possible_misses, estimate_tokens, explain_match,
+    extract_summary, gather_recency, hybrid_boost, in_memory_score, intent_focus, kind_str,
+    load_layer_overrides, parse_intent, parse_query, resolve_scope, result_bucket, stale_warning,
+    symbol_tier, trim_for_agent,
 };
 
 use crate::config::Config;
@@ -80,6 +81,14 @@ pub struct SearchArgs {
     /// ledger involvement). Implied by --agent; this shows it in terminal output.
     #[arg(long)]
     pub explain: bool,
+
+    /// Restrict results to semantic symbols only (skip document index).
+    #[arg(long)]
+    pub symbols_only: bool,
+
+    /// Restrict results to document/resource hits only (skip symbol index).
+    #[arg(long)]
+    pub docs_only: bool,
 }
 
 pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
@@ -117,11 +126,24 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         paths_filter,
     };
 
+    // --- Document hits (broad corpus) ---
+    let doc_hits = if !args.symbols_only {
+        SearchDocsDb::open(&cfg.db_path)
+            .ok()
+            .filter(|db| !db.is_empty())
+            .and_then(|db| db.search(&tokens_from_query, args.limit, None).ok())
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
+
     // --- FTS path ---
-    let fts_result = SearchFtsDb::open(&cfg.db_path)
-        .ok()
-        .filter(|fts| fts.has_data())
-        .and_then(|fts| fts.search(&args.query, &filters, args.limit * 4).ok());
+    let fts_result = if args.docs_only { None } else {
+        SearchFtsDb::open(&cfg.db_path)
+            .ok()
+            .filter(|fts| fts.has_data())
+            .and_then(|fts| fts.search(&args.query, &filters, args.limit * 4).ok())
+    };
 
     if let Some(hits) = fts_result {
         let tokens = tokens_from_query.clone();
@@ -197,12 +219,25 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 })
             }).collect();
             let possible_misses = detect_possible_misses(&args.query, &layers_present, results.len());
+            let doc_results: Vec<serde_json::Value> = doc_hits.iter().map(|h| {
+                serde_json::json!({
+                    "source": "document",
+                    "score": h.bm25_score,
+                    "kind": h.kind,
+                    "path": h.path,
+                    "line": h.span_start,
+                    "title": h.title,
+                    "preview": h.preview,
+                    "owner_symbol_id": h.owner_symbol_id,
+                })
+            }).collect();
             let raw = serde_json::json!({
                 "query": args.query,
                 "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
                 "ambiguous_terms": ambiguous_terms,
                 "possible_misses": possible_misses,
                 "results": results,
+                "document_hits": doc_results,
             });
             let max_list = (args.agent_budget / 500).max(3).min(20);
             let trimmed = trim_for_agent(&raw, max_list);
@@ -243,6 +278,16 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     if !reasons.is_empty() {
                         println!("       why: {}", reasons.join(", "));
                     }
+                }
+            }
+            // Print document hits below symbol hits.
+            if !doc_hits.is_empty() {
+                println!("\n-- document hits --");
+                for h in &doc_hits {
+                    let line_tag = h.span_start.map(|l| format!(":{l}")).unwrap_or_default();
+                    println!("[{:.1}] {} {}{}", h.bm25_score, h.kind, h.path, line_tag);
+                    if !h.title.is_empty() { println!("       {}", h.title); }
+                    if !h.preview.is_empty() { println!("       {}", &h.preview.chars().take(120).collect::<String>()); }
                 }
             }
         }
