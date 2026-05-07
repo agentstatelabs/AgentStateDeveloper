@@ -17,6 +17,7 @@ pub mod read;
 pub mod repair;
 pub mod scratch;
 pub mod search;
+pub mod since;
 pub mod status;
 pub mod sync;
 pub mod trace;

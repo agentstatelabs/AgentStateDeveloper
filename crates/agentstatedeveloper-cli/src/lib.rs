@@ -162,6 +162,11 @@ pub enum Command {
     /// recent git touches — all composed in a single JSON response.
     #[command(name = "prepare-change")]
     PrepareChange(commands::prepare_change::PrepareChangeArgs),
+
+    /// Symbols in files changed since a commit + combined blast radius.
+    /// PR-review workflow: pass the base SHA to get full impact without knowing
+    /// any symbol names upfront. Supports --agent, --intent, --depth.
+    Since(commands::since::SinceArgs),
 }
 
 /// Resolve [`Config`] from the parsed CLI flags.
@@ -205,5 +210,6 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Impact(args) => impact::run(cfg, args),
         Command::Checklist(args) => checklist::run(cfg, args),
         Command::PrepareChange(args) => prepare_change::run(cfg, args),
+        Command::Since(args) => since::run(cfg, args),
     }
 }

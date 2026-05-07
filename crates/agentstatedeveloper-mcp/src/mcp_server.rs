@@ -155,6 +155,20 @@ pub struct ImpactParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct SinceParams {
+    /// Base commit SHA (or branch/tag) to diff against HEAD.
+    pub sha: String,
+    /// Caller-graph BFS depth for blast radius (default: 3).
+    #[serde(default = "default_impact_depth")]
+    pub depth: u32,
+    /// Number of recent git commits to scan per changed file (default: 10).
+    #[serde(default = "default_since_git_depth")]
+    pub git_depth: u32,
+}
+
+fn default_since_git_depth() -> u32 { 10 }
+
+#[derive(Deserialize, JsonSchema)]
 pub struct CodeReadParams {
     /// Fully-qualified symbol name.
     pub qname: String,
@@ -2863,6 +2877,154 @@ impl AsdMcpServer {
             "effects": effects,
             "callers": caller_rows,
             "affected_tests": affected_test_rows,
+            "recently_touched": recently_touched,
+        })).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// Symbols in files changed since a commit + combined blast radius.
+    /// PR-review workflow: pass the base SHA to get full impact without knowing any symbol names.
+    #[tool(description = "Symbols in files changed since a commit and their combined blast radius. Pass the base SHA of a branch/PR to discover all symbols touched by the diff, their transitive callers, affected tests, invariants, hazards, and effects — without needing to know any symbol names upfront.")]
+    async fn since(&self, params: Parameters<SinceParams>) -> String {
+        let p = params.0;
+        let db_path = self.db_path.clone();
+        let layer_overrides = load_layer_overrides(&db_path);
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+
+        let index = AsgIndexStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let effect_store = AsgEffectStore { repo: &engine.repo };
+
+        // Build id_map.
+        let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+        let all_qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
+            Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
+            _ => vec![],
+        };
+        let mut id_map: std::collections::HashMap<String, agentstatedeveloper_core::Symbol> =
+            std::collections::HashMap::new();
+        for qn in &all_qnames {
+            if let Ok(Some(s)) = index.get_symbol_by_qname(&ref_name, qn) {
+                id_map.insert(s.symbol_id.clone(), s);
+            }
+        }
+
+        // Get changed files.
+        let changed_files: Vec<String> = {
+            let out = Proc::new("git")
+                .args(["diff", "--name-only", &format!("{}..HEAD", p.sha)])
+                .output();
+            match out {
+                Ok(o) if o.status.success() => {
+                    String::from_utf8_lossy(&o.stdout).lines()
+                        .filter(|l| !l.is_empty()).map(|l| l.to_string()).collect()
+                }
+                _ => vec![],
+            }
+        };
+
+        if changed_files.is_empty() {
+            return serde_json::to_string(&serde_json::json!({
+                "sha": p.sha, "changed_files": [], "touched_symbols": {},
+                "callers": [], "affected_tests": [], "invariants": [], "hazards": [], "effects": [],
+            })).unwrap_or_else(|_| "{}".to_string());
+        }
+
+        let changed_set: HashSet<&str> = changed_files.iter().map(String::as_str).collect();
+
+        // Seeds: all symbols in changed files.
+        let seed_ids: Vec<String> = id_map.values()
+            .filter(|s| changed_set.contains(s.file.as_str()))
+            .map(|s| s.symbol_id.clone())
+            .collect();
+
+        // Group touched symbols by layer.
+        let mut by_layer: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
+        for sid in &seed_ids {
+            if let Some(s) = id_map.get(sid) {
+                let tier = symbol_tier(&s.file);
+                let layer = classify_layer(&s.file, tier, &layer_overrides);
+                by_layer.entry(layer.to_string()).or_default().push(serde_json::json!({
+                    "qname": s.qname, "file": s.file, "line": s.start.line, "layer": layer,
+                }));
+            }
+        }
+
+        // BFS blast radius.
+        let max_depth = p.depth.max(1) as usize;
+        let mut visited: HashSet<String> = seed_ids.iter().cloned().collect();
+        let mut queue: VecDeque<(String, usize)> = seed_ids.iter().map(|id| (id.clone(), 0)).collect();
+        let mut caller_rows: Vec<serde_json::Value> = Vec::new();
+        let mut affected_test_rows: Vec<serde_json::Value> = Vec::new();
+        let mut touched_files: Vec<(String, usize)> = changed_files.iter().map(|f| (f.clone(), 0)).collect();
+        let mut seen_files: HashSet<String> = changed_files.iter().cloned().collect();
+
+        while let Some((sym_id, depth)) = queue.pop_front() {
+            if depth >= max_depth { continue; }
+            let neighbors = index.get_callers(&ref_name, &sym_id).unwrap_or_default();
+            for nbr_id in neighbors {
+                if visited.contains(&nbr_id) { continue; }
+                visited.insert(nbr_id.clone());
+                if let Some(s) = id_map.get(&nbr_id) {
+                    let t = symbol_tier(&s.file);
+                    let l = classify_layer(&s.file, t, &layer_overrides);
+                    let row = serde_json::json!({
+                        "qname": s.qname, "file": s.file, "line": s.start.line,
+                        "depth": depth + 1, "layer": l,
+                    });
+                    if t == 2 { affected_test_rows.push(row); } else { caller_rows.push(row); }
+                    if seen_files.insert(s.file.clone()) {
+                        touched_files.push((s.file.clone(), depth + 1));
+                    }
+                    if depth + 1 < max_depth { queue.push_back((nbr_id, depth + 1)); }
+                }
+            }
+        }
+
+        // Aggregate invariants/hazards/effects from seeds.
+        let mut all_invariants: Vec<serde_json::Value> = Vec::new();
+        let mut all_hazards: Vec<serde_json::Value> = Vec::new();
+        let mut all_effects: Vec<serde_json::Value> = Vec::new();
+        let mut seen_inv: HashSet<String> = HashSet::new();
+        for sym_id in &seed_ids {
+            let entries = ledger_store.list_entries(&ref_name, sym_id).unwrap_or_default();
+            let sym_qname = id_map.get(sym_id).map(|s| s.qname.as_str()).unwrap_or("");
+            for entry in entries {
+                let key = entry.summary.clone();
+                match entry.kind {
+                    LedgerKind::Invariant => {
+                        if seen_inv.insert(key) {
+                            all_invariants.push(serde_json::json!({ "summary": entry.summary, "source": sym_qname }));
+                        }
+                    }
+                    LedgerKind::Hazard => {
+                        all_hazards.push(serde_json::json!({ "summary": entry.summary, "source": sym_qname }));
+                    }
+                    _ => {}
+                }
+            }
+            if let Ok(Some(decl)) = effect_store.get_effects(&ref_name, sym_id) {
+                let qn = id_map.get(sym_id).map(|s| s.qname.clone()).unwrap_or_default();
+                for eff in &decl.declared {
+                    all_effects.push(serde_json::json!({ "category": format!("{:?}", eff.effect), "source": qn }));
+                }
+            }
+        }
+
+        let git_depth = p.git_depth.max(1) as usize;
+        let recently_touched = mcp_git_recent_touches(&touched_files[..touched_files.len().min(5)], git_depth);
+
+        serde_json::to_string(&serde_json::json!({
+            "sha": p.sha,
+            "changed_files": changed_files,
+            "touched_symbols": by_layer,
+            "caller_count": caller_rows.len(),
+            "test_count": affected_test_rows.len(),
+            "callers": caller_rows,
+            "affected_tests": affected_test_rows,
+            "invariants": all_invariants,
+            "hazards": all_hazards,
+            "effects": all_effects,
             "recently_touched": recently_touched,
         })).unwrap_or_else(|_| "{}".to_string())
     }
