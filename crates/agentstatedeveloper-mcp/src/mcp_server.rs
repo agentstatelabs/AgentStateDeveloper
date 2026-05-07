@@ -3281,8 +3281,12 @@ fn inject_file_stem(
     mut scored: Vec<(f64, String)>,
     depth: usize,
 ) -> Vec<(f64, String)> {
+    // Only protect files already in the top `depth` slots. Files ranked
+    // depth+1..depth*8 in FTS are still eligible for re-injection so a
+    // strong stem boost can displace a weak FTS match.
     let covered_files: std::collections::HashSet<String> = scored
         .iter()
+        .take(depth)
         .filter_map(|(_, qn)| {
             index.get_symbol_by_qname(ref_name, qn).ok().flatten().map(|s| s.file)
         })

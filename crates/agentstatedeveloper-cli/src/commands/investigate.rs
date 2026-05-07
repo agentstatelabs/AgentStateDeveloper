@@ -311,12 +311,15 @@ pub(crate) fn find_candidates(
             .collect();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        // File-stem injection: for each query token, find files whose name
-        // contains that token but are not yet represented in the candidates.
-        // Injects one representative symbol per missing file with a modest
-        // baseline score so it can still be outranked by higher-quality hits.
+        // File-stem injection: for each query token, find files whose stem
+        // contains that token and ensure they appear in the final top-depth
+        // results.  covered_files only protects the files already in the TOP
+        // `depth` slots — files ranked depth+1..depth*8 in FTS are still
+        // eligible for re-injection so a strong stem boost can displace a
+        // weak FTS match.
         let covered_files: std::collections::HashSet<String> = scored
             .iter()
+            .take(depth)
             .filter_map(|(_, qname)| {
                 index_store.get_symbol_by_qname(&engine.ref_name, qname)
                     .ok()
@@ -331,7 +334,6 @@ pub(crate) fn find_candidates(
                     for hit in stem_hits {
                         if !covered_files.contains(&hit.file) {
                             let boost = hybrid_boost(&hit, tokens);
-                            // Baseline score: lower than any FTS hit but visible.
                             scored.push((1.0 + boost, hit.qname));
                         }
                     }
