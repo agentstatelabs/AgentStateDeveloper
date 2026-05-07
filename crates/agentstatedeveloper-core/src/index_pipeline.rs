@@ -61,7 +61,10 @@ pub struct IndexSummary {
     pub cross_module_edges: usize,
     pub transitive_updates: usize,
     pub orphaned_tagged: usize,
-    /// Top qname collisions: (qname, first_file, second_file).
+    /// Number of symbols that received a :line suffix to resolve a same-file
+    /// qname collision.  0 means the index is collision-free.
+    pub disambiguated: usize,
+    /// Top cross-file qname collisions: (qname, first_file, second_file).
     /// Only populated when collisions occur; capped at 10 for display.
     pub top_collisions: Vec<(String, String, String)>,
 }
@@ -136,9 +139,9 @@ pub fn run_index(
     };
 
     let mut symbol_count = 0usize;
+    let mut disambiguated_count = 0usize;
     let mut all_edges: Vec<CallEdge> = Vec::new();
-    // Track first-seen file for each qname parsed in this run so we can report
-    // which files are colliding rather than just a raw count.
+    // Track first-seen file for each qname to report cross-file collisions.
     let mut qname_first_file: HashMap<String, String> = HashMap::new();
     let mut collision_log: Vec<(String, String, String)> = Vec::new();
 
@@ -173,7 +176,8 @@ pub fn run_index(
         let rel = file.strip_prefix(&index_root).unwrap_or(file);
         let file_str = rel.to_string_lossy().replace('\\', "/");
 
-        let parsed = adapter.parse_symbols(&file_str, &source)?;
+        let mut parsed = adapter.parse_symbols(&file_str, &source)?;
+        disambiguated_count += disambiguate_qnames(&mut parsed);
 
         for p in &parsed {
             let symbol_id = canonical_symbol_id(&p.qname, p.kind, &file_str);
@@ -240,27 +244,25 @@ pub fn run_index(
         file_ctxs.push(FileCtx { file_str, source, parsed, adapter: Arc::clone(adapter) });
     }
 
-    // Authoritative counts: by_qname is keyed by qname so duplicate qnames
-    // silently overwrite.  Capture the deduped size before flushing.
     let unique_symbol_count = by_qname.len();
     let unique_effect_count = by_effects.len();
-    if symbol_count != unique_symbol_count {
-        eprintln!(
-            "  note: {} qname collision(s) — {} symbols parsed, {} unique written",
-            symbol_count - unique_symbol_count,
-            symbol_count,
-            unique_symbol_count,
-        );
+    if disambiguated_count > 0 || !collision_log.is_empty() {
+        if disambiguated_count > 0 {
+            eprintln!(
+                "  note: disambiguated {} same-file qname collision(s) with :line suffix",
+                disambiguated_count,
+            );
+        }
         for (qname, f1, f2) in collision_log.iter().take(5) {
-            eprintln!("    collision: {qname:?}  {f1}  ↔  {f2}");
+            eprintln!("    cross-file collision: {qname:?}  {f1}  ↔  {f2}");
         }
         if collision_log.len() > 5 {
-            eprintln!("    … and {} more (pass --diagnose-collisions to see all)", collision_log.len() - 5);
+            eprintln!("    … and {} more cross-file collisions", collision_log.len() - 5);
         }
     }
 
     if let Some(f) = on_phase {
-        f(&format!("  {} files parsed — committing symbols + effects…", unique_symbol_count));
+        f(&format!("  {} files parsed — committing symbols + effects…", symbol_count));
     }
 
     // -----------------------------------------------------------------------
@@ -476,8 +478,28 @@ pub fn run_index(
         cross_module_edges,
         transitive_updates,
         orphaned_tagged,
+        disambiguated: disambiguated_count,
         top_collisions,
     })
+}
+
+/// Append `:line` to the qname of every symbol that collides within a single
+/// file's parse output.  Only symbols that actually collide are touched —
+/// unique qnames are left unchanged so existing ledger/call-graph data is
+/// not invalidated.  Returns the number of symbols that were renamed.
+fn disambiguate_qnames(parsed: &mut Vec<ParsedSymbol>) -> usize {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for p in parsed.iter() {
+        *counts.entry(p.qname.clone()).or_insert(0) += 1;
+    }
+    let mut renamed = 0usize;
+    for p in parsed.iter_mut() {
+        if counts.get(&p.qname).copied().unwrap_or(0) > 1 {
+            p.qname = format!("{}:{}", p.qname, p.start_line);
+            renamed += 1;
+        }
+    }
+    renamed
 }
 
 /// Compute transitive effects entirely in memory, then flush changed

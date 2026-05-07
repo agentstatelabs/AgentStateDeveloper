@@ -184,7 +184,8 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
             "cross_module_edges": summary.cross_module_edges,
             "transitive_updates": summary.transitive_updates,
             "orphaned_tagged": summary.orphaned_tagged,
-            "qname_collisions": summary.top_collisions.iter().map(|(q, f1, f2)| {
+            "disambiguated": summary.disambiguated,
+            "cross_file_collisions": summary.top_collisions.iter().map(|(q, f1, f2)| {
                 serde_json::json!({ "qname": q, "first": f1, "second": f2 })
             }).collect::<Vec<_>>(),
         }))?
