@@ -23,7 +23,7 @@ use agentstatedeveloper_core::{
     ScratchFilter, ScratchStatus, ScratchStore, SearchFtsDb, Situation, actions, classify_layer_sym,
     derive_cold_hints, emit_audit, event_types, extract_summary, find_candidates, gather_recency,
     hybrid_boost, intent_focus, intent_layer_order, load_layer_overrides, parse_intent, paths,
-    parse_query, propose_test_path, query_tokens, symbol_tier,
+    parse_query, propose_test_path, resolve_scope, symbol_tier,
 };
 
 /// The AgentStateDeveloper MCP server.
@@ -68,6 +68,10 @@ pub struct CodeSearchParams {
     pub include_tests: bool,
     /// Comma-separated terms to exclude (e.g. "sample editor,waveform").
     pub exclude: Option<String>,
+    /// Comma-separated glob patterns to restrict to specific paths (e.g. "App/**/DriftPad*").
+    pub paths: Option<String>,
+    /// Named scope alias from .asd/scopes.toml (e.g. "drift-pad").
+    pub scope: Option<String>,
 }
 
 fn default_search_limit() -> u32 { 20 }
@@ -92,6 +96,10 @@ pub struct InvestigateParams {
     pub intent: Option<String>,
     /// Comma-separated terms to exclude (e.g. "sample editor,waveform").
     pub exclude: Option<String>,
+    /// Comma-separated glob patterns to restrict to specific paths.
+    pub paths: Option<String>,
+    /// Named scope alias from .asd/scopes.toml.
+    pub scope: Option<String>,
 }
 
 fn default_investigate_depth() -> u32 { 10 }
@@ -128,6 +136,10 @@ pub struct PrepareChangeParams {
     pub git_depth: u32,
     /// Comma-separated terms to exclude (e.g. "sample editor,waveform").
     pub exclude: Option<String>,
+    /// Comma-separated glob patterns to restrict to specific paths.
+    pub paths: Option<String>,
+    /// Named scope alias from .asd/scopes.toml.
+    pub scope: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -153,6 +165,10 @@ pub struct ChecklistParams {
     pub test_depth: u32,
     /// Comma-separated terms to exclude (e.g. "sample editor,waveform").
     pub exclude: Option<String>,
+    /// Comma-separated glob patterns to restrict to specific paths.
+    pub paths: Option<String>,
+    /// Named scope alias from .asd/scopes.toml.
+    pub scope: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -630,11 +646,19 @@ impl AsdMcpServer {
         }
 
         let limit = p.limit.max(1) as usize;
+        let mut paths_filter: Vec<String> = Vec::new();
+        if let Some(ref scope) = p.scope {
+            paths_filter.extend(resolve_scope(scope, &db_path));
+        }
+        if let Some(ref paths) = p.paths {
+            paths_filter.extend(paths.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+        }
         let filters = FtsFilters {
             kind: p.kind.as_deref().map(|k| k.to_lowercase()),
             language: p.language.as_deref().map(|l| l.to_lowercase()),
             include_tests: p.include_tests,
             exclude_terms: exclusions.clone(),
+            paths_filter,
         };
 
         // --- FTS path ---
@@ -785,11 +809,19 @@ impl AsdMcpServer {
         }
 
         let depth = p.depth.max(1) as usize;
+        let mut paths_filter: Vec<String> = Vec::new();
+        if let Some(ref scope) = p.scope {
+            paths_filter.extend(resolve_scope(scope, &db_path));
+        }
+        if let Some(ref paths) = p.paths {
+            paths_filter.extend(paths.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+        }
         let filters = FtsFilters {
             kind: p.kind.as_deref().map(|k| k.to_lowercase()),
             language: p.language.as_deref().map(|l| l.to_lowercase()),
             include_tests: p.include_tests,
             exclude_terms: exclusions,
+            paths_filter,
         };
 
         let index = AsgIndexStore { repo: &engine.repo };
@@ -2372,11 +2404,19 @@ impl AsdMcpServer {
         let depth = p.depth.max(1) as usize;
         let test_depth = p.test_depth.max(1) as usize;
         let git_depth = p.git_depth.max(1) as usize;
+        let mut paths_filter: Vec<String> = Vec::new();
+        if let Some(ref scope) = p.scope {
+            paths_filter.extend(resolve_scope(scope, &db_path));
+        }
+        if let Some(ref paths) = p.paths {
+            paths_filter.extend(paths.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+        }
         let filters = FtsFilters {
             kind: p.kind.as_deref().map(|k| k.to_lowercase()),
             language: p.language.as_deref().map(|l| l.to_lowercase()),
             include_tests: p.include_tests,
             exclude_terms: exclusions,
+            paths_filter,
         };
 
         let index = AsgIndexStore { repo: &engine.repo };
@@ -2566,11 +2606,19 @@ impl AsdMcpServer {
 
         let depth = p.depth.max(1) as usize;
         let test_depth = p.test_depth.max(1) as usize;
+        let mut paths_filter: Vec<String> = Vec::new();
+        if let Some(ref scope) = p.scope {
+            paths_filter.extend(resolve_scope(scope, &db_path));
+        }
+        if let Some(ref paths) = p.paths {
+            paths_filter.extend(paths.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+        }
         let filters = FtsFilters {
             kind: p.kind.as_deref().map(|k| k.to_lowercase()),
             language: p.language.as_deref().map(|l| l.to_lowercase()),
             include_tests: p.include_tests,
             exclude_terms: exclusions,
+            paths_filter,
         };
 
         let index = AsgIndexStore { repo: &engine.repo };
