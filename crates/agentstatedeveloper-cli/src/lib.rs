@@ -157,6 +157,11 @@ pub enum Command {
     /// tests to run, known hazards, and effects to verify. Markdown or JSON output.
     Checklist(commands::checklist::ChecklistArgs),
 
+    /// Record, list, and remove invariants attached to symbols.
+    /// Shortcut for `asd ledger {append,list,withdraw} --kind invariant`.
+    #[command(subcommand)]
+    Invariant(commands::invariant::InvariantCmd),
+
     /// One-call agent-ready context package for a planned change: design invariants,
     /// layer-grouped entry points, likely edit files, affected tests, effects, and
     /// recent git touches — all composed in a single JSON response.
@@ -209,6 +214,7 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Status(args) => status::run(cfg, args),
         Command::Impact(args) => impact::run(cfg, args),
         Command::Checklist(args) => checklist::run(cfg, args),
+        Command::Invariant(sub) => invariant::run(cfg, sub),
         Command::PrepareChange(args) => prepare_change::run(cfg, args),
         Command::Since(args) => since::run(cfg, args),
     }

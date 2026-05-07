@@ -169,6 +169,23 @@ pub struct SinceParams {
 fn default_since_git_depth() -> u32 { 10 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct InvariantAddParams {
+    /// Fully-qualified symbol name.
+    pub qname: String,
+    /// One-line invariant summary.
+    pub summary: String,
+    /// Author identifier (default: "asd-mcp-agent").
+    #[serde(default = "default_author_id")]
+    pub author_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct InvariantListParams {
+    /// Filter to a single symbol's invariants. Omit to list all.
+    pub qname: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct CodeReadParams {
     /// Fully-qualified symbol name.
     pub qname: String,
@@ -3027,6 +3044,122 @@ impl AsdMcpServer {
             "effects": all_effects,
             "recently_touched": recently_touched,
         })).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[tool(
+        description = "Record an invariant that must hold at a symbol. Shortcut for `ledger_append` with kind=invariant. Invariants appear in investigate, checklist, and prepare_change outputs — record them here so future agents see them."
+    )]
+    async fn invariant_add(&self, params: Parameters<InvariantAddParams>) -> String {
+        let p = params.0;
+        let Ok(engine) = Engine::open_sqlite(&self.db_path) else {
+            return err_json("failed to open database");
+        };
+        let index_store = AsgIndexStore { repo: &engine.repo };
+        let Ok(Some(symbol)) = index_store.get_symbol_by_qname(&engine.ref_name, &p.qname) else {
+            return err_json(&format!("symbol not found: {}", p.qname));
+        };
+        let author = Author { kind: AuthorKind::Agent, id: p.author_id.clone() };
+        let entry = LedgerEntry::new(
+            &symbol.symbol_id,
+            LedgerKind::Invariant,
+            p.summary.clone(),
+            author,
+        );
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        match ledger_store.append_entry(&engine.ref_name, &entry, "asd-mcp") {
+            Ok(_) => serde_json::to_string(&serde_json::json!({
+                "status": "added",
+                "entry_id": entry.entry_id,
+                "symbol_id": entry.symbol_id,
+                "qname": p.qname,
+                "summary": p.summary,
+            })).unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "List invariants recorded against symbols. Pass qname to filter to one symbol; omit to list all invariants in the index."
+    )]
+    async fn invariant_list(&self, params: Parameters<InvariantListParams>) -> String {
+        let p = params.0;
+        let Ok(engine) = Engine::open_sqlite(&self.db_path) else {
+            return err_json("failed to open database");
+        };
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+
+        let rows: Vec<serde_json::Value> = if let Some(qname) = p.qname {
+            let index_store = AsgIndexStore { repo: &engine.repo };
+            match index_store.get_symbol_by_qname(&engine.ref_name, &qname) {
+                Ok(Some(symbol)) => {
+                    ledger_store
+                        .list_entries(&engine.ref_name, &symbol.symbol_id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|e| e.kind == LedgerKind::Invariant)
+                        .map(|e| serde_json::json!({
+                            "entry_id": e.entry_id,
+                            "qname": qname,
+                            "summary": e.summary,
+                            "created_at": e.created_at,
+                            "tags": e.tags,
+                        }))
+                        .collect()
+                }
+                _ => return err_json(&format!("symbol not found: {}", qname)),
+            }
+        } else {
+            let ref_name = &engine.ref_name;
+            let tree = match engine.repo.get_tree(ref_name, "/asd/v1/ledger") {
+                Ok(v) => v,
+                _ => return serde_json::to_string(&serde_json::json!({ "invariants": [] }))
+                    .unwrap_or_else(|_| "{}".to_string()),
+            };
+            let index_store_all = AsgIndexStore { repo: &engine.repo };
+            let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+            let all_qnames: Vec<String> = match engine.repo.get_tree(ref_name, &prefix) {
+                Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
+                _ => vec![],
+            };
+            let mut id_map: std::collections::HashMap<String, agentstatedeveloper_core::Symbol> =
+                std::collections::HashMap::new();
+            for qn in &all_qnames {
+                if let Ok(Some(s)) = index_store_all.get_symbol_by_qname(ref_name, qn) {
+                    id_map.insert(s.symbol_id.clone(), s);
+                }
+            }
+            let mut rows: Vec<serde_json::Value> = Vec::new();
+            if let Some(sym_map) = tree.as_object() {
+                for per_symbol in sym_map.values() {
+                    if let Some(entry_map) = per_symbol.as_object() {
+                        for entry_val in entry_map.values() {
+                            if let Ok(e) = serde_json::from_value::<LedgerEntry>(entry_val.clone()) {
+                                if e.kind == LedgerKind::Invariant {
+                                    let qname = id_map.get(&e.symbol_id)
+                                        .map(|s| s.qname.as_str())
+                                        .unwrap_or("");
+                                    rows.push(serde_json::json!({
+                                        "entry_id": e.entry_id,
+                                        "qname": qname,
+                                        "summary": e.summary,
+                                        "created_at": e.created_at,
+                                        "tags": e.tags,
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            rows.sort_by(|a, b| {
+                a.get("qname").and_then(serde_json::Value::as_str)
+                    .cmp(&b.get("qname").and_then(serde_json::Value::as_str))
+            });
+            rows
+        };
+
+        serde_json::to_string(&serde_json::json!({ "invariants": rows }))
+            .unwrap_or_else(|_| "{}".to_string())
     }
 }
 
