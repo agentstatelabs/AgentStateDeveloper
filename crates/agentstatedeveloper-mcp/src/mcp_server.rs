@@ -3498,6 +3498,7 @@ impl AsdMcpServer {
             note: p.note.clone(),
             author: p.author_id.clone(),
             created_at: chrono::Utc::now(),
+            file_scope: None,
         };
         let feedback_store = AsgFeedbackStore { repo: &engine.repo };
         match feedback_store.record(&ref_name, &entry, &p.author_id) {

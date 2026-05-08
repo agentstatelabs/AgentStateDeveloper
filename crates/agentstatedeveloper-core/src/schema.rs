@@ -465,6 +465,11 @@ impl FeedbackVerdict {
 }
 
 /// A single feedback record: a (query, symbol, verdict) triple stored durably.
+///
+/// When `file_scope` is set the verdict applies to all symbols from files
+/// matching that glob pattern, not just the specific symbol.  In that case
+/// `symbol_id` is a synthetic `"fs_<uuid>"` identifier and `symbol_qname` is
+/// left empty.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedbackEntry {
     pub entry_id: String,
@@ -477,4 +482,9 @@ pub struct FeedbackEntry {
     pub created_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// File path or glob pattern (e.g. `"App/Utility/**"`) that this verdict
+    /// applies to.  When set, the verdict is applied to all symbols whose file
+    /// path matches this pattern for queries in the same query family.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_scope: Option<String>,
 }

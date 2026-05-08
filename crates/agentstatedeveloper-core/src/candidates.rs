@@ -827,6 +827,29 @@ fn fb_query_tokens(q: &str) -> std::collections::HashSet<String> {
         .collect()
 }
 
+/// Extract name tokens from a fully-qualified symbol name for sibling suppression.
+/// Takes the last `::` or `.`-delimited segment, then splits snake_case by `_`
+/// and CamelCase at uppercase boundaries.
+fn name_tokens_from_qname(qname: &str) -> HashSet<String> {
+    let last = qname.rsplit(|c| c == ':' || c == '.').next().unwrap_or(qname);
+    // Split CamelCase at uppercase boundaries.
+    let mut tokens: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for ch in last.chars() {
+        if ch.is_uppercase() && !cur.is_empty() {
+            tokens.push(std::mem::take(&mut cur));
+        }
+        cur.push(ch.to_lowercase().next().unwrap_or(ch));
+    }
+    if !cur.is_empty() { tokens.push(cur); }
+    // Also split by `_`.
+    tokens.iter()
+        .flat_map(|t| t.split('_'))
+        .filter(|t| t.len() > 2 && !is_stopword(t))
+        .map(|t| t.to_string())
+        .collect()
+}
+
 /// t-003: Query-family matching — a stored verdict applies to the current query
 /// when their token sets overlap by at least one token (not just substring match).
 /// This makes "drift playhead" verdicts apply to "playhead drift" and
@@ -891,24 +914,31 @@ pub fn apply_feedback_adjustments(
         })
         .collect();
 
-    // --- t-002: Build set of files whose symbols have been marked Noisy/WrongLayer
-    // for query families overlapping the current query. All sibling symbols in
-    // those files will be suppressed.
-    let mut noisy_files: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (sym_id, fb_query, verdict) in feedback_entries {
-        if !matches!(verdict, crate::schema::FeedbackVerdict::Noisy | crate::schema::FeedbackVerdict::WrongLayer) {
-            continue;
-        }
-        if !query_family_matches(&current_tokens, fb_query) { continue; }
-        // Look up the file this symbol lives in and add it to the noisy set.
-        // We use the index store to get the symbol's file.
-        let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-        if let Ok(serde_json::Value::Object(map)) = engine.repo.get_tree(&engine.ref_name, &prefix) {
-            for sym_val in map.values() {
-                if let Ok(sym) = serde_json::from_value::<Symbol>(sym_val.clone()) {
-                    if sym.symbol_id == *sym_id {
-                        noisy_files.insert(sym.file);
-                        break;
+    // --- t-001: Build noisy-file map: file → [(sym_id, kind, name_tokens)].
+    // We single-pass the index tree so we only pay one repo.get_tree call.
+    // Only symbols whose query family overlaps the current query are tracked.
+    struct NoisySymInfo { sym_id: String, name_tokens: HashSet<String> }
+    let mut noisy_file_syms: HashMap<String, Vec<NoisySymInfo>> = HashMap::new();
+    {
+        let noisy_ids: HashSet<&str> = feedback_entries.iter()
+            .filter(|(_, fb_query, verdict)| {
+                matches!(verdict, crate::schema::FeedbackVerdict::Noisy | crate::schema::FeedbackVerdict::WrongLayer)
+                    && query_family_matches(&current_tokens, fb_query)
+            })
+            .map(|(sym_id, _, _)| sym_id.as_str())
+            .collect();
+        if !noisy_ids.is_empty() {
+            let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+            if let Ok(serde_json::Value::Object(map)) = engine.repo.get_tree(&engine.ref_name, &prefix) {
+                for sym_val in map.values() {
+                    if let Ok(sym) = serde_json::from_value::<Symbol>(sym_val.clone()) {
+                        if noisy_ids.contains(sym.symbol_id.as_str()) {
+                            let name_tokens = name_tokens_from_qname(&sym.qname);
+                            noisy_file_syms.entry(sym.file.clone()).or_default().push(NoisySymInfo {
+                                sym_id: sym.symbol_id,
+                                name_tokens,
+                            });
+                        }
                     }
                 }
             }
@@ -923,17 +953,31 @@ pub fn apply_feedback_adjustments(
         };
         let sym_id = &sym.symbol_id;
 
-        // t-002: Sibling file suppression.
-        if noisy_files.contains(&sym.file) {
-            // Check this specific symbol doesn't have a Useful override.
-            let has_useful = feedback_entries.iter().any(|(fid, fq, v)| {
-                fid == sym_id
-                    && matches!(v, crate::schema::FeedbackVerdict::Useful)
-                    && query_family_matches(&current_tokens, fq)
-            });
-            if !has_useful {
-                *score = f64::NEG_INFINITY;
-                continue;
+        // t-001: Smarter sibling file suppression.
+        // Class/Module containers and symbols with name tokens fully disjoint
+        // from the noisy symbol are exempted to avoid collateral demotions.
+        if let Some(noisy_syms) = noisy_file_syms.get(&sym.file) {
+            // Exempt: Class/Module containers are never collateral-suppressed.
+            let is_container = matches!(sym.kind, SymbolKind::Class | SymbolKind::Module);
+            if !is_container {
+                let candidate_tokens = name_tokens_from_qname(qname);
+                // Check overlap: suppress only if name tokens share at least one
+                // token with at least one noisy symbol in the same file.
+                let overlaps_noisy = noisy_syms.iter().any(|ns| {
+                    ns.sym_id != *sym_id
+                        && candidate_tokens.iter().any(|t| ns.name_tokens.contains(t))
+                });
+                if overlaps_noisy {
+                    let has_useful = feedback_entries.iter().any(|(fid, fq, v)| {
+                        fid == sym_id
+                            && matches!(v, crate::schema::FeedbackVerdict::Useful)
+                            && query_family_matches(&current_tokens, fq)
+                    });
+                    if !has_useful {
+                        *score = f64::NEG_INFINITY;
+                        continue;
+                    }
+                }
             }
         }
 
@@ -958,6 +1002,153 @@ pub fn apply_feedback_adjustments(
                 if current_tokens_vec.iter().any(|qt| sup_tokens.iter().any(|st| st == *qt)) {
                     *score = f64::NEG_INFINITY;
                 }
+            }
+        }
+    }
+    scored.retain(|(s, _)| s.is_finite());
+}
+
+/// Per-result explanation of which feedback verdict affected a search hit.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FeedbackImpact {
+    /// Verdict that applied: "useful", "noisy", "wrong_layer", or "sibling_suppressed".
+    pub verdict: String,
+    /// The original feedback query that triggered this impact.
+    pub matched_query: String,
+    /// The author who recorded the feedback.
+    pub author: String,
+}
+
+/// For each qname in `qnames`, determine which feedback verdict (if any)
+/// affected it and return a map of qname → FeedbackImpact.
+///
+/// Used by search commands to annotate results with why they were boosted,
+/// demoted, or suppressed.
+pub fn explain_feedback_impacts(
+    engine: &Engine,
+    index_store: &AsgIndexStore,
+    query: &str,
+    qnames: &[String],
+    feedback_entries: &[crate::schema::FeedbackEntry],
+) -> HashMap<String, FeedbackImpact> {
+    let mut impacts: HashMap<String, FeedbackImpact> = HashMap::new();
+    if feedback_entries.is_empty() || qnames.is_empty() { return impacts; }
+    let query_norm = query.to_lowercase();
+    let current_tokens = fb_query_tokens(&query_norm);
+
+    // Build noisy-file → name_tokens map.
+    struct NoisyFileEntry { sym_id: String, name_tokens: HashSet<String> }
+    let mut noisy_file_syms: HashMap<String, Vec<NoisyFileEntry>> = HashMap::new();
+    {
+        let noisy_ids: HashSet<&str> = feedback_entries.iter()
+            .filter(|e| {
+                matches!(e.verdict, crate::schema::FeedbackVerdict::Noisy | crate::schema::FeedbackVerdict::WrongLayer)
+                    && query_family_matches(&current_tokens, &e.query)
+            })
+            .map(|e| e.symbol_id.as_str())
+            .collect();
+        if !noisy_ids.is_empty() {
+            let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+            if let Ok(serde_json::Value::Object(map)) = engine.repo.get_tree(&engine.ref_name, &prefix) {
+                for sym_val in map.values() {
+                    if let Ok(sym) = serde_json::from_value::<Symbol>(sym_val.clone()) {
+                        if noisy_ids.contains(sym.symbol_id.as_str()) {
+                            noisy_file_syms.entry(sym.file.clone()).or_default().push(NoisyFileEntry {
+                                sym_id: sym.symbol_id,
+                                name_tokens: name_tokens_from_qname(&sym.qname),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for qname in qnames {
+        let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+            Ok(Some(s)) => s,
+            _ => continue,
+        };
+        let sym_id = &sym.symbol_id;
+
+        // Check per-symbol verdicts first (direct match takes priority).
+        let mut found = false;
+        for entry in feedback_entries {
+            if entry.symbol_id != *sym_id { continue; }
+            if !query_family_matches(&current_tokens, &entry.query) { continue; }
+            let v_str = entry.verdict.as_str();
+            impacts.insert(qname.clone(), FeedbackImpact {
+                verdict: v_str.to_string(),
+                matched_query: entry.query.clone(),
+                author: entry.author.clone(),
+            });
+            found = true;
+            break;
+        }
+        if found { continue; }
+
+        // Check sibling suppression.
+        if let Some(noisy_syms) = noisy_file_syms.get(&sym.file) {
+            if !matches!(sym.kind, SymbolKind::Class | SymbolKind::Module) {
+                let candidate_tokens = name_tokens_from_qname(qname);
+                let overlaps = noisy_syms.iter().any(|ns| {
+                    ns.sym_id != *sym_id
+                        && candidate_tokens.iter().any(|t| ns.name_tokens.contains(t))
+                });
+                if overlaps {
+                    if let Some(entry) = feedback_entries.iter().find(|e| {
+                        noisy_syms.iter().any(|ns| ns.sym_id == e.symbol_id)
+                            && matches!(e.verdict, crate::schema::FeedbackVerdict::Noisy | crate::schema::FeedbackVerdict::WrongLayer)
+                            && query_family_matches(&current_tokens, &e.query)
+                    }) {
+                        impacts.insert(qname.clone(), FeedbackImpact {
+                            verdict: "sibling_suppressed".to_string(),
+                            matched_query: entry.query.clone(),
+                            author: entry.author.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    impacts
+}
+
+// ---------------------------------------------------------------------------
+// File-scope feedback (t-003)
+// ---------------------------------------------------------------------------
+
+/// Apply file-scoped feedback verdicts to `scored`.
+///
+/// Entries with `file_scope` set demote or boost all symbols from files
+/// matching the glob pattern, subject to query-family matching.
+pub fn apply_file_scope_feedback(
+    engine: &Engine,
+    index_store: &AsgIndexStore,
+    query: &str,
+    scored: &mut Vec<(f64, String)>,
+    file_scope_entries: &[(String, crate::schema::FeedbackVerdict, String)],
+) {
+    if file_scope_entries.is_empty() { return; }
+    let query_norm = query.to_lowercase();
+    let current_tokens = fb_query_tokens(&query_norm);
+
+    for (score, qname) in scored.iter_mut() {
+        if !score.is_finite() { continue; }
+        let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+            Ok(Some(s)) => s,
+            _ => continue,
+        };
+        for (file_glob, verdict, entry_query) in file_scope_entries {
+            if !query_family_matches(&current_tokens, entry_query) { continue; }
+            if !glob_match(file_glob, &sym.file) { continue; }
+            match verdict {
+                crate::schema::FeedbackVerdict::Useful => *score += 1.5,
+                crate::schema::FeedbackVerdict::Noisy | crate::schema::FeedbackVerdict::WrongLayer => {
+                    *score = f64::NEG_INFINITY;
+                    break;
+                }
+                crate::schema::FeedbackVerdict::Missing => {}
             }
         }
     }

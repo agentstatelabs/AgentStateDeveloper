@@ -34,7 +34,21 @@ pub trait FeedbackStore {
         Ok(self
             .list_all(ref_name)?
             .into_iter()
+            .filter(|e| e.file_scope.is_none())
             .map(|e| (e.symbol_id, e.query, e.verdict))
+            .collect())
+    }
+
+    /// Flatten file-scoped feedback into (file_glob, verdict, query) triples for
+    /// use in `apply_file_scope_feedback`.
+    fn flat_file_scope_verdicts(
+        &self,
+        ref_name: &str,
+    ) -> Result<Vec<(String, FeedbackVerdict, String)>> {
+        Ok(self
+            .list_all(ref_name)?
+            .into_iter()
+            .filter_map(|e| e.file_scope.map(|glob| (glob, e.verdict, e.query)))
             .collect())
     }
 }

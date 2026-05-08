@@ -33,7 +33,7 @@ pub enum FeedbackCmd {
 pub struct MarkArgs {
     /// The search query that produced this result.
     pub query: String,
-    /// Fully-qualified symbol name being rated.
+    /// Fully-qualified symbol name being rated. Omit (use "") when --file-scope is set.
     pub qname: String,
     /// Verdict: useful, noisy, missing, or wrong_layer.
     pub verdict: String,
@@ -43,6 +43,9 @@ pub struct MarkArgs {
     /// Author identifier recorded with the verdict.
     #[arg(long, default_value = "asd-cli")]
     pub author: String,
+    /// Apply verdict to all symbols in files matching this glob (e.g. "src/adapters/*.rs").
+    #[arg(long)]
+    pub file_scope: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -112,24 +115,35 @@ fn parse_verdict(s: &str) -> Result<FeedbackVerdict> {
 fn run_mark(cfg: &Config, args: MarkArgs) -> Result<()> {
     let verdict = parse_verdict(&args.verdict)?;
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let index_store = AsgIndexStore { repo: &engine.repo };
-    let symbol = match index_store.get_symbol_by_qname(&engine.ref_name, &args.qname)? {
-        Some(s) => s,
-        None => bail!("symbol not found: {}", args.qname),
+    let (symbol_id, symbol_qname) = if let Some(ref glob) = args.file_scope {
+        // File-scoped verdict: no specific symbol required.
+        (format!("__file_scope__{}", Uuid::new_v4().simple()), glob.clone())
+    } else {
+        let index_store = AsgIndexStore { repo: &engine.repo };
+        let symbol = match index_store.get_symbol_by_qname(&engine.ref_name, &args.qname)? {
+            Some(s) => s,
+            None => bail!("symbol not found: {}", args.qname),
+        };
+        (symbol.symbol_id, args.qname.clone())
     };
     let entry = FeedbackEntry {
         entry_id: format!("fb_{}", Uuid::new_v4().simple()),
-        symbol_id: symbol.symbol_id.clone(),
-        symbol_qname: args.qname.clone(),
+        symbol_id,
+        symbol_qname: symbol_qname.clone(),
         query: args.query.to_lowercase().trim().to_string(),
         verdict,
         note: args.note.clone(),
         author: args.author.clone(),
         created_at: chrono::Utc::now(),
+        file_scope: args.file_scope.clone(),
     };
     let feedback_store = AsgFeedbackStore { repo: &engine.repo };
     feedback_store.record(&engine.ref_name, &entry, &args.author)?;
-    println!("recorded {} for {} ({})", args.verdict, args.qname, entry.entry_id);
+    if args.file_scope.is_some() {
+        println!("recorded {} for files matching {:?} ({})", args.verdict, symbol_qname, entry.entry_id);
+    } else {
+        println!("recorded {} for {} ({})", args.verdict, args.qname, entry.entry_id);
+    }
     Ok(())
 }
 

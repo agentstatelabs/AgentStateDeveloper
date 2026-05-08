@@ -523,17 +523,51 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         .map(|inv| json!({ "constraint": inv["summary"], "source": inv["source"], "kind": "invariant" }))
         .chain(known_hazards.iter().map(|h| json!({ "constraint": h["summary"], "source": h["source"], "kind": "hazard" })))
         .collect();
-    // edit: only impl files — example/reference/demo files move to recipe_reference
+    // t-005: Find files where a matching symbol has a WrongLayer verdict for
+    // the current query family. Those impl files are demoted to recipe_reference.
+    use std::collections::HashSet as _HSet;
+    let wrong_layer_files: _HSet<String> = {
+        let all_fb = feedback_store.list_all(&engine.ref_name).unwrap_or_default();
+        let desc_norm = args.description.to_lowercase();
+        let desc_tokens: std::collections::HashSet<String> = desc_norm
+            .split(|c: char| !c.is_alphabetic())
+            .filter(|t: &&str| t.len() > 2)
+            .map(|t| t.to_string())
+            .collect();
+        let mut wl_files = _HSet::new();
+        for entry in &all_fb {
+            if !matches!(entry.verdict, agentstatedeveloper_core::FeedbackVerdict::WrongLayer) { continue; }
+            // Query-family match: share at least one token.
+            let fb_tokens: std::collections::HashSet<String> = entry.query
+                .split(|c: char| !c.is_alphabetic())
+                .filter(|t: &&str| t.len() > 2)
+                .map(|t: &str| t.to_string())
+                .collect();
+            let overlaps = desc_tokens.iter().any(|t| fb_tokens.contains(t));
+            if !overlaps { continue; }
+            // Look up the symbol's file via qname.
+            if let Ok(Some(sym)) = index_store.get_symbol_by_qname(&engine.ref_name, &entry.symbol_qname) {
+                wl_files.insert(sym.file);
+            }
+        }
+        wl_files
+    };
+    // edit: only impl files not flagged as wrong-layer
     let recipe_edit: Vec<Value> = likely_edit_files.iter()
-        .filter(|f| f["file_role"].as_str() == Some("impl"))
+        .filter(|f| {
+            f["file_role"].as_str() == Some("impl")
+                && !wrong_layer_files.contains(f["file"].as_str().unwrap_or(""))
+        })
         .cloned()
         .collect();
-    // reference: example/demo/doc files that matched but should not be edited
+    // reference: example/demo/doc files that matched but should not be edited,
+    // plus any impl files demoted by WrongLayer feedback.
     let recipe_reference: Vec<Value> = likely_edit_files.iter()
-        .filter(|f| matches!(
-            f["file_role"].as_str(),
-            Some("example") | Some("reference")
-        ))
+        .filter(|f| {
+            matches!(f["file_role"].as_str(), Some("example") | Some("reference"))
+                || (f["file_role"].as_str() == Some("impl")
+                    && wrong_layer_files.contains(f["file"].as_str().unwrap_or("")))
+        })
         .cloned()
         .collect();
     // t-002: include exact build/test commands for each affected test file.

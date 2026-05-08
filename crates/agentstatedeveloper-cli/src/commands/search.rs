@@ -10,7 +10,7 @@ use clap::Args;
 use agentstatedeveloper_core::{
     AGENT_DEFAULT_BUDGET, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, Engine, FeedbackStore,
     FeedbackVerdict, FtsFilters, IndexStore, LedgerStore, SearchDocsDb, SearchFtsDb,
-    apply_feedback_adjustments, classify_layer_sym, confidence_scores, detect_ambiguous_tokens,
+    apply_feedback_adjustments, apply_file_scope_feedback, classify_layer_sym, confidence_scores, detect_ambiguous_tokens,
     detect_confidence_warnings, detect_possible_misses, estimate_tokens, explain_match,
     extract_summary, gather_recency, hybrid_boost, in_memory_score, intent_focus, kind_str,
     load_layer_overrides, parse_intent, parse_query, resolve_scope, result_bucket, stale_warning,
@@ -181,12 +181,17 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             if let Ok(fb) = fb_store.list_all(&engine.ref_name) {
                 if !fb.is_empty() {
                     let fb_tuples: Vec<_> = fb.iter()
+                        .filter(|e| e.file_scope.is_none())
                         .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict))
+                        .collect();
+                    let fs_tuples: Vec<_> = fb.iter()
+                        .filter_map(|e| e.file_scope.as_ref().map(|g| (g.clone(), e.verdict, e.query.clone())))
                         .collect();
                     let mut adj: Vec<(f64, String)> = scored.iter()
                         .map(|(s, h)| (*s, h.qname.clone()))
                         .collect();
                     apply_feedback_adjustments(&engine, &idx, &args.query, &mut adj, &fb_tuples);
+                    apply_file_scope_feedback(&engine, &idx, &args.query, &mut adj, &fs_tuples);
                     let adj_map: std::collections::HashMap<String, f64> =
                         adj.into_iter().map(|(s, q)| (q, s)).collect();
                     let before = scored.len();
@@ -441,12 +446,17 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         if let Ok(fb) = fb_store.list_all(&engine.ref_name) {
             if !fb.is_empty() {
                 let fb_tuples: Vec<_> = fb.iter()
+                    .filter(|e| e.file_scope.is_none())
                     .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict))
+                    .collect();
+                let fs_tuples: Vec<_> = fb.iter()
+                    .filter_map(|e| e.file_scope.as_ref().map(|g| (g.clone(), e.verdict, e.query.clone())))
                     .collect();
                 let mut adj: Vec<(f64, String)> = scored.iter()
                     .map(|(s, sym)| (*s as f64, sym.qname.clone()))
                     .collect();
                 apply_feedback_adjustments(&engine, &idx, &args.query, &mut adj, &fb_tuples);
+                apply_file_scope_feedback(&engine, &idx, &args.query, &mut adj, &fs_tuples);
                 let surviving: std::collections::HashSet<String> =
                     adj.into_iter().map(|(_, q)| q).collect();
                 scored.retain(|(_, sym)| surviving.contains(&sym.qname));

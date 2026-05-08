@@ -46,8 +46,9 @@ pub use schema::{
 pub use scratch::{AsgScratchStore, CleanFilter, ScratchFilter, ScratchStore};
 pub use feedback::{AsgFeedbackStore, FeedbackStore};
 pub use candidates::{
-    apply_feedback_adjustments, confidence_scores, detect_ambiguous_tokens,
-    detect_confidence_warnings, detect_possible_misses, explain_match, find_candidates,
+    apply_feedback_adjustments, apply_file_scope_feedback, confidence_scores,
+    detect_ambiguous_tokens, detect_confidence_warnings, detect_possible_misses, explain_match,
+    explain_feedback_impacts, FeedbackImpact, find_candidates,
     glob_match, in_memory_score, kind_str, load_scope_aliases, matches_any_path_glob,
     parse_query, query_tokens, resolve_scope, result_bucket, suggest_better_queries,
 };
