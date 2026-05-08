@@ -657,6 +657,13 @@ fn append(cfg: &Config, args: AppendArgs) -> Result<()> {
         }
     }
 
+    // t-001: inject CTX plan/task provenance from env vars.
+    for tag in ctx_provenance_tags() {
+        if !entry.tags.contains(&tag) {
+            entry.tags.push(tag);
+        }
+    }
+
     let ledger_store = AsgLedgerStore { repo: &engine.repo };
     ledger_store.append_entry(&engine.ref_name, &entry, &cfg.agent_id)?;
 
@@ -785,4 +792,25 @@ fn rebind(cfg: &Config, args: RebindArgs) -> Result<()> {
         }))?
     );
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// t-001: CTX plan/task provenance from env vars
+// ---------------------------------------------------------------------------
+
+/// Read CTXONE_PLAN and CTXONE_TASK env vars and return them as ledger tags.
+/// Call this before every ledger append to attach workflow provenance.
+pub fn ctx_provenance_tags() -> Vec<String> {
+    let mut tags = Vec::new();
+    if let Ok(plan) = std::env::var("CTXONE_PLAN") {
+        if !plan.is_empty() {
+            tags.push(format!("ctx:plan:{}", plan));
+        }
+    }
+    if let Ok(task) = std::env::var("CTXONE_TASK") {
+        if !task.is_empty() {
+            tags.push(format!("ctx:task:{}", task));
+        }
+    }
+    tags
 }

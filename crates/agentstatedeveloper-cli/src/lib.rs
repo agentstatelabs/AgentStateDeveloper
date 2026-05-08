@@ -182,6 +182,15 @@ pub enum Command {
     /// and suggests (or records) decisions, invariants, proofs, and hazards.
     #[command(name = "annotate-commit")]
     AnnotateCommit(commands::annotate_commit::AnnotateCommitArgs),
+
+    /// Close an active task: write proof and optional validation entries to the
+    /// ledger for all symbols affected by HEAD, tagged with CTX plan/task provenance.
+    #[command(name = "task-close")]
+    TaskClose(commands::task_close::TaskCloseArgs),
+
+    /// Benchmark scorecard across the five ASD dimensions:
+    /// truth, feedback, change, uncertainty, and workflow.
+    Scorecard(commands::scorecard::ScorecardArgs),
 }
 
 /// Resolve [`Config`] from the parsed CLI flags.
@@ -229,5 +238,7 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Since(args) => since::run(cfg, args),
         Command::Feedback(sub) => feedback::run(cfg, sub),
         Command::AnnotateCommit(args) => annotate_commit::run(cfg, args),
+        Command::TaskClose(args) => task_close::run(cfg, args),
+        Command::Scorecard(args) => scorecard::run(cfg, args),
     }
 }

@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, IndexStore, LedgerStore,
-    Symbol, discover_symbol_ownership, find_covering_tests,
+    Symbol, discover_symbol_ownership, find_covering_tests, stale_warning,
 };
 
 use crate::commands::graph::build_id_map;
@@ -36,9 +36,18 @@ pub struct ContextForArgs {
     /// Include full source body of each symbol (can be large).
     #[arg(long, default_value = "false")]
     pub include_body: bool,
+
+    /// Suppress the stale-index warning.
+    #[arg(long)]
+    pub quiet: bool,
 }
 
 pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
+    if !args.quiet {
+        if let Some(warn) = agentstatedeveloper_core::stale_warning(&cfg.db_path, 3600) {
+            eprintln!("{warn}");
+        }
+    }
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let index_store = AsgIndexStore { repo: &engine.repo };
     let effect_store = AsgEffectStore { repo: &engine.repo };

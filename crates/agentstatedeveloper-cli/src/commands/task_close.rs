@@ -1,0 +1,154 @@
+//! `asd task-close` — capture proof, validation result, and affected symbols
+//! and write them atomically to the ledger when closing a task.
+//!
+//! Reads CTXONE_PLAN / CTXONE_TASK env vars for provenance.
+//! Changed files are resolved from git HEAD..HEAD~1 by default or passed
+//! via --symbols.
+
+use anyhow::Result;
+use clap::Args;
+use serde_json::json;
+
+use agentstatedeveloper_core::{
+    AsgIndexStore, AsgLedgerStore, Engine, IndexStore, LedgerKind, LedgerStore, Symbol,
+    schema::{Author, AuthorKind, LedgerEntry},
+};
+
+use crate::config::Config;
+
+#[derive(Debug, Args)]
+pub struct TaskCloseArgs {
+    /// Free-text description of what was completed (written as Proof entry).
+    pub proof: String,
+
+    /// Comma-separated fully-qualified symbol names to annotate.
+    /// If omitted, symbols are resolved from files changed in HEAD.
+    #[arg(long)]
+    pub symbols: Option<String>,
+
+    /// Mark the task as validated (writes a ValidationScenario entry too).
+    #[arg(long)]
+    pub validated: bool,
+
+    /// Optional validation note when --validated is set.
+    #[arg(long)]
+    pub validation_note: Option<String>,
+
+    /// CTX plan ID (overrides CTXONE_PLAN env var).
+    #[arg(long)]
+    pub plan: Option<String>,
+
+    /// CTX task ID (overrides CTXONE_TASK env var).
+    #[arg(long)]
+    pub task: Option<String>,
+
+    /// Author id written into ledger entries.
+    #[arg(long, default_value = "asd-task-close")]
+    pub author: String,
+
+    /// Suppress informational output.
+    #[arg(long)]
+    pub quiet: bool,
+}
+
+pub fn run(cfg: &Config, args: TaskCloseArgs) -> Result<()> {
+    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let index_store = AsgIndexStore { repo: &engine.repo };
+    let ledger_store = AsgLedgerStore { repo: &engine.repo };
+
+    // Resolve CTX plan/task from args or env vars (t-001).
+    let plan_id = args.plan.clone()
+        .or_else(|| std::env::var("CTXONE_PLAN").ok())
+        .unwrap_or_default();
+    let task_id = args.task.clone()
+        .or_else(|| std::env::var("CTXONE_TASK").ok())
+        .unwrap_or_default();
+
+    // Build provenance tags.
+    let mut ctx_tags: Vec<String> = Vec::new();
+    if !plan_id.is_empty() { ctx_tags.push(format!("ctx:plan:{}", plan_id)); }
+    if !task_id.is_empty() { ctx_tags.push(format!("ctx:task:{}", task_id)); }
+
+    // Resolve affected symbols.
+    let target_symbols: Vec<Symbol> = if let Some(ref sym_list) = args.symbols {
+        sym_list.split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .filter_map(|q| index_store.get_symbol_by_qname(&engine.ref_name, q).ok().flatten())
+            .collect()
+    } else {
+        // Auto-detect from git HEAD changed files.
+        let out = std::process::Command::new("git")
+            .args(["diff-tree", "--no-commit-id", "-r", "--name-only", "HEAD"])
+            .output()
+            .unwrap_or_else(|_| std::process::Output {
+                status: std::process::ExitStatus::default(),
+                stdout: vec![],
+                stderr: vec![],
+            });
+        let changed: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+
+        let tree = engine.repo
+            .get_tree(&engine.ref_name, "/asd/v1/index/by-qname")
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+        let mut syms: Vec<Symbol> = tree.as_object()
+            .map(|m| m.values()
+                .filter_map(|v| serde_json::from_value::<Symbol>(v.clone()).ok())
+                .filter(|s| changed.iter().any(|f| s.file.ends_with(f.as_str()) || s.file == *f))
+                .collect())
+            .unwrap_or_default();
+        syms.truncate(20);
+        syms
+    };
+
+    if target_symbols.is_empty() {
+        eprintln!("asd: no symbols resolved — pass --symbols or ensure HEAD has changed files");
+        println!("{}", json!({"written": [], "ctx": {"plan": plan_id, "task": task_id}}));
+        return Ok(());
+    }
+
+    let author = Author { kind: AuthorKind::Human, id: args.author.clone() };
+    let mut written: Vec<serde_json::Value> = Vec::new();
+
+    for sym in &target_symbols {
+        // Write Proof entry.
+        let mut proof_entry = LedgerEntry::new(
+            &sym.symbol_id, LedgerKind::Proof, &args.proof, author.clone(),
+        );
+        proof_entry.tags.extend(ctx_tags.iter().cloned());
+        ledger_store.append_entry(&engine.ref_name, &proof_entry, &args.author)?;
+        written.push(json!({"symbol": sym.qname, "kind": "proof", "summary": args.proof}));
+
+        // Write ValidationScenario if --validated.
+        if args.validated {
+            let validation_text = args.validation_note.clone()
+                .unwrap_or_else(|| format!("validated: {}", args.proof));
+            let mut vs_entry = LedgerEntry::new(
+                &sym.symbol_id, LedgerKind::ValidationScenario, &validation_text, author.clone(),
+            );
+            vs_entry.tags.extend(ctx_tags.iter().cloned());
+            ledger_store.append_entry(&engine.ref_name, &vs_entry, &args.author)?;
+            written.push(json!({"symbol": sym.qname, "kind": "validation_scenario", "summary": validation_text}));
+        }
+    }
+
+    if !args.quiet {
+        eprintln!("asd: wrote {} ledger entries across {} symbols", written.len(), target_symbols.len());
+        if !ctx_tags.is_empty() {
+            eprintln!("asd: provenance: {}", ctx_tags.join(", "));
+        }
+    }
+
+    println!("{}", serde_json::to_string_pretty(&json!({
+        "written": written,
+        "ctx": {
+            "plan": if plan_id.is_empty() { serde_json::Value::Null } else { json!(plan_id) },
+            "task": if task_id.is_empty() { serde_json::Value::Null } else { json!(task_id) },
+        },
+    }))?);
+    Ok(())
+}

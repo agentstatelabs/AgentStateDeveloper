@@ -55,6 +55,20 @@ pub struct AnnotateCommitArgs {
     /// Appended to the commit message body when deriving annotations.
     #[arg(long)]
     pub task_description: Option<String>,
+
+    /// CTX task ID — written as a `ctx:task:<id>` provenance tag on every entry.
+    /// Also accepts CTXONE_TASK env var.
+    #[arg(long)]
+    pub ctx_task: Option<String>,
+
+    /// CTX plan ID — written as a `ctx:plan:<id>` provenance tag.
+    /// Also accepts CTXONE_PLAN env var.
+    #[arg(long)]
+    pub ctx_plan: Option<String>,
+
+    /// Suppress informational stderr output.
+    #[arg(long)]
+    pub quiet: bool,
 }
 
 pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
@@ -165,6 +179,18 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
         }
     }
 
+    // ---- CTX provenance tags (t-001) -------------------------------------
+    let ctx_plan = args.ctx_plan.clone()
+        .or_else(|| std::env::var("CTXONE_PLAN").ok())
+        .unwrap_or_default();
+    let ctx_task = args.ctx_task.clone()
+        .or_else(|| std::env::var("CTXONE_TASK").ok())
+        .unwrap_or_default();
+    let mut ctx_tags: Vec<String> = Vec::new();
+    if !ctx_plan.is_empty() { ctx_tags.push(format!("ctx:plan:{}", ctx_plan)); }
+    if !ctx_task.is_empty() { ctx_tags.push(format!("ctx:task:{}", ctx_task)); }
+    ctx_tags.push(format!("commit:{}", &commit_hash[..8.min(commit_hash.len())]));
+
     // ---- Determine author ------------------------------------------------
     let author_id = args.author.clone().unwrap_or_else(|| {
         let out = Command::new("git")
@@ -203,12 +229,13 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
             });
 
             if args.write {
-                let entry = LedgerEntry::new(
+                let mut entry = LedgerEntry::new(
                     sym.symbol_id.clone(),
                     ann.kind,
                     ann.summary.clone(),
                     author.clone(),
                 );
+                entry.tags.extend(ctx_tags.iter().cloned());
                 match ledger_store.append_entry(&engine.ref_name, &entry, &author.id) {
                     Ok(()) => written.push(entry_val),
                     Err(e) => eprintln!("warn: could not write entry for {}: {e}", sym.qname),
