@@ -668,6 +668,8 @@ pub fn detect_ambiguous_tokens(
 ///
 /// Checks whether the result set covers the layers implied by the query.
 /// Returns human-readable warning strings for use in `possible_misses` output.
+/// Pass `scope_narrowed = true` to suppress all warnings when the user
+/// intentionally restricted results via --scope / --paths / --exclude (t-001).
 pub fn detect_possible_misses(
     query: &str,
     layers_present: &HashSet<&str>,
@@ -692,6 +694,34 @@ pub fn detect_possible_misses(
         );
     }
 
+    // t-004: service/domain query with results only in UI layer.
+    const SERVICE_HINTS: &[&str] = &["service", "manager", "coordinator", "handler", "processor", "store", "repository", "repo"];
+    const SERVICE_LAYERS: &[&str] = &["service", "domain", "core", "infrastructure"];
+    if SERVICE_HINTS.iter().any(|h| ql.contains(h))
+        && result_count > 0
+        && SERVICE_LAYERS.iter().all(|l| !layers_present.contains(l))
+        && (layers_present.contains("view") || layers_present.contains("ui"))
+    {
+        warnings.push(
+            "results are all UI-layer — query suggests service/domain involvement; \
+             service layer symbols may not be indexed"
+                .to_string(),
+        );
+    }
+
+    // t-004: data/model query missing persistence layer.
+    const DATA_HINTS: &[&str] = &["model", "entity", "persist", "database", "migration", "schema", "table"];
+    const DATA_LAYERS: &[&str] = &["persistence", "data", "infrastructure", "domain"];
+    if DATA_HINTS.iter().any(|h| ql.contains(h))
+        && result_count > 0
+        && DATA_LAYERS.iter().all(|l| !layers_present.contains(l))
+    {
+        warnings.push(
+            "no persistence/data-layer symbols found — query suggests data model involvement"
+                .to_string(),
+        );
+    }
+
     // Very few results for a precise multi-word query.
     if result_count > 0 && result_count < 3 && ql.split_whitespace().count() >= 3 {
         warnings.push(format!(
@@ -702,6 +732,90 @@ pub fn detect_possible_misses(
     }
 
     warnings
+}
+
+/// Distinguish whether low result confidence comes from ambiguous terms or a
+/// sparse index. Returns a vec of typed warning objects with kind + message.
+///
+/// kinds: "ambiguous_term" | "sparse_index"
+pub fn detect_confidence_warnings(
+    tokens: &[String],
+    result_count: usize,
+    ambiguous_terms: &[String],
+    db_path: &Path,
+) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let mut warnings = Vec::new();
+
+    // Ambiguous terms already detected upstream — annotate them with advice.
+    for term in ambiguous_terms {
+        warnings.push(json!({
+            "kind": "ambiguous_term",
+            "term": term,
+            "message": format!(
+                "\"{}\" matches too many unrelated files — add more specific terms to narrow results",
+                term
+            ),
+        }));
+    }
+
+    // Sparse index: very few results but no ambiguous terms → index may be thin.
+    if result_count < 3 && ambiguous_terms.is_empty() && !tokens.is_empty() {
+        // Check total indexed symbol count as a proxy for index completeness.
+        let total = SearchFtsDb::open(db_path)
+            .ok()
+            .filter(|f| f.has_data())
+            .and_then(|f| f.search("", &FtsFilters::default(), 1).ok())
+            .is_some();
+        if total {
+            warnings.push(json!({
+                "kind": "sparse_index",
+                "message": "very few results — the index may not cover this area yet; \
+                            try `asd index` or broaden the query",
+            }));
+        }
+    }
+
+    warnings
+}
+
+/// Suggest more specific queries when the current query is too broad.
+///
+/// Returns a vec of suggestion strings. Empty when the query is already focused.
+pub fn suggest_better_queries(tokens: &[String], query: &str) -> Vec<String> {
+    if tokens.is_empty() { return vec![]; }
+    let mut suggestions = Vec::new();
+
+    // Single-token broad queries.
+    let stopword_count = tokens.iter().filter(|t| is_stopword(t)).count();
+    let meaningful = tokens.len() - stopword_count;
+
+    if meaningful <= 1 {
+        let tok = tokens.iter().find(|t| !is_stopword(t)).map(|s| s.as_str()).unwrap_or(query);
+        suggestions.push(format!("try a more specific phrase, e.g. \"{} <subsystem>\" or \"{} <action>\"", tok, tok));
+    }
+
+    // Stopword-heavy query (>50% stopwords with 3+ tokens).
+    if tokens.len() >= 3 && stopword_count * 2 > tokens.len() {
+        suggestions.push(
+            "query contains many common words — focus on domain nouns and verbs for better precision"
+                .to_string(),
+        );
+    }
+
+    // Very common single terms likely to be ambiguous.
+    const BROAD_TERMS: &[&str] = &["update", "get", "set", "handle", "process", "run", "execute", "init", "start", "stop", "load", "save", "create", "delete", "state", "data", "model", "manager", "service", "util", "helper", "config"];
+    for tok in tokens {
+        if BROAD_TERMS.contains(&tok.as_str()) && tokens.len() == 1 {
+            suggestions.push(format!(
+                "\"{}\" is very broad — combine with a domain term, e.g. \"{} playhead\" or \"{} session\"",
+                tok, tok, tok
+            ));
+        }
+    }
+
+    suggestions.dedup();
+    suggestions
 }
 
 /// Tokenise a feedback query string into a set of non-stopword terms.

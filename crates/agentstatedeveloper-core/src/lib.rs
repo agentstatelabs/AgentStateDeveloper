@@ -46,9 +46,10 @@ pub use schema::{
 pub use scratch::{AsgScratchStore, CleanFilter, ScratchFilter, ScratchStore};
 pub use feedback::{AsgFeedbackStore, FeedbackStore};
 pub use candidates::{
-    apply_feedback_adjustments, confidence_scores, detect_ambiguous_tokens, detect_possible_misses,
-    explain_match, find_candidates, glob_match, in_memory_score, kind_str, load_scope_aliases,
-    matches_any_path_glob, parse_query, query_tokens, resolve_scope, result_bucket,
+    apply_feedback_adjustments, confidence_scores, detect_ambiguous_tokens,
+    detect_confidence_warnings, detect_possible_misses, explain_match, find_candidates,
+    glob_match, in_memory_score, kind_str, load_scope_aliases, matches_any_path_glob,
+    parse_query, query_tokens, resolve_scope, result_bucket, suggest_better_queries,
 };
 pub use repair::{IssueSeverity, RepairIssue, RepairReport, drop_orphaned_edge_refs, repair_asg, scan_asg};
 pub use search_fts::{AGENT_DEFAULT_BUDGET, FileRecency, FtsFilters, FtsHit, OwnershipSignal, SearchFtsDb, SymbolTier, classify_layer, classify_layer_sym, derive_cold_hints, discover_symbol_ownership, estimate_tokens, extract_summary, find_covering_tests, find_indexed_test_files, gather_recency, git_dirty_files, hybrid_boost, intent_focus, intent_layer_order, is_stopword, load_layer_overrides, parse_intent, propose_test_path, symbol_tier, trim_for_agent};

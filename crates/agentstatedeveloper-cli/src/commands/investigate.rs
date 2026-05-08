@@ -285,7 +285,13 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     let layers_present: std::collections::HashSet<&str> = entry_points.iter()
         .filter_map(|ep| ep.get("layer").and_then(Value::as_str))
         .collect();
-    let possible_misses = detect_possible_misses(&args.query, &layers_present, entry_points.len());
+    // t-001: suppress possible-miss warnings when scope is intentionally narrowed.
+    let scope_narrowed = !filters.paths_filter.is_empty() || !filters.exclude_terms.is_empty();
+    let possible_misses = if scope_narrowed {
+        vec![]
+    } else {
+        detect_possible_misses(&args.query, &layers_present, entry_points.len())
+    };
 
     // Default: grouped by_layer output (compact, deduped by layer).
     // --flat restores the legacy flat entry_points array.
@@ -298,6 +304,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             "tokens": tokens,
             "ambiguous_terms": ambiguous_terms,
             "possible_misses": possible_misses,
+            "scope_narrowed": scope_narrowed,
             "stale_symbols": stale_symbols,
             "invariants": all_invariants,
             "hazards": all_hazards,
@@ -311,6 +318,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             "tokens": tokens,
             "ambiguous_terms": ambiguous_terms,
             "possible_misses": possible_misses,
+            "scope_narrowed": scope_narrowed,
             "stale_symbols": stale_symbols,
             "invariants": all_invariants,
             "hazards": all_hazards,

@@ -11,9 +11,10 @@ use agentstatedeveloper_core::{
     AGENT_DEFAULT_BUDGET, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, Engine, FeedbackStore,
     FeedbackVerdict, FtsFilters, IndexStore, LedgerStore, SearchDocsDb, SearchFtsDb,
     apply_feedback_adjustments, classify_layer_sym, confidence_scores, detect_ambiguous_tokens,
-    detect_possible_misses, estimate_tokens, explain_match, extract_summary, gather_recency,
-    hybrid_boost, in_memory_score, intent_focus, kind_str, load_layer_overrides, parse_intent,
-    parse_query, resolve_scope, result_bucket, stale_warning, symbol_tier, trim_for_agent,
+    detect_confidence_warnings, detect_possible_misses, estimate_tokens, explain_match,
+    extract_summary, gather_recency, hybrid_boost, in_memory_score, intent_focus, kind_str,
+    load_layer_overrides, parse_intent, parse_query, resolve_scope, result_bucket, stale_warning,
+    suggest_better_queries, symbol_tier, trim_for_agent,
 };
 
 use crate::config::Config;
@@ -266,6 +267,14 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             } else {
                 detect_possible_misses(&args.query, &layers_present, results.len())
             };
+            // t-003: typed confidence warnings (ambiguous vs sparse).
+            let confidence_warnings = detect_confidence_warnings(
+                &tokens, results.len(), &ambiguous_terms, &cfg.db_path,
+            );
+            // t-005: query improvement suggestions.
+            let query_suggestions = if scope_narrowed { vec![] } else {
+                suggest_better_queries(&tokens, &args.query)
+            };
             let doc_results: Vec<serde_json::Value> = doc_hits.iter().map(|h| {
                 serde_json::json!({
                     "source": "document",
@@ -283,6 +292,8 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
                 "ambiguous_terms": ambiguous_terms,
                 "possible_misses": possible_misses,
+                "confidence_warnings": confidence_warnings,
+                "query_suggestions": query_suggestions,
                 "scope_narrowed": scope_narrowed,
                 "feedback_suppressed": feedback_suppressed,
                 "results": results,
@@ -298,6 +309,13 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             }
             println!("{}", serde_json::to_string_pretty(&out)?);
         } else {
+            // t-005: show query suggestions before results.
+            let scope_narrowed_term = !filters.paths_filter.is_empty() || !filters.exclude_terms.is_empty();
+            let q_suggestions = if scope_narrowed_term { vec![] } else { suggest_better_queries(&tokens, &args.query) };
+            for s in &q_suggestions {
+                eprintln!("asd: {}", s);
+            }
+
             // Load feedback for display badges (already applied to ranking above).
             let fb_for_display = {
                 let fb_store = AsgFeedbackStore { repo: &engine.repo };
@@ -326,9 +344,21 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 } else {
                     ""
                 };
+                // t-002: confidence bucket label in terminal output.
+                let conf = confidences.get(idx).copied().unwrap_or(0.5);
+                let (bucket, match_reasons_disp) = if let Ok(Some(sym)) = index_store.get_symbol_by_qname(&engine.ref_name, &hit.qname) {
+                    let entries = ledger_store.list_entries(&engine.ref_name, &sym.symbol_id).unwrap_or_default();
+                    let has_ledger = !entries.is_empty();
+                    let reasons = explain_match(&sym, &tokens, &entries, is_hot);
+                    let b = result_bucket(&hit.file, &reasons, has_ledger, is_hot);
+                    (b, reasons)
+                } else {
+                    ("noisy", vec![])
+                };
+                let conf_tag = format!(" [{} {:.0}%]", bucket, conf * 100.0);
                 println!(
-                    "[{:.1}] {} {}{}{}{} ({}:{})",
-                    score, hit.kind, hit.qname, hot_tag, fb_tag, age_tag, hit.file, hit.line
+                    "[{:.1}] {} {}{}{}{}{} ({}:{})",
+                    score, hit.kind, hit.qname, hot_tag, fb_tag, conf_tag, age_tag, hit.file, hit.line
                 );
                 if let Some(sig) = &hit.signature {
                     if !sig.is_empty() { println!("       sig: {}", sig); }
@@ -336,24 +366,13 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 let summary = extract_summary(hit.doc.as_deref(), hit.signature.as_deref());
                 if !summary.is_empty() { println!("       {}", summary); }
                 if args.explain {
-                    let entries = ledger_store
-                        .list_entries(&engine.ref_name, &hit.symbol_id)
-                        .unwrap_or_default();
-                    let has_ledger = !entries.is_empty();
-                    let reasons = index_store
-                        .get_symbol_by_qname(&engine.ref_name, &hit.qname)
-                        .ok().flatten()
-                        .map(|sym| explain_match(&sym, &tokens, &entries, is_hot))
-                        .unwrap_or_default();
-                    let conf = confidences.get(idx).copied().unwrap_or(0.0);
-                    let bucket = result_bucket(&hit.file, &reasons, has_ledger, is_hot);
                     println!(
                         "       confidence: {:.0}%  bucket: {}",
                         conf * 100.0,
                         bucket
                     );
-                    if !reasons.is_empty() {
-                        println!("       why: {}", reasons.join(", "));
+                    if !match_reasons_disp.is_empty() {
+                        println!("       why: {}", match_reasons_disp.join(", "));
                     }
                 }
             }
