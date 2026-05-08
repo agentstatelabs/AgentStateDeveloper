@@ -12,8 +12,9 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, IndexStore, LedgerKind,
-    LedgerStore, classify_layer_sym, estimate_tokens, git_dirty_files, intent_focus,
-    load_layer_overrides, parse_intent, propose_test_path, stale_warning, symbol_tier, trim_for_agent,
+    LedgerStore, classify_layer_sym, estimate_tokens, git_dirty_files, glob_match, intent_focus,
+    load_layer_overrides, matches_any_path_glob, parse_intent, propose_test_path, resolve_scope,
+    stale_warning, symbol_tier, trim_for_agent,
 };
 
 use crate::commands::graph::build_id_map;
@@ -49,6 +50,18 @@ pub struct ImpactArgs {
     /// Token budget when --agent is set (default: 8000).
     #[arg(long, default_value = "8000")]
     pub agent_budget: usize,
+
+    /// Comma-separated terms to exclude from caller results.
+    #[arg(long)]
+    pub exclude: Option<String>,
+
+    /// Comma-separated glob patterns to restrict callers to specific paths.
+    #[arg(long)]
+    pub paths: Option<String>,
+
+    /// Named scope alias from .asd/scopes.toml, e.g. --scope drift-pad.
+    #[arg(long)]
+    pub scope: Option<String>,
 }
 
 pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
@@ -68,6 +81,17 @@ pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
     let symbol = index_store
         .get_symbol_by_qname(&engine.ref_name, &args.qname)?
         .ok_or_else(|| anyhow::anyhow!("symbol not found: {}", args.qname))?;
+
+    let mut paths_filter: Vec<String> = Vec::new();
+    if let Some(ref scope) = args.scope {
+        paths_filter.extend(resolve_scope(scope, &cfg.db_path));
+    }
+    if let Some(ref paths) = args.paths {
+        paths_filter.extend(paths.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()));
+    }
+    let exclusions: Vec<String> = args.exclude.as_deref().map(|e| {
+        e.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).collect()
+    }).unwrap_or_default();
 
     let tier = symbol_tier(&symbol.file);
     let layer = classify_layer_sym(&symbol.file, &symbol.qname, tier, &layer_overrides);
@@ -97,6 +121,17 @@ pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
             }
             visited.insert(nbr_id.clone());
             if let Some(s) = id_map.get(&nbr_id) {
+                // Apply path and exclusion filters.
+                if !paths_filter.is_empty() && !matches_any_path_glob(&paths_filter, &s.file) {
+                    continue;
+                }
+                if !exclusions.is_empty() {
+                    let lfile = s.file.to_lowercase();
+                    let lqname = s.qname.to_lowercase();
+                    if exclusions.iter().any(|e| glob_match(e, &lfile) || lqname.contains(e.as_str())) {
+                        continue;
+                    }
+                }
                 let t = symbol_tier(&s.file);
                 let l = classify_layer_sym(&s.file, &s.qname, t, &layer_overrides);
                 let row = json!({

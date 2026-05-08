@@ -8,12 +8,12 @@ use anyhow::Result;
 use clap::Args;
 
 use agentstatedeveloper_core::{
-    AGENT_DEFAULT_BUDGET, AsgIndexStore, AsgLedgerStore, Engine, FtsFilters, IndexStore,
-    LedgerStore, SearchDocsDb, SearchFtsDb, classify_layer_sym, confidence_scores,
-    detect_ambiguous_tokens, detect_possible_misses, estimate_tokens, explain_match,
-    extract_summary, gather_recency, hybrid_boost, in_memory_score, intent_focus, kind_str,
-    load_layer_overrides, parse_intent, parse_query, resolve_scope, result_bucket, stale_warning,
-    symbol_tier, trim_for_agent,
+    AGENT_DEFAULT_BUDGET, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, Engine, FeedbackStore,
+    FeedbackVerdict, FtsFilters, IndexStore, LedgerStore, SearchDocsDb, SearchFtsDb,
+    apply_feedback_adjustments, classify_layer_sym, confidence_scores, detect_ambiguous_tokens,
+    detect_possible_misses, estimate_tokens, explain_match, extract_summary, gather_recency,
+    hybrid_boost, in_memory_score, intent_focus, kind_str, load_layer_overrides, parse_intent,
+    parse_query, resolve_scope, result_bucket, stale_warning, symbol_tier, trim_for_agent,
 };
 
 use crate::config::Config;
@@ -172,6 +172,31 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             })
             .collect();
 
+        // Apply durable feedback: suppress noisy/wrong-layer, boost useful.
+        {
+            let fb_store = AsgFeedbackStore { repo: &engine.repo };
+            let idx = AsgIndexStore { repo: &engine.repo };
+            if let Ok(fb) = fb_store.list_all(&engine.ref_name) {
+                if !fb.is_empty() {
+                    let fb_tuples: Vec<_> = fb.iter()
+                        .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict))
+                        .collect();
+                    let mut adj: Vec<(f64, String)> = scored.iter()
+                        .map(|(s, h)| (*s, h.qname.clone()))
+                        .collect();
+                    apply_feedback_adjustments(&engine, &idx, &args.query, &mut adj, &fb_tuples);
+                    let adj_map: std::collections::HashMap<String, f64> =
+                        adj.into_iter().map(|(s, q)| (q, s)).collect();
+                    scored.retain(|(_, h)| adj_map.contains_key(&h.qname));
+                    for (score, h) in scored.iter_mut() {
+                        if let Some(&new_s) = adj_map.get(&h.qname) {
+                            *score = new_s;
+                        }
+                    }
+                }
+            }
+        }
+
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.1.qname.cmp(&b.1.qname)));
         scored.truncate(args.limit);
@@ -208,6 +233,19 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     vec![]
                 };
                 let bucket = result_bucket(&hit.file, &match_reasons, has_ledger, is_hot);
+                // Check for an active useful feedback verdict (these survive filtering).
+                let fb_store2 = AsgFeedbackStore { repo: &engine.repo };
+                let fb_status = if let Ok(fb) = fb_store2.list_all(&engine.ref_name) {
+                    let q = args.query.to_lowercase();
+                    fb.iter().find(|e| {
+                        e.symbol_id == hit.symbol_id
+                            && (e.query.is_empty()
+                                || q.contains(e.query.as_str())
+                                || e.query.contains(q.as_str()))
+                    }).map(|e| e.verdict.as_str().to_string())
+                } else {
+                    None
+                };
                 serde_json::json!({
                     "score": score, "confidence": conf, "bucket": bucket,
                     "qname": hit.qname, "kind": hit.kind,
@@ -216,9 +254,15 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     "last_touched_days": rec.and_then(|r| r.last_touched_days),
                     "hot": is_hot,
                     "match_reasons": match_reasons,
+                    "feedback_status": fb_status,
                 })
             }).collect();
-            let possible_misses = detect_possible_misses(&args.query, &layers_present, results.len());
+            let scope_narrowed = !filters.paths_filter.is_empty() || !filters.exclude_terms.is_empty();
+            let possible_misses = if scope_narrowed {
+                vec![]
+            } else {
+                detect_possible_misses(&args.query, &layers_present, results.len())
+            };
             let doc_results: Vec<serde_json::Value> = doc_hits.iter().map(|h| {
                 serde_json::json!({
                     "source": "document",
@@ -236,6 +280,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
                 "ambiguous_terms": ambiguous_terms,
                 "possible_misses": possible_misses,
+                "scope_narrowed": scope_narrowed,
                 "results": results,
                 "document_hits": doc_results,
             });
@@ -249,16 +294,37 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             }
             println!("{}", serde_json::to_string_pretty(&out)?);
         } else {
-            for (score, hit) in &scored {
+            // Load feedback for display badges (already applied to ranking above).
+            let fb_for_display = {
+                let fb_store = AsgFeedbackStore { repo: &engine.repo };
+                fb_store.list_all(&engine.ref_name).unwrap_or_default()
+            };
+            let query_norm = args.query.to_lowercase();
+            for (idx, (score, hit)) in scored.iter().enumerate() {
                 let rec = recency.get(&hit.file);
-                let hot_tag = if rec.map(|r| r.hot).unwrap_or(false) { " [hot]" } else { "" };
+                let is_hot = rec.map(|r| r.hot).unwrap_or(false);
+                let hot_tag = if is_hot { " [hot]" } else { "" };
                 let age_tag = rec
                     .and_then(|r| r.last_touched_days)
                     .map(|d| format!(" ~{:.0}d ago", d))
                     .unwrap_or_default();
+                // Feedback badge: show [useful] when a matching verdict boosted this result.
+                let fb_tag = if !fb_for_display.is_empty() {
+                    let q = query_norm.as_str();
+                    let has_useful = fb_for_display.iter().any(|e| {
+                        e.symbol_id == hit.symbol_id
+                            && (e.query.is_empty()
+                                || q.contains(e.query.as_str())
+                                || e.query.contains(q))
+                            && matches!(e.verdict, FeedbackVerdict::Useful)
+                    });
+                    if has_useful { " [useful]" } else { "" }
+                } else {
+                    ""
+                };
                 println!(
-                    "[{:.1}] {} {}{}{} ({}:{})",
-                    score, hit.kind, hit.qname, hot_tag, age_tag, hit.file, hit.line
+                    "[{:.1}] {} {}{}{}{} ({}:{})",
+                    score, hit.kind, hit.qname, hot_tag, fb_tag, age_tag, hit.file, hit.line
                 );
                 if let Some(sig) = &hit.signature {
                     if !sig.is_empty() { println!("       sig: {}", sig); }
@@ -269,12 +335,19 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     let entries = ledger_store
                         .list_entries(&engine.ref_name, &hit.symbol_id)
                         .unwrap_or_default();
-                    let hit_is_hot = rec.map(|r| r.hot).unwrap_or(false);
+                    let has_ledger = !entries.is_empty();
                     let reasons = index_store
                         .get_symbol_by_qname(&engine.ref_name, &hit.qname)
                         .ok().flatten()
-                        .map(|sym| explain_match(&sym, &tokens, &entries, hit_is_hot))
+                        .map(|sym| explain_match(&sym, &tokens, &entries, is_hot))
                         .unwrap_or_default();
+                    let conf = confidences.get(idx).copied().unwrap_or(0.0);
+                    let bucket = result_bucket(&hit.file, &reasons, has_ledger, is_hot);
+                    println!(
+                        "       confidence: {:.0}%  bucket: {}",
+                        conf * 100.0,
+                        bucket
+                    );
                     if !reasons.is_empty() {
                         println!("       why: {}", reasons.join(", "));
                     }
@@ -332,6 +405,26 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         let score = in_memory_score(&sym, &tokens, &ledger_store, &engine);
         if score > 0 {
             scored.push((score, sym));
+        }
+    }
+
+    // Apply durable feedback on fallback path too.
+    {
+        let fb_store = AsgFeedbackStore { repo: &engine.repo };
+        let idx = AsgIndexStore { repo: &engine.repo };
+        if let Ok(fb) = fb_store.list_all(&engine.ref_name) {
+            if !fb.is_empty() {
+                let fb_tuples: Vec<_> = fb.iter()
+                    .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict))
+                    .collect();
+                let mut adj: Vec<(f64, String)> = scored.iter()
+                    .map(|(s, sym)| (*s as f64, sym.qname.clone()))
+                    .collect();
+                apply_feedback_adjustments(&engine, &idx, &args.query, &mut adj, &fb_tuples);
+                let surviving: std::collections::HashSet<String> =
+                    adj.into_iter().map(|(_, q)| q).collect();
+                scored.retain(|(_, sym)| surviving.contains(&sym.qname));
+            }
         }
     }
 

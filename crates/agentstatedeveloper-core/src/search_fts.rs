@@ -812,6 +812,42 @@ fn extract_sig_param_names(sig: &str) -> Vec<String> {
     names
 }
 
+/// Look up real indexed test files that correspond to `source_file`.
+///
+/// Scans the FTS index for files whose path contains a test/spec indicator
+/// AND whose stem shares the source file's stem (e.g. `Foo.swift` → `FooTests.swift`).
+/// Returns found paths. Falls back to an empty vec if the index is unavailable.
+pub fn find_indexed_test_files(db_path: &std::path::Path, source_file: &str) -> Vec<String> {
+    let stem = std::path::Path::new(source_file)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if stem.is_empty() {
+        return vec![];
+    }
+    let Ok(db) = SearchFtsDb::open(db_path) else { return vec![]; };
+    // Query unique file paths from the index that look like test files.
+    let Ok(mut stmt) = db.conn.prepare(
+        "SELECT DISTINCT file_orig FROM asd_search_fts WHERE tier = 2"
+    ) else { return vec![]; };
+    let rows: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map(|iter| iter.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default();
+    // Keep only files whose stem contains (or is contained by) the source stem.
+    rows.into_iter()
+        .filter(|f| {
+            let f_stem = std::path::Path::new(f)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            f_stem.contains(&stem) || stem.contains(f_stem.trim_end_matches("tests").trim_end_matches("test").trim_end_matches("spec"))
+        })
+        .collect()
+}
+
 pub fn propose_test_path(source_file: &str) -> String {
     let path = std::path::Path::new(source_file);
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown");

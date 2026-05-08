@@ -30,8 +30,13 @@ pub struct InvestigateArgs {
     pub query: String,
 
     /// Number of top entry-point symbols to fully expand (default: 10).
+    /// Alias: --limit (both accepted).
     #[arg(long, default_value = "10")]
     pub depth: usize,
+
+    /// Maximum results to expand. Overrides --depth when provided.
+    #[arg(long)]
+    pub limit: Option<usize>,
 
     /// Filter by symbol kind: module, function, method, class, variable.
     #[arg(long)]
@@ -139,6 +144,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     // Each entry_point candidate: (combined_score, symbol_id, qname)
     // We resolve full Symbol via index_store for context assembly.
     // Returns (score, qname) pairs.
+    let limit = args.limit.unwrap_or(args.depth);
     let mut candidates: Vec<(f64, String)> = find_candidates(
         &engine,
         &cfg.db_path,
@@ -147,7 +153,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         &filters,
         &ledger_store,
         &index_store,
-        args.depth,
+        limit,
     );
 
     // Apply durable feedback adjustments (Useful/Noisy/WrongLayer verdicts).

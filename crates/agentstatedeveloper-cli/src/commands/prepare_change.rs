@@ -21,7 +21,8 @@ use agentstatedeveloper_core::{
     classify_layer_sym, confidence_scores, derive_cold_hints, detect_ambiguous_tokens,
     detect_possible_misses, estimate_tokens, explain_match, extract_summary, find_candidates,
     gather_recency, git_dirty_files, intent_focus, intent_layer_order, load_layer_overrides,
-    parse_intent, parse_query, propose_test_path, resolve_scope, result_bucket, stale_warning,
+    find_indexed_test_files, parse_intent, parse_query, propose_test_path, resolve_scope,
+    result_bucket, stale_warning,
     symbol_tier, trim_for_agent,
 };
 
@@ -402,8 +403,16 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
 
     // --- Test-gap detection -----------------------------------------------
     let test_gap = affected_tests.is_empty();
+    // Try to find a real indexed test file before falling back to a suggested path.
     let proposed_test_path = test_gap.then(|| {
-        file_scores.first().map(|(_, f, _, _, _)| propose_test_path(f))
+        let source = file_scores.first().map(|(_, f, _, _, _)| f.as_str()).unwrap_or("");
+        if source.is_empty() { return None; }
+        let real = find_indexed_test_files(&cfg.db_path, source);
+        if real.is_empty() {
+            Some(format!("no known test target (suggested: {})", propose_test_path(source)))
+        } else {
+            Some(real.join(", "))
+        }
     }).flatten();
     let suggested_test_coverage: Vec<String> = if test_gap {
         let mut hints: Vec<String> = design_invariants.iter()
@@ -453,7 +462,13 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     let layers_present: std::collections::HashSet<&str> = file_scores.iter()
         .map(|(_, _, layer, _, _)| layer.as_str())
         .collect();
-    let possible_misses = detect_possible_misses(&args.description, &layers_present, file_scores.len());
+    // Suppress possible-miss warnings when the user explicitly narrowed scope.
+    let scope_narrowed = !filters.paths_filter.is_empty() || !filters.exclude_terms.is_empty();
+    let possible_misses = if scope_narrowed {
+        vec![]
+    } else {
+        detect_possible_misses(&args.description, &layers_present, file_scores.len())
+    };
 
     // T1: safe-change recipe — actionable sections for an agent or developer.
     // T4: manually_validate includes concrete ValidationScenario entries.
@@ -467,11 +482,18 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         .map(|inv| json!({ "constraint": inv["summary"], "source": inv["source"], "kind": "invariant" }))
         .chain(known_hazards.iter().map(|h| json!({ "constraint": h["summary"], "source": h["source"], "kind": "hazard" })))
         .collect();
-    // edit: impl files first (most likely to change), then other roles
+    // edit: only impl files — example/reference/demo files move to recipe_reference
     let recipe_edit: Vec<Value> = likely_edit_files.iter()
         .filter(|f| f["file_role"].as_str() == Some("impl"))
         .cloned()
-        .chain(likely_edit_files.iter().filter(|f| f["file_role"].as_str() != Some("impl")).cloned())
+        .collect();
+    // reference: example/demo/doc files that matched but should not be edited
+    let recipe_reference: Vec<Value> = likely_edit_files.iter()
+        .filter(|f| matches!(
+            f["file_role"].as_str(),
+            Some("example") | Some("reference")
+        ))
+        .cloned()
         .collect();
     let recipe_run: Vec<Value> = affected_tests.iter()
         .map(|t| json!({ "qname": t["qname"], "file": t["file"], "covers_invariants": t["covers_invariants"] }))
@@ -490,6 +512,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         "inspect": recipe_inspect,
         "preserve": recipe_preserve,
         "edit": recipe_edit,
+        "reference_only": recipe_reference,
         "run": recipe_run,
         "manually_validate": recipe_manually_validate,
     });
@@ -502,6 +525,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         "focus": if focus.is_empty() { Value::Null } else { json!(focus) },
         "ambiguous_terms": ambiguous_terms,
         "possible_misses": possible_misses,
+        "scope_narrowed": scope_narrowed,
         "safe_change_recipe": safe_change_recipe,
         "design_invariants": design_invariants,
         "known_hazards": known_hazards,
