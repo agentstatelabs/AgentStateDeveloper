@@ -9,7 +9,7 @@
 //!   effects_summary    — declared effects from top entry points
 //!   recently_touched   — per-file git log from the top entry point's file
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use anyhow::Result;
 use clap::Args;
@@ -307,15 +307,9 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     let likely_edit_files: Vec<Value> = file_scores
         .iter()
         .map(|(score, file, layer, days, hot)| {
-            let fl = file.to_lowercase();
-            let file_role = if fl.contains("/example") || fl.contains("/examples")
-                || fl.contains("/sample") || fl.contains("/demo")
-            { "example" } else if fl.contains("/test") || fl.contains("/spec")
-                || fl.contains("_test.") || fl.contains("spec.") || fl.ends_with("tests.swift")
-            { "test" } else if fl.contains("/reference") || fl.contains("/doc")
-                || fl.contains("readme") || fl.ends_with(".md")
-            { "reference" } else { "impl" };
+            let file_role = classify_file_role(file);
             let conflict_risk = dirty_files.contains(file.as_str());
+            let conflict_detail = if conflict_risk { explain_conflict_risk(file) } else { None };
             json!({
                 "file": file,
                 "layer": layer,
@@ -324,6 +318,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
                 "hot": hot,
                 "file_role": file_role,
                 "conflict_risk": conflict_risk,
+                "conflict_detail": conflict_detail,
             })
         })
         .collect();
@@ -384,6 +379,52 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             }
         }
     }
+
+    // ---- Blast-radius: caller/callee layer distribution from top entry points ----
+    let blast_radius = {
+        let mut caller_layers: HashMap<String, usize> = HashMap::new();
+        let mut callee_layers: HashMap<String, usize> = HashMap::new();
+        let mut total_callers = 0usize;
+        let mut total_callees = 0usize;
+        let top_sids: Vec<String> = candidates.iter().take(5)
+            .filter_map(|(_, q)| index_store.get_symbol_by_qname(&engine.ref_name, q).ok().flatten())
+            .map(|s| s.symbol_id)
+            .collect();
+        for sid in &top_sids {
+            let mut visited: HashSet<String> = HashSet::new();
+            let mut q: VecDeque<(String, usize)> = VecDeque::new();
+            visited.insert(sid.clone());
+            q.push_back((sid.clone(), 0));
+            while let Some((cid, depth)) = q.pop_front() {
+                if depth >= 3 { continue; }
+                for caller_id in index_store.get_callers(&engine.ref_name, &cid).unwrap_or_default() {
+                    if visited.insert(caller_id.clone()) {
+                        if let Some(sym) = id_map.get(&caller_id) {
+                            let tier = symbol_tier(&sym.file);
+                            let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
+                            *caller_layers.entry(layer.to_string()).or_default() += 1;
+                            total_callers += 1;
+                        }
+                        q.push_back((caller_id, depth + 1));
+                    }
+                }
+            }
+            for callee_id in index_store.get_callees(&engine.ref_name, sid).unwrap_or_default() {
+                if let Some(sym) = id_map.get(&callee_id) {
+                    let tier = symbol_tier(&sym.file);
+                    let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
+                    *callee_layers.entry(layer.to_string()).or_default() += 1;
+                    total_callees += 1;
+                }
+            }
+        }
+        json!({
+            "total_callers": total_callers,
+            "total_callees": total_callees,
+            "caller_layer_distribution": caller_layers,
+            "callee_layer_distribution": callee_layers,
+        })
+    };
 
     // ---- Recent git touches for the top files (up to 3) ----------------
     let top_files: Vec<(String, usize)> = file_scores
@@ -495,18 +536,69 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         ))
         .cloned()
         .collect();
-    let recipe_run: Vec<Value> = affected_tests.iter()
-        .map(|t| json!({ "qname": t["qname"], "file": t["file"], "covers_invariants": t["covers_invariants"] }))
+    // t-002: include exact build/test commands for each affected test file.
+    let mut recipe_run: Vec<Value> = affected_tests.iter()
+        .map(|t| {
+            let file = t["file"].as_str().unwrap_or("");
+            let cmd = detect_test_command(file);
+            json!({
+                "qname": t["qname"],
+                "file": file,
+                "covers_invariants": t["covers_invariants"],
+                "run_command": cmd,
+            })
+        })
         .collect();
-    // manually_validate: concrete ValidationScenario entries (T4) + constraint-word invariants + effects
-    let mut recipe_manually_validate: Vec<Value> = validation_scenarios_ledger.clone();
-    for s in &scenario_tests {
-        recipe_manually_validate.push(json!({ "scenario": s, "source": "invariant", "kind": "constraint_check" }));
+    // If no test files discovered, still emit a command for the top impl file.
+    if recipe_run.is_empty() {
+        if let Some((_, top_file, _, _, _)) = file_scores.first() {
+            if let Some(cmd) = detect_test_command(top_file) {
+                recipe_run.push(json!({
+                    "qname": Value::Null,
+                    "file": top_file,
+                    "covers_invariants": [],
+                    "run_command": cmd,
+                }));
+            }
+        }
+    }
+    // t-005: manually_validate with concrete step/expected pairs.
+    let mut recipe_manually_validate: Vec<Value> = validation_scenarios_ledger.iter()
+        .map(|vs| {
+            let text = vs["scenario"].as_str().unwrap_or("");
+            let scenario = invariant_to_scenario(text);
+            json!({
+                "source": vs["source"],
+                "kind": "validation_scenario",
+                "step": scenario["step"],
+                "expected": scenario["expected"],
+                "raw": text,
+            })
+        })
+        .collect();
+    for inv in &design_invariants {
+        let text = inv["summary"].as_str().unwrap_or("");
+        let sl = text.to_lowercase();
+        if CONSTRAINT_WORDS.iter().any(|w| sl.contains(w)) {
+            let scenario = invariant_to_scenario(text);
+            recipe_manually_validate.push(json!({
+                "source": inv["source"],
+                "kind": "constraint_check",
+                "step": scenario["step"],
+                "expected": scenario["expected"],
+                "raw": text,
+            }));
+        }
     }
     for eff in &effects_summary {
-        let desc = format!("verify {} side-effect still correct after change",
-            eff["category"].as_str().unwrap_or("").to_lowercase());
-        recipe_manually_validate.push(json!({ "scenario": desc, "source": eff["source"], "kind": "effect_check" }));
+        let cat = eff["category"].as_str().unwrap_or("").to_lowercase();
+        recipe_manually_validate.push(json!({
+            "source": eff["source"],
+            "kind": "effect_check",
+            "step": format!("Execute the code path that triggers {}", cat),
+            "expected": format!("{} side-effect behaves correctly after change", cat),
+            "raw": format!("verify {} effect", cat),
+        }));
     }
     let safe_change_recipe = json!({
         "inspect": recipe_inspect,
@@ -515,6 +607,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         "reference_only": recipe_reference,
         "run": recipe_run,
         "manually_validate": recipe_manually_validate,
+        "blast_radius": blast_radius,
     });
 
     let focus = intent_focus(intent);
@@ -556,4 +649,187 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     };
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// t-001: expanded file role classification
+// ---------------------------------------------------------------------------
+
+fn classify_file_role(file: &str) -> &'static str {
+    let fl = file.to_lowercase();
+    if fl.contains("/test") || fl.contains("/spec")
+        || fl.contains("_test.") || fl.contains("spec.")
+        || fl.ends_with("tests.swift") || fl.contains("/tests/")
+    {
+        return "test";
+    }
+    if fl.contains("/example") || fl.contains("/examples")
+        || fl.contains("/sample") || fl.contains("/samples")
+        || fl.contains("/demo") || fl.contains("/demos")
+    {
+        return "example";
+    }
+    if fl.contains("/fixture") || fl.contains("/fixtures")
+        || fl.contains("/seed") || fl.contains("/seeds")
+    {
+        return "fixture";
+    }
+    if fl.contains("/script") || fl.contains("/scripts")
+        || fl.contains("/tool/") || fl.contains("/tools/")
+        || fl.contains("/bin/") || fl.contains("/hack/")
+    {
+        return "script";
+    }
+    if fl.contains("/generated") || fl.contains("/gen/")
+        || fl.contains(".generated.") || fl.contains(".pb.")
+        || fl.contains(".pb.swift") || fl.contains("_generated")
+    {
+        return "generated";
+    }
+    if fl.contains("/doc") || fl.contains("/docs")
+        || fl.contains("/reference") || fl.contains("readme")
+        || fl.ends_with(".md") || fl.ends_with(".rst") || fl.ends_with(".adoc")
+    {
+        return "reference";
+    }
+    "impl"
+}
+
+// ---------------------------------------------------------------------------
+// t-002: detect the test command for a given source file
+// ---------------------------------------------------------------------------
+
+fn detect_test_command(file: &str) -> Option<String> {
+    use std::path::Path;
+    let p = Path::new(file);
+    // Walk up to find a recognisable project root marker.
+    let mut dir = p.parent()?;
+    loop {
+        if dir.join("Cargo.toml").exists() {
+            // Try to extract the package name for a precise `cargo test -p` command.
+            let pkg_name = std::fs::read_to_string(dir.join("Cargo.toml")).ok()
+                .and_then(|s| {
+                    s.lines()
+                        .skip_while(|l| !l.trim_start().starts_with("[package]"))
+                        .find(|l| l.trim_start().starts_with("name"))
+                        .and_then(|l| l.splitn(2, '=').nth(1))
+                        .map(|v| v.trim().trim_matches('"').to_string())
+                });
+            return Some(match pkg_name {
+                Some(name) => format!("cargo test -p {}", name),
+                None => "cargo test".to_string(),
+            });
+        }
+        if dir.join("package.json").exists() {
+            let has_yarn = dir.join("yarn.lock").exists();
+            let has_pnpm = dir.join("pnpm-lock.yaml").exists();
+            return Some(if has_pnpm {
+                "pnpm test".to_string()
+            } else if has_yarn {
+                "yarn test".to_string()
+            } else {
+                "npm test".to_string()
+            });
+        }
+        if dir.join("pyproject.toml").exists() || dir.join("setup.py").exists()
+            || dir.join("pytest.ini").exists() || dir.join("setup.cfg").exists()
+        {
+            let rel = p.strip_prefix(dir).unwrap_or(p).to_string_lossy();
+            return Some(format!("pytest {}", rel));
+        }
+        if dir.join("Gemfile").exists() {
+            let rel = p.strip_prefix(dir).unwrap_or(p).to_string_lossy();
+            return Some(format!("bundle exec rspec {}", rel));
+        }
+        if dir.join("build.gradle").exists() || dir.join("build.gradle.kts").exists() {
+            return Some("./gradlew test".to_string());
+        }
+        if dir.join("pom.xml").exists() {
+            return Some("mvn test".to_string());
+        }
+        if dir.join("go.mod").exists() {
+            let pkg_dir = p.parent().map(|d| d.to_string_lossy().to_string())
+                .unwrap_or_else(|| ".".to_string());
+            return Some(format!("go test {}/...", pkg_dir));
+        }
+        if dir.join("Makefile").exists() || dir.join("makefile").exists() {
+            return Some("make test".to_string());
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => break,
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// t-004: explain why a dirty file is a conflict risk
+// ---------------------------------------------------------------------------
+
+fn explain_conflict_risk(file: &str) -> Option<String> {
+    // Check for unresolved merge conflict markers.
+    if let Ok(content) = std::fs::read_to_string(file) {
+        if content.contains("<<<<<<<") {
+            return Some("file contains unresolved merge conflict markers".to_string());
+        }
+    }
+    // Check git status for staged/unstaged changes.
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--", file])
+        .output()
+        .ok()?;
+    let status_str = String::from_utf8_lossy(&status.stdout);
+    let code = status_str.chars().take(2).collect::<String>();
+    let reason = match code.trim() {
+        "M" | "MM" => "has unstaged modifications",
+        "A"        => "is newly staged",
+        "D"        => "is staged for deletion",
+        "R"        => "has been renamed (staged)",
+        "UU"       => "has unmerged changes",
+        s if s.contains('M') => "has staged and/or unstaged modifications",
+        _ => "has uncommitted changes",
+    };
+    Some(reason.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// t-005: convert invariant / constraint text into a step + expected pair
+// ---------------------------------------------------------------------------
+
+fn invariant_to_scenario(text: &str) -> Value {
+    let tl = text.to_lowercase();
+    let (step, expected) = if tl.contains("must not") || tl.contains("never") || tl.contains("cannot") || tl.contains("forbidden") {
+        let action = text
+            .split_whitespace()
+            .skip_while(|w| ["must", "never", "cannot", "should", "shall", "not", "be", "is", "are"].contains(&w.to_lowercase().as_str()))
+            .take(6)
+            .collect::<Vec<_>>()
+            .join(" ");
+        (
+            format!("Attempt to trigger: {}", if action.is_empty() { text } else { &action }),
+            format!("The system prevents it — constraint holds: {}", text),
+        )
+    } else if tl.contains("must") || tl.contains("shall") || tl.contains("always") || tl.contains("ensure") || tl.contains("guarantee") {
+        (
+            format!("Execute the code path covered by: {}", text),
+            format!("Postcondition holds after execution: {}", text),
+        )
+    } else if tl.contains("require") {
+        (
+            format!("Remove or violate the precondition in: {}", text),
+            "Guard or error fires as expected".to_string(),
+        )
+    } else if tl.contains("only") || tl.contains("prevent") {
+        (
+            format!("Attempt a path that bypasses: {}", text),
+            "Prevention still enforced after change".to_string(),
+        )
+    } else {
+        (
+            format!("Verify constraint: {}", text),
+            "Constraint holds after the change".to_string(),
+        )
+    };
+    json!({ "step": step, "expected": expected })
 }
