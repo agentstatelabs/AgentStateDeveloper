@@ -47,6 +47,10 @@ pub struct ScorecardArgs {
     /// Override the history file path (default: <db_path>.scorecard-history.json).
     #[arg(long)]
     pub history_path: Option<PathBuf>,
+
+    /// Max symbols shown in --drill-down output (default: 10).
+    #[arg(long, default_value_t = 10)]
+    pub limit: usize,
 }
 
 struct Metrics {
@@ -251,6 +255,20 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
     };
     let scores = compute_scores(&metrics);
 
+    // Sparse-DB detection: warn when ledger density is too low to be meaningful.
+    let ledger_density = total_ledger_entries as f64 / total_symbols.max(1) as f64;
+    let sparse_db = ledger_density < 0.5 && total_symbols > 0;
+    let sparse_note = if sparse_db {
+        Some(format!(
+            "sparse ledger ({total_ledger_entries} entries across {total_symbols} symbols, \
+             {:.2} avg) — run 'asd sync' + 'asd hydrate' to populate; \
+             scores reflect data density, not workflow quality",
+            ledger_density
+        ))
+    } else {
+        None
+    };
+
     let now = Utc::now().to_rfc3339();
     let hist_path = history_path(cfg, args.history_path.as_ref());
 
@@ -318,11 +336,19 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
             "timestamp": now,
             "scores": snapshot["scores"].clone(),
             "details": details,
+            "sparse_db": sparse_db,
+            "sparse_note": sparse_note,
         });
         if need_drill {
+            let total_gaps = drill_rows.len();
+            let shown: Vec<_> = drill_rows.into_iter().take(args.limit).collect();
+            let omitted = total_gaps.saturating_sub(shown.len());
             out.as_object_mut().unwrap().insert("drill_down".into(), json!({
                 "dimension": drill,
-                "gap_symbols": drill_rows,
+                "total_gaps": total_gaps,
+                "shown": shown.len(),
+                "omitted": omitted,
+                "gap_symbols": shown,
             }));
         }
         if let Some(ref t) = trend_obj {
@@ -374,15 +400,21 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
     println!("Ledger entries:     {}", total_ledger_entries);
     println!("CTX-tagged:         {}", ctx_tagged_entries);
 
+    if let Some(ref note) = sparse_note {
+        println!("\nNote: {note}");
+    }
+
     if need_drill && !drill_rows.is_empty() {
-        println!("\n## Drill-down: {drill} gaps ({} symbols)", drill_rows.len());
-        for row in drill_rows.iter().take(20) {
+        let total_gaps = drill_rows.len();
+        let limit = args.limit;
+        println!("\n## Drill-down: {drill} gaps ({total_gaps} symbols)");
+        for row in drill_rows.iter().take(limit) {
             let qname = row.get("qname").and_then(Value::as_str).unwrap_or("");
             let file = row.get("file").and_then(Value::as_str).unwrap_or("");
             println!("  {qname}  ({file})");
         }
-        if drill_rows.len() > 20 {
-            println!("  … and {} more", drill_rows.len() - 20);
+        if total_gaps > limit {
+            println!("  … and {} more (use --limit to show more)", total_gaps - limit);
         }
     }
 
