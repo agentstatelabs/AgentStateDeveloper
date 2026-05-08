@@ -15,8 +15,9 @@ use anyhow::Result;
 use clap::Args;
 
 use agentstatedeveloper_adapters::default_adapters;
-use agentstatedeveloper_core::{collect_source_files, run_index, Engine};
+use agentstatedeveloper_core::{collect_source_files, run_index, sync_to_dir, Engine};
 
+use crate::commands::init::find_project_root;
 use crate::config::Config;
 
 const SKIPPED_DISPLAY_LIMIT: usize = 100;
@@ -141,6 +142,26 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
 
     // Unwrap Arc — run_index is done, no other holders.
     let mut log = Arc::try_unwrap(log).ok().and_then(|m| m.into_inner().ok()).flatten();
+
+    // Auto-sync sidecar so ledger/effects survive future DB rebuilds without
+    // needing a manual `asd sync` call.
+    let project_root = find_project_root(&cfg.db_path);
+    match sync_to_dir(&engine.repo, &engine.ref_name, &project_root) {
+        Ok(s) => {
+            let msg = format!(
+                "Sidecar synced: {} symbol{}, {} ledger entr{}, {} effect{}.",
+                s.symbols_written, if s.symbols_written == 1 { "" } else { "s" },
+                s.ledger_entries_written, if s.ledger_entries_written == 1 { "y" } else { "ies" },
+                s.effects_written, if s.effects_written == 1 { "" } else { "s" },
+            );
+            if let Some(l) = &mut log { l.line(&msg); }
+        }
+        Err(e) => {
+            let msg = format!("asd: sidecar sync skipped: {e}");
+            eprintln!("{msg}");
+            if let Some(l) = &mut log { l.line(&msg); }
+        }
+    }
 
     // Log all skipped files (no cap in log; capped on stderr).
     log_skipped(&skipped, &mut log, args.verbose);

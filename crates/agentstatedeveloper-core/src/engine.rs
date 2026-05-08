@@ -10,6 +10,7 @@ use crate::index::{AsgIndexStore, IndexStore};
 use crate::ledger::{AsgLedgerStore, LedgerStore, RatifyOps};
 use crate::policy::{Decision, PermissivePolicyGate, PolicyGate, PolicyStoreGate, Situation, actions};
 use crate::schema::{LedgerEntry, Symbol};
+use crate::sidecar::hydrate_from_dir;
 use serde_json::json;
 
 /// The top-level ASD engine. Owns an ASG repository, a policy gate, an
@@ -35,17 +36,43 @@ pub struct Engine {
 
 impl Engine {
     /// Open (or create) an ASD engine backed by a SQLite file.
+    ///
+    /// If the repository has no symbols and a `.asd/v1/` sidecar exists next
+    /// to the DB file, hydrates automatically — this covers the fresh-clone
+    /// case without requiring a manual `asd hydrate` invocation.
     pub fn open_sqlite(db_path: &Path) -> Result<Self> {
         let storage = SqliteStorage::open(db_path).map_err(|e| AsdError::Other(e.to_string()))?;
         let repo = Repository::new(Box::new(storage));
         repo.init()?;
-        Ok(Self {
+
+        let engine = Self {
             repo,
             policy: Arc::new(PermissivePolicyGate),
             audit: Arc::new(NullSink),
             ref_name: "main".to_string(),
             ratify: None,
-        })
+        };
+
+        // Auto-hydrate from sidecar when the DB is empty (fresh clone or
+        // deleted DB). We check for the by-qname tree as a proxy for "has
+        // been indexed before". Errors are silently ignored so a missing or
+        // malformed sidecar never blocks normal operation.
+        let project_root = db_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let sidecar_root = project_root.join(".asd/v1");
+        let is_empty = engine.repo
+            .get_tree(&engine.ref_name, "/asd/v1/index/by-qname")
+            .ok()
+            .and_then(|v| v.as_object().map(|m| m.is_empty()))
+            .unwrap_or(true);
+        if is_empty && sidecar_root.exists() {
+            let _ = hydrate_from_dir(&engine.repo, &engine.ref_name, &project_root, "asd-auto-hydrate");
+        }
+
+        Ok(engine)
     }
 
     /// Open an in-memory engine — mostly for tests.

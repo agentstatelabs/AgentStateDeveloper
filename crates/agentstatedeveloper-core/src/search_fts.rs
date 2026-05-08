@@ -479,10 +479,33 @@ pub fn hybrid_boost(hit: &FtsHit, tokens: &[String]) -> f64 {
         .count() as f64
         * 2.0;
 
+    // Phrase match bonus (t-005): consecutive query tokens that appear as an
+    // adjacent subsequence in the name word list represent a domain concept
+    // ("drift playhead", "refresh lane", etc.). Reward each adjacent pair
+    // with +3.0 so compound-concept queries rank the most specific symbol first.
+    let phrase_bonus = if tokens.len() >= 2 {
+        let mut bonus = 0.0f64;
+        let lower_tokens: Vec<&str> = tokens.iter().map(|t| t.as_str()).collect();
+        for window_start in 0..name_words.len().saturating_sub(1) {
+            for pair_len in 2..=(lower_tokens.len().min(name_words.len() - window_start)) {
+                let name_slice = &name_words[window_start..window_start + pair_len];
+                for tok_start in 0..=lower_tokens.len().saturating_sub(pair_len) {
+                    let tok_slice = &lower_tokens[tok_start..tok_start + pair_len];
+                    if name_slice.iter().map(|s| s.as_str()).eq(tok_slice.iter().copied()) {
+                        bonus = bonus.max(pair_len as f64 * 3.0);
+                    }
+                }
+            }
+        }
+        bonus
+    } else {
+        0.0
+    };
+
     // Utility penalty: Preview/Sample/Editor/Generated symbols ranked below production.
     let tier_penalty = if hit.tier == 1 { -2.0 } else { 0.0 };
 
-    path_boost + name_boost + tier_penalty
+    path_boost + name_boost + phrase_bonus + tier_penalty
 }
 
 // ---------------------------------------------------------------------------
@@ -932,6 +955,144 @@ pub fn gather_recency(scan_commits: usize, hot_days: f64) -> std::collections::H
 // ---------------------------------------------------------------------------
 // Symbol summary extraction
 // ---------------------------------------------------------------------------
+
+/// Ownership signal returned by [`discover_symbol_ownership`].
+#[derive(Debug, Clone)]
+pub struct OwnershipSignal {
+    /// Name of the most frequent author in the symbol's git blame range.
+    pub primary_author: Option<String>,
+    /// Author extracted from a `@owner` / `Owner:` annotation in the doc comment.
+    pub doc_owner: Option<String>,
+    /// The `N` most recent unique committers to the symbol's file.
+    pub recent_committers: Vec<String>,
+}
+
+/// Discover the likely owner of a symbol from git blame + doc-comment annotations.
+///
+/// Returns an `OwnershipSignal` with signals from multiple sources so callers
+/// can choose how to display or prioritise them.  All signals are best-effort;
+/// errors (no git, no file) return empty/`None` gracefully.
+pub fn discover_symbol_ownership(
+    file: &str,
+    start_line: u32,
+    end_line: u32,
+    doc: Option<&str>,
+) -> OwnershipSignal {
+    use std::collections::HashMap;
+    use std::process::Command;
+
+    // 1. Extract `@owner` / `Owner:` from doc comment.
+    let doc_owner = doc.and_then(|d| {
+        for line in d.lines() {
+            let l = line.trim().to_lowercase();
+            for prefix in &["@owner ", "owner: ", "owned by "] {
+                if let Some(rest) = l.strip_prefix(prefix) {
+                    let owner = rest.split_whitespace().next().unwrap_or("").to_string();
+                    if !owner.is_empty() {
+                        return Some(owner);
+                    }
+                }
+            }
+        }
+        None
+    });
+
+    // 2. Git blame for the symbol's line range → most frequent author.
+    let blame_out = Command::new("git")
+        .args([
+            "blame",
+            "--porcelain",
+            &format!("-L{},{}", start_line.max(1), end_line.max(start_line)),
+            "--",
+            file,
+        ])
+        .output();
+    let mut blame_authors: HashMap<String, usize> = HashMap::new();
+    if let Ok(out) = blame_out {
+        if out.status.success() {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                if let Some(author) = line.strip_prefix("author ") {
+                    *blame_authors.entry(author.trim().to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    let primary_author = blame_authors
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(a, _)| a)
+        .filter(|a| !a.is_empty() && a != "Not Committed Yet");
+
+    // 3. Recent unique committers to the file (up to 5).
+    let log_out = Command::new("git")
+        .args(["log", "-n20", "--pretty=format:%an", "--", file])
+        .output();
+    let mut seen = std::collections::HashSet::new();
+    let mut recent_committers: Vec<String> = Vec::new();
+    if let Ok(out) = log_out {
+        if out.status.success() {
+            for author in String::from_utf8_lossy(&out.stdout).lines() {
+                let a = author.trim().to_string();
+                if !a.is_empty() && seen.insert(a.clone()) {
+                    recent_committers.push(a);
+                    if recent_committers.len() >= 5 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    OwnershipSignal { primary_author, doc_owner, recent_committers }
+}
+
+/// Find test symbols in the FTS index that are likely to cover `impl_qname`.
+///
+/// Matching strategy (in order of confidence):
+/// 1. Test qname contains the impl symbol's leaf name (e.g. `testRefreshPlayhead`
+///    matches `refreshPlayhead`).
+/// 2. Test doc comment mentions the impl qname.
+///
+/// Returns a list of `(test_qname, test_file, test_line)` tuples.
+pub fn find_covering_tests(
+    db_path: &std::path::Path,
+    impl_qname: &str,
+) -> Vec<(String, String, i64)> {
+    let leaf = impl_qname
+        .split(|c: char| c == '.' || c == ':' || c == '/')
+        .last()
+        .unwrap_or(impl_qname)
+        .to_lowercase();
+    if leaf.is_empty() || leaf.len() < 3 {
+        return vec![];
+    }
+    let Ok(db) = SearchFtsDb::open(db_path) else { return vec![]; };
+    // Query test-tier symbols whose qname or doc mentions the leaf name.
+    let Ok(mut stmt) = db.conn.prepare(
+        "SELECT qname_orig, file_orig, start_line FROM asd_search_fts WHERE tier = 2"
+    ) else { return vec![]; };
+    let rows: Vec<(String, String, i64)> = stmt
+        .query_map([], |r| Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
+        )))
+        .map(|iter| iter.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default();
+
+    rows.into_iter()
+        .filter(|(qname, _, _)| {
+            let q = qname.to_lowercase();
+            // Strip common test prefixes and check if the remaining name contains the impl leaf.
+            let stripped = q
+                .trim_start_matches("test")
+                .trim_start_matches('_')
+                .trim_start_matches("spec")
+                .trim_start_matches('_');
+            stripped.contains(leaf.as_str()) || q.contains(leaf.as_str())
+        })
+        .collect()
+}
 
 /// Extract a one-line human-readable summary for a symbol.
 ///

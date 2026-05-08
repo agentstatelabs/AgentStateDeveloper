@@ -189,6 +189,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             &sym,
             &id_map,
             args.include_body,
+            Some(&cfg.db_path),
         )?;
         let bucket = result_bucket(&sym.file, &match_reasons, has_ledger, hot);
         let mut ep = json!({

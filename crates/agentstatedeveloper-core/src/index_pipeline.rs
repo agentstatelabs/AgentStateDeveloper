@@ -213,16 +213,26 @@ pub fn run_index(
                 qname_first_file.insert(p.qname.clone(), file_str.clone());
             }
             by_qname.insert(p.qname.clone(), sym_val.clone());
+            let inferred = adapter.infer_effects(&source, p);
+            // Effects returned by the static checker were confirmed from
+            // source — mark Ok. An empty list means the adapter couldn't
+            // determine effects (not that it confirmed purity), so stay
+            // Unverified until a runtime trace or manual declaration says more.
+            let verification_status = if inferred.is_empty() {
+                VerificationStatus::Unverified
+            } else {
+                VerificationStatus::Ok
+            };
             by_effects.insert(
                 symbol_id.clone(),
                 serde_json::to_value(&EffectDecl {
                     symbol_id: symbol_id.clone(),
-                    declared: adapter.infer_effects(&source, p),
+                    declared: inferred,
                     transitive: Vec::new(),
                     verification: Some(Verification {
                         by: VerificationSource::StaticChecker,
                         at: Utc::now(),
-                        status: VerificationStatus::Unverified,
+                        status: verification_status,
                         mismatches: Vec::new(),
                     }),
                     confidence: None,

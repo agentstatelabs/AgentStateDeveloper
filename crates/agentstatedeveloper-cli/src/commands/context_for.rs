@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, IndexStore, LedgerStore,
-    Symbol,
+    Symbol, discover_symbol_ownership, find_covering_tests,
 };
 
 use crate::commands::graph::build_id_map;
@@ -68,6 +68,7 @@ pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
             &symbol,
             &id_map,
             args.include_body,
+            Some(&cfg.db_path),
         )?;
         symbols_out.push(sym_ctx);
     }
@@ -101,6 +102,7 @@ pub(crate) fn assemble_symbol_context(
     symbol: &Symbol,
     id_map: &HashMap<String, Symbol>,
     include_body: bool,
+    db_path: Option<&std::path::Path>,
 ) -> Result<Value> {
     // Callers and callees.
     let callee_ids = index_store.get_callees(&engine.ref_name, &symbol.symbol_id)?;
@@ -155,6 +157,35 @@ pub(crate) fn assemble_symbol_context(
         }
     }
 
+    // t-003: Ownership discovery from git blame + doc-comment annotations.
+    let ownership_signal = discover_symbol_ownership(
+        &symbol.file,
+        symbol.start.line,
+        symbol.end.line,
+        symbol.doc.as_deref(),
+    );
+    // Merge discovered signals into the existing ledger ownership entries.
+    let mut discovered_ownership: serde_json::Map<String, Value> = serde_json::Map::new();
+    if let Some(ref author) = ownership_signal.primary_author {
+        discovered_ownership.insert("primary_author".into(), json!(author));
+    }
+    if let Some(ref doc_owner) = ownership_signal.doc_owner {
+        discovered_ownership.insert("doc_owner".into(), json!(doc_owner));
+    }
+    if !ownership_signal.recent_committers.is_empty() {
+        discovered_ownership.insert("recent_committers".into(), json!(ownership_signal.recent_committers));
+    }
+
+    // t-004: Find test symbols that cover this impl symbol.
+    let covering_tests: Vec<Value> = if let Some(db) = db_path {
+        find_covering_tests(db, &symbol.qname)
+            .into_iter()
+            .map(|(qname, file, line)| json!({ "qname": qname, "file": file, "line": line }))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     // Invariants and hazards are anti-footgun guards — surface them first so
     // agents see them before the call-graph details.
     Ok(json!({
@@ -163,6 +194,8 @@ pub(crate) fn assemble_symbol_context(
         "hazards": hazards,
         "known_bugs": known_bugs,
         "ownership": ownership,
+        "ownership_discovery": discovered_ownership,
+        "covering_tests": covering_tests,
         "validation_scenarios": validation_scenarios,
         "callers": resolve(&caller_ids),
         "callees": resolve(&callee_ids),
