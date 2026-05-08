@@ -395,13 +395,19 @@ pub fn find_candidates(
             .into_iter()
             .map(|hit| {
                 let boost = hybrid_boost(&hit, tokens);
-                let ledger_boost = {
+                let (ledger_boost, ownership_struct_boost) = {
                     let entries = ledger_store
                         .list_entries(&engine.ref_name, &hit.symbol_id)
                         .unwrap_or_default();
+                    // Flat boost for any symbol explicitly declared as source-of-truth.
+                    let sot = if entries.iter().any(|e| e.kind == crate::schema::LedgerKind::Ownership) {
+                        2.0_f64
+                    } else {
+                        0.0
+                    };
                     // Weight each matching ledger entry by kind so domain-concept
                     // ranking surfaces Ownership > Invariant > Hazard/Decision > others.
-                    entries.iter().fold(0.0_f64, |acc, e| {
+                    let text_boost = entries.iter().fold(0.0_f64, |acc, e| {
                         let summary = e.summary.to_lowercase();
                         let matches = tokens.iter().filter(|t| summary.contains(t.as_str())).count();
                         if matches == 0 { return acc; }
@@ -413,9 +419,10 @@ pub fn find_candidates(
                             _ => 0.5,
                         };
                         acc + matches as f64 * weight
-                    })
+                    });
+                    (text_boost, sot)
                 };
-                (hit.bm25_score + boost + ledger_boost, hit.qname)
+                (hit.bm25_score + boost + ledger_boost + ownership_struct_boost, hit.qname)
             })
             .collect();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -1093,30 +1100,21 @@ pub fn apply_feedback_adjustments(
         };
         let sym_id = &sym.symbol_id;
 
-        // t-001: Smarter sibling file suppression.
-        // Class/Module containers and symbols with name tokens fully disjoint
-        // from the noisy symbol are exempted to avoid collateral demotions.
+        // Sibling file suppression: any symbol sharing a file with a noisy symbol
+        // is suppressed unless it has an explicit Useful verdict or is a Class/Module
+        // container (which may host unrelated symbols in the same file).
         if let Some(noisy_syms) = noisy_file_syms.get(&sym.file) {
-            // Exempt: Class/Module containers are never collateral-suppressed.
             let is_container = matches!(sym.kind, SymbolKind::Class | SymbolKind::Module);
-            if !is_container {
-                let candidate_tokens = name_tokens_from_qname(qname);
-                // Check overlap: suppress only if name tokens share at least one
-                // token with at least one noisy symbol in the same file.
-                let overlaps_noisy = noisy_syms.iter().any(|ns| {
-                    ns.sym_id != *sym_id
-                        && candidate_tokens.iter().any(|t| ns.name_tokens.contains(t))
+            let is_the_noisy_sym = noisy_syms.iter().any(|ns| ns.sym_id == *sym_id);
+            if !is_container && !is_the_noisy_sym {
+                let has_useful = feedback_entries.iter().any(|(fid, fq, v)| {
+                    fid == sym_id
+                        && matches!(v, crate::schema::FeedbackVerdict::Useful)
+                        && query_family_matches(&current_tokens, fq)
                 });
-                if overlaps_noisy {
-                    let has_useful = feedback_entries.iter().any(|(fid, fq, v)| {
-                        fid == sym_id
-                            && matches!(v, crate::schema::FeedbackVerdict::Useful)
-                            && query_family_matches(&current_tokens, fq)
-                    });
-                    if !has_useful {
-                        *score = f64::NEG_INFINITY;
-                        continue;
-                    }
+                if !has_useful {
+                    *score = f64::NEG_INFINITY;
+                    continue;
                 }
             }
         }

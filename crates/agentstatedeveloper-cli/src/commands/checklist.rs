@@ -332,20 +332,25 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
     // closing the task that produced this checklist.
     let task_close_suggestions: Vec<Value> = {
         let mut suggestions: Vec<Value> = Vec::new();
-        // For each invariant: suggest recording a proof that it held after the change.
+        // For each invariant: suggest confirming it still holds — phrased naturally.
         for inv in invariants.iter().take(4) {
             let source = inv.get("source").and_then(Value::as_str).unwrap_or("");
             let summary = inv.get("summary").and_then(Value::as_str).unwrap_or("");
             if !source.is_empty() && !summary.is_empty() {
+                // Trim leading constraint words for a more natural read.
+                let core = summary.trim_start_matches(|c: char| !c.is_alphabetic());
+                let core = ["must ", "never ", "shall ", "always ", "cannot ", "only "]
+                    .iter()
+                    .fold(core, |s, prefix| s.strip_prefix(prefix).unwrap_or(s));
                 suggestions.push(json!({
                     "action": "ledger_append",
                     "kind": "proof",
                     "symbol": source,
-                    "suggested_summary": format!("verified that {} holds after change", summary),
+                    "suggested_summary": format!("confirm {} still holds after this change", core.trim()),
                 }));
             }
         }
-        // For hazards: suggest recording a validation_scenario with expected outcome.
+        // For hazards: note whether the hazard was avoided.
         for h in hazards.iter().take(2) {
             let source = h.get("source").and_then(Value::as_str).unwrap_or("");
             let summary = h.get("summary").and_then(Value::as_str).unwrap_or("");
@@ -354,11 +359,11 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
                     "action": "ledger_append",
                     "kind": "validation_scenario",
                     "symbol": source,
-                    "suggested_summary": format!("validate that hazard '{}' was not triggered", summary),
+                    "suggested_summary": format!("check that '{}' was not introduced by this change", summary),
                 }));
             }
         }
-        // For each effect: suggest recording that it was verified post-change.
+        // For effects: confirm the side-effect behaviour is still correct.
         for eff in effects_list.iter().take(2) {
             let source = eff.get("source").and_then(Value::as_str).unwrap_or("");
             let cat = eff.get("category").and_then(Value::as_str).unwrap_or("");
@@ -367,7 +372,7 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
                     "action": "ledger_append",
                     "kind": "proof",
                     "symbol": source,
-                    "suggested_summary": format!("verified {} side-effect is correct after change", cat.to_lowercase()),
+                    "suggested_summary": format!("{} behaviour is still correct after this change", cat.to_lowercase()),
                 }));
             }
         }
@@ -531,12 +536,12 @@ fn print_markdown(
 
     if !task_close_suggestions.is_empty() {
         println!("\n## Before closing this task — record in ledger");
-        println!("_Run `asd ledger append` or `asd annotate-commit --write` to capture these:_");
+        println!("_Run `asd task-close` or `asd ledger append` to capture these:_");
         for s in task_close_suggestions {
             let kind = s.get("kind").and_then(Value::as_str).unwrap_or("");
             let symbol = s.get("symbol").and_then(Value::as_str).unwrap_or("");
             let summary = s.get("suggested_summary").and_then(Value::as_str).unwrap_or("");
-            println!("- [ ] `{kind}` on `{symbol}`: _{summary}_");
+            println!("- [ ] [{kind}] `{symbol}` — {summary}");
         }
     }
 }

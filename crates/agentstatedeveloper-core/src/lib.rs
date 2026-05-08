@@ -55,7 +55,7 @@ pub use candidates::{
 };
 pub use repair::{IssueSeverity, RepairIssue, RepairReport, drop_orphaned_edge_refs, repair_asg, scan_asg};
 pub use search_fts::{AGENT_DEFAULT_BUDGET, AnnotatedOwner, CoveringTest, FileRecency, FtsFilters, FtsHit, OwnerSignalSource, OwnershipSignal, SearchFtsDb, SymbolTier, classify_layer, classify_layer_sym, derive_cold_hints, discover_symbol_ownership, estimate_tokens, extract_summary, find_covering_tests, find_indexed_test_files, gather_recency, git_dirty_files, hybrid_boost, intent_focus, intent_layer_order, is_stopword, load_layer_overrides, parse_intent, propose_test_path, symbol_tier, trim_for_agent};
-pub use search_fts::{format_age, stale_warning};
+pub use search_fts::{effect_detail_reason, format_age, stale_warning};
 pub use search_fts::{DocHit, DocKind, SearchDoc, SearchDocsDb};
 pub use doc_adapters::{adapt_document, is_doc_file};
 pub use sidecar::{hydrate_from_dir, mark_fresh_reset, prune_sidecar, sidecar_lifecycle_state, sync_to_dir, HydrateSummary, SidecarState, SyncSummary};

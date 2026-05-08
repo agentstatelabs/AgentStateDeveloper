@@ -150,6 +150,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     if let Some(ref paths) = args.paths {
         paths_filter.extend(paths.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()));
     }
+    let has_paths_filter = !paths_filter.is_empty();
     let filters = FtsFilters {
         kind: args.kind.as_deref().map(|k| k.to_lowercase()),
         language: args.language.as_deref().map(|l| l.to_lowercase()),
@@ -646,14 +647,22 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         }
     }
 
-    // edit: only impl files not flagged as wrong-layer or view-only-on-broad-query
+    // edit: only impl files not flagged as wrong-layer or view-only-on-broad-query.
+    // Exception: when a path/scope filter is active AND the query contains domain-specific
+    // anchors (scheduler, driftpad, exampleflow), keep ViewModel files in scope.
+    let scoped_domain_anchor = has_paths_filter && tokens.iter().any(|t| {
+        matches!(t.as_str(), "scheduler" | "driftpad" | "exampleflow" | "exampleflow")
+    });
     let recipe_edit: Vec<Value> = likely_edit_files.iter()
         .filter(|f| {
             let file = f["file"].as_str().unwrap_or("");
             let layer = f["layer"].as_str().unwrap_or("");
-            f["file_role"].as_str() == Some("impl")
-                && !wrong_layer_files.contains(file)
-                && !(broad_query && is_view_like_file(file, layer))
+            let demote = !wrong_layer_files.contains(file)
+                && broad_query
+                && is_view_like_file(file, layer)
+                && !query_names_file(&tokens, file)
+                && !(scoped_domain_anchor && matches!(layer, "viewmodel"));
+            f["file_role"].as_str() == Some("impl") && !wrong_layer_files.contains(file) && !demote
         })
         .map(|f| {
             // t-005: attach covering tests and run command to each edit entry.
@@ -667,8 +676,20 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             let run_cmd = detect_test_command(file);
             let mut entry = f.clone();
             if let Some(obj) = entry.as_object_mut() {
-                obj.insert("covered_by_tests".into(), json!(indexed));
-                obj.insert("run_command".into(), json!(run_cmd));
+                // Use explicit none-found metadata instead of empty arrays/null
+                // so agents can distinguish "no tests found" from "not checked".
+                let covered = if indexed.is_empty() {
+                    json!([{"note": "none found — no test callers discovered for this file"}])
+                } else {
+                    json!(indexed)
+                };
+                let run = if run_cmd.is_none() {
+                    json!("none found — add test targets for this file")
+                } else {
+                    json!(run_cmd)
+                };
+                obj.insert("covered_by_tests".into(), covered);
+                obj.insert("run_command".into(), run);
             }
             entry
         })
@@ -678,9 +699,12 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         .filter(|f| {
             let file = f["file"].as_str().unwrap_or("");
             let layer = f["layer"].as_str().unwrap_or("");
+            let view_demote = broad_query && is_view_like_file(file, layer)
+                && !query_names_file(&tokens, file)
+                && !(scoped_domain_anchor && matches!(layer, "viewmodel"));
             matches!(f["file_role"].as_str(), Some("example") | Some("reference"))
                 || (f["file_role"].as_str() == Some("impl") && wrong_layer_files.contains(file))
-                || (f["file_role"].as_str() == Some("impl") && broad_query && is_view_like_file(file, layer))
+                || (f["file_role"].as_str() == Some("impl") && view_demote)
         })
         .cloned()
         .collect();
@@ -955,6 +979,14 @@ fn explain_conflict_risk(file: &str) -> Option<String> {
 // t-001: detect view/UI files for broad-query demotion
 // ---------------------------------------------------------------------------
 
+/// Generic tokens that appear in many UI files but don't anchor a specific domain concept.
+/// Files whose stem is composed entirely of these tokens + "state"/"view"/"model" are
+/// demoted to reference_only on broad queries unless the query names them directly.
+const GENERIC_FILE_STEMS: &[&str] = &[
+    "playhead", "state", "update", "position", "value", "cursor", "progress",
+    "indicator", "status", "mode", "flag", "current", "local",
+];
+
 fn is_view_like_file(file: &str, layer: &str) -> bool {
     if layer == "view" { return true; }
     let name = std::path::Path::new(file)
@@ -962,11 +994,62 @@ fn is_view_like_file(file: &str, layer: &str) -> bool {
         .and_then(|n| n.to_str())
         .unwrap_or(file);
     // Match common view/UI naming conventions in iOS/macOS/web/Android.
-    name.ends_with("View") || name.ends_with("ViewController") || name.ends_with("Screen")
+    if name.ends_with("View") || name.ends_with("ViewController") || name.ends_with("Screen")
         || name.ends_with("Widget") || name.ends_with("Panel") || name.ends_with("Cell")
         || name.ends_with("Button") || name.ends_with("Label") || name.ends_with("Row")
         || name.contains("ViewController") || name.contains("Renderer")
         || name.ends_with("Page") || name.ends_with("Fragment")
+    {
+        return true;
+    }
+    // Demote generic-stem files (PlayheadState.swift, UpdateView.swift, etc.)
+    // that are in a UI-adjacent layer. These match too broadly and should be
+    // reference_only unless the query explicitly names them.
+    if matches!(layer, "view" | "viewmodel" | "ui") {
+        let name_lower = name.to_lowercase();
+        let stem_words = split_camel_lower(&name_lower);
+        if !stem_words.is_empty()
+            && stem_words.iter().all(|w| GENERIC_FILE_STEMS.iter().any(|g| *g == w.as_str()))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Returns true when the query tokens explicitly name the file's stem, preventing
+/// demotion when the user is specifically asking about that file.
+fn query_names_file(query_tokens: &[String], file: &str) -> bool {
+    let name = std::path::Path::new(file)
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if name.is_empty() { return false; }
+    let stem_words = split_camel_lower(&name);
+    let matches = stem_words.iter().filter(|w| query_tokens.iter().any(|t| t == *w)).count();
+    matches >= 2.min(stem_words.len())
+}
+
+/// Split a camelCase/PascalCase identifier into lowercase words.
+fn split_camel_lower(s: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for ch in s.chars() {
+        if ch.is_uppercase() && !current.is_empty() {
+            words.push(current.to_lowercase());
+            current = ch.to_string();
+        } else if ch == '_' || ch == '-' || ch == '.' {
+            if !current.is_empty() {
+                words.push(current.to_lowercase());
+                current = String::new();
+            }
+        } else {
+            current.push(ch);
+        }
+    }
+    if !current.is_empty() { words.push(current.to_lowercase()); }
+    words
 }
 
 // ---------------------------------------------------------------------------

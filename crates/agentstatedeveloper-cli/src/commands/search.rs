@@ -8,11 +8,13 @@ use anyhow::Result;
 use clap::Args;
 
 use agentstatedeveloper_core::{
-    AGENT_DEFAULT_BUDGET, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, Engine, FeedbackStore,
-    FeedbackVerdict, FtsFilters, IndexStore, LedgerStore, SearchDocsDb, SearchFtsDb,
+    AGENT_DEFAULT_BUDGET, AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore,
+    EffectStore, Engine, FeedbackStore, FeedbackVerdict, FtsFilters, IndexStore, LedgerKind,
+    LedgerStore, SearchDocsDb, SearchFtsDb,
     apply_feedback_adjustments, apply_file_scope_feedback, classify_layer_sym, confidence_reason,
     confidence_scores, detect_ambiguous_tokens, detect_confidence_warnings, detect_possible_misses,
-    estimate_tokens, explain_match, extract_summary, gather_recency, hybrid_boost, in_memory_score,
+    effect_detail_reason, estimate_tokens, explain_match, explain_feedback_impacts, extract_summary,
+    gather_recency, hybrid_boost, in_memory_score,
     intent_focus, kind_str, load_layer_overrides, parse_intent, parse_query, resolve_scope,
     result_bucket, stale_warning, suggest_better_queries, suggest_scoped_queries, symbol_tier,
     trim_for_agent,
@@ -106,6 +108,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
     let layer_overrides = load_layer_overrides(&cfg.db_path);
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let ledger_store = AsgLedgerStore { repo: &engine.repo };
+    let effect_store = AsgEffectStore { repo: &engine.repo };
 
     let (tokens_from_query, mut inline_exclusions) = parse_query(&args.query);
     if let Some(ref excl) = args.exclude {
@@ -150,12 +153,12 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
     if let Some(hits) = fts_result {
         let tokens = tokens_from_query.clone();
 
-        // Hybrid reranking: BM25 + path/name boost + ledger boost.
+        // Hybrid reranking: BM25 + path/name boost + ledger boost + ownership anchor boost.
         let mut scored: Vec<(f64, _)> = hits
             .into_iter()
             .map(|hit| {
                 let boost = hybrid_boost(&hit, &tokens);
-                let ledger_boost = {
+                let (ledger_boost, ownership_boost) = {
                     let entries = ledger_store
                         .list_entries(&engine.ref_name, &hit.symbol_id)
                         .unwrap_or_default();
@@ -164,13 +167,21 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                         .map(|e| e.summary.to_lowercase())
                         .collect::<Vec<_>>()
                         .join(" ");
-                    if text.is_empty() {
+                    let text_boost = if text.is_empty() {
                         0.0
                     } else {
                         tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
-                    }
+                    };
+                    // Boost source-of-truth symbols (Ownership ledger entry) so they
+                    // surface above generic matches in plain search.
+                    let sot_boost = if entries.iter().any(|e| e.kind == agentstatedeveloper_core::LedgerKind::Ownership) {
+                        2.0
+                    } else {
+                        0.0
+                    };
+                    (text_boost, sot_boost)
                 };
-                (hit.bm25_score + boost + ledger_boost, hit)
+                (hit.bm25_score + boost + ledger_boost + ownership_boost, hit)
             })
             .collect();
 
@@ -257,6 +268,27 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 } else {
                     None
                 };
+                // feedback_rule: which specific verdict+query affected this result.
+                let feedback_rule: Option<serde_json::Value> = if let Ok(fb) = fb_store2.list_all(&engine.ref_name) {
+                    let impacts = explain_feedback_impacts(
+                        &engine, &AsgIndexStore { repo: &engine.repo },
+                        &args.query, &[hit.qname.clone()], &fb,
+                    );
+                    impacts.get(&hit.qname).map(|imp| serde_json::json!({
+                        "verdict": imp.verdict,
+                        "matched_query": imp.matched_query,
+                        "author": imp.author,
+                    }))
+                } else {
+                    None
+                };
+                // effect_detail: one-line reason for effect verification state.
+                let effect_detail = {
+                    let decl = effect_store.get_effects(&engine.ref_name, &hit.symbol_id)
+                        .ok()
+                        .flatten();
+                    effect_detail_reason(decl.as_ref())
+                };
                 serde_json::json!({
                     "score": score, "confidence": conf, "bucket": bucket,
                     "confidence_reason": conf_reason,
@@ -267,6 +299,8 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     "hot": is_hot,
                     "match_reasons": match_reasons,
                     "feedback_status": fb_status,
+                    "feedback_rule": feedback_rule,
+                    "effect_detail": effect_detail,
                 })
             }).collect();
             let scope_narrowed = !filters.paths_filter.is_empty() || !filters.exclude_terms.is_empty();
@@ -375,7 +409,17 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 } else {
                     ("noisy", "weak: low-signal indirect match".to_string(), vec![])
                 };
-                let conf_tag = format!(" [{} {:.0}%]", bucket, conf * 100.0);
+                // Cap confidence display when query is all-generic (avoids "[relevant 100%]"
+                // on matches that only hit generic tokens with no domain anchor).
+                let all_generic_query = !tokens.is_empty()
+                    && !ambiguous_terms.is_empty()
+                    && tokens.iter().all(|t| ambiguous_terms.contains(t));
+                let (display_conf, display_bucket) = if all_generic_query && conf > 0.5 {
+                    (0.5_f64, "peripheral")
+                } else {
+                    (conf, bucket)
+                };
+                let conf_tag = format!(" [{} {:.0}%]", display_bucket, display_conf * 100.0);
                 println!(
                     "[{:.1}] {} {}{}{}{}{} ({}:{})",
                     score, hit.kind, hit.qname, hot_tag, fb_tag, conf_tag, age_tag, hit.file, hit.line
@@ -399,6 +443,15 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             }
             if feedback_suppressed > 0 {
                 eprintln!("asd: {} result(s) suppressed by feedback (use `asd feedback list` to review)", feedback_suppressed);
+            }
+            // Try-narrowing suggestion: when ambiguous terms dominate, suggest scoped queries.
+            if !ambiguous_terms.is_empty() {
+                let top_qnames: Vec<String> = scored.iter().take(5)
+                    .map(|(_, h)| h.qname.clone()).collect();
+                let narrowing = suggest_scoped_queries(&tokens, &ambiguous_terms, &top_qnames);
+                if !narrowing.is_empty() {
+                    eprintln!("asd: try narrowing with: {}", narrowing.join(", "));
+                }
             }
             // Print document hits below symbol hits.
             if !doc_hits.is_empty() {

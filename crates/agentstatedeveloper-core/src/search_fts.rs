@@ -508,11 +508,15 @@ pub fn hybrid_boost(hit: &FtsHit, tokens: &[String]) -> f64 {
     // t-001: Penalize results where ALL matched tokens are generic unless a
     // domain-specific co-occurring token also matched in the name or path.
     // Generic tokens produce noise when used alone (e.g. "state", "update").
+    // Generic + project-ambiguous tokens: terms that match many symbols without
+    // anchoring a specific domain concept. "playhead" is ambiguous in this project
+    // (many UI and scheduler files contain it); require a co-occurring anchor.
     const GENERIC_TOKENS: &[&str] = &[
         "state", "update", "local", "position", "value", "data", "item",
         "list", "info", "event", "action", "type", "mode", "flag", "current",
         "node", "result", "status", "record", "entry", "object", "element",
         "get", "set", "add", "remove", "reset", "apply", "build", "make",
+        "playhead", "cursor", "progress", "indicator", "tick",
     ];
     let matched_tokens: Vec<&str> = tokens.iter()
         .filter(|t| {
@@ -524,7 +528,7 @@ pub fn hybrid_boost(hit: &FtsHit, tokens: &[String]) -> f64 {
     let generic_penalty = if !matched_tokens.is_empty()
         && matched_tokens.iter().all(|t| GENERIC_TOKENS.contains(t))
     {
-        -1.5
+        -2.5  // increased from -1.5 to push generic-only matches below domain-anchored ones
     } else {
         0.0
     };
@@ -1952,6 +1956,51 @@ impl SearchDocsDb {
 
     pub fn is_empty(&self) -> bool {
         self.count().unwrap_or(0) == 0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Effect detail reason — one-line human + agent explanation
+// ---------------------------------------------------------------------------
+
+/// Return a one-line explanation of an effect declaration's verification state.
+///
+/// Examples:
+///   "ok — verified by test_observed at 2024-01-15"
+///   "effects declared but not verified — run 'asd verify-effects'"
+///   "mismatch — unexpected for StateIO (expected: declared)"
+///   "no effects declared"
+pub fn effect_detail_reason(decl: Option<&crate::schema::EffectDecl>) -> String {
+    let Some(decl) = decl else {
+        return "no effects declared".to_string();
+    };
+    if decl.declared.is_empty() {
+        return "no effects declared".to_string();
+    }
+    let Some(ref v) = decl.verification else {
+        return format!(
+            "effects declared ({} effect{}) but not verified — run 'asd verify-effects'",
+            decl.declared.len(),
+            if decl.declared.len() == 1 { "" } else { "s" }
+        );
+    };
+    match v.status {
+        crate::schema::VerificationStatus::Ok => {
+            let source = format!("{:?}", v.by).to_lowercase().replace("_", "-");
+            let date = v.at.format("%Y-%m-%d").to_string();
+            format!("ok — verified by {} at {}", source, date)
+        }
+        crate::schema::VerificationStatus::Unverified => {
+            "unverified — verification run did not complete".to_string()
+        }
+        crate::schema::VerificationStatus::Mismatch => {
+            if v.mismatches.is_empty() {
+                "mismatch — declared effects not observed at runtime".to_string()
+            } else {
+                let mm = &v.mismatches[0];
+                format!("mismatch — {} for {:?}", mm.kind, mm.effect)
+            }
+        }
     }
 }
 
