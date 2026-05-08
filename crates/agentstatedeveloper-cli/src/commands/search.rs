@@ -10,11 +10,12 @@ use clap::Args;
 use agentstatedeveloper_core::{
     AGENT_DEFAULT_BUDGET, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, Engine, FeedbackStore,
     FeedbackVerdict, FtsFilters, IndexStore, LedgerStore, SearchDocsDb, SearchFtsDb,
-    apply_feedback_adjustments, apply_file_scope_feedback, classify_layer_sym, confidence_scores, detect_ambiguous_tokens,
-    detect_confidence_warnings, detect_possible_misses, estimate_tokens, explain_match,
-    extract_summary, gather_recency, hybrid_boost, in_memory_score, intent_focus, kind_str,
-    load_layer_overrides, parse_intent, parse_query, resolve_scope, result_bucket, stale_warning,
-    suggest_better_queries, symbol_tier, trim_for_agent,
+    apply_feedback_adjustments, apply_file_scope_feedback, classify_layer_sym, confidence_reason,
+    confidence_scores, detect_ambiguous_tokens, detect_confidence_warnings, detect_possible_misses,
+    estimate_tokens, explain_match, extract_summary, gather_recency, hybrid_boost, in_memory_score,
+    intent_focus, kind_str, load_layer_overrides, parse_intent, parse_query, resolve_scope,
+    result_bucket, stale_warning, suggest_better_queries, suggest_scoped_queries, symbol_tier,
+    trim_for_agent,
 };
 
 use crate::config::Config;
@@ -242,6 +243,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     vec![]
                 };
                 let bucket = result_bucket(&hit.file, &match_reasons, has_ledger, is_hot);
+                let conf_reason = confidence_reason(&match_reasons, has_ledger, is_hot);
                 // Check for an active useful feedback verdict (these survive filtering).
                 let fb_store2 = AsgFeedbackStore { repo: &engine.repo };
                 let fb_status = if let Ok(fb) = fb_store2.list_all(&engine.ref_name) {
@@ -257,6 +259,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 };
                 serde_json::json!({
                     "score": score, "confidence": conf, "bucket": bucket,
+                    "confidence_reason": conf_reason,
                     "qname": hit.qname, "kind": hit.kind,
                     "file": hit.file, "line": hit.line, "layer": layer,
                     "summary": extract_summary(hit.doc.as_deref(), hit.signature.as_deref()),
@@ -276,9 +279,19 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             let confidence_warnings = detect_confidence_warnings(
                 &tokens, results.len(), &ambiguous_terms, &cfg.db_path,
             );
-            // t-005: query improvement suggestions.
+            // t-004/t-005: query improvement suggestions.
             let query_suggestions = if scope_narrowed { vec![] } else {
                 suggest_better_queries(&tokens, &args.query)
+            };
+            // t-004: scoped query suggestions using co-occurring tokens from top results.
+            let top_qnames: Vec<String> = results.iter()
+                .take(5)
+                .filter_map(|r| r["qname"].as_str().map(|s| s.to_string()))
+                .collect();
+            let scoped_suggestions = if scope_narrowed || ambiguous_terms.is_empty() {
+                vec![]
+            } else {
+                suggest_scoped_queries(&tokens, &ambiguous_terms, &top_qnames)
             };
             let doc_results: Vec<serde_json::Value> = doc_hits.iter().map(|h| {
                 serde_json::json!({
@@ -299,6 +312,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 "possible_misses": possible_misses,
                 "confidence_warnings": confidence_warnings,
                 "query_suggestions": query_suggestions,
+                "scoped_suggestions": scoped_suggestions,
                 "scope_narrowed": scope_narrowed,
                 "feedback_suppressed": feedback_suppressed,
                 "results": results,
@@ -349,16 +363,17 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 } else {
                     ""
                 };
-                // t-002: confidence bucket label in terminal output.
+                // t-002: confidence bucket + reason label in terminal output.
                 let conf = confidences.get(idx).copied().unwrap_or(0.5);
-                let (bucket, match_reasons_disp) = if let Ok(Some(sym)) = index_store.get_symbol_by_qname(&engine.ref_name, &hit.qname) {
+                let (bucket, conf_reason_str, match_reasons_disp) = if let Ok(Some(sym)) = index_store.get_symbol_by_qname(&engine.ref_name, &hit.qname) {
                     let entries = ledger_store.list_entries(&engine.ref_name, &sym.symbol_id).unwrap_or_default();
                     let has_ledger = !entries.is_empty();
                     let reasons = explain_match(&sym, &tokens, &entries, is_hot);
                     let b = result_bucket(&hit.file, &reasons, has_ledger, is_hot);
-                    (b, reasons)
+                    let cr = confidence_reason(&reasons, has_ledger, is_hot);
+                    (b, cr, reasons)
                 } else {
-                    ("noisy", vec![])
+                    ("noisy", "weak: low-signal indirect match".to_string(), vec![])
                 };
                 let conf_tag = format!(" [{} {:.0}%]", bucket, conf * 100.0);
                 println!(
@@ -372,12 +387,13 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 if !summary.is_empty() { println!("       {}", summary); }
                 if args.explain {
                     println!(
-                        "       confidence: {:.0}%  bucket: {}",
+                        "       confidence: {:.0}%  {} ({})",
                         conf * 100.0,
+                        conf_reason_str,
                         bucket
                     );
                     if !match_reasons_disp.is_empty() {
-                        println!("       why: {}", match_reasons_disp.join(", "));
+                        println!("       signals: {}", match_reasons_disp.join(", "));
                     }
                 }
             }

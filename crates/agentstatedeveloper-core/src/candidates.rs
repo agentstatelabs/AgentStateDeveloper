@@ -616,10 +616,11 @@ pub fn confidence_scores(scores: &[f64]) -> Vec<f64> {
 
 /// Classify a result into a semantic bucket.
 ///
-/// - `core`      — has ledger entries AND high-signal match (name token or hot file)
-/// - `supporting`— has ledger, name match, or recent edit
-/// - `noisy`     — only file/sig/doc lexical match; no ledger, not hot
-/// - `test-only` — symbol lives in a test file
+/// - `core`       — has ledger entries AND high-signal name match or hot file
+/// - `relevant`   — has ledger OR name match (previously "supporting", signal-bearing)
+/// - `peripheral` — only doc or file-path match; no ledger, name, or recent edit
+/// - `noisy`      — no match signal at all
+/// - `test-only`  — symbol lives in a test file
 pub fn result_bucket(
     file: &str,
     match_reasons: &[String],
@@ -629,9 +630,50 @@ pub fn result_bucket(
     use crate::search_fts::symbol_tier;
     if symbol_tier(file) == 2 { return "test-only"; }
     let has_name = match_reasons.iter().any(|r| r.starts_with("name:"));
+    let has_doc_or_file = match_reasons.iter().any(|r| r.starts_with("doc:") || r.starts_with("file:"));
     if has_ledger && (has_name || is_hot) { return "core"; }
-    if has_ledger || has_name || is_hot { return "supporting"; }
+    if has_ledger || has_name { return "relevant"; }
+    if is_hot || has_doc_or_file { return "peripheral"; }
     "noisy"
+}
+
+/// One-line explanation of why a result has high or low confidence.
+///
+/// Used in `--explain` output and agent JSON to replace the bare bucket label.
+pub fn confidence_reason(match_reasons: &[String], has_ledger: bool, is_hot: bool) -> String {
+    let has_name = match_reasons.iter().any(|r| r.starts_with("name:"));
+    let has_inv  = match_reasons.iter().any(|r| r.starts_with("invariant-attached:"));
+    let has_own  = match_reasons.iter().any(|r| r.starts_with("ownership:"));
+    let has_haz  = match_reasons.iter().any(|r| r.starts_with("ledger:"));
+    let has_sig  = match_reasons.iter().any(|r| r.starts_with("sig:"));
+    let has_doc  = match_reasons.iter().any(|r| r.starts_with("doc:"));
+    let has_file = match_reasons.iter().any(|r| r.starts_with("file:"));
+
+    if has_name && has_inv {
+        "strong: name match + invariant-attached".to_string()
+    } else if has_name && has_own {
+        "strong: name match + ownership declaration".to_string()
+    } else if has_name && has_haz {
+        "strong: name match + hazard ledger entry".to_string()
+    } else if has_name && has_ledger {
+        "strong: name match + ledger entry".to_string()
+    } else if has_name && is_hot {
+        "moderate: name match + recently edited".to_string()
+    } else if has_name {
+        "moderate: name match only".to_string()
+    } else if has_ledger && has_sig {
+        "moderate: signature match + ledger entry".to_string()
+    } else if has_ledger {
+        "moderate: ledger entry (indirect match)".to_string()
+    } else if has_sig {
+        "weak: signature match only".to_string()
+    } else if has_doc {
+        "weak: doc-only match".to_string()
+    } else if has_file {
+        "weak: file path match only".to_string()
+    } else {
+        "weak: low-signal indirect match".to_string()
+    }
 }
 
 /// Detect query tokens that match too many unrelated files (broad/ambiguous terms).
@@ -722,6 +764,45 @@ pub fn detect_possible_misses(
         );
     }
 
+    // t-005: Named-layer warnings for scheduler, engine, and network.
+    const SCHEDULER_HINTS: &[&str] = &["scheduler", "schedule", "clock", "timer", "tick", "dispatch", "queue", "async"];
+    if SCHEDULER_HINTS.iter().any(|h| ql.contains(h))
+        && result_count > 0
+        && !layers_present.contains("scheduler")
+    {
+        warnings.push(
+            "scheduler layer absent from results — query implies timing/dispatch involvement; \
+             check that scheduler symbols are indexed"
+                .to_string(),
+        );
+    }
+
+    const ENGINE_HINTS: &[&str] = &["engine", "audio", "video", "render", "pipeline", "runtime", "processor"];
+    if ENGINE_HINTS.iter().any(|h| ql.contains(h))
+        && result_count > 0
+        && !layers_present.contains("engine")
+        && !layers_present.contains("core_model")
+    {
+        warnings.push(
+            "engine/core layer absent from results — query implies runtime/processing involvement; \
+             consider broadening scope or adding the engine layer to the index"
+                .to_string(),
+        );
+    }
+
+    const NETWORK_HINTS: &[&str] = &["network", "api", "http", "request", "response", "endpoint", "fetch", "upload", "download"];
+    if NETWORK_HINTS.iter().any(|h| ql.contains(h))
+        && result_count > 0
+        && !layers_present.contains("network")
+        && !layers_present.contains("infrastructure")
+    {
+        warnings.push(
+            "network layer absent from results — query implies API/network involvement; \
+             check that network client symbols are indexed"
+                .to_string(),
+        );
+    }
+
     // Very few results for a precise multi-word query.
     if result_count > 0 && result_count < 3 && ql.split_whitespace().count() >= 3 {
         warnings.push(format!(
@@ -732,6 +813,65 @@ pub fn detect_possible_misses(
     }
 
     warnings
+}
+
+/// Suggest refined, scoped queries when the current query contains ambiguous terms.
+///
+/// Extracts domain-specific co-occurring tokens from the top result qnames and
+/// combines them with the non-ambiguous query tokens to produce 2–3 focused suggestions.
+pub fn suggest_scoped_queries(
+    original_tokens: &[String],
+    ambiguous_terms: &[String],
+    top_qnames: &[String],
+) -> Vec<String> {
+    if ambiguous_terms.is_empty() || top_qnames.is_empty() { return vec![]; }
+
+    let amb_set: HashSet<&str> = ambiguous_terms.iter().map(|s| s.as_str()).collect();
+    let specific_tokens: Vec<&str> = original_tokens.iter()
+        .filter(|t| !amb_set.contains(t.as_str()))
+        .map(|s| s.as_str())
+        .collect();
+
+    // Extract candidate narrowing terms from top result qnames (last segment words).
+    let mut cooccur: HashMap<String, usize> = HashMap::new();
+    for qname in top_qnames {
+        let last = qname.rsplit(|c: char| c == '.' || c == ':' || c == '/').next().unwrap_or(qname);
+        // Split CamelCase into words.
+        let mut cur = String::new();
+        let mut words: Vec<String> = Vec::new();
+        for ch in last.chars() {
+            if ch.is_uppercase() && !cur.is_empty() {
+                words.push(cur.clone()); cur.clear();
+            }
+            cur.push(ch.to_lowercase().next().unwrap_or(ch));
+        }
+        if !cur.is_empty() { words.push(cur); }
+        // Also split snake_case.
+        let words: Vec<String> = words.iter()
+            .flat_map(|w| w.split('_').map(|s| s.to_string()).collect::<Vec<_>>())
+            .filter(|w| w.len() > 2 && !is_stopword(w) && !amb_set.contains(w.as_str()))
+            .collect();
+        for w in words {
+            if !original_tokens.iter().any(|t| t == &w) {
+                *cooccur.entry(w).or_default() += 1;
+            }
+        }
+    }
+
+    // Pick top 3 most-common co-occurring terms not already in the query.
+    let mut ranked: Vec<(usize, String)> = cooccur.into_iter().map(|(w, c)| (c, w)).collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let mut suggestions = Vec::new();
+    for (_, narrowing_term) in ranked.iter().take(3) {
+        let mut parts: Vec<&str> = specific_tokens.clone();
+        parts.push(narrowing_term.as_str());
+        let query = parts.join(" ");
+        if !suggestions.contains(&query) {
+            suggestions.push(query);
+        }
+    }
+    suggestions
 }
 
 /// Distinguish whether low result confidence comes from ambiguous terms or a

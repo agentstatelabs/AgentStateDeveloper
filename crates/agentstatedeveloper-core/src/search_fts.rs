@@ -505,7 +505,31 @@ pub fn hybrid_boost(hit: &FtsHit, tokens: &[String]) -> f64 {
     // Utility penalty: Preview/Sample/Editor/Generated symbols ranked below production.
     let tier_penalty = if hit.tier == 1 { -2.0 } else { 0.0 };
 
-    path_boost + name_boost + phrase_bonus + tier_penalty
+    // t-001: Penalize results where ALL matched tokens are generic unless a
+    // domain-specific co-occurring token also matched in the name or path.
+    // Generic tokens produce noise when used alone (e.g. "state", "update").
+    const GENERIC_TOKENS: &[&str] = &[
+        "state", "update", "local", "position", "value", "data", "item",
+        "list", "info", "event", "action", "type", "mode", "flag", "current",
+        "node", "result", "status", "record", "entry", "object", "element",
+        "get", "set", "add", "remove", "reset", "apply", "build", "make",
+    ];
+    let matched_tokens: Vec<&str> = tokens.iter()
+        .filter(|t| {
+            name_words.iter().any(|w| w == t.as_str())
+                || path_words.iter().any(|w| w == t.as_str())
+        })
+        .map(|t| t.as_str())
+        .collect();
+    let generic_penalty = if !matched_tokens.is_empty()
+        && matched_tokens.iter().all(|t| GENERIC_TOKENS.contains(t))
+    {
+        -1.5
+    } else {
+        0.0
+    };
+
+    path_boost + name_boost + phrase_bonus + tier_penalty + generic_penalty
 }
 
 // ---------------------------------------------------------------------------
