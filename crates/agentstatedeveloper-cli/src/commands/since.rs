@@ -15,7 +15,8 @@ use serde_json::{Value, json};
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, IndexStore, LedgerKind,
     LedgerStore, classify_layer_sym, estimate_tokens, git_dirty_files, intent_focus,
-    load_layer_overrides, parse_intent, propose_test_path, stale_warning, symbol_tier, trim_for_agent,
+    load_layer_overrides, matches_any_path_glob, parse_intent, propose_test_path, resolve_scope,
+    stale_warning, symbol_tier, trim_for_agent,
 };
 
 use crate::commands::{graph::build_id_map, impact::git_recent_touches_pub};
@@ -50,6 +51,22 @@ pub struct SinceArgs {
     /// Token budget when --agent is set (default: 8000).
     #[arg(long, default_value = "8000")]
     pub agent_budget: usize,
+
+    /// Comma-separated glob patterns to restrict touched symbols to specific paths.
+    #[arg(long)]
+    pub paths: Option<String>,
+
+    /// Named scope alias from .asd/scopes.toml, e.g. --scope drift-pad.
+    #[arg(long)]
+    pub scope: Option<String>,
+
+    /// Maximum number of seed symbols to include (default: unlimited).
+    #[arg(long)]
+    pub limit: Option<usize>,
+
+    /// Output is always JSON; this flag is accepted for CLI consistency.
+    #[arg(long)]
+    pub json: bool,
 }
 
 pub fn run(cfg: &Config, args: SinceArgs) -> Result<()> {
@@ -85,11 +102,24 @@ pub fn run(cfg: &Config, args: SinceArgs) -> Result<()> {
 
     let changed_set: HashSet<&str> = changed_files.iter().map(String::as_str).collect();
 
+    // Build optional path filter from --scope / --paths.
+    let mut paths_filter: Vec<String> = Vec::new();
+    if let Some(ref scope) = args.scope {
+        paths_filter.extend(resolve_scope(scope, &cfg.db_path));
+    }
+    if let Some(ref paths) = args.paths {
+        paths_filter.extend(paths.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()));
+    }
+
     // --- Find all indexed symbols in changed files ------------------------
-    let seed_symbols: Vec<&agentstatedeveloper_core::Symbol> = id_map
+    let mut seed_symbols: Vec<&agentstatedeveloper_core::Symbol> = id_map
         .values()
         .filter(|s| changed_set.contains(s.file.as_str()))
+        .filter(|s| paths_filter.is_empty() || matches_any_path_glob(&paths_filter, &s.file))
         .collect();
+    if let Some(lim) = args.limit {
+        seed_symbols.truncate(lim);
+    }
 
     // Group seeds by layer for the touched_symbols output.
     let mut by_layer: HashMap<String, Vec<Value>> = HashMap::new();

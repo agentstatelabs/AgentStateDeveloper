@@ -23,10 +23,10 @@
 //!   asd annotate-commit --write --task-description "$(ctx task show t-042)"
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use clap::Args;
 use serde_json::{Value, json};
 
@@ -34,6 +34,23 @@ use agentstatedeveloper_core::{
     AsgLedgerStore, Engine, LedgerKind, LedgerStore, Symbol,
     schema::{Author, AuthorKind, LedgerEntry},
 };
+
+fn is_doc_file(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    let p = Path::new(&lower);
+    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    matches!(ext, "md" | "txt" | "rst" | "adoc" | "asciidoc" | "tex" | "org")
+        || name.starts_with("readme")
+        || name.starts_with("changelog")
+        || name.starts_with("license")
+        || name.starts_with("authors")
+        || name.starts_with("contributing")
+        || lower.contains("/docs/")
+        || lower.starts_with("docs/")
+        || lower.contains("/doc/")
+        || lower.starts_with("doc/")
+}
 
 use crate::config::Config;
 
@@ -139,6 +156,42 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
     // Limit to 20 most relevant symbols to keep output manageable.
     touched_symbols.truncate(20);
 
+    // ---- Docs-only path: find nearest domain symbol when all changed files
+    //      are documentation (*.md, docs/ dirs, etc.) and no symbols were found.
+    let all_docs = !changed_files.is_empty() && changed_files.iter().all(|f| is_doc_file(f));
+    if all_docs && touched_symbols.is_empty() {
+        // Find nearest domain symbols by matching doc path directory to code files.
+        let doc_dirs: Vec<&str> = changed_files.iter()
+            .filter_map(|f| Path::new(f).parent()?.to_str())
+            .collect();
+        // Prefer symbols whose file shares a directory ancestor with the doc file.
+        let tree2 = engine.repo
+            .get_tree(&engine.ref_name, "/asd/v1/index/by-qname")
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+        let mut scored: Vec<(usize, Symbol)> = tree2.as_object()
+            .map(|m| m.values()
+                .filter_map(|v| serde_json::from_value::<Symbol>(v.clone()).ok())
+                .filter(|s| !is_doc_file(&s.file))
+                .map(|s| {
+                    let score = doc_dirs.iter().filter(|d| {
+                        !d.is_empty() && (s.file.contains(**d) || **d == "." || **d == "")
+                    }).count();
+                    (score, s)
+                })
+                .collect())
+            .unwrap_or_default();
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, sym) in scored.into_iter().take(5) {
+            if seen_ids.insert(sym.symbol_id.clone()) {
+                touched_symbols.push(sym);
+            }
+        }
+        // For docs-only commits, prefer Concept and Decision kinds.
+        if !args.quiet {
+            eprintln!("asd: docs-only commit detected — annotating nearest domain symbols");
+        }
+    }
+
     // ---- Parse commit message for structured annotations -----------------
     #[derive(Debug)]
     struct Annotation {
@@ -148,9 +201,25 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
 
     let mut annotations: Vec<Annotation> = Vec::new();
 
-    // The subject always becomes a Decision.
+    // Docs-only commits: subject becomes a Concept entry (documentation, not code decision).
+    // Code commits: subject becomes a Decision.
     if !subject.is_empty() {
-        annotations.push(Annotation { kind: LedgerKind::Decision, summary: subject.clone() });
+        let subject_kind = if all_docs { LedgerKind::Concept } else { LedgerKind::Decision };
+        annotations.push(Annotation { kind: subject_kind, summary: subject.clone() });
+    }
+    // For docs-only commits with no structured body annotations, derive a Concept
+    // from the changed file names to capture what was documented.
+    if all_docs && full_body.lines().all(|l| {
+        let l = l.trim();
+        l.is_empty() || !["invariant:", "hazard:", "proof:", "validation_scenario:",
+            "known_bug:", "concept:", "decision:"].iter().any(|p| l.starts_with(p))
+    }) {
+        for file in changed_files.iter().take(3) {
+            let name = Path::new(file).file_stem()
+                .and_then(|s| s.to_str()).unwrap_or(file);
+            let concept_summary = format!("documentation: {}", name.replace(['-', '_'], " "));
+            annotations.push(Annotation { kind: LedgerKind::Concept, summary: concept_summary });
+        }
     }
 
     // Parse body lines for structured annotations.

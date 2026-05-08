@@ -19,7 +19,8 @@ use crate::config::Config;
 #[derive(Debug, Args)]
 pub struct TaskCloseArgs {
     /// Free-text description of what was completed (written as Proof entry).
-    pub proof: String,
+    /// Omit to default to "task completed".
+    pub proof: Option<String>,
 
     /// Comma-separated fully-qualified symbol names to annotate.
     /// If omitted, symbols are resolved from files changed in HEAD.
@@ -33,6 +34,11 @@ pub struct TaskCloseArgs {
     /// Optional validation note when --validated is set.
     #[arg(long)]
     pub validation_note: Option<String>,
+
+    /// Reference to validation evidence (file path, URL, or test name).
+    /// Appended to the Proof entry summary and written as a KnownBug tag if pointing to a failure.
+    #[arg(long)]
+    pub evidence: Option<String>,
 
     /// CTX plan ID (overrides CTXONE_PLAN env var).
     #[arg(long)]
@@ -49,6 +55,10 @@ pub struct TaskCloseArgs {
     /// Suppress informational output.
     #[arg(long)]
     pub quiet: bool,
+
+    /// Emit JSON closure summary (default: true; set --no-json to suppress).
+    #[arg(long, default_value_t = true)]
+    pub json: bool,
 }
 
 pub fn run(cfg: &Config, args: TaskCloseArgs) -> Result<()> {
@@ -111,22 +121,34 @@ pub fn run(cfg: &Config, args: TaskCloseArgs) -> Result<()> {
         return Ok(());
     }
 
+    // Build the proof text, incorporating evidence reference if provided.
+    let proof_base = args.proof.clone().unwrap_or_else(|| "task completed".to_string());
+    let proof_text = if let Some(ref ev) = args.evidence {
+        format!("{} [evidence: {}]", proof_base, ev)
+    } else {
+        proof_base.clone()
+    };
+
     let author = Author { kind: AuthorKind::Human, id: args.author.clone() };
     let mut written: Vec<serde_json::Value> = Vec::new();
+    let closed_at = chrono::Utc::now().to_rfc3339();
 
     for sym in &target_symbols {
         // Write Proof entry.
         let mut proof_entry = LedgerEntry::new(
-            &sym.symbol_id, LedgerKind::Proof, &args.proof, author.clone(),
+            &sym.symbol_id, LedgerKind::Proof, &proof_text, author.clone(),
         );
         proof_entry.tags.extend(ctx_tags.iter().cloned());
+        if let Some(ref ev) = args.evidence {
+            proof_entry.tags.push(format!("evidence:{}", ev));
+        }
         ledger_store.append_entry(&engine.ref_name, &proof_entry, &args.author)?;
-        written.push(json!({"symbol": sym.qname, "kind": "proof", "summary": args.proof}));
+        written.push(json!({"symbol": sym.qname, "kind": "proof", "summary": proof_text}));
 
         // Write ValidationScenario if --validated.
         if args.validated {
             let validation_text = args.validation_note.clone()
-                .unwrap_or_else(|| format!("validated: {}", args.proof));
+                .unwrap_or_else(|| format!("validated: {}", proof_base));
             let mut vs_entry = LedgerEntry::new(
                 &sym.symbol_id, LedgerKind::ValidationScenario, &validation_text, author.clone(),
             );
@@ -143,12 +165,23 @@ pub fn run(cfg: &Config, args: TaskCloseArgs) -> Result<()> {
         }
     }
 
-    println!("{}", serde_json::to_string_pretty(&json!({
-        "written": written,
+    let closure_summary = json!({
+        "status": "closed",
+        "closed_at": closed_at,
+        "proof": proof_text,
+        "validated": args.validated,
+        "evidence": args.evidence,
+        "symbols_annotated": target_symbols.len(),
+        "ledger_entries_written": written.len(),
         "ctx": {
             "plan": if plan_id.is_empty() { serde_json::Value::Null } else { json!(plan_id) },
             "task": if task_id.is_empty() { serde_json::Value::Null } else { json!(task_id) },
         },
-    }))?);
+        "written": written,
+    });
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&closure_summary)?);
+    }
     Ok(())
 }

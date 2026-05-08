@@ -62,6 +62,14 @@ pub struct ImpactArgs {
     /// Named scope alias from .asd/scopes.toml, e.g. --scope drift-pad.
     #[arg(long)]
     pub scope: Option<String>,
+
+    /// Maximum number of caller rows to include in the output (default: unlimited).
+    #[arg(long)]
+    pub limit: Option<usize>,
+
+    /// Output is always JSON; this flag is accepted for CLI consistency.
+    #[arg(long)]
+    pub json: bool,
 }
 
 pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
@@ -221,6 +229,10 @@ pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
     let mut sym_val = serde_json::to_value(&symbol)?;
     if let Some(obj) = sym_val.as_object_mut() {
         obj.remove("body");
+    }
+
+    if let Some(lim) = args.limit {
+        caller_rows.truncate(lim);
     }
 
     let focus = intent_focus(intent);

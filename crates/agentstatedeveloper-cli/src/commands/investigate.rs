@@ -93,6 +93,10 @@ pub struct InvestigateArgs {
     /// Named scope alias from .asd/scopes.toml, e.g. --scope drift-pad.
     #[arg(long)]
     pub scope: Option<String>,
+
+    /// Output is always JSON; this flag is accepted for CLI consistency.
+    #[arg(long)]
+    pub json: bool,
 }
 
 pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {

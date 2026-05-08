@@ -120,8 +120,18 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         }
     }
     // Enrich query with active task context (CTX task description, etc.).
-    if let Some(ref ctx_text) = args.task_context {
-        let (ctx_tokens, _) = parse_query(ctx_text);
+    // Auto-loads from CTXONE_PLAN / CTXONE_TASK env vars when --task-context is absent.
+    let auto_ctx_plan = std::env::var("CTXONE_PLAN").ok().filter(|s| !s.is_empty());
+    let auto_ctx_task = std::env::var("CTXONE_TASK").ok().filter(|s| !s.is_empty());
+    let ctx_text = args.task_context.clone().or_else(|| {
+        let parts: Vec<&str> = [
+            auto_ctx_plan.as_deref(),
+            auto_ctx_task.as_deref(),
+        ].iter().filter_map(|x| *x).collect();
+        if parts.is_empty() { None } else { Some(parts.join(" ")) }
+    });
+    if let Some(ref ctx) = ctx_text {
+        let (ctx_tokens, _) = parse_query(ctx);
         for t in ctx_tokens {
             if !tokens.contains(&t) {
                 tokens.push(t);
@@ -750,9 +760,18 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     });
 
     let focus = intent_focus(intent);
+    let ctx_context_val = match (auto_ctx_plan.as_deref(), auto_ctx_task.as_deref()) {
+        (None, None) => Value::Null,
+        _ => json!({
+            "plan": auto_ctx_plan,
+            "task": auto_ctx_task,
+            "injected": ctx_text.is_some(),
+        }),
+    };
     let out = json!({
         "description": args.description,
         "task_context": args.task_context,
+        "ctx_context": ctx_context_val,
         "intent": if intent.is_empty() { Value::Null } else { json!(intent) },
         "focus": if focus.is_empty() { Value::Null } else { json!(focus) },
         "ambiguous_terms": ambiguous_terms,

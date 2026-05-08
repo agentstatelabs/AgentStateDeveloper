@@ -6,7 +6,7 @@
 //!
 //! Default output is Markdown; pass `--json` for machine-readable JSON.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 
 use anyhow::Result;
 use clap::Args;
@@ -27,6 +27,11 @@ use crate::config::Config;
 pub struct ChecklistArgs {
     /// Natural-language or keyword query (same as `asd investigate`).
     pub query: String,
+
+    /// Inject active task context to enrich the search query.
+    /// When absent, CTXONE_PLAN / CTXONE_TASK env vars are read automatically.
+    #[arg(long)]
+    pub task_context: Option<String>,
 
     /// Number of top entry-point symbols to analyse (default: 10).
     #[arg(long, default_value = "10")]
@@ -97,10 +102,24 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
     let effect_store = AsgEffectStore { repo: &engine.repo };
     let id_map = build_id_map(&engine);
 
-    let (tokens, mut exclusions) = parse_query(&args.query);
+    let (mut tokens, mut exclusions) = parse_query(&args.query);
     if let Some(ref excl) = args.exclude {
         for term in excl.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()) {
             exclusions.push(term);
+        }
+    }
+    // Auto-load CTX context from env vars if --task-context not provided.
+    let auto_ctx_plan = std::env::var("CTXONE_PLAN").ok().filter(|s| !s.is_empty());
+    let auto_ctx_task = std::env::var("CTXONE_TASK").ok().filter(|s| !s.is_empty());
+    let ctx_text = args.task_context.clone().or_else(|| {
+        let parts: Vec<&str> = [auto_ctx_plan.as_deref(), auto_ctx_task.as_deref()]
+            .iter().filter_map(|x| *x).collect();
+        if parts.is_empty() { None } else { Some(parts.join(" ")) }
+    });
+    if let Some(ref ctx) = ctx_text {
+        let (ctx_tokens, _) = parse_query(ctx);
+        for t in ctx_tokens {
+            if !tokens.contains(&t) { tokens.push(t); }
         }
     }
     if tokens.is_empty() {
@@ -356,8 +375,13 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
     };
 
     if args.agent || args.json {
+        let ctx_context_val = match (auto_ctx_plan.as_deref(), auto_ctx_task.as_deref()) {
+            (None, None) => Value::Null,
+            _ => json!({ "plan": auto_ctx_plan, "task": auto_ctx_task }),
+        };
         let out = json!({
             "query": args.query,
+            "ctx_context": ctx_context_val,
             "intent": if intent.is_empty() { Value::Null } else { json!(intent) },
             "focus": if focus.is_empty() { Value::Null } else { json!(focus) },
             "files_to_inspect": files_to_inspect,
