@@ -576,10 +576,20 @@ pub fn explain_match(
     let inv_count = ledger_entries.iter().filter(|e| matches!(e.kind, LedgerKind::Invariant)).count();
     let haz_count = ledger_entries.iter().filter(|e| matches!(e.kind, LedgerKind::Hazard)).count();
     if inv_count > 0 {
-        reasons.push(format!("ledger:{} invariant{}", inv_count, if inv_count == 1 { "" } else { "s" }));
+        reasons.push(format!("invariant-attached:{}", inv_count));
     }
     if haz_count > 0 {
         reasons.push(format!("ledger:{} hazard{}", haz_count, if haz_count == 1 { "" } else { "s" }));
+    }
+    // Ownership-boundary: this symbol is explicitly declared as the source-of-truth
+    // for a domain concept that overlaps the query.
+    let owns: Vec<&str> = ledger_entries.iter()
+        .filter(|e| e.kind == LedgerKind::Ownership)
+        .map(|e| e.summary.as_str())
+        .filter(|s| tokens.iter().any(|t| s.to_lowercase().contains(t.as_str())))
+        .collect();
+    if !owns.is_empty() {
+        reasons.push(format!("ownership:{}", owns[0].split_whitespace().take(4).collect::<Vec<_>>().join("-")));
     }
     if is_hot {
         reasons.push("recent-edit".to_string());

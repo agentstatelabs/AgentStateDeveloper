@@ -18,10 +18,11 @@ use serde_json::{Value, json};
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine,
     FeedbackStore, FtsFilters, IndexStore, LedgerKind, LedgerStore, apply_feedback_adjustments,
-    classify_layer_sym, derive_cold_hints, detect_ambiguous_tokens, detect_possible_misses,
-    estimate_tokens, extract_summary, find_candidates, gather_recency, git_dirty_files,
-    intent_focus, intent_layer_order, load_layer_overrides, parse_intent, parse_query,
-    propose_test_path, resolve_scope, stale_warning, symbol_tier, trim_for_agent,
+    classify_layer_sym, confidence_scores, derive_cold_hints, detect_ambiguous_tokens,
+    detect_possible_misses, estimate_tokens, explain_match, extract_summary, find_candidates,
+    gather_recency, git_dirty_files, intent_focus, intent_layer_order, load_layer_overrides,
+    parse_intent, parse_query, propose_test_path, resolve_scope, result_bucket, stale_warning,
+    symbol_tier, trim_for_agent,
 };
 
 use crate::commands::{
@@ -168,6 +169,8 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
 
     // ---- Build entry points + aggregate data ----------------------------
     let layer_order = intent_layer_order(intent);
+    let raw_scores: Vec<f64> = candidates.iter().map(|(s, _)| *s).collect();
+    let confidences = confidence_scores(&raw_scores);
     let mut by_layer: serde_json::Map<String, Value> = serde_json::Map::new();
     let mut design_invariants: Vec<Value> = Vec::new();
     let mut known_hazards: Vec<Value> = Vec::new();
@@ -186,7 +189,8 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // Top entry point symbol id for impact BFS.
     let mut top_sym_id: Option<String> = None;
 
-    for (score, qname) in &candidates {
+    for (idx, (score, qname)) in candidates.iter().enumerate() {
+        let conf = confidences.get(idx).copied().unwrap_or(0.5);
         let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
             Ok(Some(s)) => s,
             _ => continue,
@@ -261,8 +265,14 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         }
 
         // Add to by_layer.
+        let has_ledger = !entries.is_empty();
+        let match_reasons = explain_match(&sym, &tokens, &entries, hot);
+        let bucket = result_bucket(&sym.file, &match_reasons, has_ledger, hot);
         let ep_val = json!({
             "score": score,
+            "confidence": conf,
+            "bucket": bucket,
+            "match_reasons": match_reasons,
             "qname": sym.qname,
             "file": sym.file,
             "line": sym.start.line,
