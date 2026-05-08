@@ -956,6 +956,27 @@ pub fn gather_recency(scan_commits: usize, hot_days: f64) -> std::collections::H
 // Symbol summary extraction
 // ---------------------------------------------------------------------------
 
+/// The evidence source that identified an owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerSignalSource {
+    /// Determined by frequency in `git blame` for the symbol's line range.
+    GitBlame,
+    /// Extracted from `@owner` / `Owner:` annotation in the doc comment.
+    DocComment,
+    /// Listed among recent unique committers from `git log`.
+    GitLog,
+    /// Recorded in an `Ownership` ledger entry for this symbol.
+    LedgerTruth,
+}
+
+/// An owner with the evidence source that identified them.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AnnotatedOwner {
+    pub name: String,
+    pub source: OwnerSignalSource,
+}
+
 /// Ownership signal returned by [`discover_symbol_ownership`].
 #[derive(Debug, Clone)]
 pub struct OwnershipSignal {
@@ -965,6 +986,8 @@ pub struct OwnershipSignal {
     pub doc_owner: Option<String>,
     /// The `N` most recent unique committers to the symbol's file.
     pub recent_committers: Vec<String>,
+    /// All owner signals with source confidence annotations.
+    pub annotated: Vec<AnnotatedOwner>,
 }
 
 /// Discover the likely owner of a symbol from git blame + doc-comment annotations.
@@ -1043,7 +1066,36 @@ pub fn discover_symbol_ownership(
         }
     }
 
-    OwnershipSignal { primary_author, doc_owner, recent_committers }
+    // Build annotated list with source confidence labels.
+    let mut annotated: Vec<AnnotatedOwner> = Vec::new();
+    // Doc owner is the strongest signal — explicit annotation by the author.
+    if let Some(ref owner) = doc_owner {
+        annotated.push(AnnotatedOwner { name: owner.clone(), source: OwnerSignalSource::DocComment });
+    }
+    // Primary blame author is high-confidence structural ownership.
+    if let Some(ref author) = primary_author {
+        if !annotated.iter().any(|a| &a.name == author) {
+            annotated.push(AnnotatedOwner { name: author.clone(), source: OwnerSignalSource::GitBlame });
+        }
+    }
+    // Recent committers complete the picture with lower-confidence recency signal.
+    for committer in &recent_committers {
+        if !annotated.iter().any(|a| &a.name == committer) {
+            annotated.push(AnnotatedOwner { name: committer.clone(), source: OwnerSignalSource::GitLog });
+        }
+    }
+
+    OwnershipSignal { primary_author, doc_owner, recent_committers, annotated }
+}
+
+/// A test symbol that likely covers a given impl symbol.
+#[derive(Debug, Clone)]
+pub struct CoveringTest {
+    pub qname: String,
+    pub file: String,
+    pub line: i64,
+    /// Exact command to run this test (e.g. `swift test --filter testRefreshPlayhead`).
+    pub run_command: String,
 }
 
 /// Find test symbols in the FTS index that are likely to cover `impl_qname`.
@@ -1053,11 +1105,11 @@ pub fn discover_symbol_ownership(
 ///    matches `refreshPlayhead`).
 /// 2. Test doc comment mentions the impl qname.
 ///
-/// Returns a list of `(test_qname, test_file, test_line)` tuples.
+/// Returns a list of `CoveringTest` with file path and exact run command.
 pub fn find_covering_tests(
     db_path: &std::path::Path,
     impl_qname: &str,
-) -> Vec<(String, String, i64)> {
+) -> Vec<CoveringTest> {
     let leaf = impl_qname
         .split(|c: char| c == '.' || c == ':' || c == '/')
         .last()
@@ -1083,7 +1135,6 @@ pub fn find_covering_tests(
     rows.into_iter()
         .filter(|(qname, _, _)| {
             let q = qname.to_lowercase();
-            // Strip common test prefixes and check if the remaining name contains the impl leaf.
             let stripped = q
                 .trim_start_matches("test")
                 .trim_start_matches('_')
@@ -1091,7 +1142,81 @@ pub fn find_covering_tests(
                 .trim_start_matches('_');
             stripped.contains(leaf.as_str()) || q.contains(leaf.as_str())
         })
+        .map(|(qname, file, line)| {
+            let run_command = derive_test_run_command(&file, &qname);
+            CoveringTest { qname, file, line, run_command }
+        })
         .collect()
+}
+
+/// Derive an exact test run command from a test file path and test qname.
+///
+/// Walks up from the file to find the project manifest, then emits the
+/// appropriate test runner invocation.
+fn derive_test_run_command(file: &str, test_qname: &str) -> String {
+    use std::path::Path;
+
+    let file_path = Path::new(file);
+    let leaf_name = test_qname
+        .split(|c: char| c == '.' || c == ':')
+        .last()
+        .unwrap_or(test_qname);
+
+    // Walk up to find a project manifest.
+    let mut dir = file_path.parent();
+    while let Some(d) = dir {
+        if d.join("Package.swift").exists() {
+            return format!("swift test --filter {}", leaf_name);
+        }
+        if d.join("Cargo.toml").exists() {
+            return format!("cargo test {}", leaf_name);
+        }
+        if d.join("package.json").exists() {
+            // Prefer jest/vitest based on file extension.
+            if file.ends_with(".test.ts") || file.ends_with(".spec.ts")
+                || file.ends_with(".test.js") || file.ends_with(".spec.js")
+            {
+                return format!("npx jest --testNamePattern=\"{}\"", leaf_name);
+            }
+            return format!("npm test -- --grep \"{}\"", leaf_name);
+        }
+        if d.join("pyproject.toml").exists() || d.join("setup.py").exists() {
+            return format!("pytest -k \"{}\"", leaf_name);
+        }
+        if d.join("go.mod").exists() {
+            // Derive package from file path relative to go.mod.
+            let rel = file_path.strip_prefix(d)
+                .ok()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.to_str())
+                .map(|s| format!("./{}", s))
+                .unwrap_or_else(|| "./...".to_string());
+            return format!("go test {} -run {}", rel, leaf_name);
+        }
+        if d.join("Gemfile").exists() {
+            return format!("bundle exec rspec --example \"{}\"", leaf_name);
+        }
+        if d.join("build.gradle").exists() || d.join("build.gradle.kts").exists() {
+            return format!("./gradlew test --tests \"*{}*\"", leaf_name);
+        }
+        if d.join("pom.xml").exists() {
+            return format!("mvn -Dtest=*{}* test", leaf_name);
+        }
+        dir = d.parent();
+    }
+
+    // Fallback: language-based inference from file extension.
+    if file.ends_with(".swift") {
+        format!("swift test --filter {}", leaf_name)
+    } else if file.ends_with(".rs") {
+        format!("cargo test {}", leaf_name)
+    } else if file.ends_with(".py") {
+        format!("pytest -k \"{}\"", leaf_name)
+    } else if file.ends_with(".go") {
+        format!("go test ./... -run {}", leaf_name)
+    } else {
+        format!("# run: {}", leaf_name)
+    }
 }
 
 /// Extract a one-line human-readable summary for a symbol.

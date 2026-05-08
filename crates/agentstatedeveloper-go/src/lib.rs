@@ -263,10 +263,10 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
         "os.Mkdir",
     ];
     if let Some(note) = first_match_note(body, &fs_read_needles) {
-        effects.push(Effect { effect: EffectCategory::IoFsRead, qualifiers: serde_json::Value::Null, note: Some(note) });
+        effects.push(Effect { effect: EffectCategory::IoFsRead, qualifiers: serde_json::Value::Null, note: Some(note), ..Default::default() });
     }
     if let Some(note) = first_match_note(body, &fs_write_needles) {
-        effects.push(Effect { effect: EffectCategory::IoFsWrite, qualifiers: serde_json::Value::Null, note: Some(note) });
+        effects.push(Effect { effect: EffectCategory::IoFsWrite, qualifiers: serde_json::Value::Null, note: Some(note), ..Default::default() });
     }
 
     // Network — net/http, resty, grpc, websocket
@@ -298,7 +298,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     }
     if net_note.is_some() {
         let qualifiers = if net_hosts.is_empty() { serde_json::Value::Null } else { json!({ "hosts": net_hosts }) };
-        effects.push(Effect { effect: EffectCategory::IoNetOut, qualifiers, note: net_note });
+        effects.push(Effect { effect: EffectCategory::IoNetOut, qualifiers, note: net_note, ..Default::default() });
     }
 
     // Database — database/sql, gorm, sqlx, pgx
@@ -307,17 +307,17 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
         let has_write = body.contains("db.Exec(") || body.contains(".Create(") || body.contains(".Save(") || body.contains(".Delete(") || body.contains(".Update(");
         let has_read = body.contains("db.Query(") || body.contains("db.QueryRow(") || body.contains(".Find(") || body.contains(".First(");
         if has_read || (!has_read && !has_write) {
-            effects.push(Effect { effect: EffectCategory::IoDbRead, qualifiers: serde_json::Value::Null, note: Some(note.clone()) });
+            effects.push(Effect { effect: EffectCategory::IoDbRead, qualifiers: serde_json::Value::Null, note: Some(note.clone()), ..Default::default() });
         }
         if has_write || (!has_read && !has_write) {
-            effects.push(Effect { effect: EffectCategory::IoDbWrite, qualifiers: serde_json::Value::Null, note: Some(note) });
+            effects.push(Effect { effect: EffectCategory::IoDbWrite, qualifiers: serde_json::Value::Null, note: Some(note), ..Default::default() });
         }
     }
 
     // Process spawn — os/exec
     let proc_needles = ["exec.Command(", "exec.CommandContext(", "os.StartProcess("];
     if let Some(note) = first_match_note(body, &proc_needles) {
-        effects.push(Effect { effect: EffectCategory::ProcSpawn, qualifiers: serde_json::Value::Null, note: Some(note) });
+        effects.push(Effect { effect: EffectCategory::ProcSpawn, qualifiers: serde_json::Value::Null, note: Some(note), ..Default::default() });
     }
 
     // Env read — os.Getenv, os.LookupEnv
@@ -331,7 +331,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             }
         }
         let qualifiers = if vars.is_empty() { serde_json::Value::Null } else { json!({ "vars": vars }) };
-        effects.push(Effect { effect: EffectCategory::EnvRead, qualifiers, note: Some(note) });
+        effects.push(Effect { effect: EffectCategory::EnvRead, qualifiers, note: Some(note), ..Default::default() });
     }
 
     // Logging — fmt.Print*, log.*, zap.*, slog.*
@@ -341,18 +341,18 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
         "zap.", "slog.", "logrus.",
     ];
     if let Some(note) = first_match_note(body, &log_needles) {
-        effects.push(Effect { effect: EffectCategory::Log, qualifiers: serde_json::Value::Null, note: Some(note) });
+        effects.push(Effect { effect: EffectCategory::Log, qualifiers: serde_json::Value::Null, note: Some(note), ..Default::default() });
     }
 
     // Sleep — time.Sleep
     if let Some(note) = first_match_note(body, &["time.Sleep("]) {
-        effects.push(Effect { effect: EffectCategory::TimeSleep, qualifiers: serde_json::Value::Null, note: Some(note) });
+        effects.push(Effect { effect: EffectCategory::TimeSleep, qualifiers: serde_json::Value::Null, note: Some(note), ..Default::default() });
     }
 
     // Time read — time.Now
     let time_read_needles = ["time.Now()", "time.Since(", "time.Until(", "time.Date("];
     if let Some(note) = first_match_note(body, &time_read_needles) {
-        effects.push(Effect { effect: EffectCategory::TimeRead, qualifiers: serde_json::Value::Null, note: Some(note) });
+        effects.push(Effect { effect: EffectCategory::TimeRead, qualifiers: serde_json::Value::Null, note: Some(note), ..Default::default() });
     }
 
     // Random — math/rand, crypto/rand
@@ -370,13 +370,13 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
         "rand.New(",
     ];
     if let Some(note) = first_match_note(body, &random_needles) {
-        effects.push(Effect { effect: EffectCategory::Random, qualifiers: serde_json::Value::Null, note: Some(note) });
+        effects.push(Effect { effect: EffectCategory::Random, qualifiers: serde_json::Value::Null, note: Some(note), ..Default::default() });
     }
 
     // Throw — panic()
     if body.contains("panic(") {
         let note = first_matching_line(body, &["panic("]);
-        effects.push(Effect { effect: EffectCategory::Throw, qualifiers: serde_json::Value::Null, note });
+        effects.push(Effect { effect: EffectCategory::Throw, qualifiers: serde_json::Value::Null, note, ..Default::default() });
     }
 
     effects

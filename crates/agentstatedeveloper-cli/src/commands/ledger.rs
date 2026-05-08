@@ -219,6 +219,8 @@ pub enum CliLedgerKind {
     /// Known bug or defect not yet fixed.
     #[value(name = "known_bug")]
     KnownBug,
+    /// Domain concept (e.g. "Drift Pad clip playhead") — first-class queryable entity.
+    Concept,
 }
 
 impl From<CliLedgerKind> for LedgerKind {
@@ -235,6 +237,7 @@ impl From<CliLedgerKind> for LedgerKind {
             CliLedgerKind::Proof => LedgerKind::Proof,
             CliLedgerKind::ValidationScenario => LedgerKind::ValidationScenario,
             CliLedgerKind::KnownBug => LedgerKind::KnownBug,
+            CliLedgerKind::Concept => LedgerKind::Concept,
         }
     }
 }

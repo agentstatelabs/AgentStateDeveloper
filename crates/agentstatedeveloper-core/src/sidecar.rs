@@ -44,6 +44,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
 use serde_json::Value;
@@ -58,6 +59,51 @@ use crate::schema::{ASD_SCHEMA_VERSION, EffectDecl, LedgerEntry, Rebind, Symbol}
 
 /// Relative path (from project root) to the sidecar root.
 const SIDECAR_REL_ROOT: &str = ".asd/v1";
+
+/// Observable lifecycle state of the on-disk sidecar.
+///
+/// Agents can use this to distinguish a deliberate reset from an indexing
+/// failure, and to know whether `asd hydrate` still needs to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SidecarState {
+    /// No `.asd/v1/` directory exists — the project has never been synced.
+    Missing,
+    /// `.asd/v1/` exists with sidecar files but has not yet been hydrated into ASG.
+    Present,
+    /// `.asd/v1/` was successfully hydrated into ASG (`meta/hydrated-at` is present).
+    Hydrated,
+    /// The sidecar was deliberately reset (`meta/fresh-reset` sentinel is present).
+    FreshReset,
+}
+
+/// Inspect the on-disk sidecar under `dir` and return its lifecycle state.
+///
+/// Checks in priority order: `FreshReset` > `Hydrated` > `Present` > `Missing`.
+pub fn sidecar_lifecycle_state(dir: &Path) -> SidecarState {
+    let root = dir.join(SIDECAR_REL_ROOT);
+    if !root.exists() {
+        return SidecarState::Missing;
+    }
+    let meta = root.join("meta");
+    if meta.join("fresh-reset").exists() {
+        return SidecarState::FreshReset;
+    }
+    if meta.join("hydrated-at").exists() {
+        return SidecarState::Hydrated;
+    }
+    SidecarState::Present
+}
+
+/// Write the `meta/fresh-reset` sentinel so agents know a deliberate reset occurred.
+/// Call this when `asd init --reset` or an equivalent wipe operation runs.
+pub fn mark_fresh_reset(dir: &Path) -> Result<()> {
+    let sentinel = dir.join(SIDECAR_REL_ROOT).join("meta").join("fresh-reset");
+    if let Some(parent) = sentinel.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    write_text_atomic(&sentinel, &format!("{}\n", chrono::Utc::now().to_rfc3339()))
+}
 
 /// Result of [`sync_to_dir`]. Counts what was written; the schema
 /// version is always stamped.
@@ -698,6 +744,15 @@ pub fn hydrate_from_dir(
             refs_dropped
         );
     }
+
+    // Stamp meta/hydrated-at so sidecar_lifecycle_state() can return Hydrated.
+    // Also clear any stale fresh-reset sentinel — the hydrate supersedes it.
+    let meta_dir = root.join("meta");
+    let _ = write_text_atomic(
+        &meta_dir.join("hydrated-at"),
+        &format!("{}\n", chrono::Utc::now().to_rfc3339()),
+    );
+    let _ = fs::remove_file(meta_dir.join("fresh-reset"));
 
     Ok(HydrateSummary {
         effects_loaded,

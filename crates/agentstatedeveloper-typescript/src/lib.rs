@@ -498,6 +498,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             effect: EffectCategory::Log,
             qualifiers: serde_json::Value::Null,
             note,
+            ..Default::default()
         });
     }
 
@@ -514,6 +515,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             effect: EffectCategory::IoFsRead,
             qualifiers: serde_json::Value::Null,
             note: Some(note),
+            ..Default::default()
         });
     }
 
@@ -535,6 +537,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             effect: EffectCategory::IoFsWrite,
             qualifiers: serde_json::Value::Null,
             note: Some(note),
+            ..Default::default()
         });
     }
 
@@ -576,6 +579,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             effect: EffectCategory::IoNetOut,
             qualifiers,
             note: net_note,
+            ..Default::default()
         });
     }
 
@@ -596,6 +600,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             effect: EffectCategory::ProcSpawn,
             qualifiers: serde_json::Value::Null,
             note: Some(note),
+            ..Default::default()
         });
     }
 
@@ -630,6 +635,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             effect: EffectCategory::EnvRead,
             qualifiers,
             note: first_matching_line(body, &["process.env"]),
+            ..Default::default()
         });
     }
 
@@ -640,6 +646,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             effect: EffectCategory::TimeSleep,
             qualifiers: serde_json::Value::Null,
             note: Some(note),
+            ..Default::default()
         });
     }
 
@@ -650,6 +657,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             effect: EffectCategory::TimeRead,
             qualifiers: serde_json::Value::Null,
             note: Some(note),
+            ..Default::default()
         });
     }
 
@@ -668,6 +676,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             effect: EffectCategory::Random,
             qualifiers: serde_json::Value::Null,
             note: Some(note),
+            ..Default::default()
         });
     }
 
@@ -708,6 +717,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
                             effect: EffectCategory::IoDbWrite,
                             qualifiers: serde_json::Value::Null,
                             note,
+                            ..Default::default()
                         });
                         seen_db_write = true;
                     } else if is_read && !seen_db_read {
@@ -715,6 +725,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
                             effect: EffectCategory::IoDbRead,
                             qualifiers: serde_json::Value::Null,
                             note,
+                            ..Default::default()
                         });
                         seen_db_read = true;
                     } else if !is_write && !is_read && !seen_db_read && !seen_db_write {
@@ -722,11 +733,13 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
                             effect: EffectCategory::IoDbRead,
                             qualifiers: serde_json::Value::Null,
                             note: note.clone(),
+                            ..Default::default()
                         });
                         effects.push(Effect {
                             effect: EffectCategory::IoDbWrite,
                             qualifiers: serde_json::Value::Null,
                             note,
+                            ..Default::default()
                         });
                         seen_db_read = true;
                         seen_db_write = true;
@@ -743,6 +756,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             effect: EffectCategory::Throw,
             qualifiers: serde_json::Value::Null,
             note,
+            ..Default::default()
         });
     }
 

@@ -83,6 +83,8 @@ pub enum LedgerKind {
     ValidationScenario,
     /// A known bug or defect that has not been fixed yet.
     KnownBug,
+    /// A domain concept (e.g. "Drift Pad clip playhead") — first-class queryable entity.
+    Concept,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +132,27 @@ pub struct Effect {
     pub qualifiers: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Language adapter that inferred this effect (e.g. "swift", "python").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
+    /// Source-code pattern that triggered inference (e.g. "FileManager", "URLSession").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_pattern: Option<String>,
+    /// Whether verify-effects confirmed this effect against the current source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified: Option<bool>,
+}
+
+impl Effect {
+    pub fn new(effect: EffectCategory) -> Self {
+        Self { effect, qualifiers: serde_json::Value::Null, note: None, adapter: None, source_pattern: None, verified: None }
+    }
+}
+
+impl Default for Effect {
+    fn default() -> Self {
+        Self::new(EffectCategory::Pure)
+    }
 }
 
 /// Effect category — either a well-known built-in or a user-defined domain
@@ -321,6 +344,7 @@ impl LedgerKind {
             LedgerKind::Proof => "proof",
             LedgerKind::ValidationScenario => "validation_scenario",
             LedgerKind::KnownBug => "known_bug",
+            LedgerKind::Concept => "concept",
         }
     }
 }

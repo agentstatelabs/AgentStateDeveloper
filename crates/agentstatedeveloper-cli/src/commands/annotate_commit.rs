@@ -168,6 +168,8 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
             (LedgerKind::ValidationScenario, rest.trim())
         } else if let Some(rest) = line.strip_prefix("known_bug:") {
             (LedgerKind::KnownBug, rest.trim())
+        } else if let Some(rest) = line.strip_prefix("concept:") {
+            (LedgerKind::Concept, rest.trim())
         } else if let Some(rest) = line.strip_prefix("decision:") {
             (LedgerKind::Decision, rest.trim())
         } else {

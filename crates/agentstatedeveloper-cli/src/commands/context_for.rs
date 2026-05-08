@@ -18,6 +18,7 @@ use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, IndexStore, LedgerStore,
     Symbol, discover_symbol_ownership, find_covering_tests, stale_warning,
 };
+use agentstatedeveloper_core::schema::VerificationStatus;
 
 use crate::commands::graph::build_id_map;
 use crate::config::Config;
@@ -142,6 +143,7 @@ pub(crate) fn assemble_symbol_context(
     let mut proofs: Vec<Value> = Vec::new();
     let mut validation_scenarios: Vec<Value> = Vec::new();
     let mut known_bugs: Vec<Value> = Vec::new();
+    let mut concepts: Vec<Value> = Vec::new();
     let mut other_ledger: Vec<Value> = Vec::new();
 
     for entry in &ledger {
@@ -153,6 +155,7 @@ pub(crate) fn assemble_symbol_context(
             agentstatedeveloper_core::LedgerKind::Proof => proofs.push(v),
             agentstatedeveloper_core::LedgerKind::ValidationScenario => validation_scenarios.push(v),
             agentstatedeveloper_core::LedgerKind::KnownBug => known_bugs.push(v),
+            agentstatedeveloper_core::LedgerKind::Concept => concepts.push(v),
             _ => other_ledger.push(v),
         }
     }
@@ -184,13 +187,66 @@ pub(crate) fn assemble_symbol_context(
     if !ownership_signal.recent_committers.is_empty() {
         discovered_ownership.insert("recent_committers".into(), json!(ownership_signal.recent_committers));
     }
+    // t-005: Include annotated owners with source confidence for each signal.
+    if !ownership_signal.annotated.is_empty() {
+        let annotated_val: Vec<Value> = ownership_signal.annotated.iter().map(|a| {
+            json!({ "name": a.name, "source": serde_json::to_value(a.source).unwrap_or(json!("unknown")) })
+        }).collect();
+        discovered_ownership.insert("annotated".into(), json!(annotated_val));
+    }
 
-    // t-004: Find test symbols that cover this impl symbol.
+    // t-003: Find test symbols that cover this impl symbol (with file + run command).
     let covering_tests: Vec<Value> = if let Some(db) = db_path {
         find_covering_tests(db, &symbol.qname)
             .into_iter()
-            .map(|(qname, file, line)| json!({ "qname": qname, "file": file, "line": line }))
+            .map(|ct| json!({
+                "qname": ct.qname,
+                "file": ct.file,
+                "line": ct.line,
+                "run_command": ct.run_command,
+            }))
             .collect()
+    } else {
+        Vec::new()
+    };
+
+    // t-002: Per-effect verification detail — cross-reference declared effects
+    // against the verification mismatches so agents see ok/mismatch/unverified per effect.
+    let effects_detail: Vec<Value> = if let Some(ref decl) = effects {
+        let mismatch_effects: std::collections::HashSet<String> = decl
+            .verification
+            .as_ref()
+            .map(|v| v.mismatches.iter().map(|m| m.effect.as_str().to_string()).collect())
+            .unwrap_or_default();
+        let overall_ok = decl.verification.as_ref()
+            .map(|v| matches!(v.status, VerificationStatus::Ok))
+            .unwrap_or(false);
+        decl.declared.iter().map(|e| {
+            let effect_str = e.effect.as_str();
+            let is_mismatched = mismatch_effects.contains(effect_str);
+            let status = if decl.verification.is_none() {
+                "unverified"
+            } else if is_mismatched {
+                "mismatch"
+            } else if overall_ok {
+                "ok"
+            } else {
+                "ok"
+            };
+            let mut obj = serde_json::Map::new();
+            obj.insert("effect".into(), json!(effect_str));
+            obj.insert("status".into(), json!(status));
+            if let Some(ref adapter) = e.adapter {
+                obj.insert("adapter".into(), json!(adapter));
+            }
+            if let Some(ref pattern) = e.source_pattern {
+                obj.insert("source_pattern".into(), json!(pattern));
+            }
+            if let Some(note) = &e.note {
+                obj.insert("note".into(), json!(note));
+            }
+            Value::Object(obj)
+        }).collect()
     } else {
         Vec::new()
     };
@@ -202,6 +258,7 @@ pub(crate) fn assemble_symbol_context(
         "invariants": invariants,
         "hazards": hazards,
         "known_bugs": known_bugs,
+        "concepts": concepts,
         "ownership": ownership,
         "ownership_discovery": discovered_ownership,
         "covering_tests": covering_tests,
@@ -209,6 +266,7 @@ pub(crate) fn assemble_symbol_context(
         "callers": resolve(&caller_ids),
         "callees": resolve(&callee_ids),
         "effects": effects,
+        "effects_detail": effects_detail,
         "proofs": proofs,
         "decisions_and_notes": other_ledger,
     }))

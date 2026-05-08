@@ -515,7 +515,7 @@ pub struct ScratchDiscardParams {
 pub struct ScratchPromoteParams {
     /// Scratch entry ID to promote.
     pub scratch_id: String,
-    /// Ledger kind: decision, assumption, constraint, rationale, hazard, tradeoff, invariant, ownership, proof, validation_scenario, known_bug.
+    /// Ledger kind: decision, assumption, constraint, rationale, hazard, tradeoff, invariant, ownership, proof, validation_scenario, known_bug, concept.
     pub kind: String,
     /// Symbol qualified name. Required if the scratch entry has no symbol attached.
     #[serde(default)]
@@ -968,6 +968,7 @@ impl AsdMcpServer {
             let mut ownership: Vec<serde_json::Value> = Vec::new();
             let mut validation_scenarios: Vec<serde_json::Value> = Vec::new();
             let mut known_bugs: Vec<serde_json::Value> = Vec::new();
+            let mut concepts: Vec<serde_json::Value> = Vec::new();
             let mut other_ledger: Vec<serde_json::Value> = Vec::new();
             for entry in &ledger {
                 let v = serde_json::to_value(entry).unwrap_or_default();
@@ -977,6 +978,7 @@ impl AsdMcpServer {
                     LedgerKind::Ownership => ownership.push(v),
                     LedgerKind::ValidationScenario => validation_scenarios.push(v),
                     LedgerKind::KnownBug => known_bugs.push(v),
+                    LedgerKind::Concept => concepts.push(v),
                     _ => other_ledger.push(v),
                 }
             }
@@ -1000,6 +1002,7 @@ impl AsdMcpServer {
                 "invariants": invariants,
                 "hazards": hazards,
                 "known_bugs": known_bugs,
+                "concepts": concepts,
                 "ownership": ownership,
                 "validation_scenarios": validation_scenarios,
                 "callers": resolve_ids(caller_ids),
@@ -3632,8 +3635,9 @@ fn parse_ledger_kind(s: &str) -> Result<LedgerKind, String> {
         "proof" => Ok(LedgerKind::Proof),
         "validation_scenario" | "validationscenario" => Ok(LedgerKind::ValidationScenario),
         "known_bug" | "knownbug" => Ok(LedgerKind::KnownBug),
+        "concept" => Ok(LedgerKind::Concept),
         other => Err(format!(
-            "unknown ledger kind: {}. Valid: decision, assumption, constraint, rationale, hazard, tradeoff, invariant, ownership, proof, validation_scenario, known_bug",
+            "unknown ledger kind: {}. Valid: decision, assumption, constraint, rationale, hazard, tradeoff, invariant, ownership, proof, validation_scenario, known_bug, concept",
             other
         )),
     }

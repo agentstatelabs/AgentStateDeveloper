@@ -323,6 +323,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             effect: EffectCategory::IoFsRead,
             qualifiers: serde_json::Value::Null,
             note: Some(note),
+            ..Default::default()
         });
     }
 
@@ -344,6 +345,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             effect: EffectCategory::IoFsWrite,
             qualifiers: serde_json::Value::Null,
             note: Some(note),
+            ..Default::default()
         });
     }
 
@@ -388,6 +390,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             effect: EffectCategory::IoNetOut,
             qualifiers,
             note: net_note,
+            ..Default::default()
         });
     }
 
@@ -427,6 +430,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
                 effect: EffectCategory::IoDbRead,
                 qualifiers: serde_json::Value::Null,
                 note: Some(note.clone()),
+                ..Default::default()
             });
         }
         if has_write || (!has_read && !has_write) {
@@ -434,6 +438,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
                 effect: EffectCategory::IoDbWrite,
                 qualifiers: serde_json::Value::Null,
                 note: Some(note),
+                ..Default::default()
             });
         }
     }
@@ -449,6 +454,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             effect: EffectCategory::ProcSpawn,
             qualifiers: serde_json::Value::Null,
             note: Some(note),
+            ..Default::default()
         });
     }
 
@@ -473,6 +479,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             effect: EffectCategory::EnvRead,
             qualifiers,
             note: Some(note),
+            ..Default::default()
         });
     }
 
@@ -496,6 +503,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             effect: EffectCategory::Log,
             qualifiers: serde_json::Value::Null,
             note: Some(note),
+            ..Default::default()
         });
     }
 
@@ -506,6 +514,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             effect: EffectCategory::TimeSleep,
             qualifiers: serde_json::Value::Null,
             note: Some(note),
+            ..Default::default()
         });
     }
 
@@ -529,6 +538,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             effect: EffectCategory::TimeRead,
             qualifiers: serde_json::Value::Null,
             note: Some(note),
+            ..Default::default()
         });
     }
 
@@ -550,6 +560,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             effect: EffectCategory::Random,
             qualifiers: serde_json::Value::Null,
             note: Some(note),
+            ..Default::default()
         });
     }
 
@@ -560,6 +571,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             effect: EffectCategory::Throw,
             qualifiers: serde_json::Value::Null,
             note: Some(note),
+            ..Default::default()
         });
     }
 

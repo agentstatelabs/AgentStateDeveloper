@@ -1,9 +1,9 @@
-//! `asd status` — show index health, age, and modified files.
+//! `asd status` — show index health, age, modified files, and sidecar lifecycle.
 
 use anyhow::Result;
 use clap::Args;
 
-use agentstatedeveloper_core::{SearchFtsDb, format_age};
+use agentstatedeveloper_core::{SearchFtsDb, format_age, sidecar_lifecycle_state, SidecarState};
 
 use crate::config::Config;
 
@@ -45,6 +45,18 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
         }
         None => println!("  indexed:  unknown"),
     }
+
+    // Sidecar lifecycle state — helps agents distinguish deliberate reset from
+    // indexing failure and know whether `asd hydrate` still needs to run.
+    let project_root = cfg.db_path.parent().unwrap_or(std::path::Path::new("."));
+    let sidecar_state = sidecar_lifecycle_state(project_root);
+    let sidecar_label = match sidecar_state {
+        SidecarState::Missing   => "missing — run 'asd sync' to create",
+        SidecarState::Present   => "present — run 'asd hydrate' to load into ASG",
+        SidecarState::Hydrated  => "hydrated",
+        SidecarState::FreshReset => "fresh-reset (deliberate reset — re-run 'asd index' + 'asd sync')",
+    };
+    println!("  sidecar:  {sidecar_label}");
 
     if args.show_dirty {
         print_dirty_files(cfg)?;

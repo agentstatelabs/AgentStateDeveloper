@@ -46,6 +46,7 @@ fn put_simple_effect_decl(
                 effect: c,
                 qualifiers: serde_json::Value::Null,
                 note: None,
+                ..Default::default()
             })
             .collect(),
         transitive: Vec::new(),

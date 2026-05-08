@@ -48,6 +48,7 @@ fn seed_engine(e: &Engine) -> (Symbol, EffectDecl, LedgerEntry) {
             effect: EffectCategory::IoNetOut,
             qualifiers: serde_json::Value::Null,
             note: Some("calls Stripe API".to_string()),
+            ..Default::default()
         }],
         transitive: Vec::new(),
         verification: Some(Verification {
