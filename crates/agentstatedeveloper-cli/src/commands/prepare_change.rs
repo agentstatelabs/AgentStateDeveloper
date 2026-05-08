@@ -20,10 +20,9 @@ use agentstatedeveloper_core::{
     FeedbackStore, FtsFilters, IndexStore, LedgerKind, LedgerStore, apply_feedback_adjustments,
     classify_layer_sym, confidence_scores, derive_cold_hints, detect_ambiguous_tokens,
     detect_possible_misses, estimate_tokens, explain_match, extract_summary, find_candidates,
-    gather_recency, git_dirty_files, intent_focus, intent_layer_order, load_layer_overrides,
-    find_indexed_test_files, parse_intent, parse_query, propose_test_path, resolve_scope,
-    result_bucket, stale_warning,
-    symbol_tier, trim_for_agent,
+    find_indexed_test_files, gather_recency, git_dirty_files, glob_match, intent_focus,
+    intent_layer_order, load_layer_overrides, parse_intent, parse_query, propose_test_path,
+    resolve_scope, result_bucket, stale_warning, symbol_tier, trim_for_agent,
 };
 
 use crate::commands::{
@@ -380,7 +379,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         }
     }
 
-    // ---- Blast-radius: caller/callee layer distribution from top entry points ----
+    // ---- Blast-radius: caller/callee layer distribution + concrete call chains ----
     let blast_radius = {
         let mut caller_layers: HashMap<String, usize> = HashMap::new();
         let mut callee_layers: HashMap<String, usize> = HashMap::new();
@@ -390,13 +389,20 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             .filter_map(|(_, q)| index_store.get_symbol_by_qname(&engine.ref_name, q).ok().flatten())
             .map(|s| s.symbol_id)
             .collect();
+
+        // t-003: BFS tracking paths so we can emit concrete caller chains.
+        // Each path is stored root-first: [outer_caller, ..., direct_caller, our_symbol].
+        let mut top_caller_chains: Vec<Vec<String>> = Vec::new();
+
         for sid in &top_sids {
+            let anchor_qname = id_map.get(sid).map(|s| s.qname.clone()).unwrap_or_default();
             let mut visited: HashSet<String> = HashSet::new();
-            let mut q: VecDeque<(String, usize)> = VecDeque::new();
+            // Queue: (current_id, path_from_this_node_to_anchor)
+            let mut q: VecDeque<(String, Vec<String>)> = VecDeque::new();
             visited.insert(sid.clone());
-            q.push_back((sid.clone(), 0));
-            while let Some((cid, depth)) = q.pop_front() {
-                if depth >= 3 { continue; }
+            q.push_back((sid.clone(), vec![anchor_qname.clone()]));
+            while let Some((cid, path)) = q.pop_front() {
+                if path.len() > 4 { continue; }
                 for caller_id in index_store.get_callers(&engine.ref_name, &cid).unwrap_or_default() {
                     if visited.insert(caller_id.clone()) {
                         if let Some(sym) = id_map.get(&caller_id) {
@@ -404,8 +410,14 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
                             let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
                             *caller_layers.entry(layer.to_string()).or_default() += 1;
                             total_callers += 1;
+                            // Build path: prepend this caller.
+                            let mut new_path = vec![sym.qname.clone()];
+                            new_path.extend_from_slice(&path);
+                            if top_caller_chains.len() < 5 {
+                                top_caller_chains.push(new_path.clone());
+                            }
+                            q.push_back((caller_id, new_path));
                         }
-                        q.push_back((caller_id, depth + 1));
                     }
                 }
             }
@@ -423,6 +435,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             "total_callees": total_callees,
             "caller_layer_distribution": caller_layers,
             "callee_layer_distribution": callee_layers,
+            "top_caller_chains": top_caller_chains,
         })
     };
 
@@ -500,6 +513,13 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         .collect();
 
     let ambiguous_terms = detect_ambiguous_tokens(&tokens, &cfg.db_path, &filters);
+    // t-001: broad_query = at least half the query tokens are flagged as ambiguous.
+    let broad_query = !ambiguous_terms.is_empty() && {
+        let amb_set: HashSet<&str> = ambiguous_terms.iter().map(|s| s.as_str()).collect();
+        let amb_count = tokens.iter().filter(|t| amb_set.contains(t.as_str())).count();
+        amb_count * 2 >= tokens.len().max(1)
+    };
+
     let layers_present: std::collections::HashSet<&str> = file_scores.iter()
         .map(|(_, _, layer, _, _)| layer.as_str())
         .collect();
@@ -509,6 +529,58 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         vec![]
     } else {
         detect_possible_misses(&args.description, &layers_present, file_scores.len())
+    };
+
+    // t-002: Surface files that scope/path filters cut out but are known callers or callees.
+    let likely_omitted_files: Vec<Value> = if scope_narrowed && !filters.paths_filter.is_empty() {
+        let top_sids_omit: Vec<String> = candidates.iter().take(3)
+            .filter_map(|(_, q)| index_store.get_symbol_by_qname(&engine.ref_name, q).ok().flatten())
+            .map(|s| s.symbol_id)
+            .collect();
+        let mut omitted: Vec<Value> = Vec::new();
+        let mut seen_files: HashSet<String> = HashSet::new();
+        for sid in &top_sids_omit {
+            let anchor_qname = id_map.get(sid).map(|s| s.qname.clone()).unwrap_or_default();
+            // Check callers outside scope.
+            for caller_id in index_store.get_callers(&engine.ref_name, sid).unwrap_or_default() {
+                if let Some(sym) = id_map.get(&caller_id) {
+                    let in_scope = filters.paths_filter.iter().any(|p| glob_match(p, &sym.file));
+                    if !in_scope && seen_files.insert(sym.file.clone()) {
+                        let dir = std::path::Path::new(&sym.file)
+                            .parent()
+                            .map(|d| format!("{}/**", d.to_string_lossy()))
+                            .unwrap_or_else(|| sym.file.clone());
+                        omitted.push(json!({
+                            "file": sym.file,
+                            "relation": "caller",
+                            "of_symbol": anchor_qname,
+                            "suggested_paths": dir,
+                        }));
+                    }
+                }
+            }
+            // Check callees outside scope.
+            for callee_id in index_store.get_callees(&engine.ref_name, sid).unwrap_or_default() {
+                if let Some(sym) = id_map.get(&callee_id) {
+                    let in_scope = filters.paths_filter.iter().any(|p| glob_match(p, &sym.file));
+                    if !in_scope && seen_files.insert(sym.file.clone()) {
+                        let dir = std::path::Path::new(&sym.file)
+                            .parent()
+                            .map(|d| format!("{}/**", d.to_string_lossy()))
+                            .unwrap_or_else(|| sym.file.clone());
+                        omitted.push(json!({
+                            "file": sym.file,
+                            "relation": "callee",
+                            "of_symbol": anchor_qname,
+                            "suggested_paths": dir,
+                        }));
+                    }
+                }
+            }
+        }
+        omitted
+    } else {
+        vec![]
     };
 
     // T1: safe-change recipe — actionable sections for an agent or developer.
@@ -552,21 +624,53 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         }
         wl_files
     };
-    // edit: only impl files not flagged as wrong-layer
+    // t-005: Build a map of file → test files that cover it (from affected_tests).
+    let mut file_to_tests: HashMap<String, Vec<String>> = HashMap::new();
+    for test in &affected_tests {
+        if let Some(test_file) = test["file"].as_str() {
+            for (_, file, _, _, _) in &file_scores {
+                let entry = file_to_tests.entry(file.clone()).or_default();
+                let tf = test_file.to_string();
+                if !entry.contains(&tf) { entry.push(tf); }
+            }
+        }
+    }
+
+    // edit: only impl files not flagged as wrong-layer or view-only-on-broad-query
     let recipe_edit: Vec<Value> = likely_edit_files.iter()
         .filter(|f| {
+            let file = f["file"].as_str().unwrap_or("");
+            let layer = f["layer"].as_str().unwrap_or("");
             f["file_role"].as_str() == Some("impl")
-                && !wrong_layer_files.contains(f["file"].as_str().unwrap_or(""))
+                && !wrong_layer_files.contains(file)
+                && !(broad_query && is_view_like_file(file, layer))
         })
-        .cloned()
+        .map(|f| {
+            // t-005: attach covering tests and run command to each edit entry.
+            let file = f["file"].as_str().unwrap_or("");
+            let mut indexed = find_indexed_test_files(&cfg.db_path, file);
+            if let Some(extra) = file_to_tests.get(file) {
+                for t in extra {
+                    if !indexed.contains(t) { indexed.push(t.clone()); }
+                }
+            }
+            let run_cmd = detect_test_command(file);
+            let mut entry = f.clone();
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert("covered_by_tests".into(), json!(indexed));
+                obj.insert("run_command".into(), json!(run_cmd));
+            }
+            entry
+        })
         .collect();
-    // reference: example/demo/doc files that matched but should not be edited,
-    // plus any impl files demoted by WrongLayer feedback.
+    // reference: example/doc files + WrongLayer demotions + view-on-broad demotions.
     let recipe_reference: Vec<Value> = likely_edit_files.iter()
         .filter(|f| {
+            let file = f["file"].as_str().unwrap_or("");
+            let layer = f["layer"].as_str().unwrap_or("");
             matches!(f["file_role"].as_str(), Some("example") | Some("reference"))
-                || (f["file_role"].as_str() == Some("impl")
-                    && wrong_layer_files.contains(f["file"].as_str().unwrap_or("")))
+                || (f["file_role"].as_str() == Some("impl") && wrong_layer_files.contains(file))
+                || (f["file_role"].as_str() == Some("impl") && broad_query && is_view_like_file(file, layer))
         })
         .cloned()
         .collect();
@@ -642,6 +746,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         "run": recipe_run,
         "manually_validate": recipe_manually_validate,
         "blast_radius": blast_radius,
+        "likely_omitted_files": likely_omitted_files,
     });
 
     let focus = intent_focus(intent);
@@ -828,41 +933,81 @@ fn explain_conflict_risk(file: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// t-005: convert invariant / constraint text into a step + expected pair
+// t-001: detect view/UI files for broad-query demotion
 // ---------------------------------------------------------------------------
+
+fn is_view_like_file(file: &str, layer: &str) -> bool {
+    if layer == "view" { return true; }
+    let name = std::path::Path::new(file)
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or(file);
+    // Match common view/UI naming conventions in iOS/macOS/web/Android.
+    name.ends_with("View") || name.ends_with("ViewController") || name.ends_with("Screen")
+        || name.ends_with("Widget") || name.ends_with("Panel") || name.ends_with("Cell")
+        || name.ends_with("Button") || name.ends_with("Label") || name.ends_with("Row")
+        || name.contains("ViewController") || name.contains("Renderer")
+        || name.ends_with("Page") || name.ends_with("Fragment")
+}
+
+// ---------------------------------------------------------------------------
+// t-004: convert invariant / constraint text into a step + expected pair
+// ---------------------------------------------------------------------------
+
+/// Extract the key subject noun phrase from an invariant sentence.
+/// Returns the first 3–6 words after stripping leading modal/constraint words.
+fn extract_subject(text: &str) -> String {
+    const SKIP: &[&str] = &[
+        "the", "a", "an", "this", "that", "it",
+        "must", "never", "cannot", "shall", "always", "only", "not", "no",
+        "should", "will", "would", "is", "are", "be", "been",
+        "require", "ensure", "prevent", "guarantee", "invariant",
+    ];
+    text.split_whitespace()
+        .filter(|w| {
+            let wl = w.to_lowercase();
+            let base: String = wl.chars().filter(|c| c.is_alphabetic()).collect();
+            !SKIP.contains(&base.as_str())
+        })
+        .take(5)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 fn invariant_to_scenario(text: &str) -> Value {
     let tl = text.to_lowercase();
+    let subject = extract_subject(text);
+    let subj = if subject.is_empty() { text.to_string() } else { subject };
+
     let (step, expected) = if tl.contains("must not") || tl.contains("never") || tl.contains("cannot") || tl.contains("forbidden") {
-        let action = text
-            .split_whitespace()
-            .skip_while(|w| ["must", "never", "cannot", "should", "shall", "not", "be", "is", "are"].contains(&w.to_lowercase().as_str()))
-            .take(6)
-            .collect::<Vec<_>>()
-            .join(" ");
         (
-            format!("Attempt to trigger: {}", if action.is_empty() { text } else { &action }),
-            format!("The system prevents it — constraint holds: {}", text),
+            format!("Trigger conditions that would violate: {}", subj),
+            format!("System rejects or prevents the violation — «{}» holds", text),
         )
-    } else if tl.contains("must") || tl.contains("shall") || tl.contains("always") || tl.contains("ensure") || tl.contains("guarantee") {
+    } else if tl.contains("must") || tl.contains("shall") || tl.contains("always") {
         (
-            format!("Execute the code path covered by: {}", text),
-            format!("Postcondition holds after execution: {}", text),
+            format!("Exercise the happy path for: {}", subj),
+            format!("Observe that «{}» is satisfied after execution", text),
+        )
+    } else if tl.contains("ensure") || tl.contains("guarantee") {
+        (
+            format!("Run the scenario that exercises: {}", subj),
+            format!("Post-condition confirmed: «{}»", text),
         )
     } else if tl.contains("require") {
         (
-            format!("Remove or violate the precondition in: {}", text),
-            "Guard or error fires as expected".to_string(),
+            format!("Attempt to call without satisfying the precondition for: {}", subj),
+            format!("Guard fires or error raised before violating «{}»", text),
         )
     } else if tl.contains("only") || tl.contains("prevent") {
         (
-            format!("Attempt a path that bypasses: {}", text),
-            "Prevention still enforced after change".to_string(),
+            format!("Attempt a bypass around: {}", subj),
+            format!("Prevention still enforced — «{}»", text),
         )
     } else {
         (
-            format!("Verify constraint: {}", text),
-            "Constraint holds after the change".to_string(),
+            format!("Verify the observable behaviour of: {}", subj),
+            format!("Constraint «{}» holds after the change", text),
         )
     };
     json!({ "step": step, "expected": expected })
