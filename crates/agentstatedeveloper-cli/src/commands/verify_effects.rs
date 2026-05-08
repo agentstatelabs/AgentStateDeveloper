@@ -133,7 +133,7 @@ pub fn run(cfg: &Config, args: VerifyEffectsArgs) -> Result<()> {
 
     if args.write {
         effect_decl.verification = Some(verification);
-        effect_store.put_effects(&engine.ref_name, &effect_decl)?;
+        effect_store.put_effects(&engine.ref_name, &effect_decl.symbol_id, &effect_decl, "asd-verify-effects")?;
     }
 
     let out = json!({
