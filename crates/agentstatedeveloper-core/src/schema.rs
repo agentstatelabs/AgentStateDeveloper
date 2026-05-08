@@ -195,6 +195,14 @@ impl EffectCategory {
         }
     }
 
+    /// Returns true for effects that are nearly universal and low-signal
+    /// (appear on most symbols, rarely indicate a meaningful side-effect).
+    /// Used to suppress noise in `prepare_change` and `effects_of` output.
+    /// Low-signal effects are only shown when they are the only effects on a symbol.
+    pub fn is_low_signal(&self) -> bool {
+        matches!(self, Self::Throw | Self::Random | Self::Log | Self::Pure | Self::TimeRead | Self::TimeSleep)
+    }
+
     pub fn from_str(s: &str) -> Self {
         match s {
             "io.fs.read" => EffectCategory::IoFsRead,

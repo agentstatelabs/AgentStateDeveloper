@@ -395,30 +395,27 @@ pub fn find_candidates(
             .into_iter()
             .map(|hit| {
                 let boost = hybrid_boost(&hit, tokens);
-                let (ledger_boost, ownership_boost) = {
+                let ledger_boost = {
                     let entries = ledger_store
                         .list_entries(&engine.ref_name, &hit.symbol_id)
                         .unwrap_or_default();
-                    let text = entries
-                        .iter()
-                        .map(|e| e.summary.to_lowercase())
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    let lb = if text.is_empty() {
-                        0.0
-                    } else {
-                        tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
-                    };
-                    // Extra boost for symbols explicitly designated as owners of
-                    // a domain concept that overlaps the query.
-                    let ob = entries.iter()
-                        .filter(|e| e.kind == crate::schema::LedgerKind::Ownership)
-                        .map(|e| e.summary.to_lowercase())
-                        .filter(|s| tokens.iter().any(|t| s.contains(t.as_str())))
-                        .count() as f64 * 2.0;
-                    (lb, ob)
+                    // Weight each matching ledger entry by kind so domain-concept
+                    // ranking surfaces Ownership > Invariant > Hazard/Decision > others.
+                    entries.iter().fold(0.0_f64, |acc, e| {
+                        let summary = e.summary.to_lowercase();
+                        let matches = tokens.iter().filter(|t| summary.contains(t.as_str())).count();
+                        if matches == 0 { return acc; }
+                        let weight = match e.kind {
+                            crate::schema::LedgerKind::Ownership => 3.0,
+                            crate::schema::LedgerKind::Invariant => 1.5,
+                            crate::schema::LedgerKind::Hazard
+                            | crate::schema::LedgerKind::Decision => 1.0,
+                            _ => 0.5,
+                        };
+                        acc + matches as f64 * weight
+                    })
                 };
-                (hit.bm25_score + boost + ledger_boost + ownership_boost, hit.qname)
+                (hit.bm25_score + boost + ledger_boost, hit.qname)
             })
             .collect();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));

@@ -2603,8 +2603,10 @@ impl AsdMcpServer {
             }
             if *score >= effect_score_floor {
                 if let Ok(Some(decl)) = effect_store.get_effects(&ref_name, &sym.symbol_id) {
+                    let has_high_signal = decl.declared.iter().any(|e| !e.effect.is_low_signal());
                     for eff in &decl.declared {
-                        let cat = format!("{:?}", eff.effect);
+                        if has_high_signal && eff.effect.is_low_signal() { continue; }
+                        let cat = eff.effect.as_str().to_string();
                         let key = format!("{}:{}", cat, sym.qname);
                         if seen_effect.insert(key) {
                             effects_summary.push(serde_json::json!({ "category": cat, "source": sym.qname }));
@@ -2660,13 +2662,25 @@ impl AsdMcpServer {
                     visited.insert(cid.clone());
                     if let Some(s) = id_map.get(&cid) {
                         if symbol_tier(&s.file) == 2 && seen_tnames.insert(s.qname.clone()) {
-                            let test_tokens: Vec<&str> = s.qname.split(|c: char| !c.is_alphabetic())
-                                .filter(|t: &&str| t.len() > 2).collect();
+                            let qname_words: Vec<String> = s.qname
+                                .split(|c: char| !c.is_alphabetic())
+                                .filter(|t: &&str| t.len() > 2)
+                                .map(|t| t.to_lowercase())
+                                .collect();
+                            let doc_words: Vec<String> = s.doc.as_deref().unwrap_or("")
+                                .split(|c: char| !c.is_alphabetic())
+                                .filter(|t: &&str| t.len() > 2)
+                                .map(|t| t.to_lowercase())
+                                .collect();
+                            let test_tokens: Vec<&str> = qname_words.iter()
+                                .chain(doc_words.iter())
+                                .map(|s| s.as_str())
+                                .collect();
                             let covers: Vec<&str> = design_invariants.iter()
                                 .filter_map(|inv| inv.get("summary").and_then(serde_json::Value::as_str))
                                 .filter(|sum| {
                                     let sl = sum.to_lowercase();
-                                    test_tokens.iter().any(|t| sl.contains(&t.to_lowercase()[..]))
+                                    test_tokens.iter().any(|t| sl.contains(*t))
                                 })
                                 .collect();
                             affected_tests.push(serde_json::json!({
