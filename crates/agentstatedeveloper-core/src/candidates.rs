@@ -704,12 +704,41 @@ pub fn detect_possible_misses(
     warnings
 }
 
+/// Tokenise a feedback query string into a set of non-stopword terms.
+fn fb_query_tokens(q: &str) -> std::collections::HashSet<String> {
+    q.split(|c: char| !c.is_alphabetic())
+        .filter(|t| t.len() > 2)
+        .map(|t| t.to_lowercase())
+        .filter(|t| !is_stopword(t))
+        .collect()
+}
+
+/// t-003: Query-family matching — a stored verdict applies to the current query
+/// when their token sets overlap by at least one token (not just substring match).
+/// This makes "drift playhead" verdicts apply to "playhead drift" and
+/// "drift pad playhead position".
+fn query_family_matches(current_query_tokens: &std::collections::HashSet<String>, fb_query: &str) -> bool {
+    if fb_query.is_empty() { return true; }
+    let fb_tokens = fb_query_tokens(fb_query);
+    if fb_tokens.is_empty() { return true; }
+    // Any shared non-stopword token means the queries are in the same family.
+    fb_tokens.iter().any(|t| current_query_tokens.contains(t))
+}
+
 /// Apply feedback verdicts as score adjustments after candidate selection.
 ///
 /// `Useful` entries add a boost; `Noisy` / `WrongLayer` entries demote the
-/// symbol to negative infinity (effectively removed). Also detects recurring
-/// false positives — symbols with ≥2 noisy verdicts sharing a query token —
-/// and suppresses them for the current query when those tokens overlap.
+/// symbol to negative infinity (effectively removed). Also:
+///
+/// - t-002: Sibling propagation — when a symbol in a file is marked Noisy or
+///   WrongLayer, all other symbols from the same file are also suppressed for
+///   query families that overlap the noisy verdict.
+/// - t-003: Query-family matching — a stored verdict applies to the current
+///   query when they share at least one non-stopword token, not just exact
+///   substring match.
+/// - Recurring false positives — symbols with ≥2 noisy verdicts sharing a
+///   query token are suppressed for any query that overlaps those tokens.
+///
 /// Called at CLI/MCP call sites after `find_candidates`.
 pub fn apply_feedback_adjustments(
     engine: &Engine,
@@ -718,34 +747,25 @@ pub fn apply_feedback_adjustments(
     scored: &mut Vec<(f64, String)>,
     feedback_entries: &[(String, String, crate::schema::FeedbackVerdict)],
 ) {
-    // feedback_entries: (symbol_id, query_pattern, verdict)
     if feedback_entries.is_empty() { return; }
     let query_norm = query.to_lowercase();
-    let query_tokens: Vec<&str> = query_norm
-        .split(|c: char| !c.is_alphabetic())
-        .filter(|t| t.len() > 2 && !is_stopword(&t.to_string()))
-        .collect();
+    let current_tokens: std::collections::HashSet<String> = fb_query_tokens(&query_norm);
+    let current_tokens_vec: Vec<&str> = current_tokens.iter().map(|s| s.as_str()).collect();
 
-    // Build recurring false positive map: symbol_id → suppression tokens.
-    // A token is a suppression signal when it appears in ≥2 distinct noisy queries for that symbol.
+    // --- Recurring false positive map (same as before) ---
     let mut noisy_queries_by_sym: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
     for (sym_id, fb_query, verdict) in feedback_entries {
         if matches!(verdict, crate::schema::FeedbackVerdict::Noisy | crate::schema::FeedbackVerdict::WrongLayer) {
             noisy_queries_by_sym.entry(sym_id.as_str()).or_default().push(fb_query.as_str());
         }
     }
-    // symbol_id → set of tokens that triggered noisy in ≥2 distinct queries
     let recurring_fp: std::collections::HashMap<&str, Vec<String>> = noisy_queries_by_sym
         .into_iter()
         .filter(|(_, queries)| queries.len() >= 2)
         .map(|(sym_id, queries)| {
             let mut token_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
             for q in &queries {
-                let tokens: std::collections::HashSet<String> = q
-                    .split(|c: char| !c.is_alphabetic())
-                    .filter(|t| t.len() > 2)
-                    .map(|t| t.to_lowercase())
-                    .collect();
+                let tokens = fb_query_tokens(q);
                 for t in tokens { *token_counts.entry(t).or_default() += 1; }
             }
             let suppression_tokens: Vec<String> = token_counts
@@ -757,18 +777,57 @@ pub fn apply_feedback_adjustments(
         })
         .collect();
 
+    // --- t-002: Build set of files whose symbols have been marked Noisy/WrongLayer
+    // for query families overlapping the current query. All sibling symbols in
+    // those files will be suppressed.
+    let mut noisy_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (sym_id, fb_query, verdict) in feedback_entries {
+        if !matches!(verdict, crate::schema::FeedbackVerdict::Noisy | crate::schema::FeedbackVerdict::WrongLayer) {
+            continue;
+        }
+        if !query_family_matches(&current_tokens, fb_query) { continue; }
+        // Look up the file this symbol lives in and add it to the noisy set.
+        // We use the index store to get the symbol's file.
+        let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+        if let Ok(serde_json::Value::Object(map)) = engine.repo.get_tree(&engine.ref_name, &prefix) {
+            for sym_val in map.values() {
+                if let Ok(sym) = serde_json::from_value::<Symbol>(sym_val.clone()) {
+                    if sym.symbol_id == *sym_id {
+                        noisy_files.insert(sym.file);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Score adjustments ---
     for (score, qname) in scored.iter_mut() {
-        let sym_id = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
-            Ok(Some(s)) => s.symbol_id,
+        let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+            Ok(Some(s)) => s,
             _ => continue,
         };
-        // Per-query verdict matching.
+        let sym_id = &sym.symbol_id;
+
+        // t-002: Sibling file suppression.
+        if noisy_files.contains(&sym.file) {
+            // Check this specific symbol doesn't have a Useful override.
+            let has_useful = feedback_entries.iter().any(|(fid, fq, v)| {
+                fid == sym_id
+                    && matches!(v, crate::schema::FeedbackVerdict::Useful)
+                    && query_family_matches(&current_tokens, fq)
+            });
+            if !has_useful {
+                *score = f64::NEG_INFINITY;
+                continue;
+            }
+        }
+
+        // Per-symbol verdict matching (t-003: query-family aware).
         for (fb_symbol_id, fb_query, verdict) in feedback_entries {
-            if fb_symbol_id != &sym_id { continue; }
-            let q_matches = fb_query.is_empty()
-                || query_norm.contains(fb_query.as_str())
-                || fb_query.contains(query_norm.as_str());
-            if !q_matches { continue; }
+            if fb_symbol_id != sym_id { continue; }
+            // t-003: use token-family matching instead of substring containment.
+            if !query_family_matches(&current_tokens, fb_query) { continue; }
             match verdict {
                 crate::schema::FeedbackVerdict::Useful => *score += 1.5,
                 crate::schema::FeedbackVerdict::Noisy
@@ -778,11 +837,11 @@ pub fn apply_feedback_adjustments(
                 crate::schema::FeedbackVerdict::Missing => {}
             }
         }
-        // Recurring false positive suppression: demote if current query shares
-        // a suppression token derived from ≥2 past noisy verdicts.
+
+        // Recurring false positive suppression.
         if score.is_finite() {
             if let Some(sup_tokens) = recurring_fp.get(sym_id.as_str()) {
-                if query_tokens.iter().any(|qt| sup_tokens.iter().any(|st| st == qt)) {
+                if current_tokens_vec.iter().any(|qt| sup_tokens.iter().any(|st| st == *qt)) {
                     *score = f64::NEG_INFINITY;
                 }
             }

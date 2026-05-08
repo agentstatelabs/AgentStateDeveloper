@@ -173,6 +173,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             .collect();
 
         // Apply durable feedback: suppress noisy/wrong-layer, boost useful.
+        let mut feedback_suppressed: usize = 0;
         {
             let fb_store = AsgFeedbackStore { repo: &engine.repo };
             let idx = AsgIndexStore { repo: &engine.repo };
@@ -187,7 +188,9 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     apply_feedback_adjustments(&engine, &idx, &args.query, &mut adj, &fb_tuples);
                     let adj_map: std::collections::HashMap<String, f64> =
                         adj.into_iter().map(|(s, q)| (q, s)).collect();
+                    let before = scored.len();
                     scored.retain(|(_, h)| adj_map.contains_key(&h.qname));
+                    feedback_suppressed = before - scored.len();
                     for (score, h) in scored.iter_mut() {
                         if let Some(&new_s) = adj_map.get(&h.qname) {
                             *score = new_s;
@@ -281,6 +284,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 "ambiguous_terms": ambiguous_terms,
                 "possible_misses": possible_misses,
                 "scope_narrowed": scope_narrowed,
+                "feedback_suppressed": feedback_suppressed,
                 "results": results,
                 "document_hits": doc_results,
             });
@@ -352,6 +356,9 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                         println!("       why: {}", reasons.join(", "));
                     }
                 }
+            }
+            if feedback_suppressed > 0 {
+                eprintln!("asd: {} result(s) suppressed by feedback (use `asd feedback list` to review)", feedback_suppressed);
             }
             // Print document hits below symbol hits.
             if !doc_hits.is_empty() {

@@ -23,6 +23,10 @@ pub enum FeedbackCmd {
     List(ListArgs),
     /// Designate a symbol as the canonical source-of-truth for a domain concept.
     PromoteAsTruth(PromoteAsTruthArgs),
+    /// Export all feedback entries to a JSON file (or stdout).
+    Export(ExportArgs),
+    /// Import feedback entries from a JSON file (or stdin).
+    Import(ImportArgs),
 }
 
 #[derive(Debug, Args)]
@@ -62,11 +66,33 @@ pub struct PromoteAsTruthArgs {
     pub author: String,
 }
 
+#[derive(Debug, Args)]
+pub struct ExportArgs {
+    /// Output file path. Omit to write to stdout.
+    #[arg(long)]
+    pub output: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ImportArgs {
+    /// Input file path. Omit to read from stdin.
+    #[arg(long)]
+    pub input: Option<String>,
+    /// Skip entries whose entry_id already exists in the store.
+    #[arg(long, default_value = "true")]
+    pub skip_existing: bool,
+    /// Author recorded for imported entries.
+    #[arg(long, default_value = "asd-import")]
+    pub author: String,
+}
+
 pub fn run(cfg: &Config, cmd: FeedbackCmd) -> Result<()> {
     match cmd {
         FeedbackCmd::Mark(args) => run_mark(cfg, args),
         FeedbackCmd::List(args) => run_list(cfg, args),
         FeedbackCmd::PromoteAsTruth(args) => run_promote_as_truth(cfg, args),
+        FeedbackCmd::Export(args) => run_export(cfg, args),
+        FeedbackCmd::Import(args) => run_import(cfg, args),
     }
 }
 
@@ -160,5 +186,61 @@ fn run_list(cfg: &Config, args: ListArgs) -> Result<()> {
             println!("    note: {}", note);
         }
     }
+    Ok(())
+}
+
+fn run_export(cfg: &Config, args: ExportArgs) -> Result<()> {
+    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let feedback_store = AsgFeedbackStore { repo: &engine.repo };
+    let entries = feedback_store.list_all(&engine.ref_name)?;
+    let json = serde_json::to_string_pretty(&entries)?;
+    match args.output {
+        Some(ref path) => {
+            std::fs::write(path, &json)?;
+            eprintln!("asd: exported {} feedback entries to {}", entries.len(), path);
+        }
+        None => println!("{}", json),
+    }
+    Ok(())
+}
+
+fn run_import(cfg: &Config, args: ImportArgs) -> Result<()> {
+    use agentstatedeveloper_core::schema::FeedbackEntry;
+    let raw = match args.input {
+        Some(ref path) => std::fs::read_to_string(path)?,
+        None => {
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            buf
+        }
+    };
+    let incoming: Vec<FeedbackEntry> = serde_json::from_str(&raw)
+        .map_err(|e| anyhow::anyhow!("failed to parse feedback JSON: {e}"))?;
+
+    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let feedback_store = AsgFeedbackStore { repo: &engine.repo };
+
+    let existing_ids: std::collections::HashSet<String> = if args.skip_existing {
+        feedback_store
+            .list_all(&engine.ref_name)?
+            .into_iter()
+            .map(|e| e.entry_id)
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    let mut imported = 0usize;
+    let mut skipped = 0usize;
+    for entry in &incoming {
+        if args.skip_existing && existing_ids.contains(&entry.entry_id) {
+            skipped += 1;
+            continue;
+        }
+        feedback_store.record(&engine.ref_name, entry, &args.author)?;
+        imported += 1;
+    }
+    eprintln!("asd: imported {imported} entries, skipped {skipped} duplicates");
     Ok(())
 }
