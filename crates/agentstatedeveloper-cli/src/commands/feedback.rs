@@ -9,8 +9,8 @@ use clap::{Args, Subcommand};
 use uuid::Uuid;
 
 use agentstatedeveloper_core::{
-    AsgFeedbackStore, AsgIndexStore, Engine, FeedbackEntry, FeedbackStore, FeedbackVerdict,
-    IndexStore,
+    AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, FeedbackEntry,
+    FeedbackStore, FeedbackVerdict, IndexStore, LedgerEntry, LedgerKind, LedgerStore,
 };
 
 use crate::config::Config;
@@ -21,6 +21,8 @@ pub enum FeedbackCmd {
     Mark(MarkArgs),
     /// List recorded feedback verdicts.
     List(ListArgs),
+    /// Designate a symbol as the canonical source-of-truth for a domain concept.
+    PromoteAsTruth(PromoteAsTruthArgs),
 }
 
 #[derive(Debug, Args)]
@@ -48,10 +50,23 @@ pub struct ListArgs {
     pub json: bool,
 }
 
+#[derive(Debug, Args)]
+pub struct PromoteAsTruthArgs {
+    /// Fully-qualified symbol name to promote.
+    pub qname: String,
+    /// The domain concept this symbol is the source-of-truth for.
+    #[arg(long)]
+    pub concept: String,
+    /// Author identifier recorded with the ownership entry.
+    #[arg(long, default_value = "asd-cli")]
+    pub author: String,
+}
+
 pub fn run(cfg: &Config, cmd: FeedbackCmd) -> Result<()> {
     match cmd {
         FeedbackCmd::Mark(args) => run_mark(cfg, args),
         FeedbackCmd::List(args) => run_list(cfg, args),
+        FeedbackCmd::PromoteAsTruth(args) => run_promote_as_truth(cfg, args),
     }
 }
 
@@ -89,6 +104,27 @@ fn run_mark(cfg: &Config, args: MarkArgs) -> Result<()> {
     let feedback_store = AsgFeedbackStore { repo: &engine.repo };
     feedback_store.record(&engine.ref_name, &entry, &args.author)?;
     println!("recorded {} for {} ({})", args.verdict, args.qname, entry.entry_id);
+    Ok(())
+}
+
+fn run_promote_as_truth(cfg: &Config, args: PromoteAsTruthArgs) -> Result<()> {
+    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let index_store = AsgIndexStore { repo: &engine.repo };
+    let symbol = match index_store.get_symbol_by_qname(&engine.ref_name, &args.qname)? {
+        Some(s) => s,
+        None => bail!("symbol not found: {}", args.qname),
+    };
+    let author_kind = if args.author == "asd-cli" { AuthorKind::Human } else { AuthorKind::Agent };
+    let mut entry = LedgerEntry::new(
+        &symbol.symbol_id,
+        LedgerKind::Ownership,
+        &args.concept,
+        Author { kind: author_kind, id: args.author.clone() },
+    );
+    entry.tags = vec!["promote-as-truth".to_string()];
+    let ledger_store = AsgLedgerStore { repo: &engine.repo };
+    ledger_store.append_entry(&engine.ref_name, &entry, &args.author)?;
+    println!("promoted {} as source-of-truth for \"{}\" ({})", args.qname, args.concept, entry.entry_id);
     Ok(())
 }
 

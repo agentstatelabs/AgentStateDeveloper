@@ -242,6 +242,17 @@ pub struct FeedbackListParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct FeedbackPromoteParams {
+    /// Fully-qualified symbol name to promote.
+    pub qname: String,
+    /// The domain concept this symbol is the source-of-truth for (e.g. "Drift Pad playhead").
+    pub concept: String,
+    /// Agent/author identifier (default: "asd-mcp-agent").
+    #[serde(default = "default_author_id")]
+    pub author_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct CodeReadParams {
     /// Fully-qualified symbol name.
     pub qname: String,
@@ -3492,6 +3503,40 @@ impl AsdMcpServer {
                 "entry_id": entry_id,
                 "verdict": p.verdict,
                 "qname": p.qname,
+            })).unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Designate a symbol as the canonical source-of-truth for a domain concept. Writes an Ownership ledger entry (3x ranking boost) so future searches for that concept reliably surface this symbol. Use when you know which function/struct truly owns a concept."
+    )]
+    async fn feedback_promote(&self, params: Parameters<FeedbackPromoteParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let index_store = AsgIndexStore { repo: &engine.repo };
+        let symbol = match index_store.get_symbol_by_qname(&ref_name, &p.qname) {
+            Ok(Some(s)) => s,
+            Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
+            Err(e) => return err_json(&e.to_string()),
+        };
+        let author_kind = if p.author_id.contains("human") { AuthorKind::Human } else { AuthorKind::Agent };
+        let mut entry = LedgerEntry::new(
+            &symbol.symbol_id,
+            LedgerKind::Ownership,
+            &p.concept,
+            Author { kind: author_kind, id: p.author_id.clone() },
+        );
+        entry.tags = vec!["promote-as-truth".to_string()];
+        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        match ledger_store.append_entry(&ref_name, &entry, &p.author_id) {
+            Ok(()) => serde_json::to_string(&serde_json::json!({
+                "ok": true,
+                "entry_id": entry.entry_id,
+                "qname": p.qname,
+                "concept": p.concept,
+                "kind": "ownership",
             })).unwrap_or_else(|_| "{}".to_string()),
             Err(e) => err_json(&e.to_string()),
         }

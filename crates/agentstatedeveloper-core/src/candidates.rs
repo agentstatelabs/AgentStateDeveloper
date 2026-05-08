@@ -707,8 +707,10 @@ pub fn detect_possible_misses(
 /// Apply feedback verdicts as score adjustments after candidate selection.
 ///
 /// `Useful` entries add a boost; `Noisy` / `WrongLayer` entries demote the
-/// symbol to negative infinity (effectively removed). Called at CLI/MCP
-/// call sites after `find_candidates`.
+/// symbol to negative infinity (effectively removed). Also detects recurring
+/// false positives — symbols with ≥2 noisy verdicts sharing a query token —
+/// and suppresses them for the current query when those tokens overlap.
+/// Called at CLI/MCP call sites after `find_candidates`.
 pub fn apply_feedback_adjustments(
     engine: &Engine,
     index_store: &AsgIndexStore,
@@ -719,12 +721,48 @@ pub fn apply_feedback_adjustments(
     // feedback_entries: (symbol_id, query_pattern, verdict)
     if feedback_entries.is_empty() { return; }
     let query_norm = query.to_lowercase();
+    let query_tokens: Vec<&str> = query_norm
+        .split(|c: char| !c.is_alphabetic())
+        .filter(|t| t.len() > 2 && !is_stopword(&t.to_string()))
+        .collect();
+
+    // Build recurring false positive map: symbol_id → suppression tokens.
+    // A token is a suppression signal when it appears in ≥2 distinct noisy queries for that symbol.
+    let mut noisy_queries_by_sym: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
+    for (sym_id, fb_query, verdict) in feedback_entries {
+        if matches!(verdict, crate::schema::FeedbackVerdict::Noisy | crate::schema::FeedbackVerdict::WrongLayer) {
+            noisy_queries_by_sym.entry(sym_id.as_str()).or_default().push(fb_query.as_str());
+        }
+    }
+    // symbol_id → set of tokens that triggered noisy in ≥2 distinct queries
+    let recurring_fp: std::collections::HashMap<&str, Vec<String>> = noisy_queries_by_sym
+        .into_iter()
+        .filter(|(_, queries)| queries.len() >= 2)
+        .map(|(sym_id, queries)| {
+            let mut token_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            for q in &queries {
+                let tokens: std::collections::HashSet<String> = q
+                    .split(|c: char| !c.is_alphabetic())
+                    .filter(|t| t.len() > 2)
+                    .map(|t| t.to_lowercase())
+                    .collect();
+                for t in tokens { *token_counts.entry(t).or_default() += 1; }
+            }
+            let suppression_tokens: Vec<String> = token_counts
+                .into_iter()
+                .filter(|(_, count)| *count >= 2)
+                .map(|(t, _)| t)
+                .collect();
+            (sym_id, suppression_tokens)
+        })
+        .collect();
 
     for (score, qname) in scored.iter_mut() {
         let sym_id = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
             Ok(Some(s)) => s.symbol_id,
             _ => continue,
         };
+        // Per-query verdict matching.
         for (fb_symbol_id, fb_query, verdict) in feedback_entries {
             if fb_symbol_id != &sym_id { continue; }
             let q_matches = fb_query.is_empty()
@@ -738,6 +776,15 @@ pub fn apply_feedback_adjustments(
                     *score = f64::NEG_INFINITY;
                 }
                 crate::schema::FeedbackVerdict::Missing => {}
+            }
+        }
+        // Recurring false positive suppression: demote if current query shares
+        // a suppression token derived from ≥2 past noisy verdicts.
+        if score.is_finite() {
+            if let Some(sup_tokens) = recurring_fp.get(sym_id.as_str()) {
+                if query_tokens.iter().any(|qt| sup_tokens.iter().any(|st| st == qt)) {
+                    *score = f64::NEG_INFINITY;
+                }
             }
         }
     }
