@@ -13,8 +13,9 @@
 //!   file_in_key      — at least one item in array `key` has `field` containing `value`
 //!   qname_rank_lte   — result whose qname contains `fragment` appears at rank ≤ `max_rank`
 //!   result_count_lte — results array length ≤ `max`
-//!   cluster_winner_kind_not — cluster_debug entry matching `doc_stem` winner kind ≠ `kind_not`
-//!   no_duplicate_summaries  — no two suggested_entries share the same summary per symbol
+//!   cluster_winner_kind_not     — cluster_debug entry matching `doc_stem` winner kind ≠ `kind_not`
+//!   cluster_winner_qname_contains — cluster_debug entry matching `doc_stem` winner qname contains `fragment`
+//!   no_duplicate_summaries      — no two suggested_entries share the same summary per symbol
 
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -434,6 +435,33 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
                         ))
                     } else {
                         Ok(())
+                    }
+                }
+            }
+        }
+
+        // cluster_winner_qname_contains: cluster_debug entry whose doc_file contains `doc_stem`
+        // must have winner qname containing `fragment`.
+        "cluster_winner_qname_contains" => {
+            let doc_stem = str_field(map, "doc_stem")?;
+            let fragment = str_field(map, "fragment")?;
+            let dbg = output.get("cluster_debug").and_then(|v| v.as_array()).unwrap_or(&empty_arr);
+            let entry = dbg.iter().find(|e| {
+                e.get("doc_file").and_then(|v| v.as_str())
+                    .map_or(false, |f| f.to_lowercase().contains(&doc_stem.to_lowercase()))
+            });
+            match entry {
+                None => Err(format!("cluster_winner_qname_contains: no cluster_debug entry matches doc_stem {:?}", doc_stem)),
+                Some(e) => {
+                    let winner = e.get("winner_selected").unwrap_or(&Value::Null);
+                    let qname = winner.get("qname").and_then(|v| v.as_str()).unwrap_or("");
+                    if qname.to_lowercase().contains(&fragment.to_lowercase()) {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "cluster_winner_qname_contains: winner {:?} does not contain {:?}",
+                            qname, fragment
+                        ))
                     }
                 }
             }

@@ -180,7 +180,8 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
                 .split_whitespace()
                 .filter(|w| w.len() >= 3 && !matches!(*w,
                     "the" | "and" | "for" | "doc" | "docs" | "readme"
-                    | "design" | "notes" | "plan" | "spec" | "guide" | "api"))
+                    | "design" | "notes" | "plan" | "spec" | "guide" | "api"
+                    | "todo" | "fixme" | "draft" | "wip" | "change" | "changes"))
                 .map(|w| w.to_string())
                 .collect()
         };
@@ -222,7 +223,25 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
                             _ => 0,
                         }
                     };
-                    ((term_score as isize) * 2 + kind_bonus, term_score, s)
+                    // dir_seg_bonus: +1 per distinct doc-term that appears in a *parent-
+                    // directory* component of the symbol's file path (not the filename).
+                    // Rewards symbols in a dedicated namespace dir (SongPlayers/SIDPlayer/)
+                    // over symbols that merely match a term in their class name.
+                    let dir_seg_bonus: isize = {
+                        let p = Path::new(&s.file);
+                        let dirs: Vec<String> = p.parent()
+                            .map(|parent| {
+                                parent.components()
+                                    .filter_map(|c| c.as_os_str().to_str())
+                                    .map(|seg| seg.to_lowercase())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        file_terms.iter()
+                            .filter(|t| dirs.iter().any(|d| d.contains(t.as_str())))
+                            .count() as isize
+                    };
+                    ((term_score as isize) * 2 + kind_bonus + dir_seg_bonus, term_score, s)
                 })
                 .filter(|(_, ts, _)| *ts >= 1)
                 .collect();
@@ -241,11 +260,26 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
                             _ => 0,
                         }
                     };
+                    let dsb: isize = {
+                        let p = Path::new(&s.file);
+                        let dirs: Vec<String> = p.parent()
+                            .map(|parent| {
+                                parent.components()
+                                    .filter_map(|c| c.as_os_str().to_str())
+                                    .map(|seg| seg.to_lowercase())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        file_terms.iter()
+                            .filter(|t| dirs.iter().any(|d| d.contains(t.as_str())))
+                            .count() as isize
+                    };
                     json!({
                         "qname": s.qname,
                         "file": s.file,
                         "kind": k,
                         "kind_bonus": kb,
+                        "dir_seg_bonus": dsb,
                         "term_score": ts,
                         "combined_score": combined,
                     })
@@ -257,7 +291,7 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
                         "term_score": ts,
                         "confidence": confidence,
                         "reason": format!(
-                            "highest combined score (term_score×2 + kind_bonus); matched {}/{} terms",
+                            "highest combined score (term_score×2 + kind_bonus + dir_seg_bonus); matched {}/{} terms",
                             ts, file_terms.len()
                         ),
                     })
