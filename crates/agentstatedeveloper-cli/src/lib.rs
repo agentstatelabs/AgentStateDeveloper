@@ -191,6 +191,10 @@ pub enum Command {
     /// Benchmark scorecard across the five ASD dimensions:
     /// truth, feedback, change, uncertainty, and workflow.
     Scorecard(commands::scorecard::ScorecardArgs),
+
+    /// Golden benchmark harness: run structural assertions against ASD
+    /// command output to catch ranking/classification regressions.
+    Probe(commands::probe::ProbeCmd),
 }
 
 /// Resolve [`Config`] from the parsed CLI flags.
@@ -240,5 +244,6 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::AnnotateCommit(args) => annotate_commit::run(cfg, args),
         Command::TaskClose(args) => task_close::run(cfg, args),
         Command::Scorecard(args) => scorecard::run(cfg, args),
+        Command::Probe(cmd) => probe::run(cfg, cmd),
     }
 }
