@@ -86,6 +86,12 @@ pub struct AnnotateCommitArgs {
     /// Suppress informational stderr output.
     #[arg(long)]
     pub quiet: bool,
+
+    /// Print per-doc cluster selection reasoning: terms extracted, top-5 candidates
+    /// with kind bonus and match score, and why the winner was selected.
+    /// Only active for docs-only commits.
+    #[arg(long)]
+    pub debug_clusters: bool,
 }
 
 pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
@@ -160,6 +166,8 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
     // Populated by the docs-only path; used in the emit loop to attach
     // file-specific concept annotations only to their matched symbol.
     let mut cluster_meta: HashMap<String, (String, f64)> = HashMap::new();
+    // cluster_debug: per-doc selection trace (populated when --debug-clusters is set).
+    let mut cluster_debug: Vec<Value> = Vec::new();
 
     // ---- Docs-only path: find nearest domain symbol when all changed files
     //      are documentation (*.md, docs/ dirs, etc.) and no symbols were found.
@@ -197,21 +205,60 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
         for doc_file in &changed_files {
             let file_terms = extract_terms(doc_file);
             if file_terms.is_empty() { continue; }
-            let best = candidate_syms.iter()
+            let mut ranked: Vec<(usize, usize, &Symbol)> = candidate_syms.iter()
                 .map(|s| {
                     let haystack = format!("{} {}", s.qname.to_lowercase(), s.file.to_lowercase());
                     let term_score = file_terms.iter().filter(|t| haystack.contains(t.as_str())).count();
-                    // Prefer broad container symbols over individual methods/tests.
                     let kind_bonus: usize = match kind_str(&s.kind) {
                         "module" | "class" | "struct" | "enum" | "trait"
                         | "type" | "interface" | "protocol" | "namespace" => 2,
-                        k if k.contains("test") => 0,  // don't penalise, just don't bonus
+                        k if k.contains("test") => 0,
                         _ => 0,
                     };
                     (term_score * 2 + kind_bonus, term_score, s)
                 })
                 .filter(|(_, ts, _)| *ts >= 1)
-                .max_by_key(|(combined, _, _)| *combined);
+                .collect();
+            ranked.sort_by(|a, b| b.0.cmp(&a.0));
+            let best = ranked.first().copied();
+            if args.debug_clusters {
+                let top5: Vec<Value> = ranked.iter().take(5).map(|(combined, ts, s)| {
+                    let k = kind_str(&s.kind);
+                    let kb: usize = match k {
+                        "module" | "class" | "struct" | "enum" | "trait"
+                        | "type" | "interface" | "protocol" | "namespace" => 2,
+                        _ => 0,
+                    };
+                    json!({
+                        "qname": s.qname,
+                        "file": s.file,
+                        "kind": k,
+                        "kind_bonus": kb,
+                        "term_score": ts,
+                        "combined_score": combined,
+                    })
+                }).collect();
+                let winner_info: Value = if let Some((_, ts, sym)) = best {
+                    let confidence = ts as f64 / file_terms.len().max(1) as f64;
+                    json!({
+                        "qname": sym.qname,
+                        "term_score": ts,
+                        "confidence": confidence,
+                        "reason": format!(
+                            "highest combined score (term_score×2 + kind_bonus); matched {}/{} terms",
+                            ts, file_terms.len()
+                        ),
+                    })
+                } else {
+                    json!({"reason": "no candidates matched any term"})
+                };
+                cluster_debug.push(json!({
+                    "doc_file": doc_file,
+                    "terms_extracted": file_terms,
+                    "top_5_candidates": top5,
+                    "winner_selected": winner_info,
+                }));
+            }
             if let Some((_, term_score, sym)) = best {
                 any_term_match = true;
                 let confidence = term_score as f64 / file_terms.len().max(1) as f64;
@@ -394,6 +441,7 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
             "touched_symbols": touched_symbols.iter().map(|s| &s.qname).collect::<Vec<_>>(),
             "suggested_entries": suggested,
             "note": "dry-run — pass --write to record these entries",
+            "cluster_debug": if args.debug_clusters { json!(cluster_debug) } else { Value::Null },
         })
     };
 

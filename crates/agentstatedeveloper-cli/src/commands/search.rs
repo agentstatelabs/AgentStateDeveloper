@@ -93,6 +93,11 @@ pub struct SearchArgs {
     /// Restrict results to document/resource hits only (skip symbol index).
     #[arg(long)]
     pub docs_only: bool,
+
+    /// Print per-result score breakdown: BM25, hybrid boost, ledger boost,
+    /// SOT boost, state-holder penalty, and domain-overlap count.
+    #[arg(long)]
+    pub debug_boosts: bool,
 }
 
 pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
@@ -156,64 +161,69 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         // Hybrid reranking: BM25 + path/name boost + ledger boost + ownership anchor boost.
         // Also track which symbols received a SOT boost (for boosted-but-outranked report).
         let mut sot_boosted_qnames: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut scored: Vec<(f64, _)> = hits
-            .into_iter()
-            .map(|hit| {
-                let boost = hybrid_boost(&hit, &tokens);
-                let (ledger_boost, ownership_boost) = {
-                    let entries = ledger_store
-                        .list_entries(&engine.ref_name, &hit.symbol_id)
-                        .unwrap_or_default();
-                    let text = entries
-                        .iter()
-                        .map(|e| e.summary.to_lowercase())
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    let text_boost = if text.is_empty() {
-                        0.0
-                    } else {
-                        tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
-                    };
-                    // Source-of-truth boost: scaled by non-generic query-term overlap.
-                    // Generic tokens (state, update, position…) are excluded from the
-                    // overlap count so only domain-specific matches drive the boost.
-                    let haystack = format!("{} {}", hit.qname.to_lowercase(), hit.file.to_lowercase());
-                    // Inline GENERIC_TOKENS subset for overlap filtering.
-                    const GENERIC_BOOST_SKIP: &[&str] = &[
-                        "state", "update", "position", "value", "cursor", "progress",
-                        "indicator", "status", "mode", "flag", "current", "local",
-                        "playhead", "tick", "item", "data", "info", "manager",
-                    ];
-                    let domain_overlap = tokens.iter()
-                        .filter(|t| !GENERIC_BOOST_SKIP.contains(&t.as_str()))
-                        .filter(|t| haystack.contains(t.as_str()))
-                        .count();
-                    let has_ownership = entries.iter().any(|e| e.kind == LedgerKind::Ownership);
-                    let has_invariant = entries.iter().any(|e| e.kind == LedgerKind::Invariant);
-                    // State-holder penalty: class/struct with no SOT/invariant and query
-                    // does not ask for a type/model concept.
-                    let is_state_holder = matches!(hit.kind.as_str(), "class" | "struct" | "type" | "enum")
-                        && !has_ownership && !has_invariant
-                        && !tokens.iter().any(|t| matches!(t.as_str(),
-                            "state" | "model" | "type" | "class" | "struct" | "enum" | "schema"));
-                    let state_penalty = if is_state_holder { -0.8 } else { 0.0 };
-                    let sot_boost = if has_ownership && domain_overlap >= 2 {
-                        5.0  // strong: SOT symbol whose domain name matches the query
-                    } else if has_ownership && domain_overlap >= 1 {
-                        3.5  // moderate: SOT with partial domain overlap
-                    } else if has_ownership {
-                        2.0  // baseline: SOT symbol, no domain overlap
-                    } else if has_invariant && domain_overlap >= 1 {
-                        1.5  // invariant-bearing symbol with domain match
-                    } else {
-                        0.0
-                    };
-                    (text_boost, sot_boost + state_penalty)
+        // Per-result boost breakdown (populated when --debug-boosts is set).
+        let mut boost_debug: std::collections::HashMap<String, serde_json::Value> =
+            std::collections::HashMap::new();
+        const GENERIC_BOOST_SKIP: &[&str] = &[
+            "state", "update", "position", "value", "cursor", "progress",
+            "indicator", "status", "mode", "flag", "current", "local",
+            "playhead", "tick", "item", "data", "info", "manager",
+        ];
+        let mut scored: Vec<(f64, _)> = {
+            let mut tmp = Vec::with_capacity(hits.len());
+            for hit in hits {
+                let hybrid = hybrid_boost(&hit, &tokens);
+                let entries = ledger_store
+                    .list_entries(&engine.ref_name, &hit.symbol_id)
+                    .unwrap_or_default();
+                let text = entries.iter()
+                    .map(|e| e.summary.to_lowercase())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let ledger_boost = if text.is_empty() {
+                    0.0
+                } else {
+                    tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
                 };
-                let total = hit.bm25_score + boost + ledger_boost + ownership_boost;
-                (total, hit)
-            })
-            .collect();
+                let haystack = format!("{} {}", hit.qname.to_lowercase(), hit.file.to_lowercase());
+                let domain_overlap = tokens.iter()
+                    .filter(|t| !GENERIC_BOOST_SKIP.contains(&t.as_str()))
+                    .filter(|t| haystack.contains(t.as_str()))
+                    .count();
+                let has_ownership = entries.iter().any(|e| e.kind == LedgerKind::Ownership);
+                let has_invariant = entries.iter().any(|e| e.kind == LedgerKind::Invariant);
+                let is_state_holder = matches!(hit.kind.as_str(), "class" | "struct" | "type" | "enum")
+                    && !has_ownership && !has_invariant
+                    && !tokens.iter().any(|t| matches!(t.as_str(),
+                        "state" | "model" | "type" | "class" | "struct" | "enum" | "schema"));
+                let state_penalty = if is_state_holder { -0.8 } else { 0.0 };
+                let sot_boost = if has_ownership && domain_overlap >= 2 {
+                    5.0
+                } else if has_ownership && domain_overlap >= 1 {
+                    3.5
+                } else if has_ownership {
+                    2.0
+                } else if has_invariant && domain_overlap >= 1 {
+                    1.5
+                } else {
+                    0.0
+                };
+                let total = hit.bm25_score + hybrid + ledger_boost + sot_boost + state_penalty;
+                if args.debug_boosts {
+                    boost_debug.insert(hit.qname.clone(), serde_json::json!({
+                        "bm25": hit.bm25_score,
+                        "hybrid_boost": hybrid,
+                        "ledger_boost": ledger_boost,
+                        "sot_boost": sot_boost,
+                        "state_penalty": state_penalty,
+                        "domain_overlap": domain_overlap,
+                        "total": total,
+                    }));
+                }
+                tmp.push((total, hit));
+            }
+            tmp
+        };
 
         // Record SOT-boosted symbols before truncation for outranked reporting.
         // Re-scan entries to find which symbols got a non-zero sot_boost.
@@ -328,7 +338,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                         .flatten();
                     effect_detail_reason(decl.as_ref())
                 };
-                serde_json::json!({
+                let mut result_val = serde_json::json!({
                     "score": score, "confidence": conf, "bucket": bucket,
                     "confidence_reason": conf_reason,
                     "qname": hit.qname, "kind": hit.kind,
@@ -340,7 +350,13 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     "feedback_status": fb_status,
                     "feedback_rule": feedback_rule,
                     "effect_detail": effect_detail,
-                })
+                });
+                if args.debug_boosts {
+                    if let Some(dbg) = boost_debug.get(&hit.qname) {
+                        result_val["boost_debug"] = dbg.clone();
+                    }
+                }
+                result_val
             }).collect();
             let scope_narrowed = !filters.paths_filter.is_empty() || !filters.exclude_terms.is_empty();
             let possible_misses = if scope_narrowed {
@@ -487,6 +503,20 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     );
                     if !match_reasons_disp.is_empty() {
                         println!("       signals: {}", match_reasons_disp.join(", "));
+                    }
+                }
+                if args.debug_boosts {
+                    if let Some(dbg) = boost_debug.get(&hit.qname) {
+                        println!(
+                            "       boosts: bm25={:.2} hybrid={:.2} ledger={:.2} sot={:.2} state_pen={:.2} domain_overlap={}  => total={:.2}",
+                            dbg["bm25"].as_f64().unwrap_or(0.0),
+                            dbg["hybrid_boost"].as_f64().unwrap_or(0.0),
+                            dbg["ledger_boost"].as_f64().unwrap_or(0.0),
+                            dbg["sot_boost"].as_f64().unwrap_or(0.0),
+                            dbg["state_penalty"].as_f64().unwrap_or(0.0),
+                            dbg["domain_overlap"].as_u64().unwrap_or(0),
+                            dbg["total"].as_f64().unwrap_or(0.0),
+                        );
                     }
                 }
             }

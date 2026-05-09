@@ -98,6 +98,11 @@ pub struct PrepareChangeArgs {
     /// Example: --task-context "$(ctx task show --format plain)"
     #[arg(long)]
     pub task_context: Option<String>,
+
+    /// Print per-file classification reasoning: file_role, surface_demoted,
+    /// domain_anchor_retained, matched stem words, and the rule that won.
+    #[arg(long)]
+    pub debug_classification: bool,
 }
 
 pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
@@ -849,6 +854,56 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             "raw": format!("verify {} effect", cat),
         }));
     }
+    // --debug-classification: per-file reasoning for edit/reference classification.
+    let classification_debug: Vec<Value> = if args.debug_classification {
+        likely_edit_files.iter().map(|f| {
+            let file = f["file"].as_str().unwrap_or("");
+            let layer = f["layer"].as_str().unwrap_or("");
+            let file_role = f["file_role"].as_str().unwrap_or("unknown");
+            let names_file = query_names_file(&tokens, file);
+            let stem_words = split_camel_lower(
+                std::path::Path::new(file).file_stem().and_then(|n| n.to_str()).unwrap_or("")
+            );
+            let matched_stem_words: Vec<&str> = stem_words.iter()
+                .filter(|w| tokens.iter().any(|t| t == *w))
+                .map(|w| w.as_str())
+                .collect();
+            let domain_overlap = matched_stem_words.len();
+            let has_domain_anchor = domain_overlap >= 2;
+            let surface_demoted = is_rendering_surface(file) && !names_file;
+            let broad_demoted = broad_query && is_view_like_file(file, layer)
+                && !names_file && !has_domain_anchor;
+            let is_wrong_layer = wrong_layer_files.contains(file);
+            let rule_that_won = if file_role == "test" {
+                "test"
+            } else if is_wrong_layer {
+                "wrong-layer → reference"
+            } else if surface_demoted {
+                "surface → reference"
+            } else if broad_demoted {
+                "broad-query view → reference"
+            } else if file_role == "impl" {
+                "edit"
+            } else {
+                file_role
+            };
+            json!({
+                "file": file,
+                "file_role": file_role,
+                "surface_demoted": surface_demoted,
+                "domain_anchor_retained": has_domain_anchor,
+                "matched_stem_words": matched_stem_words,
+                "domain_overlap": domain_overlap,
+                "names_file": names_file,
+                "is_wrong_layer": is_wrong_layer,
+                "broad_query": broad_query,
+                "rule_that_won": rule_that_won,
+            })
+        }).collect()
+    } else {
+        vec![]
+    };
+
     let safe_change_recipe = json!({
         "inspect": recipe_inspect,
         "preserve": recipe_preserve,
@@ -892,6 +947,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         "stale_symbols": stale_symbols,
         "effects_summary": effects_summary,
         "recently_touched": recently_touched,
+        "classification_debug": if args.debug_classification { json!(classification_debug) } else { Value::Null },
     });
     let out = if args.agent {
         let max_list = (args.agent_budget / 500).max(3).min(20);
