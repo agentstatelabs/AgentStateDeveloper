@@ -734,7 +734,14 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
                 && is_view_like_file(file, layer)
                 && !names_file
                 && !has_domain_anchor;
-            let demote = !wrong_layer_files.contains(file) && (surface_demote || broad_demote);
+            // Anchor-missing: view-like file with zero domain overlap is always
+            // reference-only regardless of broad_query. A drift/playhead query should
+            // never put PianoRollView or SheetMusicView (notation views, zero overlap)
+            // into edit — they are unrelated surfaces even when the query is specific.
+            let anchor_missing_demote = is_view_like_file(file, layer)
+                && !names_file
+                && domain_overlap == 0;
+            let demote = !wrong_layer_files.contains(file) && (surface_demote || broad_demote || anchor_missing_demote);
             f["file_role"].as_str() == Some("impl") && !wrong_layer_files.contains(file) && !demote
         })
         .map(|f| {
@@ -783,7 +790,9 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             let surface_demote = is_rendering_surface(file) && !names_file;
             let broad_demote = broad_query && is_view_like_file(file, layer)
                 && !names_file && !has_domain_anchor;
-            let view_demote = surface_demote || broad_demote;
+            let anchor_missing_demote = is_view_like_file(file, layer)
+                && !names_file && domain_overlap == 0;
+            let view_demote = surface_demote || broad_demote || anchor_missing_demote;
             matches!(f["file_role"].as_str(), Some("example") | Some("reference"))
                 || (f["file_role"].as_str() == Some("impl") && wrong_layer_files.contains(file))
                 || (f["file_role"].as_str() == Some("impl") && view_demote)
@@ -885,6 +894,8 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             let surface_demoted = is_rendering_surface(file) && !names_file;
             let broad_demoted = broad_query && is_view_like_file(file, layer)
                 && !names_file && !has_domain_anchor;
+            let anchor_missing_demoted = is_view_like_file(file, layer)
+                && !names_file && domain_overlap == 0;
             let is_wrong_layer = wrong_layer_files.contains(file);
             let rule_that_won = if file_role == "test" {
                 "test"
@@ -894,6 +905,8 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
                 "surface → reference"
             } else if broad_demoted {
                 "broad-query view → reference"
+            } else if anchor_missing_demoted {
+                "anchor-missing view → reference"
             } else if file_role == "impl" {
                 "edit"
             } else {

@@ -13,9 +13,14 @@
 //!   file_in_key      — at least one item in array `key` has `field` containing `value`
 //!   qname_rank_lte   — result whose qname contains `fragment` appears at rank ≤ `max_rank`
 //!   result_count_lte — results array length ≤ `max`
-//!   cluster_winner_kind_not     — cluster_debug entry matching `doc_stem` winner kind ≠ `kind_not`
-//!   cluster_winner_qname_contains — cluster_debug entry matching `doc_stem` winner qname contains `fragment`
-//!   no_duplicate_summaries      — no two suggested_entries share the same summary per symbol
+//!   cluster_winner_kind_not        — cluster_debug entry matching `doc_stem` winner kind ≠ `kind_not`
+//!   cluster_winner_qname_contains  — cluster_debug entry matching `doc_stem` winner qname contains `fragment`
+//!   no_duplicate_summaries         — no two suggested_entries share the same summary per symbol
+//!   qname_not_in_results           — no result's qname contains `fragment` (feedback suppression check)
+//!   boosted_outranked_contains     — boosted_outranked has an entry containing `fragment`
+//!   ambiguous_terms_nonempty       — ambiguous_terms array is non-empty (broad query uncertainty check)
+//!   scoped_suggestions_nonempty    — scoped_suggestions array is non-empty
+//!   scoped_suggestions_contains    — scoped_suggestions contains an entry matching `fragment`
 
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -487,6 +492,83 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
                 ));
             }
             Ok(())
+        }
+
+        // boosted_outranked_contains: boosted_outranked has at least one entry containing `fragment`.
+        // Use this to verify a known-good SOT symbol that slipped below top-5 is reported.
+        "boosted_outranked_contains" => {
+            let fragment = str_field(map, "fragment")?;
+            let outranked = output.get("boosted_outranked").and_then(|v| v.as_array()).unwrap_or(&empty_arr);
+            let found = outranked.iter().any(|s| {
+                s.as_str().map_or(false, |q| q.to_lowercase().contains(&fragment.to_lowercase()))
+            });
+            if found {
+                Ok(())
+            } else {
+                Err(format!(
+                    "boosted_outranked_contains: {:?} not in boosted_outranked; got {:?}",
+                    fragment,
+                    outranked.iter().filter_map(|s| s.as_str()).collect::<Vec<_>>()
+                ))
+            }
+        }
+
+        // qname_not_in_results: no result has a qname containing `fragment`.
+        // Use this to prove a feedback-suppressed symbol is absent from results.
+        "qname_not_in_results" => {
+            let fragment = str_field(map, "fragment")?;
+            let results = output.get("results").and_then(|v| v.as_array()).unwrap_or(&empty_arr);
+            let hit = results.iter().find(|r| {
+                r.get("qname").and_then(|v| v.as_str())
+                    .map_or(false, |q| q.to_lowercase().contains(&fragment.to_lowercase()))
+            });
+            match hit {
+                Some(r) => {
+                    let qname = r.get("qname").and_then(|v| v.as_str()).unwrap_or("?");
+                    Err(format!("qname_not_in_results: {:?} is present in results (expected suppressed)", qname))
+                }
+                None => Ok(()),
+            }
+        }
+
+        // ambiguous_terms_nonempty: the query has at least one ambiguous term flagged.
+        // Use this to verify broad/generic queries signal uncertainty.
+        "ambiguous_terms_nonempty" => {
+            let terms = output.get("ambiguous_terms").and_then(|v| v.as_array()).unwrap_or(&empty_arr);
+            if terms.is_empty() {
+                Err("ambiguous_terms_nonempty: ambiguous_terms is empty — query may be too specific or detection not firing".to_string())
+            } else {
+                Ok(())
+            }
+        }
+
+        // scoped_suggestions_nonempty: scoped_suggestions has at least one entry.
+        // Use this to verify broad queries emit narrowing hints.
+        "scoped_suggestions_nonempty" => {
+            let suggestions = output.get("scoped_suggestions").and_then(|v| v.as_array()).unwrap_or(&empty_arr);
+            if suggestions.is_empty() {
+                Err("scoped_suggestions_nonempty: scoped_suggestions is empty — no narrowing hints emitted".to_string())
+            } else {
+                Ok(())
+            }
+        }
+
+        // scoped_suggestions_contains: at least one scoped suggestion contains `fragment`.
+        "scoped_suggestions_contains" => {
+            let fragment = str_field(map, "fragment")?;
+            let suggestions = output.get("scoped_suggestions").and_then(|v| v.as_array()).unwrap_or(&empty_arr);
+            let found = suggestions.iter().any(|s| {
+                s.as_str().map_or(false, |t| t.to_lowercase().contains(&fragment.to_lowercase()))
+            });
+            if found {
+                Ok(())
+            } else {
+                Err(format!(
+                    "scoped_suggestions_contains: no suggestion contains {:?}; got {:?}",
+                    fragment,
+                    suggestions.iter().filter_map(|s| s.as_str()).collect::<Vec<_>>()
+                ))
+            }
         }
 
         "" => Ok(()), // no kind → smoke test, always passes

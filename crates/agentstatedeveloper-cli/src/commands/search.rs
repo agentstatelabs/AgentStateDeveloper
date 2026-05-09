@@ -236,6 +236,8 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
 
         // Apply durable feedback: suppress noisy/wrong-layer, boost useful.
         let mut feedback_suppressed: usize = 0;
+        // feedback_suppressed_detail: qname fragments of symbols removed for this specific query.
+        let mut feedback_suppressed_detail: Vec<String> = Vec::new();
         {
             let fb_store = AsgFeedbackStore { repo: &engine.repo };
             let idx = AsgIndexStore { repo: &engine.repo };
@@ -253,6 +255,13 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                         .collect();
                     apply_feedback_adjustments(&engine, &idx, &args.query, &mut adj, &fb_tuples);
                     apply_file_scope_feedback(&engine, &idx, &args.query, &mut adj, &fs_tuples);
+                    // Collect suppressed qnames before consuming adj.
+                    let surviving: std::collections::HashSet<&str> =
+                        adj.iter().map(|(_, q)| q.as_str()).collect();
+                    feedback_suppressed_detail = scored.iter()
+                        .map(|(_, h)| h.qname.clone())
+                        .filter(|q| !surviving.contains(q.as_str()))
+                        .collect();
                     let adj_map: std::collections::HashMap<String, f64> =
                         adj.into_iter().map(|(s, q)| (q, s)).collect();
                     let before = scored.len();
@@ -394,13 +403,21 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     "owner_symbol_id": h.owner_symbol_id,
                 })
             }).collect();
-            // boosted_outranked: SOT symbols that got a boost but didn't make the final cut.
-            let final_qnames: std::collections::HashSet<&str> = results.iter()
-                .filter_map(|r| r["qname"].as_str())
+            // boosted_outranked: SOT symbols that got a boost but ranked below position 5
+            // or didn't make results at all. Useful for diagnosing cases where an SOT
+            // symbol should have surfaced higher — the probe harness can assert these
+            // are reported when a known-good symbol slips past the top cut.
+            const OUTRANKED_THRESHOLD: usize = 5;
+            let result_positions: std::collections::HashMap<&str, usize> = results.iter()
+                .enumerate()
+                .filter_map(|(i, r)| r["qname"].as_str().map(|q| (q, i + 1)))
                 .collect();
             let boosted_outranked: Vec<&str> = sot_boosted_qnames.iter()
                 .map(|s| s.as_str())
-                .filter(|q| !final_qnames.contains(*q))
+                .filter(|q| match result_positions.get(*q) {
+                    Some(&rank) => rank > OUTRANKED_THRESHOLD,
+                    None => true, // not in results at all
+                })
                 .collect();
 
             let raw = serde_json::json!({
@@ -413,6 +430,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 "scoped_suggestions": scoped_suggestions,
                 "scope_narrowed": scope_narrowed,
                 "feedback_suppressed": feedback_suppressed,
+                "feedback_suppressed_detail": feedback_suppressed_detail,
                 "boosted_outranked": boosted_outranked,
                 "results": results,
                 "document_hits": doc_results,
