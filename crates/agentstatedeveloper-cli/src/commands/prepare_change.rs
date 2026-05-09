@@ -790,6 +790,18 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         })
         .cloned()
         .collect();
+    // Rebuild likely_edit_files to only include files that made it into recipe_edit.
+    // Files demoted to reference_only must not appear in likely_edit_files — the raw
+    // file_scores list is built before the edit/reference split, so without this step
+    // surface-demoted files (WaveformCanvas etc.) would linger in the raw list.
+    let edit_file_set: HashSet<&str> = recipe_edit.iter()
+        .filter_map(|e| e["file"].as_str())
+        .collect();
+    let likely_edit_files: Vec<Value> = likely_edit_files
+        .into_iter()
+        .filter(|e| e["file"].as_str().map_or(false, |f| edit_file_set.contains(f)))
+        .collect();
+
     // t-002: include exact build/test commands for each affected test file.
     let mut recipe_run: Vec<Value> = affected_tests.iter()
         .map(|t| {

@@ -205,17 +205,24 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
         for doc_file in &changed_files {
             let file_terms = extract_terms(doc_file);
             if file_terms.is_empty() { continue; }
-            let mut ranked: Vec<(usize, usize, &Symbol)> = candidate_syms.iter()
+            // combined_score is isize so test-file symbols can receive a negative bonus.
+            let mut ranked: Vec<(isize, usize, &Symbol)> = candidate_syms.iter()
                 .map(|s| {
                     let haystack = format!("{} {}", s.qname.to_lowercase(), s.file.to_lowercase());
                     let term_score = file_terms.iter().filter(|t| haystack.contains(t.as_str())).count();
-                    let kind_bonus: usize = match kind_str(&s.kind) {
-                        "module" | "class" | "struct" | "enum" | "trait"
-                        | "type" | "interface" | "protocol" | "namespace" => 2,
-                        k if k.contains("test") => 0,
-                        _ => 0,
+                    let fl = s.file.to_lowercase();
+                    let is_test_file = fl.contains("/test") || fl.contains("/tests/")
+                        || fl.contains("/spec") || fl.ends_with("tests.swift");
+                    let kind_bonus: isize = if is_test_file {
+                        -2  // loses to any non-test class with equal term match
+                    } else {
+                        match kind_str(&s.kind) {
+                            "module" | "class" | "struct" | "enum" | "trait"
+                            | "type" | "interface" | "protocol" | "namespace" => 2,
+                            _ => 0,
+                        }
                     };
-                    (term_score * 2 + kind_bonus, term_score, s)
+                    ((term_score as isize) * 2 + kind_bonus, term_score, s)
                 })
                 .filter(|(_, ts, _)| *ts >= 1)
                 .collect();
@@ -224,10 +231,15 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
             if args.debug_clusters {
                 let top5: Vec<Value> = ranked.iter().take(5).map(|(combined, ts, s)| {
                     let k = kind_str(&s.kind);
-                    let kb: usize = match k {
-                        "module" | "class" | "struct" | "enum" | "trait"
-                        | "type" | "interface" | "protocol" | "namespace" => 2,
-                        _ => 0,
+                    let fl = s.file.to_lowercase();
+                    let is_test = fl.contains("/test") || fl.contains("/tests/")
+                        || fl.contains("/spec") || fl.ends_with("tests.swift");
+                    let kb: isize = if is_test { -2 } else {
+                        match k {
+                            "module" | "class" | "struct" | "enum" | "trait"
+                            | "type" | "interface" | "protocol" | "namespace" => 2,
+                            _ => 0,
+                        }
                     };
                     json!({
                         "qname": s.qname,
@@ -386,7 +398,13 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
         } else {
             vec![]
         };
-        let all_anns: Vec<&Annotation> = cluster_anns.iter().chain(annotations.iter()).collect();
+        // When this symbol has a cluster-specific concept, suppress any generic
+        // Concept entries from the global annotations list (the subject line) so
+        // we don't emit both "documentation: X" and "Define X scope" for the same symbol.
+        let has_cluster = !cluster_anns.is_empty();
+        let all_anns: Vec<&Annotation> = cluster_anns.iter()
+            .chain(annotations.iter().filter(|a| !(has_cluster && a.kind == LedgerKind::Concept)))
+            .collect();
         let cluster_confidence = cluster_meta.get(&sym.symbol_id).map(|(_, c)| *c);
 
         for ann in all_anns {
