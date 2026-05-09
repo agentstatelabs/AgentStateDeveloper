@@ -172,10 +172,21 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     } else {
                         tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
                     };
-                    // Boost source-of-truth symbols (Ownership ledger entry) so they
-                    // surface above generic matches in plain search.
-                    let sot_boost = if entries.iter().any(|e| e.kind == agentstatedeveloper_core::LedgerKind::Ownership) {
-                        2.0
+                    // Source-of-truth boost: scaled by query-term overlap so SOT symbols
+                    // that directly match the query float well above generic matches.
+                    // Invariant-bearing symbols with name overlap get an additional bump.
+                    let haystack = format!("{} {}", hit.qname.to_lowercase(), hit.file.to_lowercase());
+                    let name_overlap = tokens.iter().filter(|t| haystack.contains(t.as_str())).count();
+                    let has_ownership = entries.iter().any(|e| e.kind == LedgerKind::Ownership);
+                    let has_invariant = entries.iter().any(|e| e.kind == LedgerKind::Invariant);
+                    let sot_boost = if has_ownership && name_overlap >= 2 {
+                        5.0  // strong: SOT symbol whose name directly matches the query
+                    } else if has_ownership && name_overlap >= 1 {
+                        3.5  // moderate: SOT symbol with partial name overlap
+                    } else if has_ownership {
+                        2.0  // baseline: SOT symbol, no name overlap
+                    } else if has_invariant && name_overlap >= 1 {
+                        1.5  // invariant-bearing symbol that matches the query
                     } else {
                         0.0
                     };

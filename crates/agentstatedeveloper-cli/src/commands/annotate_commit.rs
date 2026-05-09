@@ -160,21 +160,19 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
     //      are documentation (*.md, docs/ dirs, etc.) and no symbols were found.
     let all_docs = !changed_files.is_empty() && changed_files.iter().all(|f| is_doc_file(f));
     if all_docs && touched_symbols.is_empty() {
-        // Stage 1: extract domain terms from doc filenames and score symbols by name match.
-        let doc_terms: Vec<String> = changed_files.iter()
-            .flat_map(|f| {
-                let stem = Path::new(f).file_stem()
-                    .and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-                // Split on _, -, whitespace, and camelCase boundaries.
-                let with_spaces = stem.replace(['-', '_', '.'], " ");
-                with_spaces.split_whitespace()
-                    .filter(|w| w.len() >= 3 && !matches!(*w, "the" | "and" | "for" | "doc"
-                        | "docs" | "readme" | "design" | "notes" | "plan" | "spec"))
-                    .map(|w| w.to_string())
-                    .collect::<Vec<_>>()
-            })
-            .collect();
+        let extract_terms = |path: &str| -> Vec<String> {
+            let stem = Path::new(path).file_stem()
+                .and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+            stem.replace(['-', '_', '.'], " ")
+                .split_whitespace()
+                .filter(|w| w.len() >= 3 && !matches!(*w,
+                    "the" | "and" | "for" | "doc" | "docs" | "readme"
+                    | "design" | "notes" | "plan" | "spec" | "guide" | "api"))
+                .map(|w| w.to_string())
+                .collect()
+        };
 
+        // Load all non-doc candidate symbols once.
         let tree2 = engine.repo
             .get_tree(&engine.ref_name, "/asd/v1/index/by-qname")
             .unwrap_or(serde_json::Value::Object(Default::default()));
@@ -185,27 +183,30 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
                 .collect())
             .unwrap_or_default();
 
-        let mut scored: Vec<(usize, Symbol)> = candidate_syms.iter()
-            .map(|s| {
-                let haystack = format!("{} {}", s.qname.to_lowercase(), s.file.to_lowercase());
-                let name_score: usize = doc_terms.iter()
-                    .filter(|t| haystack.contains(t.as_str()))
-                    .count();
-                (name_score, s.clone())
-            })
-            .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        // Per-file pass: find the best-matching symbol for each changed doc file
+        // independently. This produces one concept cluster per doc domain rather
+        // than collapsing all files into a single nearest-neighbour lookup.
+        let mut any_term_match = false;
+        for doc_file in &changed_files {
+            let file_terms = extract_terms(doc_file);
+            if file_terms.is_empty() { continue; }
+            let best = candidate_syms.iter()
+                .map(|s| {
+                    let haystack = format!("{} {}", s.qname.to_lowercase(), s.file.to_lowercase());
+                    let score = file_terms.iter().filter(|t| haystack.contains(t.as_str())).count();
+                    (score, s)
+                })
+                .max_by_key(|(score, _)| *score);
+            if let Some((score, sym)) = best {
+                if score >= 1 && seen_ids.insert(sym.symbol_id.clone()) {
+                    any_term_match = true;
+                    touched_symbols.push(sym.clone());
+                }
+            }
+        }
 
-        // If name-term matching found strong hits (score ≥ 1), use them.
-        // Otherwise fall back to directory heuristics.
-        let best_score = scored.first().map(|(s, _)| *s).unwrap_or(0);
-        let candidates: Vec<Symbol> = if best_score >= 1 {
-            scored.into_iter()
-                .filter(|(s, _)| *s >= best_score.max(1))
-                .map(|(_, sym)| sym)
-                .take(5)
-                .collect()
-        } else {
+        // Fallback: no term matches found — use directory heuristics across all docs combined.
+        if !any_term_match {
             let doc_dirs: Vec<&str> = changed_files.iter()
                 .filter_map(|f| Path::new(f).parent()?.to_str())
                 .collect();
@@ -218,16 +219,16 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
                 })
                 .collect();
             dir_scored.sort_by(|a, b| b.0.cmp(&a.0));
-            dir_scored.into_iter().take(5).map(|(_, sym)| sym).collect()
-        };
-
-        for sym in candidates {
-            if seen_ids.insert(sym.symbol_id.clone()) {
-                touched_symbols.push(sym);
+            for (_, sym) in dir_scored.into_iter().take(5) {
+                if seen_ids.insert(sym.symbol_id.clone()) {
+                    touched_symbols.push(sym);
+                }
             }
         }
+
         if !args.quiet {
-            eprintln!("asd: docs-only commit detected — annotating nearest domain symbols");
+            eprintln!("asd: docs-only commit — {} domain cluster(s) identified across {} doc file(s)",
+                touched_symbols.len(), changed_files.len());
         }
     }
 

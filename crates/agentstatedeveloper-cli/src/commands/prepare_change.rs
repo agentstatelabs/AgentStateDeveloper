@@ -993,10 +993,15 @@ fn is_view_like_file(file: &str, layer: &str) -> bool {
         .file_stem()
         .and_then(|n| n.to_str())
         .unwrap_or(file);
-    // Match common view/UI naming conventions in iOS/macOS/web/Android.
+    // Match common view/UI naming conventions in iOS/macOS/web/Android,
+    // plus rendering-surface types (Canvas, Roll, Sheet, Overlay, Surface, Layer)
+    // that hold draw/update logic but are not domain entry points.
     if name.ends_with("View") || name.ends_with("ViewController") || name.ends_with("Screen")
         || name.ends_with("Widget") || name.ends_with("Panel") || name.ends_with("Cell")
         || name.ends_with("Button") || name.ends_with("Label") || name.ends_with("Row")
+        || name.ends_with("Canvas") || name.ends_with("Overlay") || name.ends_with("Surface")
+        || name.ends_with("Roll") || name.ends_with("Sheet") || name.ends_with("Layer")
+        || name.ends_with("Renderer") || name.ends_with("Drawable")
         || name.contains("ViewController") || name.contains("Renderer")
         || name.ends_with("Page") || name.ends_with("Fragment")
     {
