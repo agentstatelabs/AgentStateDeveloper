@@ -22,7 +22,7 @@
 //! Integrates with CTX task closure via `--task-description`:
 //!   asd annotate-commit --write --task-description "$(ctx task show t-042)"
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
 
@@ -31,7 +31,7 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
-    AsgLedgerStore, Engine, LedgerKind, LedgerStore, Symbol,
+    AsgLedgerStore, Engine, LedgerKind, LedgerStore, Symbol, kind_str,
     schema::{Author, AuthorKind, LedgerEntry},
 };
 
@@ -156,6 +156,11 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
     // Limit to 20 most relevant symbols to keep output manageable.
     touched_symbols.truncate(20);
 
+    // cluster_meta: symbol_id → (per-cluster concept summary, confidence 0-1).
+    // Populated by the docs-only path; used in the emit loop to attach
+    // file-specific concept annotations only to their matched symbol.
+    let mut cluster_meta: HashMap<String, (String, f64)> = HashMap::new();
+
     // ---- Docs-only path: find nearest domain symbol when all changed files
     //      are documentation (*.md, docs/ dirs, etc.) and no symbols were found.
     let all_docs = !changed_files.is_empty() && changed_files.iter().all(|f| is_doc_file(f));
@@ -186,6 +191,8 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
         // Per-file pass: find the best-matching symbol for each changed doc file
         // independently. This produces one concept cluster per doc domain rather
         // than collapsing all files into a single nearest-neighbour lookup.
+        // Prefers type/module/class/struct symbols over methods to anchor concepts
+        // at the right granularity.
         let mut any_term_match = false;
         for doc_file in &changed_files {
             let file_terms = extract_terms(doc_file);
@@ -193,13 +200,26 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
             let best = candidate_syms.iter()
                 .map(|s| {
                     let haystack = format!("{} {}", s.qname.to_lowercase(), s.file.to_lowercase());
-                    let score = file_terms.iter().filter(|t| haystack.contains(t.as_str())).count();
-                    (score, s)
+                    let term_score = file_terms.iter().filter(|t| haystack.contains(t.as_str())).count();
+                    // Prefer broad container symbols over individual methods/tests.
+                    let kind_bonus: usize = match kind_str(&s.kind) {
+                        "module" | "class" | "struct" | "enum" | "trait"
+                        | "type" | "interface" | "protocol" | "namespace" => 2,
+                        k if k.contains("test") => 0,  // don't penalise, just don't bonus
+                        _ => 0,
+                    };
+                    (term_score * 2 + kind_bonus, term_score, s)
                 })
-                .max_by_key(|(score, _)| *score);
-            if let Some((score, sym)) = best {
-                if score >= 1 && seen_ids.insert(sym.symbol_id.clone()) {
-                    any_term_match = true;
+                .filter(|(_, ts, _)| *ts >= 1)
+                .max_by_key(|(combined, _, _)| *combined);
+            if let Some((_, term_score, sym)) = best {
+                any_term_match = true;
+                let confidence = term_score as f64 / file_terms.len().max(1) as f64;
+                let doc_name = Path::new(doc_file).file_stem()
+                    .and_then(|s| s.to_str()).unwrap_or(doc_file);
+                let concept = format!("documentation: {}", doc_name.replace(['-', '_'], " "));
+                cluster_meta.insert(sym.symbol_id.clone(), (concept, confidence));
+                if seen_ids.insert(sym.symbol_id.clone()) {
                     touched_symbols.push(sym.clone());
                 }
             }
@@ -247,20 +267,10 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
         let subject_kind = if all_docs { LedgerKind::Concept } else { LedgerKind::Decision };
         annotations.push(Annotation { kind: subject_kind, summary: subject.clone() });
     }
-    // For docs-only commits with no structured body annotations, derive a Concept
-    // from the changed file names to capture what was documented.
-    if all_docs && full_body.lines().all(|l| {
-        let l = l.trim();
-        l.is_empty() || !["invariant:", "hazard:", "proof:", "validation_scenario:",
-            "known_bug:", "concept:", "decision:"].iter().any(|p| l.starts_with(p))
-    }) {
-        for file in changed_files.iter().take(3) {
-            let name = Path::new(file).file_stem()
-                .and_then(|s| s.to_str()).unwrap_or(file);
-            let concept_summary = format!("documentation: {}", name.replace(['-', '_'], " "));
-            annotations.push(Annotation { kind: LedgerKind::Concept, summary: concept_summary });
-        }
-    }
+    // Note: for docs-only commits, per-cluster concept annotations are stored in
+    // `cluster_meta` (built in the docs-only path above) rather than the global
+    // annotations list, so they attach only to their matched cluster symbol.
+    // No global file-stem concepts are injected here.
 
     // Parse body lines for structured annotations.
     for line in full_body.lines() {
@@ -320,9 +330,19 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
     let mut written: Vec<Value> = Vec::new();
 
     for sym in &touched_symbols {
-        // Only write Decision entries for each annotation; other kinds only
-        // when explicitly tagged in the commit body.
-        for ann in &annotations {
+        // For docs-only commits, inject the per-cluster concept annotation
+        // before the global annotations so the concept is recorded first.
+        let cluster_anns: Vec<Annotation> = if all_docs {
+            cluster_meta.get(&sym.symbol_id)
+                .map(|(concept, _)| vec![Annotation { kind: LedgerKind::Concept, summary: concept.clone() }])
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+        let all_anns: Vec<&Annotation> = cluster_anns.iter().chain(annotations.iter()).collect();
+        let cluster_confidence = cluster_meta.get(&sym.symbol_id).map(|(_, c)| *c);
+
+        for ann in all_anns {
             // Check for duplicate: skip if same summary + kind already recorded.
             let existing = ledger_store
                 .list_entries(&engine.ref_name, &sym.symbol_id)
@@ -337,6 +357,7 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
                 "file": sym.file,
                 "kind": format!("{:?}", ann.kind).to_lowercase(),
                 "summary": ann.summary,
+                "cluster_confidence": cluster_confidence,
             });
 
             if args.write {

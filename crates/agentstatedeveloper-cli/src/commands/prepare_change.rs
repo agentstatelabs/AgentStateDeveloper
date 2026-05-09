@@ -17,7 +17,8 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine,
-    FeedbackStore, FtsFilters, IndexStore, LedgerKind, LedgerStore, apply_feedback_adjustments,
+    FeedbackStore, FtsFilters, IndexStore, LedgerKind, LedgerStore, SearchFtsDb,
+    apply_feedback_adjustments,
     classify_layer_sym, confidence_scores, derive_cold_hints, detect_ambiguous_tokens,
     detect_possible_misses, estimate_tokens, explain_match, extract_summary, find_candidates,
     find_indexed_test_files, gather_recency, git_dirty_files, glob_match, intent_focus,
@@ -150,7 +151,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     if let Some(ref paths) = args.paths {
         paths_filter.extend(paths.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()));
     }
-    let has_paths_filter = !paths_filter.is_empty();
+    let _has_paths_filter = !paths_filter.is_empty();
     let filters = FtsFilters {
         kind: args.kind.as_deref().map(|k| k.to_lowercase()),
         language: args.language.as_deref().map(|l| l.to_lowercase()),
@@ -542,7 +543,48 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         detect_possible_misses(&args.description, &layers_present, file_scores.len())
     };
 
-    // t-002: Surface files that scope/path filters cut out but are known callers or callees.
+    // Likely omitted: files that score well in an unscoped search but were filtered
+    // by the active scope/path filter. We run a quick unscoped FTS pass to find them,
+    // then merge with caller/callee-based omissions from the graph.
+    let fts_omitted_files: Vec<Value> = if scope_narrowed && !filters.paths_filter.is_empty() {
+        let unscoped_filters = FtsFilters {
+            kind: filters.kind.clone(),
+            language: filters.language.clone(),
+            include_tests: filters.include_tests,
+            exclude_terms: filters.exclude_terms.clone(),
+            paths_filter: vec![],  // no path filter
+        };
+        let unscoped_hits = SearchFtsDb::open(&cfg.db_path)
+            .ok()
+            .filter(|fts| fts.has_data())
+            .and_then(|fts| fts.search(&args.description, &unscoped_filters, 20).ok())
+            .unwrap_or_default();
+        let scoped_file_set: std::collections::HashSet<&str> = file_scores.iter()
+            .map(|(_, f, _, _, _)| f.as_str())
+            .collect();
+        unscoped_hits.iter()
+            .filter(|h| !filters.paths_filter.iter().any(|p| glob_match(p, &h.file)))
+            .filter(|h| !scoped_file_set.contains(h.file.as_str()))
+            .take(5)
+            .map(|h| {
+                let dir = std::path::Path::new(&h.file)
+                    .parent()
+                    .map(|d| format!("{}/**", d.to_string_lossy()))
+                    .unwrap_or_else(|| h.file.clone());
+                json!({
+                    "file": h.file,
+                    "relation": "unscoped_fts_match",
+                    "score": h.bm25_score,
+                    "suggested_paths": dir,
+                    "note": "matched query in broad search but excluded by current scope",
+                })
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+
+    // Graph-based omissions: callers/callees outside scope.
     let likely_omitted_files: Vec<Value> = if scope_narrowed && !filters.paths_filter.is_empty() {
         let top_sids_omit: Vec<String> = candidates.iter().take(3)
             .filter_map(|(_, q)| index_store.get_symbol_by_qname(&engine.ref_name, q).ok().flatten())
@@ -593,6 +635,21 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     } else {
         vec![]
     };
+    // Merge graph-based and FTS-based omissions, deduplicating by file.
+    let mut seen_omit: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut likely_omitted_files = likely_omitted_files;
+    for item in fts_omitted_files {
+        if let Some(f) = item["file"].as_str() {
+            if seen_omit.insert(f.to_string()) {
+                likely_omitted_files.push(item);
+            }
+        }
+    }
+    for item in &likely_omitted_files {
+        if let Some(f) = item["file"].as_str() {
+            seen_omit.insert(f.to_string());
+        }
+    }
 
     // T1: safe-change recipe — actionable sections for an agent or developer.
     // T4: manually_validate includes concrete ValidationScenario entries.
@@ -648,20 +705,31 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     }
 
     // edit: only impl files not flagged as wrong-layer or view-only-on-broad-query.
-    // Exception: when a path/scope filter is active AND the query contains domain-specific
-    // anchors (scheduler, driftpad, exampleflow), keep ViewModel files in scope.
-    let scoped_domain_anchor = has_paths_filter && tokens.iter().any(|t| {
-        matches!(t.as_str(), "scheduler" | "driftpad" | "exampleflow" | "exampleflow")
-    });
+    // Rendering surfaces (Canvas, Overlay, Layer etc.) are demoted unconditionally
+    // unless the query explicitly names them. Other view-like files are demoted only
+    // on broad queries. A file is retained when ≥2 of its stem words appear in the
+    // query tokens (generalised domain anchor — no hardcoded token list needed).
     let recipe_edit: Vec<Value> = likely_edit_files.iter()
         .filter(|f| {
             let file = f["file"].as_str().unwrap_or("");
             let layer = f["layer"].as_str().unwrap_or("");
-            let demote = !wrong_layer_files.contains(file)
-                && broad_query
+            let names_file = query_names_file(&tokens, file);
+            // Domain anchor: retain when query shares ≥2 stem words with the file.
+            let stem_words = split_camel_lower(
+                std::path::Path::new(file).file_stem().and_then(|n| n.to_str()).unwrap_or("")
+            );
+            let domain_overlap = stem_words.iter()
+                .filter(|w| tokens.iter().any(|t| t == *w))
+                .count();
+            let has_domain_anchor = domain_overlap >= 2;
+            // Rendering surfaces: unconditional demotion unless query names them.
+            let surface_demote = is_rendering_surface(file) && !names_file;
+            // View-like: demote on broad queries unless domain anchor present.
+            let broad_demote = broad_query
                 && is_view_like_file(file, layer)
-                && !query_names_file(&tokens, file)
-                && !(scoped_domain_anchor && matches!(layer, "viewmodel"));
+                && !names_file
+                && !has_domain_anchor;
+            let demote = !wrong_layer_files.contains(file) && (surface_demote || broad_demote);
             f["file_role"].as_str() == Some("impl") && !wrong_layer_files.contains(file) && !demote
         })
         .map(|f| {
@@ -694,14 +762,23 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             entry
         })
         .collect();
-    // reference: example/doc files + WrongLayer demotions + view-on-broad demotions.
+    // reference: example/doc files + WrongLayer demotions + view/surface demotions.
     let recipe_reference: Vec<Value> = likely_edit_files.iter()
         .filter(|f| {
             let file = f["file"].as_str().unwrap_or("");
             let layer = f["layer"].as_str().unwrap_or("");
-            let view_demote = broad_query && is_view_like_file(file, layer)
-                && !query_names_file(&tokens, file)
-                && !(scoped_domain_anchor && matches!(layer, "viewmodel"));
+            let names_file = query_names_file(&tokens, file);
+            let stem_words = split_camel_lower(
+                std::path::Path::new(file).file_stem().and_then(|n| n.to_str()).unwrap_or("")
+            );
+            let domain_overlap = stem_words.iter()
+                .filter(|w| tokens.iter().any(|t| t == *w))
+                .count();
+            let has_domain_anchor = domain_overlap >= 2;
+            let surface_demote = is_rendering_surface(file) && !names_file;
+            let broad_demote = broad_query && is_view_like_file(file, layer)
+                && !names_file && !has_domain_anchor;
+            let view_demote = surface_demote || broad_demote;
             matches!(f["file_role"].as_str(), Some("example") | Some("reference"))
                 || (f["file_role"].as_str() == Some("impl") && wrong_layer_files.contains(file))
                 || (f["file_role"].as_str() == Some("impl") && view_demote)
@@ -987,15 +1064,25 @@ const GENERIC_FILE_STEMS: &[&str] = &[
     "indicator", "status", "mode", "flag", "current", "local",
 ];
 
+/// Returns true for files that are pure rendering surfaces regardless of query.
+/// These are demoted unconditionally unless the query explicitly names them.
+fn is_rendering_surface(file: &str) -> bool {
+    let name = std::path::Path::new(file)
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or(file);
+    name.ends_with("Canvas") || name.ends_with("Overlay") || name.ends_with("Surface")
+        || name.ends_with("Roll") || name.ends_with("Sheet") || name.ends_with("Layer")
+        || name.ends_with("Renderer") || name.ends_with("Drawable")
+}
+
 fn is_view_like_file(file: &str, layer: &str) -> bool {
     if layer == "view" { return true; }
     let name = std::path::Path::new(file)
         .file_stem()
         .and_then(|n| n.to_str())
         .unwrap_or(file);
-    // Match common view/UI naming conventions in iOS/macOS/web/Android,
-    // plus rendering-surface types (Canvas, Roll, Sheet, Overlay, Surface, Layer)
-    // that hold draw/update logic but are not domain entry points.
+    // Common view/UI naming conventions in iOS/macOS/web/Android.
     if name.ends_with("View") || name.ends_with("ViewController") || name.ends_with("Screen")
         || name.ends_with("Widget") || name.ends_with("Panel") || name.ends_with("Cell")
         || name.ends_with("Button") || name.ends_with("Label") || name.ends_with("Row")
@@ -1008,8 +1095,7 @@ fn is_view_like_file(file: &str, layer: &str) -> bool {
         return true;
     }
     // Demote generic-stem files (PlayheadState.swift, UpdateView.swift, etc.)
-    // that are in a UI-adjacent layer. These match too broadly and should be
-    // reference_only unless the query explicitly names them.
+    // that are in a UI-adjacent layer.
     if matches!(layer, "view" | "viewmodel" | "ui") {
         let name_lower = name.to_lowercase();
         let stem_words = split_camel_lower(&name_lower);

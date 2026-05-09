@@ -154,6 +154,8 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         let tokens = tokens_from_query.clone();
 
         // Hybrid reranking: BM25 + path/name boost + ledger boost + ownership anchor boost.
+        // Also track which symbols received a SOT boost (for boosted-but-outranked report).
+        let mut sot_boosted_qnames: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut scored: Vec<(f64, _)> = hits
             .into_iter()
             .map(|hit| {
@@ -172,29 +174,55 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     } else {
                         tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
                     };
-                    // Source-of-truth boost: scaled by query-term overlap so SOT symbols
-                    // that directly match the query float well above generic matches.
-                    // Invariant-bearing symbols with name overlap get an additional bump.
+                    // Source-of-truth boost: scaled by non-generic query-term overlap.
+                    // Generic tokens (state, update, position…) are excluded from the
+                    // overlap count so only domain-specific matches drive the boost.
                     let haystack = format!("{} {}", hit.qname.to_lowercase(), hit.file.to_lowercase());
-                    let name_overlap = tokens.iter().filter(|t| haystack.contains(t.as_str())).count();
+                    // Inline GENERIC_TOKENS subset for overlap filtering.
+                    const GENERIC_BOOST_SKIP: &[&str] = &[
+                        "state", "update", "position", "value", "cursor", "progress",
+                        "indicator", "status", "mode", "flag", "current", "local",
+                        "playhead", "tick", "item", "data", "info", "manager",
+                    ];
+                    let domain_overlap = tokens.iter()
+                        .filter(|t| !GENERIC_BOOST_SKIP.contains(&t.as_str()))
+                        .filter(|t| haystack.contains(t.as_str()))
+                        .count();
                     let has_ownership = entries.iter().any(|e| e.kind == LedgerKind::Ownership);
                     let has_invariant = entries.iter().any(|e| e.kind == LedgerKind::Invariant);
-                    let sot_boost = if has_ownership && name_overlap >= 2 {
-                        5.0  // strong: SOT symbol whose name directly matches the query
-                    } else if has_ownership && name_overlap >= 1 {
-                        3.5  // moderate: SOT symbol with partial name overlap
+                    // State-holder penalty: class/struct with no SOT/invariant and query
+                    // does not ask for a type/model concept.
+                    let is_state_holder = matches!(hit.kind.as_str(), "class" | "struct" | "type" | "enum")
+                        && !has_ownership && !has_invariant
+                        && !tokens.iter().any(|t| matches!(t.as_str(),
+                            "state" | "model" | "type" | "class" | "struct" | "enum" | "schema"));
+                    let state_penalty = if is_state_holder { -0.8 } else { 0.0 };
+                    let sot_boost = if has_ownership && domain_overlap >= 2 {
+                        5.0  // strong: SOT symbol whose domain name matches the query
+                    } else if has_ownership && domain_overlap >= 1 {
+                        3.5  // moderate: SOT with partial domain overlap
                     } else if has_ownership {
-                        2.0  // baseline: SOT symbol, no name overlap
-                    } else if has_invariant && name_overlap >= 1 {
-                        1.5  // invariant-bearing symbol that matches the query
+                        2.0  // baseline: SOT symbol, no domain overlap
+                    } else if has_invariant && domain_overlap >= 1 {
+                        1.5  // invariant-bearing symbol with domain match
                     } else {
                         0.0
                     };
-                    (text_boost, sot_boost)
+                    (text_boost, sot_boost + state_penalty)
                 };
-                (hit.bm25_score + boost + ledger_boost + ownership_boost, hit)
+                let total = hit.bm25_score + boost + ledger_boost + ownership_boost;
+                (total, hit)
             })
             .collect();
+
+        // Record SOT-boosted symbols before truncation for outranked reporting.
+        // Re-scan entries to find which symbols got a non-zero sot_boost.
+        for (_, hit) in &scored {
+            let entries = ledger_store.list_entries(&engine.ref_name, &hit.symbol_id).unwrap_or_default();
+            if entries.iter().any(|e| e.kind == LedgerKind::Ownership) {
+                sot_boosted_qnames.insert(hit.qname.clone());
+            }
+        }
 
         // Apply durable feedback: suppress noisy/wrong-layer, boost useful.
         let mut feedback_suppressed: usize = 0;
@@ -350,6 +378,15 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     "owner_symbol_id": h.owner_symbol_id,
                 })
             }).collect();
+            // boosted_outranked: SOT symbols that got a boost but didn't make the final cut.
+            let final_qnames: std::collections::HashSet<&str> = results.iter()
+                .filter_map(|r| r["qname"].as_str())
+                .collect();
+            let boosted_outranked: Vec<&str> = sot_boosted_qnames.iter()
+                .map(|s| s.as_str())
+                .filter(|q| !final_qnames.contains(*q))
+                .collect();
+
             let raw = serde_json::json!({
                 "query": args.query,
                 "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
@@ -360,6 +397,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 "scoped_suggestions": scoped_suggestions,
                 "scope_narrowed": scope_narrowed,
                 "feedback_suppressed": feedback_suppressed,
+                "boosted_outranked": boosted_outranked,
                 "results": results,
                 "document_hits": doc_results,
             });

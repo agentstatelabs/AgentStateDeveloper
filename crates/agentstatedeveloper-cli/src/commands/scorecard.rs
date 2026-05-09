@@ -10,6 +10,7 @@
 //! Per-dimension drill-down: `--drill-down <dim>`
 //! Trend vs previous run:    `--trend`
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -18,9 +19,10 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
-    AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine,
-    FeedbackStore, IndexStore, LedgerStore,
-    schema::{LedgerKind, VerificationStatus},
+    AsgEffectStore, AsgFeedbackStore, Engine,
+    FeedbackStore, EffectStore,
+    glob_match, resolve_scope,
+    schema::{LedgerEntry, LedgerKind, Symbol, VerificationStatus},
 };
 
 use crate::config::Config;
@@ -51,6 +53,14 @@ pub struct ScorecardArgs {
     /// Max symbols shown in --drill-down output (default: 10).
     #[arg(long, default_value_t = 10)]
     pub limit: usize,
+
+    /// Named scope alias from .asd/scopes.toml — evaluate only that subsystem.
+    #[arg(long)]
+    pub scope: Option<String>,
+
+    /// Comma-separated glob patterns — restrict scoring to matching file paths.
+    #[arg(long)]
+    pub paths: Option<String>,
 }
 
 struct Metrics {
@@ -141,30 +151,79 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
         }
     }
 
+    // Build path filter from --scope / --paths.
+    let mut paths_filter: Vec<String> = Vec::new();
+    if let Some(ref s) = args.scope {
+        paths_filter.extend(resolve_scope(s, &cfg.db_path));
+    }
+    if let Some(ref p) = args.paths {
+        paths_filter.extend(p.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()));
+    }
+    let scoped = !paths_filter.is_empty();
+
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let index_store = AsgIndexStore { repo: &engine.repo };
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
     let effect_store = AsgEffectStore { repo: &engine.repo };
     let feedback_store = AsgFeedbackStore { repo: &engine.repo };
 
-    let all_qnames: Vec<String> = {
+    // Bulk load index — one git read instead of N.
+    let all_syms: Vec<Symbol> = {
         let tree = engine.repo
             .get_tree(&engine.ref_name, "/asd/v1/index/by-qname")
             .unwrap_or(serde_json::Value::Object(Default::default()));
         tree.as_object()
-            .map(|m| m.keys().cloned().collect())
+            .map(|m| m.values()
+                .filter_map(|v| serde_json::from_value::<Symbol>(v.clone()).ok())
+                .collect())
             .unwrap_or_default()
     };
-    let total_symbols = all_qnames.len();
+
+    // Apply path filter upfront.
+    let scored_syms: Vec<&Symbol> = if scoped {
+        all_syms.iter()
+            .filter(|s| paths_filter.iter().any(|p| glob_match(p, &s.file)))
+            .collect()
+    } else {
+        all_syms.iter().collect()
+    };
+    let total_symbols = scored_syms.len();
 
     if total_symbols == 0 {
+        let note = if scoped {
+            "no symbols matched the path filter — try broadening --scope/--paths"
+        } else {
+            "no symbols indexed — run `asd index` first"
+        };
         let zero = json!({
-            "note": "no symbols indexed — run `asd index` first",
+            "note": note,
             "scores": { "truth": 0, "feedback": 0, "change": 0, "uncertainty": 0, "workflow": 0, "overall": 0 }
         });
         println!("{}", serde_json::to_string_pretty(&zero)?);
         return Ok(());
     }
+
+    // Bulk load ledger — one git read instead of N per-symbol reads.
+    let ledger_by_sym: HashMap<String, Vec<LedgerEntry>> = {
+        let tree = engine.repo
+            .get_tree(&engine.ref_name, "/asd/v1/ledger")
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+        let mut map: HashMap<String, Vec<LedgerEntry>> = HashMap::new();
+        if let serde_json::Value::Object(by_symbol) = tree {
+            for (sym_id, per_symbol) in by_symbol {
+                if let serde_json::Value::Object(entries_map) = per_symbol {
+                    let mut entries: Vec<LedgerEntry> = entries_map.values()
+                        .filter_map(|v| serde_json::from_value::<LedgerEntry>(v.clone()).ok())
+                        .collect();
+                    entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                    let superseded: std::collections::HashSet<String> = entries.iter()
+                        .flat_map(|e| e.supersedes.iter().cloned())
+                        .collect();
+                    entries.retain(|e| !superseded.contains(&e.entry_id));
+                    map.insert(sym_id, entries);
+                }
+            }
+        }
+        map
+    };
 
     // Per-symbol tracking for drill-down.
     let drill = args.drill_down.as_deref().unwrap_or("").to_lowercase();
@@ -179,12 +238,7 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
     let mut total_ledger_entries = 0usize;
     let mut ctx_tagged_entries = 0usize;
 
-    for qname in &all_qnames {
-        let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
-            Ok(Some(s)) => s,
-            _ => continue,
-        };
-
+    for sym in &scored_syms {
         let has_verified = if let Ok(Some(decl)) = effect_store.get_effects(&engine.ref_name, &sym.symbol_id) {
             decl.verification.as_ref()
                 .map(|v| matches!(v.status, VerificationStatus::Ok))
@@ -192,10 +246,10 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
         } else { false };
         if has_verified { verified_count += 1; }
 
-        let entries = ledger_store
-            .list_entries(&engine.ref_name, &sym.symbol_id)
-            .unwrap_or_default();
+        let entries = ledger_by_sym.get(&sym.symbol_id).cloned().unwrap_or_default();
         total_ledger_entries += entries.len();
+
+        let qname = &sym.qname;
 
         let mut sym_owned = false;
         let mut sym_inv = false;
@@ -320,6 +374,21 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
     });
     save_snapshot(&hist_path, &snapshot);
 
+    let data_quality = json!({
+        "ledger_density": ledger_density,
+        "symbols_scored": total_symbols,
+        "symbols_with_any_ledger": scored_syms.iter()
+            .filter(|s| ledger_by_sym.contains_key(&s.symbol_id))
+            .count(),
+        "coverage_pct": if total_symbols > 0 {
+            (scored_syms.iter().filter(|s| ledger_by_sym.contains_key(&s.symbol_id)).count() as f64
+             / total_symbols as f64 * 100.0).round()
+        } else { 0.0 },
+        "sparse_db": sparse_db,
+        "note": sparse_note.as_deref().unwrap_or("ledger density is adequate"),
+        "scope": if scoped { json!(paths_filter) } else { json!(null) },
+    });
+
     let details = json!({
         "total_symbols": total_symbols,
         "verified_effects": verified_count,
@@ -334,10 +403,10 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
     if args.json {
         let mut out = json!({
             "timestamp": now,
-            "scores": snapshot["scores"].clone(),
+            "capability_scores": snapshot["scores"].clone(),
+            "scores": snapshot["scores"].clone(),  // kept for history compat
+            "data_quality": data_quality,
             "details": details,
-            "sparse_db": sparse_db,
-            "sparse_note": sparse_note,
         });
         if need_drill {
             let total_gaps = drill_rows.len();
@@ -360,6 +429,9 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
 
     // Human-readable table.
     println!("ASD Benchmark Scorecard");
+    if scoped {
+        println!("  scope:  {}", paths_filter.join(", "));
+    }
     println!("{:-<40}", "");
     let dim_names = [
         ("Truth Model      ", "truth",       scores.truth),
