@@ -261,8 +261,8 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     let mut adj: Vec<(f64, String)> = scored.iter()
                         .map(|(s, h)| (*s, h.qname.clone()))
                         .collect();
-                    apply_feedback_adjustments(&engine, &idx, &args.query, &mut adj, &fb_tuples);
-                    apply_file_scope_feedback(&engine, &idx, &args.query, &mut adj, &fs_tuples);
+                    apply_feedback_adjustments(&engine, &idx, &cfg.db_path, &args.query, &mut adj, &fb_tuples);
+                    apply_file_scope_feedback(&engine, &idx, &cfg.db_path, &args.query, &mut adj, &fs_tuples);
                     // Collect suppressed qnames before consuming adj.
                     let surviving: std::collections::HashSet<&str> =
                         adj.iter().map(|(_, q)| q.as_str()).collect();
@@ -314,7 +314,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             // calling it per-result meant 20 full tree scans. One batch call eliminates that.
             let all_result_qnames: Vec<String> = scored.iter().map(|(_, h)| h.qname.clone()).collect();
             let all_feedback_impacts = explain_feedback_impacts(
-                &engine, &AsgIndexStore { repo: &engine.repo },
+                &engine, &AsgIndexStore { repo: &engine.repo }, &cfg.db_path,
                 &args.query, &all_result_qnames, &fb_all_for_results,
             );
 
@@ -652,8 +652,8 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 let mut adj: Vec<(f64, String)> = scored.iter()
                     .map(|(s, sym)| (*s as f64, sym.qname.clone()))
                     .collect();
-                apply_feedback_adjustments(&engine, &idx, &args.query, &mut adj, &fb_tuples);
-                apply_file_scope_feedback(&engine, &idx, &args.query, &mut adj, &fs_tuples);
+                apply_feedback_adjustments(&engine, &idx, &cfg.db_path, &args.query, &mut adj, &fb_tuples);
+                apply_file_scope_feedback(&engine, &idx, &cfg.db_path, &args.query, &mut adj, &fs_tuples);
                 let surviving: std::collections::HashSet<String> =
                     adj.into_iter().map(|(_, q)| q).collect();
                 scored.retain(|(_, sym)| surviving.contains(&sym.qname));

@@ -923,7 +923,7 @@ impl AsdMcpServer {
             use agentstatedeveloper_core::{apply_feedback_adjustments, FeedbackStore};
             let fb_store = AsgFeedbackStore { repo: &engine.repo };
             let fb = fb_store.flat_verdicts(&ref_name).unwrap_or_default();
-            apply_feedback_adjustments(&engine, &index, &p.query, &mut top_qnames, &fb);
+            apply_feedback_adjustments(&engine, &index, &db_path, &p.query, &mut top_qnames, &fb);
         }
 
         // Build id_map for call graph resolution.
@@ -2566,7 +2566,7 @@ impl AsdMcpServer {
             use agentstatedeveloper_core::{apply_feedback_adjustments, FeedbackStore};
             let fb_store = AsgFeedbackStore { repo: &engine.repo };
             let fb = fb_store.flat_verdicts(&ref_name).unwrap_or_default();
-            apply_feedback_adjustments(&engine, &index, &p.description, &mut candidates, &fb);
+            apply_feedback_adjustments(&engine, &index, &db_path, &p.description, &mut candidates, &fb);
         }
 
         let recency = gather_recency(200, 14.0);
@@ -2882,7 +2882,7 @@ impl AsdMcpServer {
             use agentstatedeveloper_core::{apply_feedback_adjustments, FeedbackStore};
             let fb_store = AsgFeedbackStore { repo: &engine.repo };
             let fb = fb_store.flat_verdicts(&ref_name).unwrap_or_default();
-            apply_feedback_adjustments(&engine, &index, &p.query, &mut candidates, &fb);
+            apply_feedback_adjustments(&engine, &index, &db_path, &p.query, &mut candidates, &fb);
         }
 
         let mut files_to_inspect: Vec<serde_json::Value> = Vec::new();

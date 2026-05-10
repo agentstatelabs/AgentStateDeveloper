@@ -163,7 +163,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     // Apply durable feedback adjustments (Useful/Noisy/WrongLayer verdicts).
     let feedback_store = AsgFeedbackStore { repo: &engine.repo };
     let feedback_verdicts = feedback_store.flat_verdicts(&engine.ref_name).unwrap_or_default();
-    apply_feedback_adjustments(&engine, &index_store, &args.query, &mut candidates, &feedback_verdicts);
+    apply_feedback_adjustments(&engine, &index_store, &cfg.db_path, &args.query, &mut candidates, &feedback_verdicts);
 
     // One git pass to gather recency for all candidate files (hot = 14 days).
     let recency = gather_recency(200, 14.0);

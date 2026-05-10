@@ -232,14 +232,25 @@ pub fn resolve_scope(scope: &str, db_path: &Path) -> Vec<String> {
 fn apply_paths_filter(
     engine: &Engine,
     index_store: &AsgIndexStore,
+    db_path: &Path,
     paths_filter: &[String],
     scored: &mut Vec<(f64, String)>,
 ) {
     if paths_filter.is_empty() { return; }
+    // M60: bulk-resolve all qnames — one SQL query instead of N git reads.
+    let qname_strs: Vec<&str> = scored.iter().map(|(_, q)| q.as_str()).collect();
+    let resolved = SearchFtsDb::open(db_path)
+        .ok()
+        .map(|fts| fts.resolve_qnames_bulk(&qname_strs))
+        .unwrap_or_default();
     scored.retain(|(_, qname)| {
-        match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
-            Ok(Some(sym)) => matches_any_path_glob(paths_filter, &sym.file),
-            _ => true,
+        if let Some(rsym) = resolved.get(qname.as_str()) {
+            matches_any_path_glob(paths_filter, &rsym.file)
+        } else {
+            match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+                Ok(Some(sym)) => matches_any_path_glob(paths_filter, &sym.file),
+                _ => true,
+            }
         }
     });
 }
@@ -253,19 +264,36 @@ fn apply_paths_filter(
 fn apply_exclusions(
     engine: &Engine,
     index_store: &AsgIndexStore,
+    db_path: &Path,
     exclude_terms: &[String],
     scored: &mut Vec<(f64, String)>,
 ) {
     if exclude_terms.is_empty() { return; }
+    // M60: bulk-resolve all qnames — one SQL query; FTS carries doc + sig_orig.
+    let qname_strs: Vec<&str> = scored.iter().map(|(_, q)| q.as_str()).collect();
+    let resolved = SearchFtsDb::open(db_path)
+        .ok()
+        .map(|fts| fts.resolve_qnames_bulk(&qname_strs))
+        .unwrap_or_default();
     scored.retain(|(_, qname)| {
-        let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
-            Ok(Some(s)) => s,
-            _ => return true,
-        };
         let qname_lower = qname.to_lowercase();
-        let file_lower = sym.file.to_lowercase();
-        let doc_lower = sym.doc.as_deref().unwrap_or("").to_lowercase();
-        let sig_lower = sym.signature.as_deref().unwrap_or("").to_lowercase();
+        let (file_lower, doc_lower, sig_lower) =
+            if let Some(rsym) = resolved.get(qname.as_str()) {
+                (
+                    rsym.file.to_lowercase(),
+                    rsym.doc.as_deref().unwrap_or("").to_lowercase(),
+                    rsym.signature.as_deref().unwrap_or("").to_lowercase(),
+                )
+            } else {
+                match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+                    Ok(Some(s)) => (
+                        s.file.to_lowercase(),
+                        s.doc.as_deref().unwrap_or("").to_lowercase(),
+                        s.signature.as_deref().unwrap_or("").to_lowercase(),
+                    ),
+                    _ => return true,
+                }
+            };
         !exclude_terms.iter().any(|excl| {
             qname_lower.contains(excl.as_str())
                 || file_lower.contains(excl.as_str())
@@ -286,23 +314,36 @@ const ANCHOR_SCORE: f64 = 0.5;
 /// Maximum number of extra symbols that can be injected by the anchor pass.
 const MAX_ANCHORS: usize = 5;
 
-/// After candidate selection, scan every ledger entry whose summary contains
-/// a query token and inject the bearing symbol if it is not already present.
+/// After candidate selection, inject invariant/hazard-bearing symbols whose
+/// ledger summaries match a query token but were dropped by dedup or FTS ranking.
 ///
-/// Only Invariant and Hazard entries trigger anchoring — Decisions and Notes
-/// are informational and don't imply the symbol must surface for the query.
+/// M60: replaced 2 `get_tree` git reads (ledger tree + qname index) with a
+/// single SQL query against the denormalized `ledger_text`/`ledger_flags`
+/// UNINDEXED columns in `asd_search_fts`.
 ///
-/// Cost: one `get_tree` call over the ledger tree (small dataset) + one
-/// `get_tree` call over the qname index to build the id→qname reverse map.
-/// Both are cached Git-object reads.
+/// Falls back to the git-based path when the FTS index is unavailable.
 fn ledger_anchor_pass(
     engine: &Engine,
+    db_path: &Path,
     tokens: &[String],
     candidates: &mut Vec<(f64, String)>,
 ) {
     if tokens.is_empty() { return; }
 
-    // Walk the entire ledger tree looking for token-matching entries.
+    let existing_qnames: HashSet<String> = candidates.iter().map(|(_, q)| q.clone()).collect();
+
+    // Fast path: FTS denormalized columns — zero git reads.
+    if let Ok(fts) = SearchFtsDb::open(db_path) {
+        if fts.has_data() {
+            let hits = fts.anchor_candidates(tokens, &existing_qnames, MAX_ANCHORS);
+            for (qname, _sym_id) in hits {
+                candidates.push((ANCHOR_SCORE, qname));
+            }
+            return;
+        }
+    }
+
+    // Fallback: git object store (used when FTS index is absent or empty).
     let ledger_prefix = format!("{}/ledger", crate::paths::ASD_ROOT);
     let ledger_tree = match engine.repo.get_tree(&engine.ref_name, &ledger_prefix) {
         Ok(v) => v,
@@ -321,7 +362,7 @@ fn ledger_anchor_pass(
                         let summary_lower = entry.summary.to_lowercase();
                         if tokens.iter().any(|t| summary_lower.contains(t.as_str())) {
                             matching_sym_ids.push(sym_id.clone());
-                            break; // one match per symbol is enough
+                            break;
                         }
                     }
                 }
@@ -331,7 +372,6 @@ fn ledger_anchor_pass(
 
     if matching_sym_ids.is_empty() { return; }
 
-    // Build symbol_id → Symbol reverse map from the qname index.
     let qname_prefix = format!("{}/index/by-qname", crate::paths::ASD_ROOT);
     let id_map: HashMap<String, Symbol> =
         match engine.repo.get_tree(&engine.ref_name, &qname_prefix) {
@@ -343,9 +383,7 @@ fn ledger_anchor_pass(
             _ => HashMap::new(),
         };
 
-    let existing_qnames: HashSet<String> = candidates.iter().map(|(_, q)| q.clone()).collect();
     let mut anchors = 0usize;
-
     for sym_id in matching_sym_ids {
         if anchors >= MAX_ANCHORS { break; }
         if let Some(sym) = id_map.get(&sym_id) {
@@ -532,12 +570,13 @@ pub fn find_candidates(
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(depth);
 
-        apply_paths_filter(engine, index_store, &filters.paths_filter, &mut scored);
-        apply_exclusions(engine, index_store, &filters.exclude_terms, &mut scored);
+        apply_paths_filter(engine, index_store, db_path, &filters.paths_filter, &mut scored);
+        apply_exclusions(engine, index_store, db_path, &filters.exclude_terms, &mut scored);
 
         // Ledger-anchor pass: inject invariant/hazard-bearing symbols that
         // matched query tokens but were dropped by dedup or FTS ranking.
-        ledger_anchor_pass(engine, tokens, &mut scored);
+        // M60: uses FTS denormalized columns via db_path — no git reads.
+        ledger_anchor_pass(engine, db_path, tokens, &mut scored);
 
         return scored;
     }
@@ -573,9 +612,9 @@ pub fn find_candidates(
     }
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(depth);
-    apply_paths_filter(engine, index_store, &filters.paths_filter, &mut scored);
-    apply_exclusions(engine, index_store, &filters.exclude_terms, &mut scored);
-    ledger_anchor_pass(engine, tokens, &mut scored);
+    apply_paths_filter(engine, index_store, db_path, &filters.paths_filter, &mut scored);
+    apply_exclusions(engine, index_store, db_path, &filters.exclude_terms, &mut scored);
+    ledger_anchor_pass(engine, db_path, tokens, &mut scored);
     scored
 }
 
@@ -1058,6 +1097,7 @@ fn query_family_matches(current_query_tokens: &std::collections::HashSet<String>
 pub fn apply_feedback_adjustments(
     engine: &Engine,
     index_store: &AsgIndexStore,
+    db_path: &Path,
     query: &str,
     scored: &mut Vec<(f64, String)>,
     feedback_entries: &[(String, String, crate::schema::FeedbackVerdict)],
@@ -1067,7 +1107,7 @@ pub fn apply_feedback_adjustments(
     let current_tokens: std::collections::HashSet<String> = fb_query_tokens(&query_norm);
     let current_tokens_vec: Vec<&str> = current_tokens.iter().map(|s| s.as_str()).collect();
 
-    // --- Recurring false positive map (same as before) ---
+    // --- Recurring false positive map ---
     let mut noisy_queries_by_sym: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
     for (sym_id, fb_query, verdict) in feedback_entries {
         if matches!(verdict, crate::schema::FeedbackVerdict::Noisy | crate::schema::FeedbackVerdict::WrongLayer) {
@@ -1092,13 +1132,12 @@ pub fn apply_feedback_adjustments(
         })
         .collect();
 
-    // --- t-001: Build noisy-file map: file → [(sym_id, kind, name_tokens)].
-    // We single-pass the index tree so we only pay one repo.get_tree call.
-    // Only symbols whose query family overlaps the current query are tracked.
+    // --- t-001: Build noisy-file map via asd_symbols_meta (M60: no git read).
+    // Falls back to get_tree when FTS index is unavailable.
     struct NoisySymInfo { sym_id: String, name_tokens: HashSet<String> }
     let mut noisy_file_syms: HashMap<String, Vec<NoisySymInfo>> = HashMap::new();
     {
-        let noisy_ids: HashSet<&str> = feedback_entries.iter()
+        let noisy_ids: Vec<&str> = feedback_entries.iter()
             .filter(|(_, fb_query, verdict)| {
                 matches!(verdict, crate::schema::FeedbackVerdict::Noisy | crate::schema::FeedbackVerdict::WrongLayer)
                     && query_family_matches(&current_tokens, fb_query)
@@ -1106,16 +1145,33 @@ pub fn apply_feedback_adjustments(
             .map(|(sym_id, _, _)| sym_id.as_str())
             .collect();
         if !noisy_ids.is_empty() {
-            let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-            if let Ok(serde_json::Value::Object(map)) = engine.repo.get_tree(&engine.ref_name, &prefix) {
-                for sym_val in map.values() {
-                    if let Ok(sym) = serde_json::from_value::<Symbol>(sym_val.clone()) {
-                        if noisy_ids.contains(sym.symbol_id.as_str()) {
-                            let name_tokens = name_tokens_from_qname(&sym.qname);
-                            noisy_file_syms.entry(sym.file.clone()).or_default().push(NoisySymInfo {
-                                sym_id: sym.symbol_id,
-                                name_tokens,
-                            });
+            // M60: bulk-resolve noisy symbol_ids via FTS — one SQL query.
+            let resolved = SearchFtsDb::open(db_path)
+                .ok()
+                .map(|fts| fts.resolve_symbol_ids_bulk(&noisy_ids))
+                .unwrap_or_default();
+            if !resolved.is_empty() {
+                for (sym_id_str, rsym) in &resolved {
+                    let name_tokens = name_tokens_from_qname(&rsym.qname);
+                    noisy_file_syms.entry(rsym.file.clone()).or_default().push(NoisySymInfo {
+                        sym_id: sym_id_str.clone(),
+                        name_tokens,
+                    });
+                }
+            } else {
+                // Fallback: git object store.
+                let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+                if let Ok(serde_json::Value::Object(map)) = engine.repo.get_tree(&engine.ref_name, &prefix) {
+                    let noisy_set: HashSet<&str> = noisy_ids.into_iter().collect();
+                    for sym_val in map.values() {
+                        if let Ok(sym) = serde_json::from_value::<Symbol>(sym_val.clone()) {
+                            if noisy_set.contains(sym.symbol_id.as_str()) {
+                                let name_tokens = name_tokens_from_qname(&sym.qname);
+                                noisy_file_syms.entry(sym.file.clone()).or_default().push(NoisySymInfo {
+                                    sym_id: sym.symbol_id,
+                                    name_tokens,
+                                });
+                            }
                         }
                     }
                 }
@@ -1123,19 +1179,38 @@ pub fn apply_feedback_adjustments(
         }
     }
 
+    // M60: pre-fetch all scored qnames in one SQL batch — no per-symbol git read.
+    let scored_qnames: Vec<&str> = scored.iter().map(|(_, q)| q.as_str()).collect();
+    let resolved_map = SearchFtsDb::open(db_path)
+        .ok()
+        .map(|fts| fts.resolve_qnames_bulk(&scored_qnames))
+        .unwrap_or_default();
+
     // --- Score adjustments ---
     for (score, qname) in scored.iter_mut() {
-        let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
-            Ok(Some(s)) => s,
-            _ => continue,
+        // M60: use FTS bulk-resolved data; fall back to git read if missing.
+        let (sym_file, sym_symbol_id, sym_kind) =
+            if let Some(rsym) = resolved_map.get(qname.as_str()) {
+                (rsym.file.clone(), rsym.symbol_id.clone(), rsym.kind.clone())
+            } else {
+                match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+                    Ok(Some(s)) => (s.file, s.symbol_id, format!("{:?}", s.kind).to_lowercase()),
+                    _ => continue,
+                }
+            };
+        let sym_id = &sym_symbol_id;
+        // Reconstruct a minimal view for the checks below.
+        let sym_kind_enum = match sym_kind.as_str() {
+            "class"  => SymbolKind::Class,
+            "module" => SymbolKind::Module,
+            _        => SymbolKind::Function,
         };
-        let sym_id = &sym.symbol_id;
 
         // Sibling file suppression: any symbol sharing a file with a noisy symbol
         // is suppressed unless it has an explicit Useful verdict or is a Class/Module
         // container (which may host unrelated symbols in the same file).
-        if let Some(noisy_syms) = noisy_file_syms.get(&sym.file) {
-            let is_container = matches!(sym.kind, SymbolKind::Class | SymbolKind::Module);
+        if let Some(noisy_syms) = noisy_file_syms.get(&sym_file) {
+            let is_container = matches!(sym_kind_enum, SymbolKind::Class | SymbolKind::Module);
             let is_the_noisy_sym = noisy_syms.iter().any(|ns| ns.sym_id == *sym_id);
             if !is_container && !is_the_noisy_sym {
                 let has_useful = feedback_entries.iter().any(|(fid, fq, v)| {
@@ -1196,6 +1271,7 @@ pub struct FeedbackImpact {
 pub fn explain_feedback_impacts(
     engine: &Engine,
     index_store: &AsgIndexStore,
+    db_path: &Path,
     query: &str,
     qnames: &[String],
     feedback_entries: &[crate::schema::FeedbackEntry],
@@ -1205,11 +1281,11 @@ pub fn explain_feedback_impacts(
     let query_norm = query.to_lowercase();
     let current_tokens = fb_query_tokens(&query_norm);
 
-    // Build noisy-file → name_tokens map.
+    // M60: Build noisy-file map via resolve_symbol_ids_bulk — no git read.
     struct NoisyFileEntry { sym_id: String, name_tokens: HashSet<String> }
     let mut noisy_file_syms: HashMap<String, Vec<NoisyFileEntry>> = HashMap::new();
     {
-        let noisy_ids: HashSet<&str> = feedback_entries.iter()
+        let noisy_ids: Vec<&str> = feedback_entries.iter()
             .filter(|e| {
                 matches!(e.verdict, crate::schema::FeedbackVerdict::Noisy | crate::schema::FeedbackVerdict::WrongLayer)
                     && query_family_matches(&current_tokens, &e.query)
@@ -1217,15 +1293,30 @@ pub fn explain_feedback_impacts(
             .map(|e| e.symbol_id.as_str())
             .collect();
         if !noisy_ids.is_empty() {
-            let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-            if let Ok(serde_json::Value::Object(map)) = engine.repo.get_tree(&engine.ref_name, &prefix) {
-                for sym_val in map.values() {
-                    if let Ok(sym) = serde_json::from_value::<Symbol>(sym_val.clone()) {
-                        if noisy_ids.contains(sym.symbol_id.as_str()) {
-                            noisy_file_syms.entry(sym.file.clone()).or_default().push(NoisyFileEntry {
-                                sym_id: sym.symbol_id,
-                                name_tokens: name_tokens_from_qname(&sym.qname),
-                            });
+            let resolved = SearchFtsDb::open(db_path)
+                .ok()
+                .map(|fts| fts.resolve_symbol_ids_bulk(&noisy_ids))
+                .unwrap_or_default();
+            if !resolved.is_empty() {
+                for (sym_id_str, rsym) in &resolved {
+                    noisy_file_syms.entry(rsym.file.clone()).or_default().push(NoisyFileEntry {
+                        sym_id: sym_id_str.clone(),
+                        name_tokens: name_tokens_from_qname(&rsym.qname),
+                    });
+                }
+            } else {
+                // Fallback: git object store.
+                let noisy_set: HashSet<&str> = noisy_ids.into_iter().collect();
+                let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+                if let Ok(serde_json::Value::Object(map)) = engine.repo.get_tree(&engine.ref_name, &prefix) {
+                    for sym_val in map.values() {
+                        if let Ok(sym) = serde_json::from_value::<Symbol>(sym_val.clone()) {
+                            if noisy_set.contains(sym.symbol_id.as_str()) {
+                                noisy_file_syms.entry(sym.file.clone()).or_default().push(NoisyFileEntry {
+                                    sym_id: sym.symbol_id,
+                                    name_tokens: name_tokens_from_qname(&sym.qname),
+                                });
+                            }
                         }
                     }
                 }
@@ -1233,12 +1324,32 @@ pub fn explain_feedback_impacts(
         }
     }
 
+    // M60: pre-fetch all qnames in one SQL batch.
+    let qname_strs: Vec<&str> = qnames.iter().map(|q| q.as_str()).collect();
+    let resolved_map = SearchFtsDb::open(db_path)
+        .ok()
+        .map(|fts| fts.resolve_qnames_bulk(&qname_strs))
+        .unwrap_or_default();
+
     for qname in qnames {
-        let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
-            Ok(Some(s)) => s,
-            _ => continue,
-        };
-        let sym_id = &sym.symbol_id;
+        let (sym_id_owned, sym_file, sym_kind_enum) =
+            if let Some(rsym) = resolved_map.get(qname.as_str()) {
+                let kind = match rsym.kind.as_str() {
+                    "class"  => SymbolKind::Class,
+                    "module" => SymbolKind::Module,
+                    _        => SymbolKind::Function,
+                };
+                (rsym.symbol_id.clone(), rsym.file.clone(), kind)
+            } else {
+                match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+                    Ok(Some(s)) => {
+                        let k = s.kind.clone();
+                        (s.symbol_id, s.file, k)
+                    }
+                    _ => continue,
+                }
+            };
+        let sym_id = &sym_id_owned;
 
         // Check per-symbol verdicts first (direct match takes priority).
         let mut found = false;
@@ -1257,8 +1368,8 @@ pub fn explain_feedback_impacts(
         if found { continue; }
 
         // Check sibling suppression.
-        if let Some(noisy_syms) = noisy_file_syms.get(&sym.file) {
-            if !matches!(sym.kind, SymbolKind::Class | SymbolKind::Module) {
+        if let Some(noisy_syms) = noisy_file_syms.get(&sym_file) {
+            if !matches!(sym_kind_enum, SymbolKind::Class | SymbolKind::Module) {
                 let candidate_tokens = name_tokens_from_qname(qname);
                 let overlaps = noisy_syms.iter().any(|ns| {
                     ns.sym_id != *sym_id
@@ -1294,6 +1405,7 @@ pub fn explain_feedback_impacts(
 pub fn apply_file_scope_feedback(
     engine: &Engine,
     index_store: &AsgIndexStore,
+    db_path: &Path,
     query: &str,
     scored: &mut Vec<(f64, String)>,
     file_scope_entries: &[(String, crate::schema::FeedbackVerdict, String)],
@@ -1302,15 +1414,26 @@ pub fn apply_file_scope_feedback(
     let query_norm = query.to_lowercase();
     let current_tokens = fb_query_tokens(&query_norm);
 
+    // M60: pre-fetch all scored qnames in one SQL batch — no per-symbol git read.
+    let qname_strs: Vec<&str> = scored.iter().map(|(_, q)| q.as_str()).collect();
+    let resolved_map = SearchFtsDb::open(db_path)
+        .ok()
+        .map(|fts| fts.resolve_qnames_bulk(&qname_strs))
+        .unwrap_or_default();
+
     for (score, qname) in scored.iter_mut() {
         if !score.is_finite() { continue; }
-        let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
-            Ok(Some(s)) => s,
-            _ => continue,
+        let file = if let Some(rsym) = resolved_map.get(qname.as_str()) {
+            rsym.file.clone()
+        } else {
+            match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+                Ok(Some(s)) => s.file,
+                _ => continue,
+            }
         };
         for (file_glob, verdict, entry_query) in file_scope_entries {
             if !query_family_matches(&current_tokens, entry_query) { continue; }
-            if !glob_match(file_glob, &sym.file) { continue; }
+            if !glob_match(file_glob, &file) { continue; }
             match verdict {
                 crate::schema::FeedbackVerdict::Useful => *score += 1.5,
                 crate::schema::FeedbackVerdict::Noisy | crate::schema::FeedbackVerdict::WrongLayer => {

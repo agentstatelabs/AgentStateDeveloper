@@ -125,6 +125,23 @@ pub struct SymbolMeta {
     pub kind: String,
 }
 
+/// Full symbol resolution result from the FTS table.
+///
+/// Returned by [`SearchFtsDb::resolve_qnames_bulk`] and
+/// [`SearchFtsDb::resolve_symbol_ids_bulk`]. Carries every field needed by
+/// feedback adjustment and filter functions so they can operate without any
+/// git object-store reads.
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedSymbol {
+    pub symbol_id: String,
+    /// Original (unexpanded) qname — needed for name-token extraction in feedback functions.
+    pub qname: String,
+    pub file: String,
+    pub kind: String,
+    pub doc: Option<String>,
+    pub signature: Option<String>,
+}
+
 /// Filters applied before BM25 ranking.
 #[derive(Debug, Default, Clone)]
 pub struct FtsFilters {
@@ -520,6 +537,162 @@ impl SearchFtsDb {
                     symbol_id: row.get(1)?,
                     file:      row.get(2)?,
                     kind:      row.get(3)?,
+                },
+            ))
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    }
+
+    /// Anchor-candidate lookup: return `(qname, symbol_id)` pairs for symbols
+    /// that have Invariant or Hazard ledger entries whose text matches at least
+    /// one of `tokens`, and are not already in `existing_qnames`.
+    ///
+    /// Replaces the two `get_tree` calls in `ledger_anchor_pass`:
+    ///   1. `get_tree("/asd/v1/ledger")` — full ledger tree walk
+    ///   2. `get_tree("/asd/v1/index/by-qname")` — reverse id→qname map
+    ///
+    /// Both replaced by a single SQLite scan against the UNINDEXED
+    /// `ledger_text` / `ledger_flags` columns populated at `asd index` time.
+    ///
+    /// Returns at most `limit` results (matches `MAX_ANCHORS` in candidates.rs).
+    pub fn anchor_candidates(
+        &self,
+        tokens: &[String],
+        existing_qnames: &std::collections::HashSet<String>,
+        limit: usize,
+    ) -> Vec<(String, String)> {
+        if tokens.is_empty() {
+            return vec![];
+        }
+
+        // Build WHERE clause: ledger_flags must contain invariant or hazard,
+        // AND ledger_text must contain at least one query token.
+        // Both are UNINDEXED columns — regular LIKE is fine (not FTS MATCH).
+        let flag_clause =
+            "(ledger_flags LIKE '%invariant%' OR ledger_flags LIKE '%hazard%')";
+
+        // One OR clause per token: ledger_text LIKE '%token%'
+        let text_clauses: Vec<String> = tokens
+            .iter()
+            .map(|t| format!("ledger_text LIKE '%{}%'", t.replace('\'', "''")))
+            .collect();
+        let text_clause = format!("({})", text_clauses.join(" OR "));
+
+        let sql = format!(
+            "SELECT qname_orig, symbol_id
+             FROM asd_search_fts
+             WHERE ledger_text != ''
+               AND {flag_clause}
+               AND {text_clause}
+               AND tier != '2'
+             LIMIT {limit}"
+        );
+
+        let mut stmt = match self.conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+
+        stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map(|rows| {
+            rows.filter_map(|r| r.ok())
+                .filter(|(qname, _)| !existing_qnames.contains(qname))
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Bulk-resolve qnames to [`ResolvedSymbol`] from the FTS table.
+    ///
+    /// Returns `HashMap<qname, ResolvedSymbol>` for all qnames that have a row.
+    /// Missing entries are silently omitted (unknown qname or stale index).
+    ///
+    /// Replaces per-symbol `get_symbol_by_qname` git reads in:
+    /// - `apply_feedback_adjustments`
+    /// - `explain_feedback_impacts`
+    /// - `apply_file_scope_feedback`
+    /// - `apply_paths_filter`
+    /// - `apply_exclusions`
+    ///
+    /// Cost: one SQL query per call regardless of batch size.
+    pub fn resolve_qnames_bulk(&self, qnames: &[&str]) -> HashMap<String, ResolvedSymbol> {
+        if qnames.is_empty() {
+            return HashMap::new();
+        }
+        // One row per qname_orig (guaranteed unique by rebuild_refs dedup).
+        // doc and sig_orig may be NULL — map to Option.
+        let placeholders: Vec<String> = (1..=qnames.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT qname_orig, symbol_id, file_orig, kind, doc, sig_orig
+             FROM asd_search_fts
+             WHERE qname_orig IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = match self.conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(_) => return HashMap::new(),
+        };
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            qnames.iter().map(|q| q as &dyn rusqlite::types::ToSql).collect();
+        // Columns: 0=qname_orig (key), 1=symbol_id, 2=file_orig, 3=kind, 4=doc, 5=sig_orig
+        stmt.query_map(params_refs.as_slice(), |row| {
+            let qname: String   = row.get(0)?;
+            let doc_raw: Option<String> = row.get(4)?;
+            let sig_raw: Option<String> = row.get(5)?;
+            Ok((
+                qname.clone(),
+                ResolvedSymbol {
+                    symbol_id: row.get(1)?,
+                    qname,
+                    file:      row.get(2)?,
+                    kind:      row.get(3)?,
+                    doc:       doc_raw.filter(|s| !s.is_empty()),
+                    signature: sig_raw.filter(|s| !s.is_empty()),
+                },
+            ))
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    }
+
+    /// Also resolve by symbol_id batch — used by feedback functions that have
+    /// symbol_ids (not qnames) and need file/qname/kind for sibling suppression.
+    ///
+    /// Cost: one SQL query, returns `HashMap<symbol_id, ResolvedSymbol>`.
+    pub fn resolve_symbol_ids_bulk(&self, symbol_ids: &[&str]) -> HashMap<String, ResolvedSymbol> {
+        if symbol_ids.is_empty() {
+            return HashMap::new();
+        }
+        let placeholders: Vec<String> = (1..=symbol_ids.len()).map(|i| format!("?{i}")).collect();
+        // Columns: 0=symbol_id (key), 1=qname_orig, 2=file_orig, 3=kind, 4=doc, 5=sig_orig
+        let sql = format!(
+            "SELECT symbol_id, qname_orig, file_orig, kind, doc, sig_orig
+             FROM asd_search_fts
+             WHERE symbol_id IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = match self.conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(_) => return HashMap::new(),
+        };
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            symbol_ids.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+        stmt.query_map(params_refs.as_slice(), |row| {
+            let sym_id: String = row.get(0)?;
+            let doc_raw: Option<String> = row.get(4)?;
+            let sig_raw: Option<String> = row.get(5)?;
+            Ok((
+                sym_id.clone(),
+                ResolvedSymbol {
+                    symbol_id: sym_id,
+                    qname:     row.get(1)?,
+                    file:      row.get(2)?,
+                    kind:      row.get(3)?,
+                    doc:       doc_raw.filter(|s| !s.is_empty()),
+                    signature: sig_raw.filter(|s| !s.is_empty()),
                 },
             ))
         })
