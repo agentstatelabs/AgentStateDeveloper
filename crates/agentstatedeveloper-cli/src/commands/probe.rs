@@ -63,6 +63,23 @@ pub enum ProbeSub {
     Run(ProbeRunArgs),
     /// Append a new probe entry to .asd/probes.toml.
     Add(ProbeAddArgs),
+    /// Show probe run history from .asd/probe-history.jsonl.
+    History(ProbeHistoryArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ProbeHistoryArgs {
+    /// Show last N runs (default: 20).
+    #[arg(long, default_value = "20")]
+    pub last: usize,
+
+    /// Filter to runs that were recorded with a specific --tag filter.
+    #[arg(long)]
+    pub tag: Option<String>,
+
+    /// Emit raw JSONL records instead of the summary table.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -172,6 +189,7 @@ pub fn run(cfg: &Config, cmd: ProbeCmd) -> Result<()> {
     match cmd.sub {
         ProbeSub::Run(args) => run_probes(cfg, args),
         ProbeSub::Add(args) => add_probe(cfg, args),
+        ProbeSub::History(args) => show_history(cfg, args),
     }
 }
 
@@ -184,6 +202,39 @@ fn probe_file_path(cfg: &Config) -> PathBuf {
         .parent()
         .unwrap_or(Path::new("."));
     db_dir.join(".asd").join("probes.toml")
+}
+
+fn history_path(cfg: &Config) -> PathBuf {
+    let db_dir = Path::new(&cfg.db_path)
+        .parent()
+        .unwrap_or(Path::new("."));
+    db_dir.join(".asd").join("probe-history.jsonl")
+}
+
+/// Append a compact run record to probe-history.jsonl and prune to MAX_HISTORY lines.
+/// Failures here are silently ignored — history is best-effort, never blocking.
+const MAX_HISTORY: usize = 500;
+
+fn append_history(cfg: &Config, record: &Value) {
+    let path = history_path(cfg);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let new_line = match serde_json::to_string(record) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut lines: Vec<String> = existing.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.to_string())
+        .collect();
+    lines.push(new_line);
+    if lines.len() > MAX_HISTORY {
+        lines.drain(0..lines.len() - MAX_HISTORY);
+    }
+    let content = lines.join("\n") + "\n";
+    let _ = std::fs::write(&path, content);
 }
 
 fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
@@ -369,14 +420,16 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
         .map(|(i, _)| result_to_json(&results[*i]))
         .collect();
 
+    // Compute summary values shared by JSON output, human output, and history.
+    let wall_time_ms = wall_start.elapsed().as_millis();
+    let finished_at = Utc::now().to_rfc3339();
+    let budget_failed = !slow_violations.is_empty();
+    let slow_violation_names: Vec<&str> = slow_violations.iter()
+        .map(|r| r.name.as_str())
+        .collect();
+
     if args.json {
         let json_results: Vec<Value> = results.iter().map(|r| result_to_json(r)).collect();
-        let slow_violation_names: Vec<&str> = slow_violations.iter()
-            .map(|r| r.name.as_str())
-            .collect();
-        let budget_failed = !slow_violations.is_empty();
-        let wall_time_ms = wall_start.elapsed().as_millis();
-        let finished_at = Utc::now().to_rfc3339();
         println!("{}", serde_json::to_string_pretty(&serde_json::json!({
             "asd_version": env!("CARGO_PKG_VERSION"),
             "started_at": started_at,
@@ -397,7 +450,6 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
             "results": json_results,
         }))?);
     } else {
-        let wall_time_ms = wall_start.elapsed().as_millis();
         println!("\n{} probe(s): {} passed, {} failed  [{} workers, {}ms wall]",
             results.len(), passed, failed, jobs, wall_time_ms);
         if !slow_violations.is_empty() {
@@ -416,6 +468,29 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
             }
         }
     }
+
+    // Always append a compact record to probe-history.jsonl regardless of output mode.
+    // Omits per-probe results and debug_payload — operational telemetry only.
+    let history_record = serde_json::json!({
+        "kind": "probe_run",
+        "asd_version": env!("CARGO_PKG_VERSION"),
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "probe_file": probe_file_path(cfg),
+        "db_state": db_state,
+        "symbol_count": symbol_count,
+        "total": results.len(),
+        "passed": passed,
+        "failed": failed,
+        "budget_failed": budget_failed,
+        "wall_time_ms": wall_time_ms,
+        "worker_count": jobs,
+        "performance_budget_ms": args.fail_slow,
+        "filter_name": args.name,
+        "filter_tag": args.tag,
+        "slowest": slowest_top5,
+    });
+    append_history(cfg, &history_record);
 
     if failed > 0 || !slow_violations.is_empty() {
         std::process::exit(1);
@@ -880,6 +955,87 @@ fn summarize_debug_payload(json: &Value) -> Option<String> {
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// probe history
+// ---------------------------------------------------------------------------
+
+fn show_history(cfg: &Config, args: ProbeHistoryArgs) -> Result<()> {
+    let path = history_path(cfg);
+    if !path.exists() {
+        println!("No probe history yet. Run `asd probe run` to record the first entry.");
+        return Ok(());
+    }
+
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading {}", path.display()))?;
+
+    // Parse all non-empty lines as JSON records.
+    let mut records: Vec<Value> = raw.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+
+    // Apply --tag filter (matches filter_tag field recorded in history).
+    if let Some(ref tag) = args.tag {
+        records.retain(|r| {
+            r.get("filter_tag")
+                .and_then(Value::as_str)
+                .map_or(false, |t| t == tag)
+        });
+    }
+
+    // Most recent last in file — show last N in reverse-chronological order.
+    let total = records.len();
+    let start = total.saturating_sub(args.last);
+    let mut window: Vec<&Value> = records[start..].iter().rev().collect();
+
+    if window.is_empty() {
+        println!("No matching history records.");
+        return Ok(());
+    }
+
+    if args.json {
+        // Emit each record as a JSON line.
+        for r in &window {
+            println!("{}", serde_json::to_string(r)?);
+        }
+    } else {
+        // Summary table: version | date | total/passed | wall_ms | slowest probe
+        println!("{:<10}  {:<26}  {:>5}  {:>5}  {:>10}  {:<8}  {}",
+            "version", "started_at", "total", "pass", "wall_ms", "budget", "slowest");
+        println!("{}", "-".repeat(90));
+        for r in &mut window {
+            let version   = r.get("asd_version").and_then(Value::as_str).unwrap_or("?");
+            let started   = r.get("started_at").and_then(Value::as_str).unwrap_or("?");
+            // Trim to date+time without sub-seconds: "2026-05-10T04:18:31"
+            let started_short = &started[..started.len().min(19)];
+            let total_n   = r.get("total").and_then(Value::as_u64).unwrap_or(0);
+            let passed_n  = r.get("passed").and_then(Value::as_u64).unwrap_or(0);
+            let wall      = r.get("wall_time_ms").and_then(Value::as_u64).unwrap_or(0);
+            let budget_ok = r.get("budget_failed").and_then(Value::as_bool)
+                .map_or("—", |b| if b { "FAIL" } else { "ok" });
+            let slowest_name = r.get("slowest")
+                .and_then(Value::as_array)
+                .and_then(|a| a.first())
+                .and_then(|s| s.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("—");
+            let slowest_ms = r.get("slowest")
+                .and_then(Value::as_array)
+                .and_then(|a| a.first())
+                .and_then(|s| s.get("duration_ms"))
+                .and_then(Value::as_u64)
+                .map(|ms| format!("({}ms)", ms))
+                .unwrap_or_default();
+            println!("{:<10}  {:<26}  {:>5}  {:>5}  {:>10}  {:<8}  {} {}",
+                version, started_short, total_n, passed_n, wall, budget_ok,
+                slowest_name, slowest_ms);
+        }
+        println!("\n{} run(s) shown ({}  total recorded)", window.len(), total);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
