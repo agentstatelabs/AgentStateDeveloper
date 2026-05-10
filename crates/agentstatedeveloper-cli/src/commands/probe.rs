@@ -342,43 +342,51 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
         Vec::new()
     };
 
-    // Top-5 slowest (for JSON output and summary).
+    // Helper closure: render a ProbeResult as the canonical JSON shape.
+    let fail_slow = args.fail_slow;
+    let result_to_json = |r: &ProbeResult| {
+        let is_slow = fail_slow.map_or(false, |ms| r.duration_ms > ms as u128);
+        serde_json::json!({
+            "name": r.name,
+            "command": r.command,
+            "assertion": r.assertion,
+            "tags": r.tags,
+            "passed": r.error.is_none(),
+            "slow": is_slow,
+            "timed_out": r.timed_out,
+            "duration_ms": r.duration_ms,
+            "error": r.error,
+            "debug_payload": r.debug_payload,
+        })
+    };
+
+    // Top-5 slowest — full result shape, pre-sorted descending by duration_ms.
     let mut by_duration: Vec<(usize, u128)> = results.iter().enumerate()
         .map(|(i, r)| (i, r.duration_ms))
         .collect();
     by_duration.sort_by(|a, b| b.1.cmp(&a.1));
-    let slowest_top5: Vec<Value> = by_duration.iter().take(5).map(|(i, ms)| {
-        serde_json::json!({ "name": results[*i].name, "duration_ms": ms })
-    }).collect();
+    let slowest_top5: Vec<Value> = by_duration.iter().take(5)
+        .map(|(i, _)| result_to_json(&results[*i]))
+        .collect();
 
     if args.json {
-        let json_results: Vec<Value> = results.iter().map(|r| {
-            let is_slow = args.fail_slow.map_or(false, |ms| r.duration_ms > ms as u128);
-            serde_json::json!({
-                "name": r.name,
-                "command": r.command,
-                "assertion": r.assertion,
-                "tags": r.tags,
-                "passed": r.error.is_none(),
-                "slow": is_slow,
-                "timed_out": r.timed_out,
-                "duration_ms": r.duration_ms,
-                "error": r.error,
-                "debug_payload": r.debug_payload,
-            })
-        }).collect();
+        let json_results: Vec<Value> = results.iter().map(|r| result_to_json(r)).collect();
         let slow_violation_names: Vec<&str> = slow_violations.iter()
             .map(|r| r.name.as_str())
             .collect();
+        let budget_failed = !slow_violations.is_empty();
         let wall_time_ms = wall_start.elapsed().as_millis();
         let finished_at = Utc::now().to_rfc3339();
         println!("{}", serde_json::to_string_pretty(&serde_json::json!({
             "asd_version": env!("CARGO_PKG_VERSION"),
             "started_at": started_at,
             "finished_at": finished_at,
+            "probe_file": probe_file_path(cfg),
+            "db_path": cfg.db_path,
             "total": results.len(),
             "passed": passed,
             "failed": failed,
+            "budget_failed": budget_failed,
             "wall_time_ms": wall_time_ms,
             "worker_count": jobs,
             "db_state": db_state,
