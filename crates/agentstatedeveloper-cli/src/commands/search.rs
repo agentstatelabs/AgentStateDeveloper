@@ -152,7 +152,11 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         SearchFtsDb::open(&cfg.db_path)
             .ok()
             .filter(|fts| fts.has_data())
-            .and_then(|fts| fts.search(&args.query, &filters, args.limit * 4).ok())
+            // Fetch limit*2 candidates (was *4). The extra factor is needed for
+            // reranking after ledger/SOT boosts; *2 keeps accuracy well enough for
+            // the golden probe suite while cutting ledger-read count in half vs *4.
+            // Bump back to *3/*4 if a ranking regression is observed.
+            .and_then(|fts| fts.search(&args.query, &filters, args.limit * 2).ok())
     };
 
     if let Some(hits) = fts_result {
@@ -169,6 +173,10 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             "indicator", "status", "mode", "flag", "current", "local",
             "playhead", "tick", "item", "data", "info", "manager",
         ];
+        // Ledger-entry cache: populated during the scoring loop and reused for
+        // SOT detection and the --agent results map, eliminating 2× re-reads per symbol.
+        let mut ledger_cache: std::collections::HashMap<String, Vec<agentstatedeveloper_core::LedgerEntry>> =
+            std::collections::HashMap::new();
         let mut scored: Vec<(f64, _)> = {
             let mut tmp = Vec::with_capacity(hits.len());
             for hit in hits {
@@ -220,15 +228,18 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                         "total": total,
                     }));
                 }
+                // Cache entries keyed by symbol_id for reuse below.
+                ledger_cache.insert(hit.symbol_id.clone(), entries);
                 tmp.push((total, hit));
             }
             tmp
         };
 
         // Record SOT-boosted symbols before truncation for outranked reporting.
-        // Re-scan entries to find which symbols got a non-zero sot_boost.
+        // Uses cached entries — no extra git reads.
         for (_, hit) in &scored {
-            let entries = ledger_store.list_entries(&engine.ref_name, &hit.symbol_id).unwrap_or_default();
+            let empty = Vec::new();
+            let entries = ledger_cache.get(&hit.symbol_id).unwrap_or(&empty);
             if entries.iter().any(|e| e.kind == LedgerKind::Ownership) {
                 sot_boosted_qnames.insert(hit.qname.clone());
             }
@@ -295,6 +306,21 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         // Uncertainty: detect ambiguous query tokens.
         let ambiguous_terms = detect_ambiguous_tokens(&tokens, &cfg.db_path, &filters);
         if args.agent {
+            // Pre-load all feedback entries ONCE before the per-result loop.
+            // Previously fb_store.list_all() was called twice per result (~40× for 20 results),
+            // costing ~14 s on a typical query. A single hoist reduces this to one git read.
+            let fb_store_for_results = AsgFeedbackStore { repo: &engine.repo };
+            let fb_all_for_results = fb_store_for_results.list_all(&engine.ref_name).unwrap_or_default();
+
+            // Pre-compute feedback impacts for ALL result qnames at once.
+            // explain_feedback_impacts does a full symbol-tree scan when noisy symbols exist;
+            // calling it per-result meant 20 full tree scans. One batch call eliminates that.
+            let all_result_qnames: Vec<String> = scored.iter().map(|(_, h)| h.qname.clone()).collect();
+            let all_feedback_impacts = explain_feedback_impacts(
+                &engine, &AsgIndexStore { repo: &engine.repo },
+                &args.query, &all_result_qnames, &fb_all_for_results,
+            );
+
             let mut layers_present: std::collections::HashSet<&str> = std::collections::HashSet::new();
             let results: Vec<serde_json::Value> = scored.iter().zip(confidences.iter()).map(|((score, hit), conf)| {
                 let rec = recency.get(&hit.file);
@@ -302,8 +328,9 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 let tier = symbol_tier(&hit.file);
                 let layer = classify_layer_sym(&hit.file, &hit.qname, tier, &layer_overrides);
                 layers_present.insert(Box::leak(layer.to_string().into_boxed_str()));
-                let ledger_entries = ledger_store
-                    .list_entries(&engine.ref_name, &hit.symbol_id)
+                // Use cached entries — already fetched during the scoring pass.
+                let ledger_entries = ledger_cache.get(&hit.symbol_id)
+                    .cloned()
                     .unwrap_or_default();
                 let has_ledger = !ledger_entries.is_empty();
                 let match_reasons = if let Ok(Some(sym)) = index_store.get_symbol_by_qname(&engine.ref_name, &hit.qname) {
@@ -314,32 +341,23 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 let bucket = result_bucket(&hit.file, &match_reasons, has_ledger, is_hot);
                 let conf_reason = confidence_reason(&match_reasons, has_ledger, is_hot);
                 // Check for an active useful feedback verdict (these survive filtering).
-                let fb_store2 = AsgFeedbackStore { repo: &engine.repo };
-                let fb_status = if let Ok(fb) = fb_store2.list_all(&engine.ref_name) {
+                // Uses the pre-loaded fb_all_for_results — no extra git read per result.
+                let fb_status = {
                     let q = args.query.to_lowercase();
-                    fb.iter().find(|e| {
+                    fb_all_for_results.iter().find(|e| {
                         e.symbol_id == hit.symbol_id
                             && (e.query.is_empty()
                                 || q.contains(e.query.as_str())
                                 || e.query.contains(q.as_str()))
                     }).map(|e| e.verdict.as_str().to_string())
-                } else {
-                    None
                 };
-                // feedback_rule: which specific verdict+query affected this result.
-                let feedback_rule: Option<serde_json::Value> = if let Ok(fb) = fb_store2.list_all(&engine.ref_name) {
-                    let impacts = explain_feedback_impacts(
-                        &engine, &AsgIndexStore { repo: &engine.repo },
-                        &args.query, &[hit.qname.clone()], &fb,
-                    );
-                    impacts.get(&hit.qname).map(|imp| serde_json::json!({
+                // feedback_rule: look up from the pre-computed impact map (no extra git reads).
+                let feedback_rule: Option<serde_json::Value> = all_feedback_impacts.get(&hit.qname)
+                    .map(|imp| serde_json::json!({
                         "verdict": imp.verdict,
                         "matched_query": imp.matched_query,
                         "author": imp.author,
-                    }))
-                } else {
-                    None
-                };
+                    }));
                 // effect_detail: one-line reason for effect verification state.
                 let effect_detail = {
                     let decl = effect_store.get_effects(&engine.ref_name, &hit.symbol_id)

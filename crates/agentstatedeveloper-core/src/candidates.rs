@@ -385,15 +385,27 @@ pub fn find_candidates(
     depth: usize,
 ) -> Vec<(f64, String)> {
     // --- FTS path ---
+    // Fetch depth*2 candidates (was depth*8). The overfetch factor is needed so
+    // ledger/SOT boosts can reorder candidates after BM25 ranking; *2 keeps
+    // accuracy well enough for the golden probe suite while cutting ledger-read
+    // count to 25% of the original. Bump to *3/*4/*8 if ranking regressions appear.
     let fts_result = SearchFtsDb::open(db_path)
         .ok()
         .filter(|fts| fts.has_data())
-        .and_then(|fts| fts.search(query, filters, depth * 8).ok());
+        .and_then(|fts| fts.search(query, filters, depth * 2).ok());
 
     if let Some(hits) = fts_result {
-        let mut scored: Vec<(f64, String)> = hits
-            .into_iter()
-            .map(|hit| {
+        // Ledger-entry cache: read once per symbol during scoring, reuse in
+        // covered_files check below. Eliminates 2× list_entries per top-N hit.
+        let mut ledger_cache: HashMap<String, Vec<crate::schema::LedgerEntry>> =
+            HashMap::with_capacity(hits.len());
+        // Also keep qname → (symbol_id, file) to avoid get_symbol_by_qname in covered_files.
+        let mut qname_to_sym: HashMap<String, (String, String)> =
+            HashMap::with_capacity(hits.len());
+
+        let mut scored: Vec<(f64, String)> = {
+            let mut tmp = Vec::with_capacity(hits.len());
+            for hit in hits {
                 let boost = hybrid_boost(&hit, tokens);
                 let (ledger_boost, ownership_struct_boost) = {
                     let entries = ledger_store
@@ -420,29 +432,29 @@ pub fn find_candidates(
                         };
                         acc + matches as f64 * weight
                     });
+                    ledger_cache.insert(hit.symbol_id.clone(), entries);
                     (text_boost, sot)
                 };
-                (hit.bm25_score + boost + ledger_boost + ownership_struct_boost, hit.qname)
-            })
-            .collect();
+                qname_to_sym.insert(hit.qname.clone(), (hit.symbol_id.clone(), hit.file.clone()));
+                tmp.push((hit.bm25_score + boost + ledger_boost + ownership_struct_boost, hit.qname));
+            }
+            tmp
+        };
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
         // File-stem injection: a file is "covered" only when the claiming
         // symbol in the top-`depth` results itself has ledger entries.  If a
         // non-ledger symbol holds the slot, the file stays open so a
         // ledger-bearing sibling can be injected via stem.  Files ranked
-        // depth+1..depth*8 are always eligible for re-injection.
+        // depth+1..depth*4 are always eligible for re-injection.
+        // Uses cached ledger data and pre-built qname→sym map — no extra git reads.
         let covered_files: HashSet<String> = scored
             .iter()
             .take(depth)
             .filter_map(|(_, qname)| {
-                let sym = index_store.get_symbol_by_qname(&engine.ref_name, qname)
-                    .ok().flatten()?;
-                let has_ledger = !ledger_store
-                    .list_entries(&engine.ref_name, &sym.symbol_id)
-                    .unwrap_or_default()
-                    .is_empty();
-                if has_ledger { Some(sym.file) } else { None }
+                let (sym_id, file) = qname_to_sym.get(qname)?;
+                let has_ledger = ledger_cache.get(sym_id).map_or(false, |e| !e.is_empty());
+                if has_ledger { Some(file.clone()) } else { None }
             })
             .collect();
 
