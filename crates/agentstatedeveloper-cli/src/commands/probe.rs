@@ -39,8 +39,11 @@ use std::process::Command as ProcessCommand;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use clap::{Args, Subcommand};
 use serde_json::Value;
+
+use agentstatedeveloper_core::{SearchFtsDb, stale_warning};
 
 use crate::config::Config;
 
@@ -248,6 +251,12 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
         eprintln!("Running {} probe(s) [{} parallel]…", n, jobs);
     }
 
+    // Gather DB metadata once before running probes (cheap reads).
+    let db_state = if stale_warning(&cfg.db_path, 3600).is_none() { "fresh" } else { "stale" };
+    let symbol_count: Option<u64> = SearchFtsDb::open(&cfg.db_path).ok()
+        .map(|fts| fts.symbol_count() as u64);
+
+    let started_at = Utc::now().to_rfc3339();
     let wall_start = Instant::now();
 
     // fail_fast_flag: set by any thread when an assertion fails and --fail-fast is active.
@@ -347,8 +356,12 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
             let is_slow = args.fail_slow.map_or(false, |ms| r.duration_ms > ms as u128);
             serde_json::json!({
                 "name": r.name,
+                "command": r.command,
+                "assertion": r.assertion,
+                "tags": r.tags,
                 "passed": r.error.is_none(),
                 "slow": is_slow,
+                "timed_out": r.timed_out,
                 "duration_ms": r.duration_ms,
                 "error": r.error,
                 "debug_payload": r.debug_payload,
@@ -358,12 +371,19 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
             .map(|r| r.name.as_str())
             .collect();
         let wall_time_ms = wall_start.elapsed().as_millis();
+        let finished_at = Utc::now().to_rfc3339();
         println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "asd_version": env!("CARGO_PKG_VERSION"),
+            "started_at": started_at,
+            "finished_at": finished_at,
             "total": results.len(),
             "passed": passed,
             "failed": failed,
             "wall_time_ms": wall_time_ms,
             "worker_count": jobs,
+            "db_state": db_state,
+            "symbol_count": symbol_count,
+            "performance_budget_ms": args.fail_slow,
             "slow_violations": slow_violation_names,
             "slowest": slowest_top5,
             "results": json_results,
@@ -397,7 +417,11 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
 
 struct ProbeResult {
     name: String,
+    command: String,
+    assertion: String,      // assertion kind, e.g. "file_not_in_key"; "" = smoke test
+    tags: Vec<String>,
     duration_ms: u128,
+    timed_out: bool,        // true if the probe was killed by a timeout (reserved; always false today)
     error: Option<String>,
     debug_payload: Option<Value>,
     debug_payload_summary: Option<String>,
@@ -405,6 +429,12 @@ struct ProbeResult {
 
 fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
     let start = Instant::now();
+    // Extract assertion kind from probe definition for result metadata.
+    let assertion_kind = probe.assert.as_table()
+        .and_then(|m| m.get("kind"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     // Resolve asd binary path.
     // Prefer the current executable if it actually exists (covers installed + dev builds).
@@ -465,7 +495,11 @@ fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
         Err(e) => {
             return ProbeResult {
                 name: probe.name.clone(),
+                command: probe.command.clone(),
+                assertion: assertion_kind,
+                tags: probe.tags.clone(),
                 duration_ms: start.elapsed().as_millis(),
+                timed_out: false,
                 error: Some(format!("failed to execute asd ({:?}) via sh: {}", asd_bin, e)),
                 debug_payload: None,
                 debug_payload_summary: None,
@@ -482,7 +516,11 @@ fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return ProbeResult {
             name: probe.name.clone(),
+            command: probe.command.clone(),
+            assertion: assertion_kind,
+            tags: probe.tags.clone(),
             duration_ms,
+            timed_out: false,
             error: Some(format!("command exited with {}: {}", output.status, stderr.trim())),
             debug_payload: None,
             debug_payload_summary: None,
@@ -494,7 +532,11 @@ fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
         None => {
             return ProbeResult {
                 name: probe.name.clone(),
+                command: probe.command.clone(),
+                assertion: assertion_kind,
+                tags: probe.tags.clone(),
                 duration_ms,
+                timed_out: false,
                 error: Some("command output was not valid JSON".to_string()),
                 debug_payload: None,
                 debug_payload_summary: None,
@@ -506,7 +548,11 @@ fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
     match eval_assert(&probe.assert, &json) {
         Ok(()) => ProbeResult {
             name: probe.name.clone(),
+            command: probe.command.clone(),
+            assertion: assertion_kind,
+            tags: probe.tags.clone(),
             duration_ms,
+            timed_out: false,
             error: None,
             debug_payload: None,
             debug_payload_summary: None,
@@ -515,7 +561,11 @@ fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
             let summary = summarize_debug_payload(&json);
             ProbeResult {
                 name: probe.name.clone(),
+                command: probe.command.clone(),
+                assertion: assertion_kind,
+                tags: probe.tags.clone(),
                 duration_ms,
+                timed_out: false,
                 error: Some(msg),
                 debug_payload: Some(json),
                 debug_payload_summary: summary,
