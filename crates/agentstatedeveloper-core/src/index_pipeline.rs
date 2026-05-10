@@ -462,6 +462,49 @@ pub fn run_index(
         if let Some(f) = on_phase {
             f("  rebuilding FTS search index…");
         }
+
+        // M59: build ledger_data map (symbol_id → (ledger_text, ledger_flags))
+        // from the ledger tree so FTS rows carry denormalized summaries.
+        // One get_tree call, no per-symbol git reads needed later.
+        let ledger_data: HashMap<String, (String, String)> = {
+            use crate::schema::{LedgerEntry, LedgerKind};
+            let ledger_prefix = format!("{}/ledger", crate::paths::ASD_ROOT);
+            match repo.get_tree(ref_name, &ledger_prefix) {
+                Ok(serde_json::Value::Object(by_symbol)) => {
+                    let mut map = HashMap::with_capacity(by_symbol.len());
+                    for (sym_id, per_symbol) in by_symbol {
+                        if let serde_json::Value::Object(entries_map) = per_symbol {
+                            let mut texts: Vec<String> = Vec::new();
+                            let mut flags: std::collections::BTreeSet<&'static str> =
+                                std::collections::BTreeSet::new();
+                            for (_entry_id, v) in entries_map {
+                                if let Ok(entry) = serde_json::from_value::<LedgerEntry>(v) {
+                                    if !entry.summary.is_empty() {
+                                        texts.push(entry.summary.to_lowercase());
+                                    }
+                                    match entry.kind {
+                                        LedgerKind::Ownership => { flags.insert("ownership"); }
+                                        LedgerKind::Invariant  => { flags.insert("invariant"); }
+                                        LedgerKind::Hazard     => { flags.insert("hazard"); }
+                                        LedgerKind::Decision   => { flags.insert("decision"); }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            if !texts.is_empty() || !flags.is_empty() {
+                                map.insert(
+                                    sym_id,
+                                    (texts.join(" "), flags.into_iter().collect::<Vec<_>>().join(",")),
+                                );
+                            }
+                        }
+                    }
+                    map
+                }
+                _ => HashMap::new(),
+            }
+        };
+
         match SearchFtsDb::open(db) {
             Ok(fts) => {
                 // Keep last-seen symbol per qname, matching by_qname semantics.
@@ -472,7 +515,7 @@ pub fn run_index(
                 }
                 let mut deduped: Vec<&Symbol> = seen.values().map(|&i| &indexed_symbols[i]).collect();
                 deduped.sort_by(|a, b| a.qname.cmp(&b.qname));
-                if let Err(e) = fts.rebuild_refs(&deduped) {
+                if let Err(e) = fts.rebuild_refs(&deduped, &ledger_data) {
                     eprintln!("asd: FTS rebuild warning: {e}");
                 }
             }

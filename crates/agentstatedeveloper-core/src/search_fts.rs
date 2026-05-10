@@ -27,6 +27,7 @@
 //! excluded from results by default; pass `FtsFilters { include_tests: true }`
 //! to include them.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use rusqlite::{Connection, params};
@@ -92,6 +93,36 @@ pub struct FtsHit {
     pub doc: Option<String>,
     /// Symbol tier: 0=production, 1=utility/preview/sample, 2=test.
     pub tier: SymbolTier,
+    /// Concatenated ledger entry summaries (all kinds) in lowercase.
+    /// Empty when the symbol has no ledger entries.
+    /// Populated at `asd index` time and stored in the FTS table.
+    pub ledger_text: String,
+    /// Comma-separated ledger kinds present for this symbol, e.g. "ownership,invariant".
+    /// Used for fast has_ownership() / has_invariant() checks without reading git objects.
+    pub ledger_flags: String,
+}
+
+impl FtsHit {
+    /// True if this symbol has at least one Ownership ledger entry.
+    #[inline] pub fn has_ownership(&self) -> bool { self.ledger_flags.contains("ownership") }
+    /// True if this symbol has at least one Invariant ledger entry.
+    #[inline] pub fn has_invariant(&self) -> bool { self.ledger_flags.contains("invariant") }
+    /// True if this symbol has at least one Hazard ledger entry.
+    #[inline] pub fn has_hazard(&self)    -> bool { self.ledger_flags.contains("hazard") }
+    /// True if this symbol has any ledger entries.
+    #[inline] pub fn has_ledger(&self)    -> bool { !self.ledger_text.is_empty() }
+}
+
+/// Lightweight symbol metadata stored in the `asd_symbols_meta` SQLite table.
+///
+/// Populated at `asd index` time alongside the FTS rebuild. Allows feedback
+/// adjustment functions to resolve qname → (symbol_id, file, kind) via a
+/// simple SQL lookup instead of traversing the git object store.
+#[derive(Debug, Clone)]
+pub struct SymbolMeta {
+    pub symbol_id: String,
+    pub file: String,
+    pub kind: String,
 }
 
 /// Filters applied before BM25 ranking.
@@ -130,9 +161,11 @@ impl SearchFtsDb {
     }
 
     fn ensure_schema(&self) -> rusqlite::Result<()> {
-        // Version 4: replaces is_test UNINDEXED with tier UNINDEXED (0=prod, 1=utility, 2=test).
+        // Version 5: adds ledger_text UNINDEXED + ledger_flags UNINDEXED columns to FTS
+        //            and asd_symbols_meta table (qname → symbol_id, file, kind).
+        //            Populated at `asd index` time — eliminates git reads from scoring hot path.
         // Any version mismatch drops and recreates — data is reproduced by next `asd index`.
-        const SCHEMA_VER: i64 = 4;
+        const SCHEMA_VER: i64 = 5;
 
         let current: i64 = self.conn.query_row(
             "SELECT version FROM asd_fts_meta LIMIT 1",
@@ -144,7 +177,8 @@ impl SearchFtsDb {
             self.conn.execute_batch(
                 "DROP TABLE IF EXISTS asd_search_fts;
                  DROP TABLE IF EXISTS asd_search_meta;
-                 DROP TABLE IF EXISTS asd_fts_meta;",
+                 DROP TABLE IF EXISTS asd_fts_meta;
+                 DROP TABLE IF EXISTS asd_symbols_meta;",
             )?;
         }
 
@@ -160,23 +194,34 @@ impl SearchFtsDb {
 
         self.conn.execute_batch(&format!(
             "CREATE VIRTUAL TABLE IF NOT EXISTS asd_search_fts USING fts5(
-                symbol_id  UNINDEXED,
+                symbol_id    UNINDEXED,
                 qname,
                 signature,
                 doc,
                 file,
-                language   UNINDEXED,
-                kind       UNINDEXED,
-                line       UNINDEXED,
-                qname_orig UNINDEXED,
-                sig_orig   UNINDEXED,
-                file_orig  UNINDEXED,
-                tier       UNINDEXED,
-                tokenize   = 'unicode61 remove_diacritics 1'
+                language     UNINDEXED,
+                kind         UNINDEXED,
+                line         UNINDEXED,
+                qname_orig   UNINDEXED,
+                sig_orig     UNINDEXED,
+                file_orig    UNINDEXED,
+                tier         UNINDEXED,
+                ledger_text  UNINDEXED,
+                ledger_flags UNINDEXED,
+                tokenize     = 'unicode61 remove_diacritics 1'
             );
             CREATE TABLE IF NOT EXISTS asd_search_meta (
                 file       TEXT PRIMARY KEY,
                 indexed_at INTEGER NOT NULL
+            );
+            -- Lightweight qname→(symbol_id, file, kind) lookup table.
+            -- Populated alongside FTS rebuild; allows feedback functions to resolve
+            -- qname without traversing the git object store.
+            CREATE TABLE IF NOT EXISTS asd_symbols_meta (
+                qname     TEXT PRIMARY KEY,
+                symbol_id TEXT NOT NULL,
+                file      TEXT NOT NULL,
+                kind      TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS asd_fts_meta (version INTEGER PRIMARY KEY);
             INSERT OR IGNORE INTO asd_fts_meta VALUES ({SCHEMA_VER});"
@@ -188,19 +233,47 @@ impl SearchFtsDb {
     /// This is the canonical indexing path. Because `asd index` already has the
     /// complete current-world snapshot, a full rebuild is cheaper than tracking
     /// which files changed and avoids stale rows from deleted files.
+    ///
+    /// `ledger_data`: `symbol_id → (ledger_text, ledger_flags)` map built at
+    /// index time from the ledger tree. Pass `&HashMap::new()` when no ledger
+    /// data is available (e.g. test helpers that call rebuild directly).
     pub fn rebuild(&self, symbols: &[Symbol]) -> rusqlite::Result<()> {
-        self.rebuild_refs(&symbols.iter().collect::<Vec<_>>())
+        self.rebuild_refs(&symbols.iter().collect::<Vec<_>>(), &HashMap::new())
     }
 
     /// Like [`rebuild`] but accepts a slice of references — avoids a copy when
     /// the caller already has a deduplicated `Vec<&Symbol>`.
-    pub fn rebuild_refs(&self, symbols: &[&Symbol]) -> rusqlite::Result<()> {
+    ///
+    /// `ledger_data`: `symbol_id → (ledger_text, ledger_flags)`. Pass
+    /// `&HashMap::new()` when ledger data is unavailable.
+    pub fn rebuild_refs(
+        &self,
+        symbols: &[&Symbol],
+        ledger_data: &HashMap<String, (String, String)>,
+    ) -> rusqlite::Result<()> {
         self.conn.execute_batch(
-            "DELETE FROM asd_search_fts; DELETE FROM asd_search_meta;",
+            "DELETE FROM asd_search_fts; DELETE FROM asd_search_meta; DELETE FROM asd_symbols_meta;",
         )?;
         for sym in symbols {
-            self.insert_symbol(sym)?;
+            let (lt, lf) = ledger_data
+                .get(&sym.symbol_id)
+                .map(|(t, f)| (t.as_str(), f.as_str()))
+                .unwrap_or(("", ""));
+            self.insert_symbol(sym, lt, lf)?;
         }
+
+        // Populate asd_symbols_meta: lightweight qname→(symbol_id, file, kind) table.
+        // This is the single source used by feedback functions to resolve qnames
+        // without touching the git object store.
+        for sym in symbols {
+            let kind = format!("{:?}", sym.kind).to_lowercase();
+            self.conn.execute(
+                "INSERT OR REPLACE INTO asd_symbols_meta(qname, symbol_id, file, kind)
+                 VALUES(?1, ?2, ?3, ?4)",
+                params![sym.qname, sym.symbol_id, sym.file, kind],
+            )?;
+        }
+
         // Stamp the rebuild time so staleness checks can compare against it.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -231,7 +304,7 @@ impl SearchFtsDb {
             .unwrap_or(0)
     }
 
-    fn insert_symbol(&self, sym: &Symbol) -> rusqlite::Result<()> {
+    fn insert_symbol(&self, sym: &Symbol, ledger_text: &str, ledger_flags: &str) -> rusqlite::Result<()> {
         let qname_exp = expand_identifier(&sym.qname);
         let sig_orig = sym.signature.as_deref().unwrap_or("");
         let sig_exp = if sig_orig.is_empty() { String::new() } else { expand_text(sig_orig) };
@@ -243,8 +316,8 @@ impl SearchFtsDb {
         self.conn.execute(
             "INSERT INTO asd_search_fts(
                  symbol_id, qname, signature, doc, file, language, kind, line,
-                 qname_orig, sig_orig, file_orig, tier)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                 qname_orig, sig_orig, file_orig, tier, ledger_text, ledger_flags)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             params![
                 sym.symbol_id,
                 qname_exp,
@@ -258,6 +331,8 @@ impl SearchFtsDb {
                 sym.signature.as_deref().unwrap_or(""),
                 sym.file,
                 tier,
+                ledger_text,
+                ledger_flags,
             ],
         )?;
         Ok(())
@@ -313,10 +388,12 @@ impl SearchFtsDb {
         let fetch = (limit * 4).max(80);
 
         // Columns: 0=symbol_id,1=language,2=kind,3=line,4=doc,
-        //          5=qname_orig,6=sig_orig,7=file_orig,8=tier,9=score
+        //          5=qname_orig,6=sig_orig,7=file_orig,8=tier,
+        //          9=ledger_text,10=ledger_flags,11=score
         let sql = format!(
             "SELECT symbol_id, language, kind, line, doc,
                     qname_orig, sig_orig, file_orig, tier,
+                    ledger_text, ledger_flags,
                     bm25(asd_search_fts, 10.0, 5.0, 5.0, 2.0) AS score
              FROM asd_search_fts
              WHERE asd_search_fts MATCH ?1
@@ -329,7 +406,7 @@ impl SearchFtsDb {
 
         let mut stmt = self.conn.prepare(&sql)?;
         let hits = stmt.query_map(params![match_expr], |row| {
-            let bm25_raw: f64 = row.get(9)?;
+            let bm25_raw: f64 = row.get(11)?;
             let sig_orig: Option<String> = row.get(6)?;
             let tier_str: String = row.get(8).unwrap_or_default();
             let tier: SymbolTier = tier_str.parse().unwrap_or(0);
@@ -344,6 +421,8 @@ impl SearchFtsDb {
                 signature: sig_orig.filter(|s| !s.is_empty()),
                 file: row.get(7)?,
                 tier,
+                ledger_text:  row.get::<_, String>(9).unwrap_or_default(),
+                ledger_flags: row.get::<_, String>(10).unwrap_or_default(),
             })
         })?
         .filter_map(|r| r.ok())
@@ -410,6 +489,44 @@ impl SearchFtsDb {
             .unwrap_or(false)
     }
 
+    /// Bulk-resolve qnames to [`SymbolMeta`] from the `asd_symbols_meta` table.
+    ///
+    /// Returns a map of `qname → SymbolMeta` for all qnames that have a row.
+    /// Missing entries are silently omitted; callers should fall back to a git
+    /// object read when the result map does not contain a needed qname.
+    ///
+    /// Cost: one SQL query regardless of how many qnames are requested.
+    pub fn get_symbols_meta_bulk(&self, qnames: &[&str]) -> HashMap<String, SymbolMeta> {
+        if qnames.is_empty() {
+            return HashMap::new();
+        }
+        // Build: SELECT qname, symbol_id, file, kind FROM asd_symbols_meta
+        //        WHERE qname IN (?1, ?2, ...)
+        let placeholders: Vec<String> = (1..=qnames.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT qname, symbol_id, file, kind FROM asd_symbols_meta WHERE qname IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = match self.conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(_) => return HashMap::new(),
+        };
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            qnames.iter().map(|q| q as &dyn rusqlite::types::ToSql).collect();
+        stmt.query_map(params_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                SymbolMeta {
+                    symbol_id: row.get(1)?,
+                    file:      row.get(2)?,
+                    kind:      row.get(3)?,
+                },
+            ))
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    }
+
     /// Secondary file-stem scan: return one representative symbol per file
     /// whose stored path contains `token` (case-insensitive substring match).
     ///
@@ -437,7 +554,8 @@ impl SearchFtsDb {
         // from the same row that has the minimum, so no HAVING clause is needed.
         let sql = format!(
             "SELECT symbol_id, language, kind, MIN(line) as line, doc,
-                    qname_orig, sig_orig, file_orig, tier
+                    qname_orig, sig_orig, file_orig, tier,
+                    ledger_text, ledger_flags
              FROM asd_search_fts
              WHERE lower(file_orig) LIKE '%' || lower(?1) || '%'
              {test_clause}
@@ -463,6 +581,8 @@ impl SearchFtsDb {
                     signature: sig_orig.filter(|s| !s.is_empty()),
                     file: row.get(7)?,
                     tier,
+                    ledger_text:  row.get::<_, String>(9).unwrap_or_default(),
+                    ledger_flags: row.get::<_, String>(10).unwrap_or_default(),
                 })
             })?
             .filter_map(|r| r.ok())

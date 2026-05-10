@@ -8,8 +8,8 @@ use anyhow::Result;
 use clap::Args;
 
 use agentstatedeveloper_core::{
-    AGENT_DEFAULT_BUDGET, AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore,
-    EffectStore, Engine, FeedbackStore, FeedbackVerdict, FtsFilters, IndexStore, LedgerKind,
+    AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore,
+    EffectStore, Engine, FeedbackStore, FeedbackVerdict, FtsFilters, IndexStore,
     LedgerStore, SearchDocsDb, SearchFtsDb,
     apply_feedback_adjustments, apply_file_scope_feedback, classify_layer_sym, confidence_reason,
     confidence_scores, detect_ambiguous_tokens, detect_confidence_warnings, detect_possible_misses,
@@ -173,33 +173,34 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             "indicator", "status", "mode", "flag", "current", "local",
             "playhead", "tick", "item", "data", "info", "manager",
         ];
-        // Ledger-entry cache: populated during the scoring loop and reused for
-        // SOT detection and the --agent results map, eliminating 2× re-reads per symbol.
+        // M59: ledger_cache is now lazily populated at display time only (top ~20 results).
+        // Scoring uses denormalized ledger_text/ledger_flags from FTS rows — no list_entries
+        // calls during the hot scoring loop (was N=80 calls, now 0).
         let mut ledger_cache: std::collections::HashMap<String, Vec<agentstatedeveloper_core::LedgerEntry>> =
             std::collections::HashMap::new();
+        // has_ledger_ids: symbol_ids with any ledger entries — populated from FTS fields.
+        let mut has_ledger_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         let mut scored: Vec<(f64, _)> = {
             let mut tmp = Vec::with_capacity(hits.len());
             for hit in hits {
                 let hybrid = hybrid_boost(&hit, &tokens);
-                let entries = ledger_store
-                    .list_entries(&engine.ref_name, &hit.symbol_id)
-                    .unwrap_or_default();
-                let text = entries.iter()
-                    .map(|e| e.summary.to_lowercase())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let ledger_boost = if text.is_empty() {
+                // M59: use denormalized fields — no list_entries call.
+                let ledger_boost = if hit.ledger_text.is_empty() {
                     0.0
                 } else {
-                    tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
+                    tokens.iter().filter(|t| hit.ledger_text.contains(t.as_str())).count() as f64
                 };
                 let haystack = format!("{} {}", hit.qname.to_lowercase(), hit.file.to_lowercase());
                 let domain_overlap = tokens.iter()
                     .filter(|t| !GENERIC_BOOST_SKIP.contains(&t.as_str()))
                     .filter(|t| haystack.contains(t.as_str()))
                     .count();
-                let has_ownership = entries.iter().any(|e| e.kind == LedgerKind::Ownership);
-                let has_invariant = entries.iter().any(|e| e.kind == LedgerKind::Invariant);
+                let has_ownership = hit.has_ownership();
+                let has_invariant = hit.has_invariant();
+                if hit.has_ledger() {
+                    has_ledger_ids.insert(hit.symbol_id.clone());
+                }
                 let is_state_holder = matches!(hit.kind.as_str(), "class" | "struct" | "type" | "enum")
                     && !has_ownership && !has_invariant
                     && !tokens.iter().any(|t| matches!(t.as_str(),
@@ -228,19 +229,15 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                         "total": total,
                     }));
                 }
-                // Cache entries keyed by symbol_id for reuse below.
-                ledger_cache.insert(hit.symbol_id.clone(), entries);
                 tmp.push((total, hit));
             }
             tmp
         };
 
         // Record SOT-boosted symbols before truncation for outranked reporting.
-        // Uses cached entries — no extra git reads.
+        // Uses has_ledger_ids populated from FTS fields — no extra git reads.
         for (_, hit) in &scored {
-            let empty = Vec::new();
-            let entries = ledger_cache.get(&hit.symbol_id).unwrap_or(&empty);
-            if entries.iter().any(|e| e.kind == LedgerKind::Ownership) {
+            if has_ledger_ids.contains(&hit.symbol_id) && hit.has_ownership() {
                 sot_boosted_qnames.insert(hit.qname.clone());
             }
         }
@@ -328,11 +325,19 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 let tier = symbol_tier(&hit.file);
                 let layer = classify_layer_sym(&hit.file, &hit.qname, tier, &layer_overrides);
                 layers_present.insert(Box::leak(layer.to_string().into_boxed_str()));
-                // Use cached entries — already fetched during the scoring pass.
+                // M59: lazy-load ledger entries at display time (top N only).
+                // Scoring no longer populates ledger_cache; we do it here on demand.
+                if !ledger_cache.contains_key(&hit.symbol_id) {
+                    if let Ok(entries) = ledger_store.list_entries(&engine.ref_name, &hit.symbol_id) {
+                        ledger_cache.insert(hit.symbol_id.clone(), entries);
+                    }
+                }
                 let ledger_entries = ledger_cache.get(&hit.symbol_id)
                     .cloned()
                     .unwrap_or_default();
-                let has_ledger = !ledger_entries.is_empty();
+                // Use has_ledger_ids (from FTS fields) as authoritative source;
+                // fall back to cache for completeness.
+                let has_ledger = has_ledger_ids.contains(&hit.symbol_id) || !ledger_entries.is_empty();
                 let match_reasons = if let Ok(Some(sym)) = index_store.get_symbol_by_qname(&engine.ref_name, &hit.qname) {
                     explain_match(&sym, &tokens, &ledger_entries, is_hot)
                 } else {
@@ -499,15 +504,18 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     ""
                 };
                 // t-002: confidence bucket + reason label in terminal output.
-                // Reuse ledger_cache built during scoring — avoids one list_entries git
-                // read per result. get_symbol_by_qname is still needed for explain_match
-                // (requires doc/sig fields not stored in FtsHit).
+                // M59: lazy-load ledger entries for display (only called for top N shown results).
                 let conf = confidences.get(idx).copied().unwrap_or(0.5);
+                if !ledger_cache.contains_key(&hit.symbol_id) {
+                    if let Ok(entries) = ledger_store.list_entries(&engine.ref_name, &hit.symbol_id) {
+                        ledger_cache.insert(hit.symbol_id.clone(), entries);
+                    }
+                }
                 let cached_entries = ledger_cache.get(&hit.symbol_id)
                     .cloned()
                     .unwrap_or_default();
                 let (bucket, conf_reason_str, match_reasons_disp) = if let Ok(Some(sym)) = index_store.get_symbol_by_qname(&engine.ref_name, &hit.qname) {
-                    let has_ledger = !cached_entries.is_empty();
+                    let has_ledger = has_ledger_ids.contains(&hit.symbol_id) || !cached_entries.is_empty();
                     let reasons = explain_match(&sym, &tokens, &cached_entries, is_hot);
                     let b = result_bucket(&hit.file, &reasons, has_ledger, is_hot);
                     let cr = confidence_reason(&reasons, has_ledger, is_hot);

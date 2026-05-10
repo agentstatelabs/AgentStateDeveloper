@@ -397,42 +397,46 @@ pub fn find_candidates(
     if let Some(hits) = fts_result {
         // Ledger-entry cache: read once per symbol during scoring, reuse in
         // covered_files check below. Eliminates 2× list_entries per top-N hit.
-        let mut ledger_cache: HashMap<String, Vec<crate::schema::LedgerEntry>> =
+        let ledger_cache: HashMap<String, Vec<crate::schema::LedgerEntry>> =
             HashMap::with_capacity(hits.len());
         // Also keep qname → (symbol_id, file) to avoid get_symbol_by_qname in covered_files.
         let mut qname_to_sym: HashMap<String, (String, String)> =
             HashMap::with_capacity(hits.len());
 
+        // M59: track which symbol_ids have ledger entries using the denormalized
+        // FTS fields — no list_entries call needed in the scoring loop.
+        let mut has_ledger_ids: HashSet<String> = HashSet::new();
+
         let mut scored: Vec<(f64, String)> = {
             let mut tmp = Vec::with_capacity(hits.len());
             for hit in hits {
                 let boost = hybrid_boost(&hit, tokens);
+                // M59: use denormalized ledger_text/flags from FTS row — no list_entries call.
+                // ledger_text = all summaries concatenated (lowercase).
+                // ledger_flags = comma-separated kinds: "ownership,invariant,hazard,decision".
                 let (ledger_boost, ownership_struct_boost) = {
-                    let entries = ledger_store
-                        .list_entries(&engine.ref_name, &hit.symbol_id)
-                        .unwrap_or_default();
-                    // Flat boost for any symbol explicitly declared as source-of-truth.
-                    let sot = if entries.iter().any(|e| e.kind == crate::schema::LedgerKind::Ownership) {
-                        2.0_f64
-                    } else {
+                    let sot = if hit.has_ownership() { 2.0_f64 } else { 0.0 };
+                    // Count token hits in the concatenated ledger text and weight by kind.
+                    let text_boost = if hit.ledger_text.is_empty() {
                         0.0
+                    } else {
+                        let matches = tokens.iter()
+                            .filter(|t| hit.ledger_text.contains(t.as_str()))
+                            .count() as f64;
+                        if matches == 0.0 {
+                            0.0
+                        } else {
+                            // Weight by highest-priority kind flagged for this symbol.
+                            let weight = if hit.has_ownership()  { 3.0 }
+                                    else if hit.has_invariant() { 1.5 }
+                                    else if hit.has_hazard()    { 1.0 }
+                                    else                        { 0.5 };
+                            matches * weight
+                        }
                     };
-                    // Weight each matching ledger entry by kind so domain-concept
-                    // ranking surfaces Ownership > Invariant > Hazard/Decision > others.
-                    let text_boost = entries.iter().fold(0.0_f64, |acc, e| {
-                        let summary = e.summary.to_lowercase();
-                        let matches = tokens.iter().filter(|t| summary.contains(t.as_str())).count();
-                        if matches == 0 { return acc; }
-                        let weight = match e.kind {
-                            crate::schema::LedgerKind::Ownership => 3.0,
-                            crate::schema::LedgerKind::Invariant => 1.5,
-                            crate::schema::LedgerKind::Hazard
-                            | crate::schema::LedgerKind::Decision => 1.0,
-                            _ => 0.5,
-                        };
-                        acc + matches as f64 * weight
-                    });
-                    ledger_cache.insert(hit.symbol_id.clone(), entries);
+                    if hit.has_ledger() {
+                        has_ledger_ids.insert(hit.symbol_id.clone());
+                    }
                     (text_boost, sot)
                 };
                 qname_to_sym.insert(hit.qname.clone(), (hit.symbol_id.clone(), hit.file.clone()));
@@ -453,8 +457,11 @@ pub fn find_candidates(
             .take(depth)
             .filter_map(|(_, qname)| {
                 let (sym_id, file) = qname_to_sym.get(qname)?;
-                let has_ledger = ledger_cache.get(sym_id).map_or(false, |e| !e.is_empty());
-                if has_ledger { Some(file.clone()) } else { None }
+                // M59: check has_ledger_ids (populated from FTS denormalized fields) first;
+                // fall back to ledger_cache for stem-injected hits added below.
+                let has_led = has_ledger_ids.contains(sym_id)
+                    || ledger_cache.get(sym_id).map_or(false, |e| !e.is_empty());
+                if has_led { Some(file.clone()) } else { None }
             })
             .collect();
 
@@ -478,6 +485,10 @@ pub fn find_candidates(
                             // can use cache lookups instead of get_symbol_by_qname reads.
                             qname_to_sym.entry(hit.qname.clone())
                                 .or_insert_with(|| (hit.symbol_id.clone(), hit.file.clone()));
+                            // M59: propagate ledger presence from stem hit into has_ledger_ids.
+                            if hit.has_ledger() {
+                                has_ledger_ids.insert(hit.symbol_id.clone());
+                            }
                             scored.push((1.0 + boost + view_boost, hit.qname));
                         }
                     }
@@ -498,7 +509,9 @@ pub fn find_candidates(
             .iter()
             .filter_map(|(_, qname)| {
                 let (sym_id, _) = qname_to_sym.get(qname.as_str())?;
-                let has = ledger_cache.get(sym_id).map_or(false, |e| !e.is_empty());
+                // M59: check has_ledger_ids first (no git read), then ledger_cache fallback.
+                let has = has_ledger_ids.contains(sym_id)
+                    || ledger_cache.get(sym_id).map_or(false, |e| !e.is_empty());
                 if has { Some(qname.clone()) } else { None }
             })
             .collect();
