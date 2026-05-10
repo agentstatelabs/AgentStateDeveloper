@@ -352,6 +352,54 @@ impl SearchFtsDb {
         Ok(hits)
     }
 
+    /// For each token in `tokens`, return (token, distinct_file_count) using a single
+    /// SQL UNION ALL query instead of N separate searches.  Used by
+    /// `detect_ambiguous_tokens` to batch all token checks into one round-trip.
+    pub fn count_distinct_files_per_token(
+        &self,
+        tokens: &[&str],
+        include_tests: bool,
+    ) -> rusqlite::Result<Vec<(String, usize)>> {
+        if tokens.is_empty() {
+            return Ok(vec![]);
+        }
+        let test_clause = if include_tests { "" } else { "AND tier != '2'" };
+
+        // Build: SELECT 'tok', COUNT(DISTINCT file_orig) FROM asd_search_fts
+        //        WHERE asd_search_fts MATCH '"tok"' AND tier != '2'
+        // UNION ALL ...
+        // Each sub-select is a separate FTS5 scan but they share one SQL round-trip,
+        // removing N-1 statement-prepare + result-iteration cycles vs the old path.
+        let mut parts = Vec::with_capacity(tokens.len());
+        let mut params_vec: Vec<String> = Vec::with_capacity(tokens.len());
+        for (i, tok) in tokens.iter().enumerate() {
+            let tok_clean = tok.replace('"', "");
+            parts.push(format!(
+                "SELECT ?{} AS tok, COUNT(DISTINCT file_orig) AS cnt \
+                 FROM asd_search_fts \
+                 WHERE asd_search_fts MATCH '\"{}\"' {test_clause}",
+                i + 1,
+                tok_clean
+            ));
+            params_vec.push(tok_clean);
+        }
+        let sql = parts.join(" UNION ALL ");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        // rusqlite requires params as a slice of &dyn ToSql; build it dynamically.
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+        let results = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                let tok: String = row.get(0)?;
+                let cnt: i64 = row.get(1)?;
+                Ok((tok, cnt as usize))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(results)
+    }
+
     /// True if the FTS table has at least one row.
     pub fn has_data(&self) -> bool {
         self.conn

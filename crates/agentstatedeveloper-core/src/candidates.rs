@@ -474,6 +474,10 @@ pub fn find_candidates(
                             let view_boost = if is_view_query
                                 && (layer == "ui" || layer == "viewmodel")
                             { 2.0 } else { 0.0 };
+                            // Extend maps so the has_ledger + file-dedup passes below
+                            // can use cache lookups instead of get_symbol_by_qname reads.
+                            qname_to_sym.entry(hit.qname.clone())
+                                .or_insert_with(|| (hit.symbol_id.clone(), hit.file.clone()));
                             scored.push((1.0 + boost + view_boost, hit.qname));
                         }
                     }
@@ -487,15 +491,15 @@ pub fn find_candidates(
         // Ledger-aware file dedup: promote symbols with ledger entries above
         // same-file competitors that only have a score advantage, so an
         // invariant-bearing method is never silently dropped.
+        //
+        // Uses the ledger_cache and qname_to_sym maps built during the scoring
+        // and stem-injection passes — no extra git/index reads needed here.
         let has_ledger: HashSet<String> = scored
             .iter()
             .filter_map(|(_, qname)| {
-                let sym = index_store.get_symbol_by_qname(&engine.ref_name, qname)
-                    .ok().flatten()?;
-                let entries = ledger_store
-                    .list_entries(&engine.ref_name, &sym.symbol_id)
-                    .unwrap_or_default();
-                if entries.is_empty() { None } else { Some(qname.clone()) }
+                let (sym_id, _) = qname_to_sym.get(qname.as_str())?;
+                let has = ledger_cache.get(sym_id).map_or(false, |e| !e.is_empty());
+                if has { Some(qname.clone()) } else { None }
             })
             .collect();
         scored.sort_by(|a, b| {
@@ -506,9 +510,9 @@ pub fn find_candidates(
         });
         let mut seen_files: HashSet<String> = HashSet::new();
         scored.retain(|(_, qname)| {
-            match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
-                Ok(Some(sym)) => seen_files.insert(sym.file),
-                _ => true,
+            match qname_to_sym.get(qname.as_str()) {
+                Some((_, file)) => seen_files.insert(file.clone()),
+                None => true, // unknown qname (should not happen) — keep it
             }
         });
         // Restore score order for the final result.
@@ -699,6 +703,9 @@ pub fn confidence_reason(match_reasons: &[String], has_ledger: bool, is_hot: boo
 ///
 /// Returns token strings whose FTS hit count across distinct files exceeds the
 /// threshold, indicating they will add noise rather than precision.
+///
+/// Uses a single SQL UNION ALL query to check all tokens in one round-trip
+/// (previously N separate fts.search() calls, each fetching and iterating rows).
 pub fn detect_ambiguous_tokens(
     tokens: &[String],
     db_path: &Path,
@@ -709,19 +716,18 @@ pub fn detect_ambiguous_tokens(
         Ok(f) if f.has_data() => f,
         _ => return vec![],
     };
-    tokens.iter()
+    let candidates: Vec<&str> = tokens.iter()
         .filter(|t| !is_stopword(t))
-        .filter(|token| {
-            fts.search(token, filters, THRESHOLD + 10)
-                .map(|hits| {
-                    hits.iter()
-                        .map(|h| h.file.as_str())
-                        .collect::<HashSet<_>>()
-                        .len() > THRESHOLD
-                })
-                .unwrap_or(false)
-        })
-        .cloned()
+        .map(|t| t.as_str())
+        .collect();
+    if candidates.is_empty() { return vec![]; }
+
+    let counts = fts.count_distinct_files_per_token(&candidates, filters.include_tests)
+        .unwrap_or_default();
+
+    counts.into_iter()
+        .filter(|(_, cnt)| *cnt > THRESHOLD)
+        .map(|(tok, _)| tok)
         .collect()
 }
 

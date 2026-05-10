@@ -499,11 +499,16 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     ""
                 };
                 // t-002: confidence bucket + reason label in terminal output.
+                // Reuse ledger_cache built during scoring — avoids one list_entries git
+                // read per result. get_symbol_by_qname is still needed for explain_match
+                // (requires doc/sig fields not stored in FtsHit).
                 let conf = confidences.get(idx).copied().unwrap_or(0.5);
+                let cached_entries = ledger_cache.get(&hit.symbol_id)
+                    .cloned()
+                    .unwrap_or_default();
                 let (bucket, conf_reason_str, match_reasons_disp) = if let Ok(Some(sym)) = index_store.get_symbol_by_qname(&engine.ref_name, &hit.qname) {
-                    let entries = ledger_store.list_entries(&engine.ref_name, &sym.symbol_id).unwrap_or_default();
-                    let has_ledger = !entries.is_empty();
-                    let reasons = explain_match(&sym, &tokens, &entries, is_hot);
+                    let has_ledger = !cached_entries.is_empty();
+                    let reasons = explain_match(&sym, &tokens, &cached_entries, is_hot);
                     let b = result_bucket(&hit.file, &reasons, has_ledger, is_hot);
                     let cr = confidence_reason(&reasons, has_ledger, is_hot);
                     (b, cr, reasons)

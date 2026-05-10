@@ -94,6 +94,12 @@ pub struct ProbeRunArgs {
     /// Stop on first assertion failure (does not affect --fail-slow).
     #[arg(long)]
     pub fail_fast: bool,
+
+    /// Number of probes to run in parallel (default 0 = auto, capped at 6).
+    /// Beyond 6 parallel readers the SQLite page-cache contention increases wall time.
+    /// Set --jobs 1 to run sequentially for deterministic single-line terminal output.
+    #[arg(long, default_value = "0")]
+    pub jobs: usize,
 }
 
 #[derive(Debug, Args)]
@@ -221,31 +227,98 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
         return Ok(());
     }
 
-    let mut results: Vec<ProbeResult> = Vec::new();
+    // Determine parallelism.
+    // Auto (jobs=0): cap at 6 — empirically the SQLite page-cache contention
+    // from concurrent subprocess readers increases wall time above ~6 parallel jobs
+    // even on machines with many more CPU threads.  Users can override with --jobs N.
+    let n = probes.len();
+    const AUTO_JOBS_CAP: usize = 6;
+    let jobs = if args.jobs == 0 {
+        std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(4)
+            .min(AUTO_JOBS_CAP)
+            .min(n)
+    } else {
+        args.jobs.min(n).max(1)
+    };
 
-    for probe in &probes {
-        let result = execute_probe(cfg, probe);
-        let is_fail = result.error.is_some();
-        let is_slow = args.fail_slow.map_or(false, |ms| result.duration_ms > ms as u128);
-
-        if !args.json {
-            let status = if is_fail { "FAIL" } else if is_slow { "SLOW" } else { "PASS" };
-            let ms = result.duration_ms;
-            if is_fail {
-                println!("{:<5} {} ({}ms)", status, probe.name, ms);
-                println!("      {}", result.error.as_deref().unwrap_or(""));
-                if let Some(ref payload) = result.debug_payload_summary {
-                    println!("      debug: {}", payload);
-                }
-            } else {
-                println!("{:<5} {} ({}ms)", status, probe.name, ms);
-            }
-        }
-        results.push(result);
-        if is_fail && args.fail_fast {
-            break;
-        }
+    if !args.json && jobs > 1 {
+        eprintln!("Running {} probe(s) [{} parallel]…", n, jobs);
     }
+
+    // fail_fast_flag: set by any thread when an assertion fails and --fail-fast is active.
+    // std::thread::scope guarantees all threads finish before we leave the scope, so no
+    // Arc is needed — a plain reference to the AtomicBool is sufficient and is Copy+Send.
+    let fail_fast_flag = std::sync::atomic::AtomicBool::new(false);
+    // Extract scalar flags so closures can capture them by copy (avoids moving `args`).
+    let fail_fast = args.fail_fast;
+    let fail_slow = args.fail_slow;
+    let show_json = args.json;
+    let mut results: Vec<ProbeResult> = Vec::with_capacity(n);
+
+    std::thread::scope(|scope| {
+        // Process probes in chunks of `jobs`. Within each chunk all probes run in
+        // parallel; results are printed in submission order after the chunk finishes.
+        for chunk_start in (0..probes.len()).step_by(jobs) {
+            if fail_fast_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            let chunk_end = (chunk_start + jobs).min(probes.len());
+            let chunk = &probes[chunk_start..chunk_end];
+            // Rebind as a reference so each spawned closure copies the &AtomicBool
+            // (which is Copy+Send) rather than trying to move the AtomicBool itself.
+            let ff = &fail_fast_flag;
+
+            // Spawn one thread per probe in this chunk.
+            // Each thread returns (original_index, ProbeResult).
+            let handles: Vec<_> = chunk
+                .iter()
+                .enumerate()
+                .map(|(j, probe)| {
+                    let global_idx = chunk_start + j;
+                    scope.spawn(move || {
+                        // Check flag before doing work (fast exit on fail-fast).
+                        if ff.load(std::sync::atomic::Ordering::Relaxed) {
+                            return None;
+                        }
+                        let result = execute_probe(cfg, probe);
+                        if result.error.is_some() && fail_fast {
+                            ff.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        Some((global_idx, result))
+                    })
+                })
+                .collect();
+
+            // Wait for all handles in chunk, sort back to submission order, print.
+            let mut chunk_results: Vec<(usize, ProbeResult)> = handles
+                .into_iter()
+                .filter_map(|h| h.join().unwrap_or(None))
+                .collect();
+            chunk_results.sort_by_key(|(i, _)| *i);
+
+            for (_, result) in &chunk_results {
+                let is_fail = result.error.is_some();
+                let is_slow = fail_slow.map_or(false, |ms| result.duration_ms > ms as u128);
+                if !show_json {
+                    let status =
+                        if is_fail { "FAIL" } else if is_slow { "SLOW" } else { "PASS" };
+                    let ms = result.duration_ms;
+                    if is_fail {
+                        println!("{:<5} {} ({}ms)", status, result.name, ms);
+                        println!("      {}", result.error.as_deref().unwrap_or(""));
+                        if let Some(ref payload) = result.debug_payload_summary {
+                            println!("      debug: {}", payload);
+                        }
+                    } else {
+                        println!("{:<5} {} ({}ms)", status, result.name, ms);
+                    }
+                }
+            }
+            results.extend(chunk_results.into_iter().map(|(_, r)| r));
+        }
+    });
 
     let passed = results.iter().filter(|r| r.error.is_none()).count();
     let failed = results.iter().filter(|r| r.error.is_some()).count();
