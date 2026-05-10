@@ -15,7 +15,8 @@
 //!
 //! Output flags:
 //!   --json            emit results as a JSON object (includes duration_ms per probe,
-//!                     total/passed/failed, slowest top-5, slow_violations list)
+//!                     wall_time_ms, worker_count, total/passed/failed, slowest top-5,
+//!                     slow_violations list)
 //!   --fail-slow <ms>  exit non-zero if any probe exceeds this wall-clock threshold
 //!   --fail-fast       stop on first assertion failure
 //!
@@ -247,6 +248,8 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
         eprintln!("Running {} probe(s) [{} parallel]…", n, jobs);
     }
 
+    let wall_start = Instant::now();
+
     // fail_fast_flag: set by any thread when an assertion fails and --fail-fast is active.
     // std::thread::scope guarantees all threads finish before we leave the scope, so no
     // Arc is needed — a plain reference to the AtomicBool is sufficient and is Copy+Send.
@@ -354,16 +357,21 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
         let slow_violation_names: Vec<&str> = slow_violations.iter()
             .map(|r| r.name.as_str())
             .collect();
+        let wall_time_ms = wall_start.elapsed().as_millis();
         println!("{}", serde_json::to_string_pretty(&serde_json::json!({
             "total": results.len(),
             "passed": passed,
             "failed": failed,
+            "wall_time_ms": wall_time_ms,
+            "worker_count": jobs,
             "slow_violations": slow_violation_names,
             "slowest": slowest_top5,
             "results": json_results,
         }))?);
     } else {
-        println!("\n{} probe(s): {} passed, {} failed", results.len(), passed, failed);
+        let wall_time_ms = wall_start.elapsed().as_millis();
+        println!("\n{} probe(s): {} passed, {} failed  [{} workers, {}ms wall]",
+            results.len(), passed, failed, jobs, wall_time_ms);
         if !slow_violations.is_empty() {
             let threshold_ms = args.fail_slow.unwrap();
             println!("SLOW violations (>{threshold_ms} ms):");
