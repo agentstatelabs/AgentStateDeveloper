@@ -1002,18 +1002,24 @@ fn show_history(cfg: &Config, args: ProbeHistoryArgs) -> Result<()> {
             println!("{}", serde_json::to_string(r)?);
         }
     } else {
-        // Summary table: version | date | total/passed | wall_ms | slowest probe
-        println!("{:<10}  {:<26}  {:>5}  {:>5}  {:>10}  {:<8}  {}",
-            "version", "started_at", "total", "pass", "wall_ms", "budget", "slowest");
+        // Summary table: version | scope | total | pass | wall_ms | budget | slowest
+        // scope distinguishes full runs from filtered subsets so "fewer probes" is obvious.
+        println!("{:<10}  {:<16}  {:>5}  {:>5}  {:>10}  {:<8}  {}",
+            "version", "scope", "total", "pass", "wall_ms", "budget", "slowest");
         println!("{}", "-".repeat(90));
         for r in &mut window {
-            let version   = r.get("asd_version").and_then(Value::as_str).unwrap_or("?");
-            let started   = r.get("started_at").and_then(Value::as_str).unwrap_or("?");
-            // Trim to date+time without sub-seconds: "2026-05-10T04:18:31"
-            let started_short = &started[..started.len().min(19)];
-            let total_n   = r.get("total").and_then(Value::as_u64).unwrap_or(0);
-            let passed_n  = r.get("passed").and_then(Value::as_u64).unwrap_or(0);
-            let wall      = r.get("wall_time_ms").and_then(Value::as_u64).unwrap_or(0);
+            let version  = r.get("asd_version").and_then(Value::as_str).unwrap_or("?");
+            let scope    = match (
+                r.get("filter_name").and_then(Value::as_str),
+                r.get("filter_tag").and_then(Value::as_str),
+            ) {
+                (Some(n), _) => format!("name:{}", n),
+                (_, Some(t)) => format!("tag:{}", t),
+                _            => "all".to_string(),
+            };
+            let total_n  = r.get("total").and_then(Value::as_u64).unwrap_or(0);
+            let passed_n = r.get("passed").and_then(Value::as_u64).unwrap_or(0);
+            let wall     = r.get("wall_time_ms").and_then(Value::as_u64).unwrap_or(0);
             let budget_ok = r.get("budget_failed").and_then(Value::as_bool)
                 .map_or("—", |b| if b { "FAIL" } else { "ok" });
             let slowest_name = r.get("slowest")
@@ -1029,11 +1035,11 @@ fn show_history(cfg: &Config, args: ProbeHistoryArgs) -> Result<()> {
                 .and_then(Value::as_u64)
                 .map(|ms| format!("({}ms)", ms))
                 .unwrap_or_default();
-            println!("{:<10}  {:<26}  {:>5}  {:>5}  {:>10}  {:<8}  {} {}",
-                version, started_short, total_n, passed_n, wall, budget_ok,
+            println!("{:<10}  {:<16}  {:>5}  {:>5}  {:>10}  {:<8}  {} {}",
+                version, scope, total_n, passed_n, wall, budget_ok,
                 slowest_name, slowest_ms);
         }
-        println!("\n{} run(s) shown ({}  total recorded)", window.len(), total);
+        println!("\n{} run(s) shown ({} total recorded)", window.len(), total);
     }
     Ok(())
 }
