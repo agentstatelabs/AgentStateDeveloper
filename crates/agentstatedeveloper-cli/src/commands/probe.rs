@@ -33,6 +33,9 @@
 //!   ambiguous_terms_nonempty       — ambiguous_terms array is non-empty (broad query uncertainty check)
 //!   scoped_suggestions_nonempty    — scoped_suggestions array is non-empty
 //!   scoped_suggestions_contains    — scoped_suggestions contains an entry matching `fragment`
+//!   feedback_summary_gte           — feedback_summary[field] ≥ min_value (e.g. suppressed ≥ 1)
+//!   feedback_summary_eq            — feedback_summary[field] == value
+//!   feedback_rules_contains        — feedback_summary.rules_applied contains `rule`
 
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -1075,6 +1078,63 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
                     "scoped_suggestions_contains: no suggestion contains {:?}; got {:?}",
                     fragment,
                     suggestions.iter().filter_map(|s| s.as_str()).collect::<Vec<_>>()
+                ))
+            }
+        }
+
+        // feedback_summary_gte: feedback_summary[field] >= min_value.
+        // Use this to prove feedback is actively suppressing or boosting results.
+        "feedback_summary_gte" => {
+            let field = str_field(map, "field")?;
+            let min_value = u64_field(map, "min_value")?;
+            let actual = output.get("feedback_summary")
+                .and_then(|s| s.get(field))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if actual >= min_value {
+                Ok(())
+            } else {
+                Err(format!(
+                    "feedback_summary_gte: feedback_summary.{} = {} (expected >= {})",
+                    field, actual, min_value
+                ))
+            }
+        }
+
+        // feedback_summary_eq: feedback_summary[field] == value.
+        "feedback_summary_eq" => {
+            let field = str_field(map, "field")?;
+            let expected = u64_field(map, "value")?;
+            let actual = output.get("feedback_summary")
+                .and_then(|s| s.get(field))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if actual == expected {
+                Ok(())
+            } else {
+                Err(format!(
+                    "feedback_summary_eq: feedback_summary.{} = {} (expected {})",
+                    field, actual, expected
+                ))
+            }
+        }
+
+        // feedback_rules_contains: feedback_summary.rules_applied contains `rule`.
+        "feedback_rules_contains" => {
+            let rule = str_field(map, "rule")?;
+            let rules = output.get("feedback_summary")
+                .and_then(|s| s.get("rules_applied"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let found = rules.iter().any(|r| r.as_str().map_or(false, |s| s == rule));
+            if found {
+                Ok(())
+            } else {
+                Err(format!(
+                    "feedback_rules_contains: rule {:?} not in rules_applied {:?}",
+                    rule,
+                    rules.iter().filter_map(|r| r.as_str()).collect::<Vec<_>>()
                 ))
             }
         }

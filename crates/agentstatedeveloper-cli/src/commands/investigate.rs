@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, Engine, FeedbackStore,
-    FtsFilters, IndexStore, LedgerStore, apply_feedback_adjustments, classify_layer_sym,
+    FeedbackMetrics, FtsFilters, IndexStore, LedgerStore, apply_feedback_adjustments, classify_layer_sym,
     confidence_scores, detect_ambiguous_tokens, detect_possible_misses, estimate_tokens,
     explain_match, extract_summary, find_candidates, gather_recency, git_dirty_files,
     intent_focus, intent_layer_order, load_layer_overrides, parse_intent, parse_query,
@@ -163,7 +163,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     // Apply durable feedback adjustments (Useful/Noisy/WrongLayer verdicts).
     let feedback_store = AsgFeedbackStore { repo: &engine.repo };
     let feedback_verdicts = feedback_store.flat_verdicts(&engine.ref_name).unwrap_or_default();
-    apply_feedback_adjustments(&engine, &index_store, &cfg.db_path, &args.query, &mut candidates, &feedback_verdicts);
+    let feedback_metrics = apply_feedback_adjustments(&engine, &index_store, &cfg.db_path, &args.query, &mut candidates, &feedback_verdicts);
 
     // One git pass to gather recency for all candidate files (hot = 14 days).
     let recency = gather_recency(200, 14.0);
@@ -300,6 +300,14 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     // Default: grouped by_layer output (compact, deduped by layer).
     // --flat restores the legacy flat entry_points array.
     // Invariants/hazards surfaced first so agents see constraints before call graphs.
+    let feedback_summary = json!({
+        "entries_applied": feedback_metrics.entries_applied,
+        "suppressed": feedback_metrics.suppressed,
+        "preserved_useful_siblings": feedback_metrics.preserved_useful_siblings,
+        "boosted": feedback_metrics.boosted,
+        "recurring_fp_suppressed": feedback_metrics.recurring_fp_suppressed,
+        "rules_applied": feedback_metrics.rules_applied,
+    });
     let out = if args.flat {
         json!({
             "query": args.query,
@@ -310,6 +318,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             "possible_misses": possible_misses,
             "scope_narrowed": scope_narrowed,
             "stale_symbols": stale_symbols,
+            "feedback_summary": feedback_summary,
             "invariants": all_invariants,
             "hazards": all_hazards,
             "entry_points": entry_points,
@@ -324,6 +333,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             "possible_misses": possible_misses,
             "scope_narrowed": scope_narrowed,
             "stale_symbols": stale_symbols,
+            "feedback_summary": feedback_summary,
             "invariants": all_invariants,
             "hazards": all_hazards,
             "by_layer": by_layer,

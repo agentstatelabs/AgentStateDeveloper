@@ -1081,6 +1081,25 @@ fn query_family_matches(current_query_tokens: &std::collections::HashSet<String>
 
 /// Apply feedback verdicts as score adjustments after candidate selection.
 ///
+/// Metrics returned by `apply_feedback_adjustments`, describing how feedback
+/// changed the ranked result set for this query.
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FeedbackMetrics {
+    /// Feedback entries whose stored query matched the current query family.
+    pub entries_applied: usize,
+    /// Total symbols removed from results (all causes combined).
+    pub suppressed: usize,
+    /// Symbols in a noisy file preserved because they had an explicit Useful verdict.
+    pub preserved_useful_siblings: usize,
+    /// Useful verdicts that boosted a symbol's score.
+    pub boosted: usize,
+    /// Symbols suppressed by the recurring false-positive rule (≥2 noisy verdicts).
+    pub recurring_fp_suppressed: usize,
+    /// Unique rule names that fired, in first-encounter order.
+    /// Values: "exact_noisy", "same_file_sibling_suppression", "useful_boost", "recurring_fp".
+    pub rules_applied: Vec<String>,
+}
+
 /// `Useful` entries add a boost; `Noisy` / `WrongLayer` entries demote the
 /// symbol to negative infinity (effectively removed). Also:
 ///
@@ -1101,11 +1120,26 @@ pub fn apply_feedback_adjustments(
     query: &str,
     scored: &mut Vec<(f64, String)>,
     feedback_entries: &[(String, String, crate::schema::FeedbackVerdict)],
-) {
-    if feedback_entries.is_empty() { return; }
+) -> FeedbackMetrics {
+    if feedback_entries.is_empty() { return FeedbackMetrics::default(); }
     let query_norm = query.to_lowercase();
     let current_tokens: std::collections::HashSet<String> = fb_query_tokens(&query_norm);
     let current_tokens_vec: Vec<&str> = current_tokens.iter().map(|s| s.as_str()).collect();
+
+    // Metrics accumulators.
+    let entries_applied = feedback_entries.iter()
+        .filter(|(_, fb_q, _)| query_family_matches(&current_tokens, fb_q))
+        .count();
+    let mut preserved_useful_siblings: usize = 0;
+    let mut boosted: usize = 0;
+    let mut recurring_fp_suppressed: usize = 0;
+    let mut rules_seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut rules_applied: Vec<String> = Vec::new();
+    macro_rules! record_rule {
+        ($name:expr) => {
+            if rules_seen.insert($name) { rules_applied.push($name.to_string()); }
+        };
+    }
 
     // --- Recurring false positive map ---
     let mut noisy_queries_by_sym: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
@@ -1220,7 +1254,10 @@ pub fn apply_feedback_adjustments(
                 });
                 if !has_useful {
                     *score = f64::NEG_INFINITY;
+                    record_rule!("same_file_sibling_suppression");
                     continue;
+                } else {
+                    preserved_useful_siblings += 1;
                 }
             }
         }
@@ -1231,10 +1268,15 @@ pub fn apply_feedback_adjustments(
             // t-003: use token-family matching instead of substring containment.
             if !query_family_matches(&current_tokens, fb_query) { continue; }
             match verdict {
-                crate::schema::FeedbackVerdict::Useful => *score += 1.5,
+                crate::schema::FeedbackVerdict::Useful => {
+                    *score += 1.5;
+                    boosted += 1;
+                    record_rule!("useful_boost");
+                }
                 crate::schema::FeedbackVerdict::Noisy
                 | crate::schema::FeedbackVerdict::WrongLayer => {
                     *score = f64::NEG_INFINITY;
+                    record_rule!("exact_noisy");
                 }
                 crate::schema::FeedbackVerdict::Missing => {}
             }
@@ -1245,11 +1287,16 @@ pub fn apply_feedback_adjustments(
             if let Some(sup_tokens) = recurring_fp.get(sym_id.as_str()) {
                 if current_tokens_vec.iter().any(|qt| sup_tokens.iter().any(|st| st == *qt)) {
                     *score = f64::NEG_INFINITY;
+                    recurring_fp_suppressed += 1;
+                    record_rule!("recurring_fp");
                 }
             }
         }
     }
+    let before = scored.len();
     scored.retain(|(s, _)| s.is_finite());
+    let suppressed = before - scored.len();
+    FeedbackMetrics { entries_applied, suppressed, preserved_useful_siblings, boosted, recurring_fp_suppressed, rules_applied }
 }
 
 /// Per-result explanation of which feedback verdict affected a search hit.

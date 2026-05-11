@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine,
     FeedbackStore, FtsFilters, IndexStore, LedgerKind, LedgerStore, SearchFtsDb,
-    apply_feedback_adjustments,
+    apply_feedback_adjustments, FeedbackMetrics,
     classify_layer_sym, confidence_scores, derive_cold_hints, detect_ambiguous_tokens,
     detect_possible_misses, estimate_tokens, explain_match, extract_summary, find_candidates,
     find_indexed_test_files, gather_recency, git_dirty_files, glob_match, intent_focus,
@@ -179,7 +179,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // Apply durable feedback adjustments (Useful/Noisy/WrongLayer verdicts).
     let feedback_store = AsgFeedbackStore { repo: &engine.repo };
     let feedback_verdicts = feedback_store.flat_verdicts(&engine.ref_name).unwrap_or_default();
-    apply_feedback_adjustments(&engine, &index_store, &cfg.db_path, &args.description, &mut candidates, &feedback_verdicts);
+    let feedback_metrics = apply_feedback_adjustments(&engine, &index_store, &cfg.db_path, &args.description, &mut candidates, &feedback_verdicts);
 
     // Recency pass (one git call for all files).
     let recency = gather_recency(200, 14.0);
@@ -958,6 +958,14 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         "ambiguous_terms": ambiguous_terms,
         "possible_misses": possible_misses,
         "scope_narrowed": scope_narrowed,
+        "feedback_summary": {
+            "entries_applied": feedback_metrics.entries_applied,
+            "suppressed": feedback_metrics.suppressed,
+            "preserved_useful_siblings": feedback_metrics.preserved_useful_siblings,
+            "boosted": feedback_metrics.boosted,
+            "recurring_fp_suppressed": feedback_metrics.recurring_fp_suppressed,
+            "rules_applied": feedback_metrics.rules_applied,
+        },
         "safe_change_recipe": safe_change_recipe,
         "design_invariants": design_invariants,
         "known_hazards": known_hazards,

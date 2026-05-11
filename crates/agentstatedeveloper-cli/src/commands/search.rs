@@ -12,6 +12,7 @@ use agentstatedeveloper_core::{
     EffectStore, Engine, FeedbackStore, FeedbackVerdict, FtsFilters, IndexStore,
     LedgerStore, SearchDocsDb, SearchFtsDb,
     apply_feedback_adjustments, apply_file_scope_feedback, classify_layer_sym, confidence_reason,
+    FeedbackMetrics,
     confidence_scores, detect_ambiguous_tokens, detect_confidence_warnings, detect_possible_misses,
     effect_detail_reason, estimate_tokens, explain_match, explain_feedback_impacts, extract_summary,
     gather_recency, hybrid_boost, in_memory_score,
@@ -243,8 +244,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         }
 
         // Apply durable feedback: suppress noisy/wrong-layer, boost useful.
-        let mut feedback_suppressed: usize = 0;
-        // feedback_suppressed_detail: qname fragments of symbols removed for this specific query.
+        let mut feedback_metrics = FeedbackMetrics::default();
         let mut feedback_suppressed_detail: Vec<String> = Vec::new();
         {
             let fb_store = AsgFeedbackStore { repo: &engine.repo };
@@ -261,7 +261,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     let mut adj: Vec<(f64, String)> = scored.iter()
                         .map(|(s, h)| (*s, h.qname.clone()))
                         .collect();
-                    apply_feedback_adjustments(&engine, &idx, &cfg.db_path, &args.query, &mut adj, &fb_tuples);
+                    feedback_metrics = apply_feedback_adjustments(&engine, &idx, &cfg.db_path, &args.query, &mut adj, &fb_tuples);
                     apply_file_scope_feedback(&engine, &idx, &cfg.db_path, &args.query, &mut adj, &fs_tuples);
                     // Collect suppressed qnames before consuming adj.
                     let surviving: std::collections::HashSet<&str> =
@@ -272,9 +272,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                         .collect();
                     let adj_map: std::collections::HashMap<String, f64> =
                         adj.into_iter().map(|(s, q)| (q, s)).collect();
-                    let before = scored.len();
                     scored.retain(|(_, h)| adj_map.contains_key(&h.qname));
-                    feedback_suppressed = before - scored.len();
                     for (score, h) in scored.iter_mut() {
                         if let Some(&new_s) = adj_map.get(&h.qname) {
                             *score = new_s;
@@ -452,9 +450,18 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 "query_suggestions": query_suggestions,
                 "scoped_suggestions": scoped_suggestions,
                 "scope_narrowed": scope_narrowed,
-                "feedback_suppressed": feedback_suppressed,
+                "feedback_suppressed": feedback_metrics.suppressed,
                 "feedback_suppressed_detail": feedback_suppressed_detail,
                 "boosted_outranked": boosted_outranked,
+                "feedback_summary": {
+                    "entries_applied": feedback_metrics.entries_applied,
+                    "suppressed": feedback_metrics.suppressed,
+                    "preserved_useful_siblings": feedback_metrics.preserved_useful_siblings,
+                    "boosted": feedback_metrics.boosted,
+                    "recurring_fp_suppressed": feedback_metrics.recurring_fp_suppressed,
+                    "boosted_outranked": boosted_outranked.len(),
+                    "rules_applied": feedback_metrics.rules_applied,
+                },
                 "results": results,
                 "document_hits": doc_results,
             });
@@ -569,8 +576,8 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     }
                 }
             }
-            if feedback_suppressed > 0 {
-                eprintln!("asd: {} result(s) suppressed by feedback (use `asd feedback list` to review)", feedback_suppressed);
+            if feedback_metrics.suppressed > 0 {
+                eprintln!("asd: {} result(s) suppressed by feedback (use `asd feedback list` to review)", feedback_metrics.suppressed);
             }
             // Try-narrowing suggestion: when ambiguous terms dominate, suggest scoped queries.
             if !ambiguous_terms.is_empty() {
@@ -652,7 +659,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 let mut adj: Vec<(f64, String)> = scored.iter()
                     .map(|(s, sym)| (*s as f64, sym.qname.clone()))
                     .collect();
-                apply_feedback_adjustments(&engine, &idx, &cfg.db_path, &args.query, &mut adj, &fb_tuples);
+                let _ = apply_feedback_adjustments(&engine, &idx, &cfg.db_path, &args.query, &mut adj, &fb_tuples);
                 apply_file_scope_feedback(&engine, &idx, &cfg.db_path, &args.query, &mut adj, &fs_tuples);
                 let surviving: std::collections::HashSet<String> =
                     adj.into_iter().map(|(_, q)| q).collect();
