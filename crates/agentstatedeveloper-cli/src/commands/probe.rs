@@ -503,6 +503,76 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
     let started_at = Utc::now().to_rfc3339();
     let wall_start = Instant::now();
 
+    // -------------------------------------------------------------------------
+    // Phase 1: Command de-duplication cache.
+    //
+    // Many probes share identical (command, args, cwd) — e.g. 10 search probes
+    // all run `search "drift playhead" --agent` and test different fields of the
+    // same JSON.  We compute a cache key for each probe, execute each unique key
+    // exactly once (in parallel up to `jobs` workers), then fan out the
+    // assertions in Phase 2 against the shared output.
+    //
+    // hydrate-roundtrip is excluded (in-process, not a subprocess).
+    // workflow probes (command="workflow") are excluded (no JSON output to cache).
+    // -------------------------------------------------------------------------
+    let cacheable = |p: &&ProbeEntry| {
+        p.command != "hydrate-roundtrip" && p.command != "hydrate_roundtrip"
+            && p.command != "workflow"
+    };
+
+    // Map each probe index → its cache key (or None if non-cacheable).
+    let probe_keys: Vec<Option<String>> = probes.iter()
+        .map(|p| if cacheable(&p) { Some(command_cache_key(p, &cfg.db_path)) } else { None })
+        .collect();
+
+    // Collect unique keys, keeping the first probe index as the representative.
+    let mut key_to_representative: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (i, key_opt) in probe_keys.iter().enumerate() {
+        if let Some(key) = key_opt {
+            key_to_representative.entry(key.clone()).or_insert(i);
+        }
+    }
+
+    let n_unique = key_to_representative.len();
+    let n_cacheable = probe_keys.iter().filter(|k| k.is_some()).count();
+    let n_deduped = n_cacheable.saturating_sub(n_unique);
+    if !args.json && n_deduped > 0 {
+        eprintln!("  {} duplicate command invocation(s) eliminated by cache ({} unique → {} probes)",
+            n_deduped, n_unique, n_cacheable);
+    }
+
+    // Execute unique commands in parallel, building the cache.
+    // key → CachedOutput
+    let command_cache: std::collections::HashMap<String, CachedOutput> = {
+        let unique_probes: Vec<(String, &ProbeEntry)> = key_to_representative.iter()
+            .map(|(key, &idx)| (key.clone(), probes[idx]))
+            .collect();
+        let mut map: std::collections::HashMap<String, CachedOutput> =
+            std::collections::HashMap::with_capacity(unique_probes.len());
+        std::thread::scope(|scope| {
+            for chunk in unique_probes.chunks(jobs) {
+                let handles: Vec<_> = chunk.iter().map(|(key, probe)| {
+                    scope.spawn(move || (key.clone(), run_command_only(cfg, probe)))
+                }).collect();
+                for h in handles {
+                    let (k, v) = h.join().unwrap_or_else(|_| {
+                        ("__panic__".to_string(), CachedOutput {
+                            json: None, stdout_raw: String::new(), stderr: String::new(),
+                            success: false, duration_ms: 0, timed_out: false,
+                            exec_error: Some("thread panicked during command execution".to_string()),
+                        })
+                    });
+                    map.insert(k, v);
+                }
+            }
+        });
+        map
+    };
+
+    // -------------------------------------------------------------------------
+    // Phase 2: assertion fan-out (fast — no subprocesses).
+    // -------------------------------------------------------------------------
+
     // fail_fast_flag: set by any thread when an assertion fails and --fail-fast is active.
     // std::thread::scope guarantees all threads finish before we leave the scope, so no
     // Arc is needed — a plain reference to the AtomicBool is sufficient and is Copy+Send.
@@ -528,17 +598,26 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
 
             // Spawn one thread per probe in this chunk.
             // Each thread returns (original_index, ProbeResult).
+            // Phase 2: if the probe has a cache entry, use run_assertion_against
+            // (fast, no subprocess). Otherwise fall back to execute_probe for
+            // in-process probes (hydrate-roundtrip, workflow).
             let handles: Vec<_> = chunk
                 .iter()
                 .enumerate()
                 .map(|(j, probe)| {
                     let global_idx = chunk_start + j;
+                    let cache_key = probe_keys[global_idx].clone();
+                    let cached = cache_key.as_ref().and_then(|k| command_cache.get(k));
                     scope.spawn(move || {
                         // Check flag before doing work (fast exit on fail-fast).
                         if ff.load(std::sync::atomic::Ordering::Relaxed) {
                             return None;
                         }
-                        let result = execute_probe(cfg, probe);
+                        let result = if let Some(c) = cached {
+                            run_assertion_against(probe, c)
+                        } else {
+                            execute_probe(cfg, probe)
+                        };
                         if result.error.is_some() && fail_fast {
                             ff.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
@@ -722,6 +801,194 @@ struct ProbeResult {
     error: Option<String>,
     debug_payload: Option<Value>,
     debug_payload_summary: Option<String>,
+}
+
+/// Cached result of a single subprocess execution (command + args).
+/// Shared across all probes that map to the same command invocation.
+#[derive(Clone)]
+struct CachedOutput {
+    /// Parsed JSON from stdout, or None if output was not valid JSON.
+    json: Option<Value>,
+    /// Raw stdout text (used for error messages).
+    stdout_raw: String,
+    /// Stderr text (included in error messages).
+    stderr: String,
+    /// True if the process exited successfully.
+    success: bool,
+    /// Wall-clock time for the subprocess (ms).
+    duration_ms: u128,
+    /// True if the command hit the --timeout limit.
+    timed_out: bool,
+    /// Execution-level error (process spawn failure), separate from assertion errors.
+    exec_error: Option<String>,
+}
+
+/// Compute the de-duplication key for a probe's command invocation.
+/// Probes with identical (command, args, cwd, db_path) share one subprocess run.
+fn command_cache_key(probe: &ProbeEntry, db_path: &std::path::Path) -> String {
+    let cwd_part = probe.cwd.as_deref().unwrap_or("");
+    format!("{}|{}|{}|{}", probe.command, probe.args.join("\x00"), cwd_part, db_path.display())
+}
+
+/// Execute the subprocess for `probe` and return a `CachedOutput`.
+/// Does NOT run the assertion — pure I/O only.
+/// Skipped for hydrate-roundtrip (handled separately).
+fn run_command_only(cfg: &Config, probe: &ProbeEntry) -> CachedOutput {
+    let start = Instant::now();
+
+    let asd_bin_path: PathBuf = {
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("asd"));
+        if exe.exists() { exe } else { PathBuf::from("asd") }
+    };
+    let asd_bin = asd_bin_path.to_string_lossy().into_owned();
+
+    let subcmd = match probe.command.as_str() {
+        "prepare-change" | "prepare_change" => "prepare-change",
+        "annotate-commit" | "annotate_commit" => "annotate-commit",
+        "task-close" | "task_close" => "task-close",
+        other => other,
+    };
+
+    let probe_dir = std::path::Path::new(&cfg.db_path)
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+    let work_dir = probe.cwd.as_ref()
+        .map(PathBuf::from)
+        .unwrap_or(probe_dir);
+
+    fn shell_quote_inner(s: &str) -> String {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+
+    let db_path_str = cfg.db_path.to_string_lossy().into_owned();
+    let mut shell_cmd = format!(
+        "cd {} && {} --db {} {}",
+        shell_quote_inner(work_dir.to_string_lossy().as_ref()),
+        shell_quote_inner(&asd_bin),
+        shell_quote_inner(&db_path_str),
+        shell_quote_inner(subcmd),
+    );
+    for arg in &probe.args {
+        shell_cmd.push(' ');
+        shell_cmd.push_str(&shell_quote_inner(arg));
+    }
+
+    let mut cmd = ProcessCommand::new("/bin/sh");
+    cmd.arg("-c").arg(&shell_cmd);
+
+    let output = match cmd.output() {
+        Ok(o) => o,
+        Err(e) => {
+            return CachedOutput {
+                json: None,
+                stdout_raw: String::new(),
+                stderr: String::new(),
+                success: false,
+                duration_ms: start.elapsed().as_millis(),
+                timed_out: false,
+                exec_error: Some(format!("failed to execute asd ({:?}) via sh: {}", asd_bin, e)),
+            };
+        }
+    };
+
+    let stdout_raw = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let json: Option<Value> = serde_json::from_str(&stdout_raw).ok();
+    let duration_ms = start.elapsed().as_millis();
+
+    CachedOutput {
+        json,
+        stdout_raw,
+        stderr,
+        success: output.status.success(),
+        duration_ms,
+        timed_out: false,
+        exec_error: None,
+    }
+}
+
+/// Run a probe's assertion against a pre-computed `CachedOutput`.
+/// Returns the ProbeResult without spawning any subprocess.
+fn run_assertion_against(probe: &ProbeEntry, cached: &CachedOutput) -> ProbeResult {
+    let assertion_kind = probe.assert.as_table()
+        .and_then(|m| m.get("kind"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if let Some(ref exec_err) = cached.exec_error {
+        return ProbeResult {
+            name: probe.name.clone(),
+            command: probe.command.clone(),
+            assertion: assertion_kind,
+            tags: probe.tags.clone(),
+            duration_ms: cached.duration_ms,
+            timed_out: false,
+            error: Some(exec_err.clone()),
+            debug_payload: None,
+            debug_payload_summary: None,
+        };
+    }
+
+    if !cached.success && cached.json.is_none() {
+        return ProbeResult {
+            name: probe.name.clone(),
+            command: probe.command.clone(),
+            assertion: assertion_kind,
+            tags: probe.tags.clone(),
+            duration_ms: cached.duration_ms,
+            timed_out: false,
+            error: Some(format!("command failed: {}", cached.stderr.trim())),
+            debug_payload: None,
+            debug_payload_summary: None,
+        };
+    }
+
+    let json = match cached.json.as_ref() {
+        Some(v) => v,
+        None => {
+            return ProbeResult {
+                name: probe.name.clone(),
+                command: probe.command.clone(),
+                assertion: assertion_kind,
+                tags: probe.tags.clone(),
+                duration_ms: cached.duration_ms,
+                timed_out: false,
+                error: Some("command output was not valid JSON".to_string()),
+                debug_payload: None,
+                debug_payload_summary: None,
+            };
+        }
+    };
+
+    match eval_assert(&probe.assert, json) {
+        Ok(()) => ProbeResult {
+            name: probe.name.clone(),
+            command: probe.command.clone(),
+            assertion: assertion_kind,
+            tags: probe.tags.clone(),
+            duration_ms: cached.duration_ms,
+            timed_out: false,
+            error: None,
+            debug_payload: None,
+            debug_payload_summary: None,
+        },
+        Err(msg) => {
+            let summary = summarize_debug_payload(json);
+            ProbeResult {
+                name: probe.name.clone(),
+                command: probe.command.clone(),
+                assertion: assertion_kind,
+                tags: probe.tags.clone(),
+                duration_ms: cached.duration_ms,
+                timed_out: false,
+                error: Some(msg),
+                debug_payload: Some(json.clone()),
+                debug_payload_summary: summary,
+            }
+        }
+    }
 }
 
 fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {

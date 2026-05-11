@@ -321,6 +321,20 @@ impl SearchFtsDb {
             .unwrap_or(0)
     }
 
+    /// Count symbols that have any ledger entries (ledger_text is non-empty).
+    /// Used as a fast-path guard in compute_trust_score to skip the expensive
+    /// per-symbol ledger walk when the DB is unannotated.
+    pub fn annotated_symbol_count(&self) -> usize {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM asd_search_fts WHERE ledger_text != ''",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n as usize)
+            .unwrap_or(0)
+    }
+
     fn insert_symbol(&self, sym: &Symbol, ledger_text: &str, ledger_flags: &str) -> rusqlite::Result<()> {
         let qname_exp = expand_identifier(&sym.qname);
         let sig_orig = sym.signature.as_deref().unwrap_or("");

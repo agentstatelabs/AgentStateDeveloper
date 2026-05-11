@@ -495,6 +495,16 @@ fn count_dirty_source_files(project_root: &Path) -> usize {
 /// Derive ledger density and concept-gap count from the ASG.
 /// Returns (density, gap_count). Falls back to (0.0, 0) if Engine can't open.
 fn ledger_signals(db_path: &Path, symbol_count: u64) -> (f64, usize) {
+    // Fast path: if the FTS index shows zero annotated symbols, skip the expensive
+    // per-symbol git tree walk entirely (unannotated / clean-room DBs).
+    let annotated = SearchFtsDb::open(db_path)
+        .ok()
+        .map(|fts| fts.annotated_symbol_count())
+        .unwrap_or(0);
+    if annotated == 0 {
+        return (0.0, 0);
+    }
+
     let engine = match Engine::open_sqlite(db_path) {
         Ok(e) => e,
         Err(_) => return (0.0, 0),
