@@ -33,9 +33,34 @@
 //!   ambiguous_terms_nonempty       — ambiguous_terms array is non-empty (broad query uncertainty check)
 //!   scoped_suggestions_nonempty    — scoped_suggestions array is non-empty
 //!   scoped_suggestions_contains    — scoped_suggestions contains an entry matching `fragment`
+//!   uncertainty_level_lte          — uncertainty.level ≤ max_level (low/medium/high/critical)
+//!   uncertainty_reason_contains    — uncertainty.reasons[*].code contains `code`
+//!   uncertainty_action_eq          — uncertainty.recommended_action equals `action`
+//!   recovery_suggestions_nonempty  — uncertainty.recovery_suggestions is non-empty
+//!   recovery_suggestion_estimated  — at least one recovery suggestion has `estimated_recovery = strength`
 //!   feedback_summary_gte           — feedback_summary[field] ≥ min_value (e.g. suppressed ≥ 1)
 //!   feedback_summary_eq            — feedback_summary[field] == value
 //!   feedback_rules_contains        — feedback_summary.rules_applied contains `rule`
+//!   field_gte                      — output[dot.path] ≥ min_value (numeric)
+//!   field_eq                       — output[dot.path] equals expected string
+//!   array_field_count_lte          — length of dot-path array field ≤ max_count
+//!   array_field_count_gte          — length of dot-path array field ≥ min_count
+//!   workflow_steps_contains        — workflow.steps_detected contains step
+//!   evidence_score_gte             — workflow.evidence_quality.evidence_quality_score ≥ min_value
+//!   data_quality_state_eq          — trust.data_quality.state equals expected string
+//!   feedback_state_eq              — feedback_state[field] == value (bool)
+//!   feedback_state_field_eq        — feedback_state[field] equals expected string
+//!   feedback_coverage_eq           — feedback_summary.coverage equals expected string
+//!   array_field_contains           — dot-path array field contains `value` string
+//!   array_field_excludes           — dot-path array field does NOT contain `value` string
+//!   uncertainty_exact_symbol_match — uncertainty.exact_symbol_match == expected (bool)
+//!   uncertainty_primary_source_eq  — uncertainty.sources.primary equals expected string
+//!   uncertainty_source_gte         — uncertainty.sources[source] >= min_value
+//!   all_items_have_field           — every object in a dot-path array has the named field set
+//!   file_field_contains            — specific array item (by file_fragment) has field containing substring
+//!
+//! Special probe command (no assert block needed):
+//!   hydrate-roundtrip              — write sentinel, sync, hydrate into fresh DB, verify survival
 
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -47,7 +72,7 @@ use clap::{Args, Subcommand};
 use rusqlite::{Connection, params};
 use serde_json::Value;
 
-use agentstatedeveloper_core::{SearchFtsDb, stale_warning};
+use agentstatedeveloper_core::{FtsFilters, FtsHit, SearchFtsDb, compute_trust_score, stale_warning};
 
 use crate::config::Config;
 
@@ -67,10 +92,22 @@ pub enum ProbeSub {
     Run(ProbeRunArgs),
     /// Append a new probe entry to .asd/probes.toml.
     Add(ProbeAddArgs),
+    /// Generate a starter .asd/probes.toml from the current index.
+    Bootstrap(ProbeBootstrapArgs),
     /// Show probe run history from .asd/probe-history.jsonl.
     History(ProbeHistoryArgs),
     /// Rebuild probe-analytics.db from probe-history.jsonl.
     Reindex(ProbeReindexArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ProbeBootstrapArgs {
+    /// Overwrite .asd/probes.toml if it already exists.
+    #[arg(long)]
+    pub force: bool,
+    /// Number of top symbols to generate ranking probes for (default: 5).
+    #[arg(long, default_value = "5")]
+    pub top: usize,
 }
 
 #[derive(Debug, Args)]
@@ -202,6 +239,7 @@ pub fn run(cfg: &Config, cmd: ProbeCmd) -> Result<()> {
     match cmd.sub {
         ProbeSub::Run(args) => run_probes(cfg, args),
         ProbeSub::Add(args) => add_probe(cfg, args),
+        ProbeSub::Bootstrap(args) => bootstrap_probes(cfg, args),
         ProbeSub::History(args) => show_history(cfg, args),
         ProbeSub::Reindex(args) => reindex_analytics(cfg, args),
     }
@@ -456,10 +494,11 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
         eprintln!("Running {} probe(s) [{} parallel]…", n, jobs);
     }
 
-    // Gather DB metadata once before running probes (cheap reads).
+    // Gather DB metadata + trust score once before running probes (cheap reads).
     let db_state = if stale_warning(&cfg.db_path, 3600).is_none() { "fresh" } else { "stale" };
     let symbol_count: Option<u64> = SearchFtsDb::open(&cfg.db_path).ok()
         .map(|fts| fts.symbol_count() as u64);
+    let trust = compute_trust_score(&cfg.db_path);
 
     let started_at = Utc::now().to_rfc3339();
     let wall_start = Instant::now();
@@ -601,6 +640,7 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
             "performance_budget_ms": args.fail_slow,
             "slow_violations": slow_violation_names,
             "slowest": slowest_top5,
+            "trust": trust.to_json(),
             "results": json_results,
         }))?);
     } else {
@@ -692,6 +732,38 @@ fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+
+    // Special-case: hydrate-roundtrip runs an isolated in-process cycle rather
+    // than spawning a subprocess. No assert block needed — pass/fail is the
+    // roundtrip itself.
+    if probe.command.as_str() == "hydrate-roundtrip" || probe.command.as_str() == "hydrate_roundtrip" {
+        let result = run_hydrate_roundtrip_probe(cfg);
+        let duration_ms = start.elapsed().as_millis();
+        return match result {
+            Ok(msg) => ProbeResult {
+                name: probe.name.clone(),
+                command: probe.command.clone(),
+                assertion: "hydrate_roundtrip".to_string(),
+                tags: probe.tags.clone(),
+                duration_ms,
+                timed_out: false,
+                error: None,
+                debug_payload: Some(serde_json::json!({ "message": msg })),
+                debug_payload_summary: Some(msg),
+            },
+            Err(msg) => ProbeResult {
+                name: probe.name.clone(),
+                command: probe.command.clone(),
+                assertion: "hydrate_roundtrip".to_string(),
+                tags: probe.tags.clone(),
+                duration_ms,
+                timed_out: false,
+                error: Some(msg.clone()),
+                debug_payload: Some(serde_json::json!({ "error": msg })),
+                debug_payload_summary: Some(msg),
+            },
+        };
+    }
 
     // Resolve asd binary path.
     // Prefer the current executable if it actually exists (covers installed + dev builds).
@@ -828,6 +900,99 @@ fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
                 debug_payload_summary: summary,
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hydrate roundtrip probe — semantic memory persistence proof
+// ---------------------------------------------------------------------------
+//
+// Writes a sentinel ledger entry into an isolated temp DB, syncs the sidecar,
+// hydrates into a second fresh temp DB, and verifies the entry survived.
+// Uses ephemeral SQLite files in a temp dir — never touches the production DB.
+
+fn run_hydrate_roundtrip_probe(_cfg: &Config) -> Result<String, String> {
+    use agentstatedeveloper_core::{
+        Engine, AsgIndexStore, AsgLedgerStore, IndexStore, LedgerStore,
+        hydrate_from_dir, sync_to_dir, symbol_fingerprint,
+        schema::{Author, AuthorKind, LedgerEntry, LedgerKind, Position, Symbol, SymbolKind},
+    };
+
+    // Step 1 — ephemeral temp workspace (never touches the production DB).
+    let tmp = tempfile::TempDir::new()
+        .map_err(|e| format!("failed to create temp dir: {e}"))?;
+    let db_a = tmp.path().join("roundtrip_a.db");
+    let db_b = tmp.path().join("roundtrip_b.db");
+
+    // Step 2 — open source engine, write a synthetic symbol + sentinel entry.
+    let engine_a = Engine::open_sqlite(&db_a)
+        .map_err(|e| format!("failed to open temp Engine A: {e}"))?;
+
+    let qname = "asd::probe::roundtrip_sentinel";
+    let file = "__asd_probe__/roundtrip.rs";
+    let sym = Symbol {
+        symbol_id: "asd-probe-roundtrip-sym".to_string(),
+        symbol_fp: symbol_fingerprint(qname),
+        qname: qname.to_string(),
+        kind: SymbolKind::Function,
+        file: file.to_string(),
+        language: "rust".to_string(),
+        start: Position { line: 1, col: 0 },
+        end: Position { line: 1, col: 0 },
+        doc: Some("ASD hydrate roundtrip probe sentinel symbol".to_string()),
+        signature: Some("fn roundtrip_sentinel()".to_string()),
+    };
+    let store_a = AsgIndexStore { repo: &engine_a.repo };
+    store_a.put_symbol(&engine_a.ref_name, &sym, "asd-roundtrip-probe")
+        .map_err(|e| format!("failed to write sentinel symbol: {e}"))?;
+
+    let sentinel_text = "asd-hydrate-roundtrip-proof";
+    let author = Author { kind: AuthorKind::Agent, id: "asd-roundtrip-probe".to_string() };
+    let mut entry = LedgerEntry::new(
+        "asd-probe-roundtrip-sym",
+        LedgerKind::Decision,
+        sentinel_text,
+        author,
+    );
+    entry.tags = vec!["trust-probe".to_string(), "probe-roundtrip".to_string()];
+
+    let ledger_a = AsgLedgerStore { repo: &engine_a.repo };
+    ledger_a.append_entry(&engine_a.ref_name, &entry, "asd-roundtrip-probe")
+        .map_err(|e| format!("failed to write sentinel ledger entry: {e}"))?;
+
+    // Step 3 — sync sidecar to temp dir (creates .asd/v1/ inside tmp).
+    let sidecar_root = tmp.path();
+    sync_to_dir(&engine_a.repo, &engine_a.ref_name, sidecar_root)
+        .map_err(|e| format!("sync_to_dir failed: {e}"))?;
+
+    // Step 4 — open fresh engine B (empty DB), hydrate from the sidecar.
+    let engine_b = Engine::open_sqlite(&db_b)
+        .map_err(|e| format!("failed to open temp Engine B: {e}"))?;
+    hydrate_from_dir(&engine_b.repo, &engine_b.ref_name, sidecar_root, "asd-roundtrip-probe")
+        .map_err(|e| format!("hydrate_from_dir failed: {e}"))?;
+
+    // Step 5 — verify the sentinel entry survived.
+    let ledger_b = AsgLedgerStore { repo: &engine_b.repo };
+    let entries = ledger_b
+        .list_entries(&engine_b.ref_name, "asd-probe-roundtrip-sym")
+        .map_err(|e| format!("failed to read ledger from Engine B: {e}"))?;
+
+    let survived = entries.iter().any(|e| e.summary == sentinel_text);
+
+    if survived {
+        Ok(format!(
+            "roundtrip OK — sentinel {:?} survived sync→hydrate cycle ({} entries in B)",
+            sentinel_text,
+            entries.len()
+        ))
+    } else {
+        Err(format!(
+            "roundtrip FAILED — sentinel {:?} not found in Engine B after hydrate \
+             ({} entries present: {:?})",
+            sentinel_text,
+            entries.len(),
+            entries.iter().map(|e| e.summary.as_str()).collect::<Vec<_>>()
+        ))
     }
 }
 
@@ -1082,6 +1247,116 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
             }
         }
 
+        // uncertainty_level_lte: uncertainty.level is at most `max_level`.
+        // Levels ordered: low < medium < high < critical.
+        // Use this to assert exact queries don't produce unexpected uncertainty.
+        // Example: { kind = "uncertainty_level_lte", max_level = "low" }
+        "uncertainty_level_lte" => {
+            let max_level = str_field(map, "max_level")?;
+            let level_rank = |l: &str| match l {
+                "low"      => 0u8,
+                "medium"   => 1,
+                "high"     => 2,
+                "critical" => 3,
+                _          => 4,
+            };
+            let actual_level = output.get("uncertainty")
+                .and_then(|u| u.get("level"))
+                .and_then(Value::as_str)
+                .unwrap_or("low");
+            if level_rank(actual_level) <= level_rank(max_level) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "uncertainty_level_lte: uncertainty.level = {:?} (expected <= {:?})",
+                    actual_level, max_level
+                ))
+            }
+        }
+
+        // uncertainty_reason_contains: uncertainty.reasons[*].code contains `code`.
+        // Use this to verify a specific uncertainty signal fires for ambiguous queries.
+        // Example: { kind = "uncertainty_reason_contains", code = "ambiguous_term" }
+        "uncertainty_reason_contains" => {
+            let code = str_field(map, "code")?;
+            let reasons = output.get("uncertainty")
+                .and_then(|u| u.get("reasons"))
+                .and_then(Value::as_array)
+                .unwrap_or(&empty_arr);
+            let found = reasons.iter().any(|r| {
+                r.get("code").and_then(Value::as_str).map_or(false, |c| c == code)
+            });
+            if found {
+                Ok(())
+            } else {
+                let codes: Vec<&str> = reasons.iter()
+                    .filter_map(|r| r.get("code").and_then(Value::as_str))
+                    .collect();
+                Err(format!(
+                    "uncertainty_reason_contains: reason code {:?} not found; got {:?}",
+                    code, codes
+                ))
+            }
+        }
+
+        // uncertainty_action_eq: uncertainty.recommended_action equals `action`.
+        // Use this to verify the correct recovery suggestion fires.
+        // Example: { kind = "uncertainty_action_eq", action = "narrow_query" }
+        "uncertainty_action_eq" => {
+            let action = str_field(map, "action")?;
+            let actual = output.get("uncertainty")
+                .and_then(|u| u.get("recommended_action"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if actual == action {
+                Ok(())
+            } else {
+                Err(format!(
+                    "uncertainty_action_eq: recommended_action = {:?} (expected {:?})",
+                    actual, action
+                ))
+            }
+        }
+
+        // recovery_suggestions_nonempty: uncertainty.recovery_suggestions is non-empty.
+        // Use this to verify broad queries emit structured recovery hints.
+        "recovery_suggestions_nonempty" => {
+            let suggestions = output.get("uncertainty")
+                .and_then(|u| u.get("recovery_suggestions"))
+                .and_then(Value::as_array)
+                .unwrap_or(&empty_arr);
+            if !suggestions.is_empty() {
+                Ok(())
+            } else {
+                Err("recovery_suggestions_nonempty: uncertainty.recovery_suggestions is empty".to_string())
+            }
+        }
+
+        // recovery_suggestion_estimated: at least one recovery suggestion has `estimated_recovery = strength`.
+        // Example: { kind = "recovery_suggestion_estimated", strength = "strong" }
+        "recovery_suggestion_estimated" => {
+            let strength = str_field(map, "strength")?;
+            let suggestions = output.get("uncertainty")
+                .and_then(|u| u.get("recovery_suggestions"))
+                .and_then(Value::as_array)
+                .unwrap_or(&empty_arr);
+            let found = suggestions.iter().any(|s| {
+                s.get("estimated_recovery").and_then(Value::as_str)
+                    .map_or(false, |e| e == strength)
+            });
+            if found {
+                Ok(())
+            } else {
+                let found_strengths: Vec<&str> = suggestions.iter()
+                    .filter_map(|s| s.get("estimated_recovery").and_then(Value::as_str))
+                    .collect();
+                Err(format!(
+                    "recovery_suggestion_estimated: no suggestion with estimated_recovery {:?}; got {:?}",
+                    strength, found_strengths
+                ))
+            }
+        }
+
         // feedback_summary_gte: feedback_summary[field] >= min_value.
         // Use this to prove feedback is actively suppressing or boosting results.
         "feedback_summary_gte" => {
@@ -1139,9 +1414,445 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
             }
         }
 
+        // field_gte: output[dotted.path] >= min_value (numeric).
+        // Required: field (dot-path string), min_value (integer or float).
+        // Example: { kind = "field_gte", field = "score", min_value = 0.5 }
+        //          { kind = "field_gte", field = "signals.symbol_count", min_value = 100 }
+        "field_gte" => {
+            let field = str_field(map, "field")?;
+            let min_val: f64 = map.get("min_value")
+                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .ok_or_else(|| format!("assertion missing required numeric field \"min_value\""))?;
+            let actual = dot_path(output, field)
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            if actual >= min_val {
+                Ok(())
+            } else {
+                Err(format!(
+                    "field_gte: {field} = {actual} (expected >= {min_val})"
+                ))
+            }
+        }
+
+        // array_field_count_lte: length of a dot-path array field <= max_count.
+        // Required: field (dot-path string), max_count (integer).
+        // Example: { kind = "array_field_count_lte", field = "safe_change_recipe.edit", max_count = 8 }
+        "array_field_count_lte" => {
+            let field = str_field(map, "field")?;
+            let max_count = u64_field(map, "max_count")?;
+            let val = dot_path(output, field);
+            let len = val.and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0) as u64;
+            if len <= max_count {
+                Ok(())
+            } else {
+                Err(format!(
+                    "array_field_count_lte: {field} has {len} elements (max {})",
+                    max_count
+                ))
+            }
+        }
+
+        // array_field_count_gte: length of a dot-path array field >= min_count.
+        // Required: field (dot-path string), min_count (integer).
+        // Example: { kind = "array_field_count_gte", field = "entry_points", min_count = 3 }
+        "array_field_count_gte" => {
+            let field = str_field(map, "field")?;
+            let min_count = u64_field(map, "min_count")?;
+            let val = dot_path(output, field);
+            let len = val.and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0) as u64;
+            if len >= min_count {
+                Ok(())
+            } else {
+                Err(format!(
+                    "array_field_count_gte: {field} has {len} elements (min {})",
+                    min_count
+                ))
+            }
+        }
+
+        // field_eq: output[dot.path] equals `expected` (string comparison).
+        // Required: field (dot-path string), expected (string).
+        // Example: { kind = "field_eq", field = "workflow.workflow_type", expected = "full" }
+        "field_eq" => {
+            let field = str_field(map, "field")?;
+            let expected = str_field(map, "expected")?;
+            let actual = dot_path(output, field)
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if actual == expected {
+                Ok(())
+            } else {
+                Err(format!(
+                    "field_eq: {field} = {actual:?} (expected {:?})",
+                    expected
+                ))
+            }
+        }
+
+        // workflow_steps_contains: workflow.steps_detected array contains `step`.
+        // Required: step (string).
+        // Example: { kind = "workflow_steps_contains", step = "task_closed" }
+        "workflow_steps_contains" => {
+            let step = str_field(map, "step")?;
+            let steps = dot_path(output, "workflow.steps_detected")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let found = steps.iter().any(|s| s.as_str() == Some(step));
+            if found {
+                Ok(())
+            } else {
+                Err(format!(
+                    "workflow_steps_contains: step {:?} not found in {:?}",
+                    step,
+                    steps.iter().filter_map(|s| s.as_str()).collect::<Vec<_>>()
+                ))
+            }
+        }
+
+        // evidence_score_gte: workflow.evidence_quality.evidence_quality_score >= min_value.
+        // Required: min_value (float).
+        // Example: { kind = "evidence_score_gte", min_value = 0.5 }
+        "evidence_score_gte" => {
+            let min_val: f64 = map.get("min_value")
+                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .ok_or_else(|| "assertion missing required numeric field \"min_value\"".to_string())?;
+            let actual = dot_path(output, "workflow.evidence_quality.evidence_quality_score")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            if actual >= min_val {
+                Ok(())
+            } else {
+                Err(format!(
+                    "evidence_score_gte: evidence_quality_score = {actual:.2} (expected >= {min_val})"
+                ))
+            }
+        }
+
+        // data_quality_state_eq: trust.data_quality.state equals expected string.
+        // Required: expected (string: "clean_room" | "sparse_but_active" | "populated" | "degraded" | "empty").
+        // Example: { kind = "data_quality_state_eq", expected = "populated" }
+        "data_quality_state_eq" => {
+            let expected = str_field(map, "expected")?;
+            let actual = dot_path(output, "data_quality.state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if actual == expected {
+                Ok(())
+            } else {
+                Err(format!(
+                    "data_quality_state_eq: data_quality.state = {actual:?} (expected {:?})",
+                    expected
+                ))
+            }
+        }
+
+        // feedback_state_eq: feedback_state[field] == value (bool).
+        // Required: field (string), value (bool).
+        // Example: { kind = "feedback_state_eq", field = "available", value = false }
+        "feedback_state_eq" => {
+            let field = str_field(map, "field")?;
+            let expected = map.get("value")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| "assertion missing required bool field \"value\"".to_string())?;
+            let actual = output.get("feedback_state")
+                .and_then(|s| s.get(field))
+                .and_then(Value::as_bool);
+            match actual {
+                Some(v) if v == expected => Ok(()),
+                Some(v) => Err(format!(
+                    "feedback_state_eq: feedback_state.{} = {} (expected {})",
+                    field, v, expected
+                )),
+                None => Err(format!(
+                    "feedback_state_eq: feedback_state.{} not found in output",
+                    field
+                )),
+            }
+        }
+
+        // feedback_state_field_eq: feedback_state[field] == value (string).
+        // Required: field (string), value (string).
+        // Example: { kind = "feedback_state_field_eq", field = "reason", value = "no_feedback_entries" }
+        "feedback_state_field_eq" => {
+            let field = str_field(map, "field")?;
+            let expected = str_field(map, "value")?;
+            let actual = output.get("feedback_state")
+                .and_then(|s| s.get(field))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if actual == expected {
+                Ok(())
+            } else {
+                Err(format!(
+                    "feedback_state_field_eq: feedback_state.{} = {:?} (expected {:?})",
+                    field, actual, expected
+                ))
+            }
+        }
+
+        // feedback_coverage_eq: feedback_summary.coverage == value.
+        // Required: value (string: "none" | "partial" | "applied").
+        // Example: { kind = "feedback_coverage_eq", value = "none" }
+        "feedback_coverage_eq" => {
+            let expected = str_field(map, "value")?;
+            let actual = output.get("feedback_summary")
+                .and_then(|s| s.get("coverage"))
+                .and_then(Value::as_str)
+                .unwrap_or("none");
+            if actual == expected {
+                Ok(())
+            } else {
+                Err(format!(
+                    "feedback_coverage_eq: feedback_summary.coverage = {:?} (expected {:?})",
+                    actual, expected
+                ))
+            }
+        }
+
+        // uncertainty_exact_symbol_match: uncertainty.exact_symbol_match == expected (bool).
+        // Required: expected (bool).
+        // Example: { kind = "uncertainty_exact_symbol_match", expected = true }
+        "uncertainty_exact_symbol_match" => {
+            let expected = map.get("expected")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| "assertion missing required bool field \"expected\"".to_string())?;
+            let actual = output.get("uncertainty")
+                .and_then(|u| u.get("exact_symbol_match"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if actual == expected {
+                Ok(())
+            } else {
+                Err(format!(
+                    "uncertainty_exact_symbol_match: exact_symbol_match = {} (expected {})",
+                    actual, expected
+                ))
+            }
+        }
+
+        // uncertainty_primary_source_eq: uncertainty.sources.primary == expected.
+        // Required: expected (string: "query" | "db_state" | "result_set" | "none").
+        // Example: { kind = "uncertainty_primary_source_eq", expected = "query" }
+        "uncertainty_primary_source_eq" => {
+            let expected = str_field(map, "expected")?;
+            let actual = output.get("uncertainty")
+                .and_then(|u| u.get("sources"))
+                .and_then(|s| s.get("primary"))
+                .and_then(Value::as_str)
+                .unwrap_or("none");
+            if actual == expected {
+                Ok(())
+            } else {
+                Err(format!(
+                    "uncertainty_primary_source_eq: sources.primary = {:?} (expected {:?})",
+                    actual, expected
+                ))
+            }
+        }
+
+        // uncertainty_source_gte: uncertainty.sources[source] >= min_value.
+        // Required: source (string: "query" | "db_state" | "result_set"), min_value (float).
+        // Example: { kind = "uncertainty_source_gte", source = "query", min_value = 0.2 }
+        "uncertainty_source_gte" => {
+            let source = str_field(map, "source")?;
+            let min_val: f64 = map.get("min_value")
+                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .ok_or_else(|| "assertion missing required numeric field \"min_value\"".to_string())?;
+            let actual = output.get("uncertainty")
+                .and_then(|u| u.get("sources"))
+                .and_then(|s| s.get(source))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            if actual >= min_val {
+                Ok(())
+            } else {
+                Err(format!(
+                    "uncertainty_source_gte: sources.{} = {:.2} (expected >= {})",
+                    source, actual, min_val
+                ))
+            }
+        }
+
+        // array_field_contains: dot-path array field contains `value` string.
+        // Required: field (dot-path string), value (string).
+        // Example: { kind = "array_field_contains", field = "safe_to_use_for", value = "search" }
+        "array_field_contains" => {
+            let field = str_field(map, "field")?;
+            let value = str_field(map, "value")?;
+            let arr = dot_path(output, field)
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let found = arr.iter().any(|v| v.as_str().map_or(false, |s| s == value));
+            if found {
+                Ok(())
+            } else {
+                Err(format!(
+                    "array_field_contains: {:?} not found in {} {:?}",
+                    value,
+                    field,
+                    arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()
+                ))
+            }
+        }
+
+        // array_field_excludes: dot-path array field does NOT contain `value` string.
+        // Required: field (dot-path string), value (string).
+        // Example: { kind = "array_field_excludes", field = "avoid_for", value = "search" }
+        "array_field_excludes" => {
+            let field = str_field(map, "field")?;
+            let value = str_field(map, "value")?;
+            let arr = dot_path(output, field)
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let found = arr.iter().any(|v| v.as_str().map_or(false, |s| s == value));
+            if !found {
+                Ok(())
+            } else {
+                Err(format!(
+                    "array_field_excludes: {:?} unexpectedly found in {} {:?}",
+                    value,
+                    field,
+                    arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()
+                ))
+            }
+        }
+
+        // all_items_have_field: every object in a dot-path array has `field` non-null/non-empty.
+        // Required: array (dot-path to array), field (field name within each item).
+        // Example: { kind = "all_items_have_field", array = "likely_edit_files", field = "rationale" }
+        "all_items_have_field" => {
+            let array_path = str_field(map, "array")?;
+            let field = str_field(map, "field")?;
+            let arr = dot_path(output, array_path)
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if arr.is_empty() {
+                // Empty array trivially passes (nothing to check).
+                return Ok(());
+            }
+            let missing: Vec<String> = arr.iter()
+                .filter_map(|item| {
+                    let present = item.get(field)
+                        .map(|v| !v.is_null() && v.as_str().map_or(true, |s| !s.is_empty()))
+                        .unwrap_or(false);
+                    if !present {
+                        Some(item.get("file").and_then(Value::as_str).unwrap_or("?").to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if missing.is_empty() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "all_items_have_field: {} items in {} missing field {:?}: {:?}",
+                    missing.len(), array_path, field, &missing[..missing.len().min(5)]
+                ))
+            }
+        }
+
+        // file_field_contains: in a dot-path array, find item whose "file" contains file_fragment,
+        // then check that item's `field` contains the substring `value_contains`.
+        // Required: array (dot-path), file_fragment (string), field (string), value_contains (string).
+        // Example: { kind = "file_field_contains", array = "safe_change_recipe.reference_only",
+        //            file_fragment = "WaveformCanvas", field = "rationale", value_contains = "surface" }
+        "file_field_contains" => {
+            let array_path = str_field(map, "array")?;
+            let file_fragment = str_field(map, "file_fragment")?;
+            let field = str_field(map, "field")?;
+            let value_contains = str_field(map, "value_contains")?;
+            let arr = dot_path(output, array_path)
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let item = arr.iter().find(|item| {
+                item.get("file")
+                    .and_then(Value::as_str)
+                    .map_or(false, |f| f.contains(file_fragment))
+            });
+            match item {
+                None => Err(format!(
+                    "file_field_contains: no item with file containing {:?} found in {}",
+                    file_fragment, array_path
+                )),
+                Some(item) => {
+                    let val = item.get(field).and_then(Value::as_str).unwrap_or("");
+                    if val.contains(value_contains) {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "file_field_contains: item {:?}.{} = {:?} does not contain {:?}",
+                            item.get("file").and_then(Value::as_str).unwrap_or("?"),
+                            field, val, value_contains
+                        ))
+                    }
+                }
+            }
+        }
+
+        // json_field_present: dot-path field must exist and be non-null.
+        // Required: field (dot-path string).
+        // Example: { kind = "json_field_present", field = "total" }
+        "json_field_present" => {
+            let field = str_field(map, "field")?;
+            let present = dot_path(output, field).map_or(false, |v| !v.is_null());
+            if present {
+                Ok(())
+            } else {
+                Err(format!("json_field_present: field {:?} is absent or null", field))
+            }
+        }
+
+        // json_nested_eq: dot-path field must equal `value` (integer or string).
+        // Required: path (dot-path string), value (integer or string).
+        // Example: { kind = "json_nested_eq", path = "by_verdict.useful", value = 1 }
+        "json_nested_eq" => {
+            let path = str_field(map, "path")?;
+            let actual = dot_path(output, path);
+            // Try integer match first, then string.
+            if let Some(expected_int) = map.get("value").and_then(|v| v.as_integer()) {
+                let actual_int = actual.and_then(Value::as_i64);
+                match actual_int {
+                    Some(a) if a == expected_int => Ok(()),
+                    Some(a) => Err(format!(
+                        "json_nested_eq: {}.{} = {} (expected {})", path, "", a, expected_int
+                    )),
+                    None => Err(format!(
+                        "json_nested_eq: {}: field absent or non-numeric (expected {})", path, expected_int
+                    )),
+                }
+            } else if let Some(expected_str) = map.get("value").and_then(|v| v.as_str()) {
+                let actual_str = actual.and_then(Value::as_str).unwrap_or("");
+                if actual_str == expected_str {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "json_nested_eq: {} = {:?} (expected {:?})", path, actual_str, expected_str
+                    ))
+                }
+            } else {
+                Err("json_nested_eq: assertion missing required field \"value\" (integer or string)".to_string())
+            }
+        }
+
         "" => Ok(()), // no kind → smoke test, always passes
         other => Err(format!("unknown assertion kind: {:?}", other)),
     }
+}
+
+/// Navigate a dot-separated path into a JSON value.
+/// e.g. dot_path(json, "safe_change_recipe.edit") → Some(&json["safe_change_recipe"]["edit"])
+fn dot_path<'a>(mut val: &'a Value, path: &str) -> Option<&'a Value> {
+    for key in path.split('.') {
+        val = val.get(key)?;
+    }
+    Some(val)
 }
 
 fn str_field<'a>(map: &'a toml::map::Map<String, toml::Value>, key: &str) -> Result<&'a str, String> {
@@ -1334,6 +2045,219 @@ fn show_history(cfg: &Config, args: ProbeHistoryArgs) -> Result<()> {
         }
         println!("\n{} run(s) shown ({} total recorded)", window.len(), total);
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// probe bootstrap — generate a starter probes.toml from the current index
+// ---------------------------------------------------------------------------
+
+/// Generate a starter `.asd/probes.toml` for the current workspace.
+///
+/// Discovers top symbols via FTS and emits:
+/// - Structural smoke probes (trust, search result count, feedback state)
+/// - Per-symbol ranking probes for the top-N symbols found
+/// - Change-model classification guards for the most prominent domain terms
+///
+/// Safe to run on any indexed workspace. Does not modify the index or ledger.
+fn bootstrap_probes(cfg: &Config, args: ProbeBootstrapArgs) -> Result<()> {
+    let path = probe_file_path(cfg);
+
+    if path.exists() && !args.force {
+        eprintln!(
+            "probes.toml already exists at {}.\nUse `asd probe bootstrap --force` to overwrite.",
+            path.display()
+        );
+        std::process::exit(1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Discover top symbols from FTS
+    // -----------------------------------------------------------------------
+    let fts = SearchFtsDb::open(&cfg.db_path)
+        .map_err(|e| anyhow::anyhow!("Cannot open FTS DB: {}", e))?;
+
+    if !fts.has_data() {
+        eprintln!("FTS index is empty. Run `asd index` first, then re-run bootstrap.");
+        std::process::exit(1);
+    }
+
+    // Search with a very broad filter to get top symbols (exclude tests).
+    let filters = FtsFilters {
+        kind: None,
+        language: None,
+        include_tests: false,
+        exclude_terms: vec![],
+        paths_filter: vec![],
+    };
+    // Try a few common structural terms to surface domain symbols.
+    let try_terms = ["manager", "service", "view", "model", "controller",
+                     "handler", "client", "engine", "store", "state",
+                     "view", "scene", "player", "editor", "session"];
+    let mut all_hits: Vec<_> = Vec::new();
+    for term in try_terms {
+        let h = fts.search(term, &filters, args.top * 2).unwrap_or_default();
+        for hit in h {
+            if !all_hits.iter().any(|x: &agentstatedeveloper_core::FtsHit| x.qname == hit.qname) {
+                all_hits.push(hit);
+            }
+        }
+        if all_hits.len() >= args.top * 3 { break; }
+    }
+
+    // Pick symbols: prefer tier-0 (domain), fall back to tier-1, skip tier-2 (tests).
+    let top_symbols: Vec<(String, String)> = all_hits.iter()
+        .filter(|h| h.tier != 2u8) // skip test symbols (tier=2)
+        .take(args.top)
+        .filter_map(|h| {
+            let qname = h.qname.clone();
+            // Short name = last component after '.'
+            let short = qname.rsplit('.').next().unwrap_or(&qname).to_string();
+            if short.len() >= 3 { Some((qname, short)) } else { None }
+        })
+        .collect();
+
+    // -----------------------------------------------------------------------
+    // Get trust signals to tailor smoke tests
+    // -----------------------------------------------------------------------
+    let trust = compute_trust_score(&cfg.db_path);
+    let db_state = trust.data_quality.state.as_str();
+
+    // -----------------------------------------------------------------------
+    // Build the probes.toml content
+    // -----------------------------------------------------------------------
+    let mut out = String::new();
+
+    out.push_str(&format!(
+        "# ASD golden benchmark probes — bootstrapped by `asd probe bootstrap`\n\
+         # DB: {}\n\
+         # Symbols indexed: {}\n\
+         # Data quality: {} ({})\n\
+         # Generated: {}\n\
+         #\n\
+         # Run: asd probe run\n\
+         # Run subset: asd probe run --tag smoke\n\
+         #             asd probe run --tag ranking\n\n",
+        cfg.db_path.display(),
+        trust.signals.symbol_count,
+        db_state,
+        trust.data_quality.reason,
+        chrono::Utc::now().format("%Y-%m-%d"),
+    ));
+
+    // --- Structural smoke probes -------------------------------------------
+    out.push_str("# ---------------------------------------------------------------------------\n");
+    out.push_str("# Structural smoke tests — always pass on a healthy indexed workspace\n");
+    out.push_str("# ---------------------------------------------------------------------------\n\n");
+
+    out.push_str("[[probe]]\n");
+    out.push_str("name = \"smoke-trust-score\"\n");
+    out.push_str("description = \"Trust score must be >= 0.5 for a populated index\"\n");
+    out.push_str("tags = [\"smoke\", \"trust\"]\n");
+    out.push_str("command = \"trust\"\n");
+    out.push_str("args = []\n");
+    out.push_str("assert = { kind = \"field_gte\", field = \"score\", min_value = 0.5 }\n\n");
+
+    out.push_str("[[probe]]\n");
+    out.push_str("name = \"smoke-symbol-count\"\n");
+    out.push_str("description = \"Index must contain at least 10 symbols\"\n");
+    out.push_str("tags = [\"smoke\", \"trust\"]\n");
+    out.push_str("command = \"trust\"\n");
+    out.push_str("args = []\n");
+    out.push_str("assert = { kind = \"field_gte\", field = \"signals.symbol_count\", min_value = 10 }\n\n");
+
+    out.push_str("[[probe]]\n");
+    out.push_str("name = \"smoke-search-returns-results\"\n");
+    out.push_str("description = \"A broad search must return at least 1 result\"\n");
+    out.push_str("tags = [\"smoke\", \"search\"]\n");
+    out.push_str("command = \"search\"\n");
+
+    // Use the first discovered symbol's short name as the search term.
+    let first_query = top_symbols.first()
+        .map(|(_, s)| s.to_lowercase())
+        .unwrap_or_else(|| "state".to_string());
+    out.push_str(&format!("args = [\"{}\", \"--agent\"]\n", first_query));
+    out.push_str("assert = { kind = \"array_field_count_gte\", field = \"results\", min_count = 1 }\n\n");
+
+    out.push_str("[[probe]]\n");
+    out.push_str("name = \"smoke-feedback-state-field-present\"\n");
+    out.push_str("description = \"search output must include feedback_state field\"\n");
+    out.push_str("tags = [\"smoke\", \"feedback\"]\n");
+    out.push_str("command = \"search\"\n");
+    out.push_str(&format!("args = [\"{}\", \"--agent\"]\n", first_query));
+    out.push_str("assert = { kind = \"feedback_summary_gte\", field = \"entries_applied\", min_value = 0 }\n\n");
+
+    // Data quality probe — adapt to current state.
+    out.push_str("[[probe]]\n");
+    out.push_str("name = \"smoke-data-quality-state\"\n");
+    out.push_str(&format!("description = \"Data quality must be '{}' for this workspace state\"\n", db_state));
+    out.push_str("tags = [\"smoke\", \"trust\", \"data-quality\"]\n");
+    out.push_str("command = \"trust\"\n");
+    out.push_str("args = []\n");
+    out.push_str(&format!("assert = {{ kind = \"data_quality_state_eq\", expected = \"{}\" }}\n\n", db_state));
+
+    // --- Ranking probes for discovered symbols ----------------------------
+    if !top_symbols.is_empty() {
+        out.push_str("# ---------------------------------------------------------------------------\n");
+        out.push_str("# Symbol ranking probes — discovered from current index\n");
+        out.push_str("# Edit these to match your domain's key symbols.\n");
+        out.push_str("# ---------------------------------------------------------------------------\n\n");
+
+        for (i, (qname, short)) in top_symbols.iter().enumerate() {
+            let probe_name = format!("rank-{}-top5",
+                short.to_lowercase().replace(|c: char| !c.is_alphanumeric(), "-"));
+            let desc = format!("{} must appear in top 5 results for its own name", qname);
+            out.push_str(&format!("[[probe]]\nname = {:?}\n", probe_name));
+            out.push_str(&format!("description = {:?}\n", desc));
+            out.push_str("tags = [\"ranking\"]\n");
+            out.push_str("command = \"search\"\n");
+            out.push_str(&format!("args = [{:?}, \"--agent\"]\n", short));
+            out.push_str(&format!("assert = {{ kind = \"qname_rank_lte\", fragment = {:?}, max_rank = 5 }}\n\n", qname));
+            if i >= args.top.saturating_sub(1) { break; }
+        }
+    }
+
+    // --- Change-model classification smoke test ---------------------------
+    if !top_symbols.is_empty() {
+        let query_term = top_symbols.first().map(|(_, s)| s.to_lowercase()).unwrap_or_default();
+        if query_term.len() >= 3 {
+            out.push_str("# ---------------------------------------------------------------------------\n");
+            out.push_str("# Change-model smoke tests\n");
+            out.push_str("# ---------------------------------------------------------------------------\n\n");
+
+            out.push_str("[[probe]]\n");
+            out.push_str("name = \"change-model-returns-edit-files\"\n");
+            out.push_str("description = \"prepare-change must return at least 1 likely_edit_files entry\"\n");
+            out.push_str("tags = [\"change-model\", \"smoke\"]\n");
+            out.push_str("command = \"prepare-change\"\n");
+            out.push_str(&format!("args = [{:?}, \"--agent\"]\n", query_term));
+            out.push_str("assert = { kind = \"array_field_count_gte\", field = \"likely_edit_files\", min_count = 1 }\n\n");
+
+            out.push_str("[[probe]]\n");
+            out.push_str("name = \"change-model-edit-confidence-present\"\n");
+            out.push_str("description = \"classification_summary must include an edit_confidence field\"\n");
+            out.push_str("tags = [\"change-model\", \"smoke\"]\n");
+            out.push_str("command = \"prepare-change\"\n");
+            out.push_str(&format!("args = [{:?}, \"--agent\"]\n", query_term));
+            out.push_str("assert = { kind = \"array_field_count_gte\", field = \"likely_edit_files\", min_count = 0 }\n\n");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Write the file
+    // -----------------------------------------------------------------------
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, &out)?;
+
+    println!("✓ Generated {} probes.toml", path.display());
+    println!("  Symbols indexed : {}", trust.signals.symbol_count);
+    println!("  Data quality    : {} ({})", db_state, trust.data_quality.reason);
+    println!("  Ranking probes  : {} (for top {} symbols)", top_symbols.len(), args.top);
+    println!("\nRun: asd probe run");
+    println!("Tag subsets: asd probe run --tag smoke");
+
     Ok(())
 }
 

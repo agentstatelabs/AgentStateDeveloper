@@ -496,6 +496,29 @@ impl SearchFtsDb {
         Ok(results)
     }
 
+    /// Returns true if `name` exactly matches any symbol's short name or qname.
+    ///
+    /// Matches:
+    /// - `qname_orig` ends with `.{name}` or equals `{name}` (case-insensitive)
+    ///
+    /// Used by the uncertainty override guard to distinguish "exact symbol lookup"
+    /// from generic broad queries, preventing false-high uncertainty on direct
+    /// symbol names like `ExampleFlowViewModel`.
+    pub fn has_exact_symbol_name(&self, name: &str) -> bool {
+        if name.len() < 3 {
+            return false;
+        }
+        let name_lc = name.to_lowercase();
+        // Match qname_orig case-insensitively: either it IS the name or ends with .name
+        let sql = "SELECT 1 FROM asd_search_fts \
+                   WHERE lower(qname_orig) = ?1 \
+                      OR lower(qname_orig) LIKE ?2 \
+                   LIMIT 1";
+        let suffix_pattern = format!("%.{}", name_lc);
+        self.conn.query_row(sql, rusqlite::params![name_lc, suffix_pattern], |_| Ok(true))
+            .unwrap_or(false)
+    }
+
     /// True if the FTS table has at least one row.
     pub fn has_data(&self) -> bool {
         self.conn

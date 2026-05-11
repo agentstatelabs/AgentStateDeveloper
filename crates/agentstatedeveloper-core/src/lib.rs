@@ -24,6 +24,8 @@ pub mod search_fts;
 pub mod sidecar;
 pub mod symbol;
 pub mod transitive;
+pub mod trust;
+pub mod workflow;
 
 pub use adapter::{CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols};
 pub use index_pipeline::{CollectResult, IndexSummary, collect_source_files, run_index};
@@ -46,12 +48,12 @@ pub use schema::{
 pub use scratch::{AsgScratchStore, CleanFilter, ScratchFilter, ScratchStore};
 pub use feedback::{AsgFeedbackStore, FeedbackStore};
 pub use candidates::{
-    apply_feedback_adjustments, apply_file_scope_feedback, confidence_reason, confidence_scores,
-    detect_ambiguous_tokens, detect_confidence_warnings, detect_possible_misses, explain_match,
-    explain_feedback_impacts, FeedbackImpact, FeedbackMetrics, find_candidates,
-    glob_match, in_memory_score, kind_str, load_scope_aliases, matches_any_path_glob,
-    parse_query, query_tokens, resolve_scope, result_bucket, suggest_better_queries,
-    suggest_scoped_queries,
+    apply_feedback_adjustments, apply_file_scope_feedback, build_feedback_state, confidence_reason,
+    confidence_scores, compute_uncertainty, detect_ambiguous_tokens, detect_confidence_warnings,
+    detect_possible_misses, explain_match, explain_feedback_impacts, FeedbackImpact, FeedbackMetrics,
+    FeedbackState, find_candidates, glob_match, in_memory_score, kind_str, load_scope_aliases,
+    matches_any_path_glob, parse_query, query_tokens, RecoverySuggestion, resolve_scope,
+    result_bucket, suggest_better_queries, suggest_scoped_queries, UncertaintyReason, UncertaintyReport,
 };
 pub use repair::{IssueSeverity, RepairIssue, RepairReport, drop_orphaned_edge_refs, repair_asg, scan_asg};
 pub use search_fts::{AGENT_DEFAULT_BUDGET, AnnotatedOwner, CoveringTest, FileRecency, FtsFilters, FtsHit, OwnerSignalSource, OwnershipSignal, ResolvedSymbol, SearchFtsDb, SymbolMeta, SymbolTier, classify_layer, classify_layer_sym, derive_cold_hints, discover_symbol_ownership, estimate_tokens, extract_summary, find_covering_tests, find_indexed_test_files, gather_recency, git_dirty_files, hybrid_boost, intent_focus, intent_layer_order, is_stopword, load_layer_overrides, parse_intent, propose_test_path, symbol_tier, trim_for_agent};
@@ -61,3 +63,8 @@ pub use doc_adapters::{adapt_document, is_doc_file};
 pub use sidecar::{hydrate_from_dir, mark_fresh_reset, prune_sidecar, sidecar_lifecycle_state, sync_to_dir, HydrateSummary, SidecarState, SyncSummary};
 pub use symbol::{canonical_symbol_id, symbol_fingerprint};
 pub use transitive::propagate_transitive;
+pub use trust::{DataQuality, TrustScore, TrustSignals, compute_trust_score};
+pub use workflow::{
+    EvidenceQuality, WorkflowSummary,
+    append_workflow_session, detect_workflow, score_evidence_quality,
+};

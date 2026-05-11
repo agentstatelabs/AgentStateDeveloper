@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine,
     FeedbackStore, FtsFilters, IndexStore, LedgerKind, LedgerStore, SearchFtsDb,
-    apply_feedback_adjustments, FeedbackMetrics,
+    apply_feedback_adjustments, compute_trust_score, compute_uncertainty, FeedbackMetrics,
     classify_layer_sym, confidence_scores, derive_cold_hints, detect_ambiguous_tokens,
     detect_possible_misses, estimate_tokens, explain_match, extract_summary, find_candidates,
     find_indexed_test_files, gather_recency, git_dirty_files, glob_match, intent_focus,
@@ -103,6 +103,12 @@ pub struct PrepareChangeArgs {
     /// domain_anchor_retained, matched stem words, and the rule that won.
     #[arg(long)]
     pub debug_classification: bool,
+
+    /// Compare predictions against the actual files changed in this commit.
+    /// Emits edit_precision_metrics: precision, recall, F1, true/false positives/negatives.
+    /// Example: --check-commit HEAD or --check-commit abc123f
+    #[arg(long)]
+    pub check_commit: Option<String>,
 }
 
 pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
@@ -803,6 +809,10 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // Files demoted to reference_only must not appear in likely_edit_files — the raw
     // file_scores list is built before the edit/reference split, so without this step
     // surface-demoted files (WaveformCanvas etc.) would linger in the raw list.
+    //
+    // Keep the full pre-split list for classification_debug + rationale computation
+    // (we need rationale for reference_only files too).
+    let all_candidate_files: Vec<Value> = likely_edit_files.clone();
     let edit_file_set: HashSet<&str> = recipe_edit.iter()
         .filter_map(|e| e["file"].as_str())
         .collect();
@@ -875,59 +885,144 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             "raw": format!("verify {} effect", cat),
         }));
     }
-    // --debug-classification: per-file reasoning for edit/reference classification.
-    let classification_debug: Vec<Value> = if args.debug_classification {
-        likely_edit_files.iter().map(|f| {
-            let file = f["file"].as_str().unwrap_or("");
-            let layer = f["layer"].as_str().unwrap_or("");
-            let file_role = f["file_role"].as_str().unwrap_or("unknown");
-            let names_file = query_names_file(&tokens, file);
-            let stem_words = split_camel_lower(
-                std::path::Path::new(file).file_stem().and_then(|n| n.to_str()).unwrap_or("")
-            );
-            let matched_stem_words: Vec<&str> = stem_words.iter()
-                .filter(|w| tokens.iter().any(|t| t == *w))
-                .map(|w| w.as_str())
-                .collect();
-            let domain_overlap = matched_stem_words.len();
-            let has_domain_anchor = domain_overlap >= 2;
-            let surface_demoted = is_rendering_surface(file) && !names_file;
-            let broad_demoted = broad_query && is_view_like_file(file, layer)
-                && !names_file && !has_domain_anchor;
-            let anchor_missing_demoted = is_view_like_file(file, layer)
-                && !names_file && domain_overlap == 0;
-            let is_wrong_layer = wrong_layer_files.contains(file);
-            let rule_that_won = if file_role == "test" {
-                "test"
-            } else if is_wrong_layer {
-                "wrong-layer → reference"
-            } else if surface_demoted {
-                "surface → reference"
-            } else if broad_demoted {
-                "broad-query view → reference"
-            } else if anchor_missing_demoted {
-                "anchor-missing view → reference"
-            } else if file_role == "impl" {
-                "edit"
-            } else {
-                file_role
-            };
-            json!({
-                "file": file,
-                "file_role": file_role,
-                "surface_demoted": surface_demoted,
-                "domain_anchor_retained": has_domain_anchor,
-                "matched_stem_words": matched_stem_words,
-                "domain_overlap": domain_overlap,
-                "names_file": names_file,
-                "is_wrong_layer": is_wrong_layer,
-                "broad_query": broad_query,
-                "rule_that_won": rule_that_won,
-            })
-        }).collect()
-    } else {
-        vec![]
+    // Always compute classification_debug — used for classification_summary rollup
+    // even when --debug-classification is not set.  The full array is only emitted
+    // in the JSON when --debug-classification is explicitly requested.
+    // Uses all_candidate_files (edit + reference) so the rationale map covers every file.
+    let classification_debug: Vec<Value> = all_candidate_files.iter().map(|f| {
+        let file = f["file"].as_str().unwrap_or("");
+        let layer = f["layer"].as_str().unwrap_or("");
+        let file_role = f["file_role"].as_str().unwrap_or("unknown");
+        let names_file = query_names_file(&tokens, file);
+        let stem_words = split_camel_lower(
+            std::path::Path::new(file).file_stem().and_then(|n| n.to_str()).unwrap_or("")
+        );
+        let matched_stem_words: Vec<&str> = stem_words.iter()
+            .filter(|w| tokens.iter().any(|t| t == *w))
+            .map(|w| w.as_str())
+            .collect();
+        let domain_overlap = matched_stem_words.len();
+        let has_domain_anchor = domain_overlap >= 2;
+        let surface_demoted = is_rendering_surface(file) && !names_file;
+        let broad_demoted = broad_query && is_view_like_file(file, layer)
+            && !names_file && !has_domain_anchor;
+        let anchor_missing_demoted = is_view_like_file(file, layer)
+            && !names_file && domain_overlap == 0;
+        let is_wrong_layer = wrong_layer_files.contains(file);
+        let rule_that_won = if file_role == "test" {
+            "test"
+        } else if is_wrong_layer {
+            "wrong-layer → reference"
+        } else if surface_demoted {
+            "surface → reference"
+        } else if broad_demoted {
+            "broad-query view → reference"
+        } else if anchor_missing_demoted {
+            "anchor-missing view → reference"
+        } else if file_role == "impl" {
+            "edit"
+        } else {
+            file_role
+        };
+        let rationale = make_file_rationale(
+            rule_that_won,
+            surface_demoted,
+            has_domain_anchor,
+            &matched_stem_words,
+            names_file,
+            broad_query,
+        );
+        json!({
+            "file": file,
+            "file_role": file_role,
+            "surface_demoted": surface_demoted,
+            "domain_anchor_retained": has_domain_anchor,
+            "matched_stem_words": matched_stem_words,
+            "domain_overlap": domain_overlap,
+            "names_file": names_file,
+            "is_wrong_layer": is_wrong_layer,
+            "broad_query": broad_query,
+            "rule_that_won": rule_that_won,
+            "rationale": rationale,
+        })
+    }).collect();
+
+    // Build file → rationale map from classification_debug.
+    let file_rationale: HashMap<String, String> = classification_debug.iter()
+        .filter_map(|e| {
+            let file = e["file"].as_str()?.to_string();
+            let rat = e["rationale"].as_str()?.to_string();
+            Some((file, rat))
+        })
+        .collect();
+
+    // Classification summary: rule_that_won counts aggregated across all files.
+    // Always emitted — lets dashboards answer "is ASD classifying on real domain
+    // anchors or weaker heuristics?" without needing --debug-classification.
+    let mut rule_counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for entry in &classification_debug {
+        let rule = entry.get("rule_that_won").and_then(Value::as_str).unwrap_or("unknown");
+        *rule_counts.entry(rule.to_string()).or_default() += 1;
+    }
+
+    // Edit confidence: lower when workspace has no annotation data to boost signals.
+    let trust_dq = compute_trust_score(&cfg.db_path);
+    let (edit_confidence, edit_confidence_note) = match trust_dq.data_quality.state.as_str() {
+        "clean_room" => (
+            "reduced",
+            "fresh workspace — classification relies on structural signals only; run `asd annotate-commit` after each commit to improve accuracy",
+        ),
+        "unannotated" => (
+            "reduced",
+            "no annotation data — classification uses structural signals only; ledger annotations boost accuracy",
+        ),
+        "degraded" => (
+            "low",
+            "possible state loss — ledger signals may be incomplete; verify with `asd trust`",
+        ),
+        _ => ("normal", ""),
     };
+
+    let mut classification_summary = serde_json::Map::new();
+    for (k, v) in &rule_counts {
+        classification_summary.insert(k.clone(), json!(*v));
+    }
+    classification_summary.insert("edit_confidence".into(), json!(edit_confidence));
+    if !edit_confidence_note.is_empty() {
+        classification_summary.insert("edit_confidence_note".into(), json!(edit_confidence_note));
+    }
+    let classification_summary = Value::Object(classification_summary);
+
+    // Enrich likely_edit_files with per-file rationale.
+    let likely_edit_files: Vec<Value> = likely_edit_files.into_iter().map(|mut f| {
+        if let Some(obj) = f.as_object_mut() {
+            let file = obj.get("file").and_then(Value::as_str).unwrap_or("").to_string();
+            if let Some(rat) = file_rationale.get(&file) {
+                obj.insert("rationale".into(), json!(rat));
+            }
+        }
+        f
+    }).collect();
+
+    // Enrich recipe_edit and recipe_reference with per-file rationale.
+    let recipe_edit: Vec<Value> = recipe_edit.into_iter().map(|mut f| {
+        if let Some(obj) = f.as_object_mut() {
+            let file = obj.get("file").and_then(Value::as_str).unwrap_or("").to_string();
+            if let Some(rat) = file_rationale.get(&file) {
+                obj.entry("rationale".to_string()).or_insert_with(|| json!(rat));
+            }
+        }
+        f
+    }).collect();
+    let recipe_reference: Vec<Value> = recipe_reference.into_iter().map(|mut f| {
+        if let Some(obj) = f.as_object_mut() {
+            let file = obj.get("file").and_then(Value::as_str).unwrap_or("").to_string();
+            if let Some(rat) = file_rationale.get(&file) {
+                obj.entry("rationale".to_string()).or_insert_with(|| json!(rat));
+            }
+        }
+        f
+    }).collect();
 
     let safe_change_recipe = json!({
         "inspect": recipe_inspect,
@@ -939,6 +1034,22 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         "blast_radius": blast_radius,
         "likely_omitted_files": likely_omitted_files,
     });
+
+    // Scoped suggestions for prepare-change: use edit files as top_qnames proxy.
+    let edit_file_names: Vec<String> = likely_edit_files.iter()
+        .filter_map(|v| v.get("file").and_then(Value::as_str).map(|s| s.to_string()))
+        .collect();
+    let scoped_suggestions_pc: Vec<String> = if !ambiguous_terms.is_empty() {
+        agentstatedeveloper_core::suggest_scoped_queries(&tokens, &ambiguous_terms, &edit_file_names)
+    } else {
+        vec![]
+    };
+    // Re-use the db_state already computed for edit_confidence (trust score above).
+    let uncertainty = compute_uncertainty(
+        &tokens, &ambiguous_terms, &possible_misses,
+        file_scores.len(), &scoped_suggestions_pc, &cfg.db_path,
+        Some(trust_dq.data_quality.state.as_str()),
+    );
 
     let focus = intent_focus(intent);
     let ctx_context_val = match (auto_ctx_plan.as_deref(), auto_ctx_task.as_deref()) {
@@ -955,6 +1066,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         "ctx_context": ctx_context_val,
         "intent": if intent.is_empty() { Value::Null } else { json!(intent) },
         "focus": if focus.is_empty() { Value::Null } else { json!(focus) },
+        "uncertainty": uncertainty.to_json(),
         "ambiguous_terms": ambiguous_terms,
         "possible_misses": possible_misses,
         "scope_narrowed": scope_narrowed,
@@ -980,7 +1092,13 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         "stale_symbols": stale_symbols,
         "effects_summary": effects_summary,
         "recently_touched": recently_touched,
+        "classification_summary": classification_summary,
         "classification_debug": if args.debug_classification { json!(classification_debug) } else { Value::Null },
+        "edit_precision_metrics": if let Some(ref sha) = args.check_commit {
+            compute_edit_precision(&likely_edit_files, sha)
+        } else {
+            Value::Null
+        },
     });
     let out = if args.agent {
         let max_list = (args.agent_budget / 500).max(3).min(20);
@@ -1293,4 +1411,152 @@ fn invariant_to_scenario(text: &str) -> Value {
         )
     };
     json!({ "step": step, "expected": expected })
+}
+
+// ---------------------------------------------------------------------------
+// Change Model: per-file classification rationale
+// ---------------------------------------------------------------------------
+
+/// Convert classification signals into a plain-English rationale string.
+///
+/// Used to enrich `likely_edit_files` and `safe_change_recipe.reference_only`
+/// so agents understand *why* each file was classified as edit or reference.
+fn make_file_rationale(
+    rule: &str,
+    surface_demoted: bool,
+    domain_anchor: bool,
+    matched_stems: &[&str],
+    names_file: bool,
+    broad_query: bool,
+) -> String {
+    match rule {
+        "edit" if names_file => "edit: query names this file directly".to_string(),
+        "edit" if domain_anchor => {
+            format!("edit: domain-anchored — {} query token(s) match file name ({})",
+                matched_stems.len(),
+                matched_stems.join(", "))
+        }
+        "edit" if !matched_stems.is_empty() => {
+            format!("edit: impl file matching query token '{}'", matched_stems[0])
+        }
+        "edit" => "edit: impl file in query scope".to_string(),
+
+        r if r.contains("surface") => {
+            "reference: rendering surface — read-only layer (WaveformCanvas, SheetMusicView, etc.)".to_string()
+        }
+        r if r.contains("broad-query view") => {
+            if domain_anchor {
+                format!("reference: view layer but domain-anchored ({})", matched_stems.join(", "))
+            } else {
+                format!("reference: view layer on broad query — needs ≥2 matching tokens to enter edit (matched: {})", matched_stems.len())
+            }
+        }
+        r if r.contains("anchor-missing") => {
+            "reference: view/surface layer with no domain overlap — unrelated rendering file".to_string()
+        }
+        r if r.contains("wrong-layer") => {
+            "reference: wrong layer for this change type — structural mismatch".to_string()
+        }
+
+        "example" | "reference" => "reference: documentation or example file".to_string(),
+        "test" => "test: run to validate this change".to_string(),
+
+        _ => {
+            // Fallback: surface what we know from remaining signals
+            if broad_query {
+                format!("reference: broad query heuristic — {}", rule)
+            } else {
+                format!("classified as: {} (surface_demoted={}, domain_anchor={})", rule, surface_demoted, domain_anchor)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Change Model: edit precision metrics
+// ---------------------------------------------------------------------------
+
+/// Compare `likely_edit_files` (JSON objects with a "file" key) against the
+/// actual files changed in `sha` (via git diff-tree). Returns a JSON object with
+/// precision, recall, F1, and TP/FP/FN file lists, or null if git fails.
+fn compute_edit_precision(likely_edit_files: &[Value], sha: &str) -> Value {
+    let predicted_files: Vec<String> = likely_edit_files
+        .iter()
+        .filter_map(|v| v.get("file").and_then(Value::as_str).map(|s| s.to_string()))
+        .collect();
+    let predicted_files = &predicted_files;
+    let output = std::process::Command::new("git")
+        .args(["diff-tree", "--no-commit-id", "-r", "--name-only", sha])
+        .output();
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr);
+            return json!({ "error": format!("git diff-tree failed: {}", err.trim()) });
+        }
+        Err(e) => return json!({ "error": format!("git not available: {}", e) }),
+    };
+    let actual_files: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    if actual_files.is_empty() {
+        return json!({
+            "sha": sha,
+            "error": "no files changed in commit (or commit not found)",
+        });
+    }
+
+    // Use suffix matching so that repo-relative paths match index-relative paths.
+    // predicted: "Sources/ExampleProj/Foo.swift"  actual: "ExampleProj/Sources/ExampleProj/Foo.swift"
+    let is_match = |pred: &str, actual: &str| -> bool {
+        actual.ends_with(pred) || pred.ends_with(actual) || actual == pred
+    };
+
+    let mut tp: Vec<String> = Vec::new();
+    let mut fp: Vec<String> = Vec::new();
+    let mut fn_: Vec<String> = Vec::new();
+
+    for pred in predicted_files {
+        if actual_files.iter().any(|a| is_match(pred, a)) {
+            tp.push(pred.clone());
+        } else {
+            fp.push(pred.clone());
+        }
+    }
+    for actual in &actual_files {
+        if !predicted_files.iter().any(|p| is_match(p, actual)) {
+            fn_.push(actual.clone());
+        }
+    }
+
+    let precision = if tp.len() + fp.len() > 0 {
+        tp.len() as f64 / (tp.len() + fp.len()) as f64
+    } else {
+        0.0
+    };
+    let recall = if tp.len() + fn_.len() > 0 {
+        tp.len() as f64 / (tp.len() + fn_.len()) as f64
+    } else {
+        0.0
+    };
+    let f1 = if precision + recall > 0.0 {
+        2.0 * precision * recall / (precision + recall)
+    } else {
+        0.0
+    };
+
+    json!({
+        "sha": sha,
+        "predicted_count": predicted_files.len(),
+        "actual_count": actual_files.len(),
+        "true_positives": tp,
+        "false_positives": fp,
+        "false_negatives": fn_,
+        "precision": (precision * 1000.0).round() / 1000.0,
+        "recall": (recall * 1000.0).round() / 1000.0,
+        "f1": (f1 * 1000.0).round() / 1000.0,
+    })
 }

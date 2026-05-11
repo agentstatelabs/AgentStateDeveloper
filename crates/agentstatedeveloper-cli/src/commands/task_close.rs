@@ -12,6 +12,8 @@ use serde_json::json;
 use agentstatedeveloper_core::{
     AsgIndexStore, AsgLedgerStore, Engine, IndexStore, LedgerKind, LedgerStore, Symbol,
     schema::{Author, AuthorKind, LedgerEntry},
+    append_workflow_session, compute_trust_score,
+    detect_workflow, score_evidence_quality, WorkflowSummary,
 };
 
 use crate::config::Config;
@@ -165,6 +167,67 @@ pub fn run(cfg: &Config, args: TaskCloseArgs) -> Result<()> {
         }
     }
 
+    // ── Workflow Integration: evidence quality + recipe detection ──────────
+    // Gather all pre-existing ledger entries for touched symbols (exclude the
+    // entries we just wrote so they don't inflate the detection signals).
+    let pre_existing: Vec<LedgerEntry> = target_symbols.iter()
+        .flat_map(|sym| {
+            ledger_store.list_entries(&engine.ref_name, &sym.symbol_id)
+                .unwrap_or_default()
+        })
+        .filter(|e| {
+            // Exclude entries whose summary matches what we just wrote.
+            !written.iter().any(|w| {
+                w.get("summary").and_then(|s| s.as_str()) == Some(e.summary.as_str())
+                    && w.get("kind").and_then(|k| k.as_str())
+                        .map(|k| k == format!("{:?}", e.kind).to_lowercase())
+                        .unwrap_or(false)
+            })
+        })
+        .collect();
+
+    let proof_was_explicit = args.proof.is_some();
+    let eq = score_evidence_quality(
+        &pre_existing,
+        args.validated,
+        args.evidence.as_deref(),
+        proof_was_explicit,
+        target_symbols.len(),
+        written.len(),
+    );
+
+    // Check whether any touched symbols have existing Invariant entries.
+    let has_invariants = pre_existing.iter().any(|e| e.kind == LedgerKind::Invariant);
+    let (wf_type, steps_detected, missing_steps) = detect_workflow(&pre_existing, &eq, has_invariants);
+
+    // Capture db_state for context — helps agents understand low evidence scores
+    // on fresh/unannotated workspaces.
+    let trust = compute_trust_score(&cfg.db_path);
+    let db_state = trust.data_quality.state.clone();
+    let db_state_note = match db_state.as_str() {
+        "clean_room" => "fresh workspace — low evidence score is expected before annotations are written".to_string(),
+        "unannotated" => "index built but no prior annotations — low evidence score is expected; run `asd annotate-commit` to enrich".to_string(),
+        "degraded" => "warning: sparse ledger despite prior activity — possible state loss or DB reset".to_string(),
+        _ => String::new(),
+    };
+
+    let workflow_summary = WorkflowSummary {
+        workflow_type: wf_type,
+        steps_detected,
+        missing_recommended_steps: missing_steps,
+        evidence_quality: eq,
+        task_id: task_id.clone(),
+        plan_id: plan_id.clone(),
+        closed_at: closed_at.clone(),
+        symbols_annotated: target_symbols.len(),
+        ledger_entries_written: written.len(),
+        db_state,
+        db_state_note,
+    };
+
+    // Persist to .asd/workflow-sessions.jsonl.
+    append_workflow_session(&cfg.db_path, &workflow_summary);
+
     let closure_summary = json!({
         "status": "closed",
         "closed_at": closed_at,
@@ -177,6 +240,7 @@ pub fn run(cfg: &Config, args: TaskCloseArgs) -> Result<()> {
             "plan": if plan_id.is_empty() { serde_json::Value::Null } else { json!(plan_id) },
             "task": if task_id.is_empty() { serde_json::Value::Null } else { json!(task_id) },
         },
+        "workflow": workflow_summary.to_json(),
         "written": written,
     });
 

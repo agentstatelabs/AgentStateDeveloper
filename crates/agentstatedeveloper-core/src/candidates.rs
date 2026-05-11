@@ -9,7 +9,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::path::PathBuf;
 
 use crate::engine::Engine;
 use crate::index::{AsgIndexStore, IndexStore};
@@ -1492,4 +1491,528 @@ pub fn apply_file_scope_feedback(
         }
     }
     scored.retain(|(s, _)| s.is_finite());
+}
+
+// ---------------------------------------------------------------------------
+// Uncertainty Model — structured reason codes and recovery quality metrics
+// ---------------------------------------------------------------------------
+
+/// A single, machine-readable uncertainty signal.
+///
+/// Each variant carries only the data required to understand and act on it.
+/// CLI commands collect these into an [`UncertaintyReport`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum UncertaintyReason {
+    /// A query token matches an excessive number of unrelated files.
+    /// Action: add a more specific co-occurring domain term.
+    /// Source: `query`
+    AmbiguousTerm {
+        term: String,
+        /// Number of distinct files containing this token (if known).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_count: Option<usize>,
+    },
+    /// The query consists entirely of generic/stopword-like tokens with
+    /// no domain anchor. Results are likely noisy.
+    /// Source: `query`
+    GenericQuery {
+        tokens: Vec<String>,
+    },
+    /// Fewer results than expected for a multi-term query. Index may be
+    /// incomplete for this area, or the query is too specific.
+    /// Source: `result_set`
+    LowResultCount {
+        count: usize,
+    },
+    /// The query implies a layer that is absent from the result set.
+    /// Source: `result_set`
+    MissingLayer {
+        expected_layer: String,
+        /// Short human-readable hint about what to check.
+        hint: String,
+    },
+    /// Very few results and no ambiguous terms — the index may not cover
+    /// this domain yet.
+    /// Source: `result_set`
+    SparseIndex,
+    /// The workspace has no annotation data — results are based on
+    /// structural/FTS signals only, so confidence is inherently reduced.
+    /// Source: `db_state`
+    DbStateUnannotated {
+        /// The specific state code, e.g. "unannotated", "clean_room".
+        state: String,
+    },
+}
+
+impl UncertaintyReason {
+    /// Score contribution: how much uncertainty this reason adds (0.0–1.0 range).
+    pub fn weight(&self) -> f64 {
+        match self {
+            UncertaintyReason::AmbiguousTerm { .. }     => 0.20,
+            UncertaintyReason::GenericQuery { .. }      => 0.25,
+            UncertaintyReason::LowResultCount { .. }    => 0.20,
+            UncertaintyReason::MissingLayer { .. }      => 0.10,
+            UncertaintyReason::SparseIndex              => 0.15,
+            UncertaintyReason::DbStateUnannotated { .. }=> 0.10,
+        }
+    }
+
+    /// Which high-level source category does this reason belong to?
+    ///
+    /// Returns one of: `"query"` | `"db_state"` | `"result_set"`
+    pub fn source(&self) -> &'static str {
+        match self {
+            UncertaintyReason::AmbiguousTerm { .. }      => "query",
+            UncertaintyReason::GenericQuery { .. }       => "query",
+            UncertaintyReason::LowResultCount { .. }     => "result_set",
+            UncertaintyReason::MissingLayer { .. }       => "result_set",
+            UncertaintyReason::SparseIndex               => "result_set",
+            UncertaintyReason::DbStateUnannotated { .. } => "db_state",
+        }
+    }
+}
+
+/// Recovery quality estimate for a single scoped suggestion.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RecoverySuggestion {
+    /// The suggested narrowed query string.
+    pub query: String,
+    /// Number of ambiguous terms eliminated by this suggestion.
+    pub ambiguous_terms_removed: usize,
+    /// Domain-specific tokens added vs the original query.
+    pub domain_terms_added: Vec<String>,
+    /// Coarse recovery estimate: "strong" | "partial" | "weak".
+    pub estimated_recovery: String,
+}
+
+/// Per-source uncertainty score contributions.
+///
+/// Allows agents to understand *why* uncertainty is high and which dimension
+/// to address first — rather than treating it as a single opaque number.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UncertaintySourceBreakdown {
+    /// Contribution from query signals (ambiguous terms, generic query).
+    /// Range [0.0, 1.0]; reduce by narrowing or adding domain terms.
+    pub query: f64,
+    /// Contribution from workspace/DB state (unannotated, clean-room).
+    /// Range [0.0, 1.0]; reduce by annotating commits or running task-close.
+    pub db_state: f64,
+    /// Contribution from result-set quality (low count, missing layers, sparse index).
+    /// Range [0.0, 1.0]; reduce by broadening the query or checking index coverage.
+    pub result_set: f64,
+    /// Which source dominates: "query" | "db_state" | "result_set" | "none".
+    pub primary: String,
+}
+
+/// Machine-readable uncertainty rollup.
+///
+/// Always emitted — even when `level` is "low", so dashboards can rely on
+/// structural consistency without null-checking.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UncertaintyReport {
+    /// Aggregated uncertainty level: "low" | "medium" | "high" | "critical".
+    pub level: String,
+    /// Normalised uncertainty score [0.0, 1.0] (0 = certain, 1 = completely uncertain).
+    pub score: f64,
+    /// Structured reasons, sorted by weight descending.
+    pub reasons: Vec<UncertaintyReason>,
+    /// Single most-actionable recommendation for the agent.
+    /// Values: "none" | "narrow_query" | "add_domain_term" | "check_index_coverage" | "broaden_query"
+    pub recommended_action: String,
+    /// Recovery quality metrics: one entry per scoped suggestion.
+    pub recovery_suggestions: Vec<RecoverySuggestion>,
+    /// True when the query is an exact match for a known indexed symbol name.
+    ///
+    /// When true, the level is capped at "medium" regardless of ambiguity signals —
+    /// because the agent typed the exact name they want and ASD knows that symbol.
+    pub exact_symbol_match: bool,
+    /// Per-source uncertainty breakdown: query / db_state / result_set.
+    ///
+    /// Lets agents target the right fix (refine query, annotate more, broaden scope)
+    /// instead of responding generically to a high uncertainty level.
+    pub sources: UncertaintySourceBreakdown,
+}
+
+impl UncertaintyReport {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+/// Build a structured [`UncertaintyReport`] from the signals already computed
+/// by the search/investigate/prepare-change pipeline.
+///
+/// # Parameters
+/// - `tokens` — parsed query tokens (post-stopword filter)
+/// - `ambiguous_terms` — tokens detected by `detect_ambiguous_tokens`
+/// - `possible_misses` — prose warnings from `detect_possible_misses` (parsed for layer names)
+/// - `result_count` — number of results returned
+/// - `scoped_suggestions` — suggestions from `suggest_scoped_queries`
+/// - `db_path` — used to look up per-token file counts for richer reason data
+/// - `db_state` — optional data-quality state from `compute_trust_score` (e.g. "unannotated").
+///   When `Some("unannotated")` or `Some("clean_room")`, a `DbStateUnannotated` reason is added.
+pub fn compute_uncertainty(
+    tokens: &[String],
+    ambiguous_terms: &[String],
+    possible_misses: &[String],
+    result_count: usize,
+    scoped_suggestions: &[String],
+    db_path: &Path,
+    db_state: Option<&str>,
+) -> UncertaintyReport {
+    let mut reasons: Vec<UncertaintyReason> = Vec::new();
+
+    // -----------------------------------------------------------------------
+    // 1. Ambiguous terms — one reason per term with file count if available
+    // -----------------------------------------------------------------------
+    let per_token_counts: HashMap<String, usize> = if !ambiguous_terms.is_empty() {
+        let tok_refs: Vec<&str> = ambiguous_terms.iter().map(|s| s.as_str()).collect();
+        SearchFtsDb::open(db_path)
+            .ok()
+            .and_then(|fts| fts.count_distinct_files_per_token(&tok_refs, false).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    } else {
+        HashMap::new()
+    };
+
+    for term in ambiguous_terms {
+        let file_count = per_token_counts.get(term.as_str()).copied();
+        reasons.push(UncertaintyReason::AmbiguousTerm {
+            term: term.clone(),
+            file_count,
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. Generic query — all meaningful tokens are broad/stopword-adjacent
+    // -----------------------------------------------------------------------
+    const BROAD_TERMS: &[&str] = &[
+        "update", "get", "set", "handle", "process", "run", "execute",
+        "init", "start", "stop", "load", "save", "create", "delete",
+        "state", "data", "model", "manager", "service", "util", "helper", "config",
+    ];
+    let meaningful: Vec<&String> = tokens.iter().filter(|t| !is_stopword(t)).collect();
+    let all_broad = !meaningful.is_empty()
+        && meaningful.iter().all(|t| BROAD_TERMS.contains(&t.as_str()) || ambiguous_terms.contains(t));
+    if all_broad && meaningful.len() <= 2 {
+        reasons.push(UncertaintyReason::GenericQuery {
+            tokens: meaningful.iter().map(|s| s.to_string()).collect(),
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. Low result count (< 3 and multi-term query)
+    // -----------------------------------------------------------------------
+    if result_count < 3 && result_count > 0 && tokens.len() >= 2 {
+        reasons.push(UncertaintyReason::LowResultCount { count: result_count });
+    }
+    if result_count == 0 && !tokens.is_empty() {
+        reasons.push(UncertaintyReason::LowResultCount { count: 0 });
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. Missing layer — parse possible_misses prose for layer names
+    // -----------------------------------------------------------------------
+    for miss in possible_misses {
+        let ml = miss.to_lowercase();
+        let (layer, hint) = if ml.contains("view") || ml.contains("ui") {
+            ("view", "query implies UI involvement — check scope or path coverage")
+        } else if ml.contains("service") || ml.contains("domain") {
+            ("service", "query implies service/domain involvement — check layer indexing")
+        } else if ml.contains("persist") || ml.contains("data") {
+            ("persistence", "query implies data model involvement — check index coverage")
+        } else if ml.contains("scheduler") || ml.contains("timing") {
+            ("scheduler", "query implies timing/dispatch — check scheduler symbols indexed")
+        } else if ml.contains("engine") || ml.contains("runtime") {
+            ("engine", "query implies runtime processing — consider broadening scope")
+        } else if ml.contains("network") || ml.contains("api") {
+            ("network", "query implies network/API — check network client indexing")
+        } else {
+            continue; // Unknown layer, skip structured encoding
+        };
+        reasons.push(UncertaintyReason::MissingLayer {
+            expected_layer: layer.to_string(),
+            hint: hint.to_string(),
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. Sparse index — few results, no ambiguity → index may not cover this
+    // -----------------------------------------------------------------------
+    if result_count < 3 && ambiguous_terms.is_empty() && !tokens.is_empty() && result_count > 0 {
+        reasons.push(UncertaintyReason::SparseIndex);
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. DB state — workspace has no annotations yet (unannotated / clean_room)
+    // -----------------------------------------------------------------------
+    if let Some(state) = db_state {
+        if matches!(state, "unannotated" | "clean_room") {
+            reasons.push(UncertaintyReason::DbStateUnannotated {
+                state: state.to_string(),
+            });
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Score + level
+    // -----------------------------------------------------------------------
+    // Cap ambiguous_term contributions at 2 terms (0.40 max) to avoid
+    // artificially high scores for long ambiguous queries.
+    let amb_count = reasons.iter()
+        .filter(|r| matches!(r, UncertaintyReason::AmbiguousTerm { .. }))
+        .count()
+        .min(2);
+    let non_amb_score: f64 = reasons.iter()
+        .filter(|r| !matches!(r, UncertaintyReason::AmbiguousTerm { .. }))
+        .map(|r| r.weight())
+        .sum::<f64>()
+        .min(0.60);
+    let raw_score = (amb_count as f64 * 0.20 + non_amb_score).min(1.0);
+    let score = (raw_score * 100.0).round() / 100.0;
+
+    let raw_level = if score < 0.15 {
+        "low"
+    } else if score < 0.45 {
+        "medium"
+    } else if score < 0.70 {
+        "high"
+    } else {
+        "critical"
+    };
+
+    // -----------------------------------------------------------------------
+    // Exact-symbol override guard
+    //
+    // If the query is a single meaningful token that exactly matches a known
+    // symbol name in the FTS index, cap the level at "medium".  This prevents
+    // false-high uncertainty when an agent uses the exact symbol name — the
+    // ambiguity signals fire because the token is also a broad term in other
+    // contexts, but if the symbol exists verbatim, ASD knows exactly what the
+    // agent wants.
+    // -----------------------------------------------------------------------
+    let meaningful_tokens: Vec<&String> = tokens.iter().filter(|t| !is_stopword(t)).collect();
+    let exact_symbol_match = if meaningful_tokens.len() == 1 {
+        let tok = meaningful_tokens[0];
+        // Only check if the token looks like a proper name (starts with uppercase
+        // or is >= 5 chars to avoid false-positives on tiny common words).
+        if tok.len() >= 5 || tok.chars().next().map_or(false, |c| c.is_uppercase()) {
+            SearchFtsDb::open(db_path)
+                .ok()
+                .map(|fts| fts.has_exact_symbol_name(tok))
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // Cap level if exact symbol match — agent is asking for a specific known thing.
+    let level = if exact_symbol_match && matches!(raw_level, "high" | "critical") {
+        "medium"
+    } else {
+        raw_level
+    };
+
+    // -----------------------------------------------------------------------
+    // Recommended action (most actionable, highest-weight reason wins)
+    // -----------------------------------------------------------------------
+    let recommended_action = if reasons.iter().any(|r| matches!(r, UncertaintyReason::AmbiguousTerm { .. })) {
+        "narrow_query"
+    } else if reasons.iter().any(|r| matches!(r, UncertaintyReason::GenericQuery { .. })) {
+        "add_domain_term"
+    } else if reasons.iter().any(|r| matches!(r, UncertaintyReason::MissingLayer { .. } | UncertaintyReason::SparseIndex)) {
+        "check_index_coverage"
+    } else if reasons.iter().any(|r| matches!(r, UncertaintyReason::LowResultCount { .. })) {
+        "broaden_query"
+    } else {
+        "none"
+    };
+
+    // -----------------------------------------------------------------------
+    // Recovery quality metrics per suggestion
+    // -----------------------------------------------------------------------
+    let amb_set: std::collections::HashSet<&str> = ambiguous_terms.iter()
+        .map(|s| s.as_str()).collect();
+    let original_token_set: std::collections::HashSet<&str> = tokens.iter()
+        .map(|s| s.as_str()).collect();
+
+    let recovery_suggestions: Vec<RecoverySuggestion> = scoped_suggestions.iter().map(|sugg| {
+        let sugg_tokens: Vec<String> = sugg
+            .split_whitespace()
+            .map(|t| t.to_lowercase())
+            .filter(|t| !is_stopword(t))
+            .collect();
+
+        // How many ambiguous terms does this suggestion eliminate?
+        let amb_in_sugg: std::collections::HashSet<&str> = sugg_tokens.iter()
+            .map(|s| s.as_str())
+            .filter(|t| amb_set.contains(t))
+            .collect();
+        let ambiguous_terms_removed = ambiguous_terms.len().saturating_sub(amb_in_sugg.len());
+
+        // Which tokens are genuinely new (not in original query)?
+        let domain_terms_added: Vec<String> = sugg_tokens.iter()
+            .filter(|t| !original_token_set.contains(t.as_str()) && !is_stopword(t))
+            .cloned()
+            .collect();
+
+        let estimated_recovery = if ambiguous_terms_removed == ambiguous_terms.len()
+            && !domain_terms_added.is_empty()
+        {
+            "strong"
+        } else if ambiguous_terms_removed > 0 || !domain_terms_added.is_empty() {
+            "partial"
+        } else {
+            "weak"
+        };
+
+        RecoverySuggestion {
+            query: sugg.clone(),
+            ambiguous_terms_removed,
+            domain_terms_added,
+            estimated_recovery: estimated_recovery.to_string(),
+        }
+    }).collect();
+
+    // Sort reasons by weight descending for readability.
+    reasons.sort_by(|a, b| b.weight().partial_cmp(&a.weight()).unwrap_or(std::cmp::Ordering::Equal));
+
+    // -----------------------------------------------------------------------
+    // Source breakdown: per-source contribution scores
+    // -----------------------------------------------------------------------
+    let query_score: f64 = reasons.iter()
+        .filter(|r| r.source() == "query")
+        .map(|r| r.weight())
+        .sum::<f64>()
+        .min(1.0);
+    let db_state_score: f64 = reasons.iter()
+        .filter(|r| r.source() == "db_state")
+        .map(|r| r.weight())
+        .sum::<f64>()
+        .min(1.0);
+    let result_set_score: f64 = reasons.iter()
+        .filter(|r| r.source() == "result_set")
+        .map(|r| r.weight())
+        .sum::<f64>()
+        .min(1.0);
+
+    let primary_source = {
+        let scores = [
+            ("query",      query_score),
+            ("db_state",   db_state_score),
+            ("result_set", result_set_score),
+        ];
+        let max = scores.iter().cloned().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        match max {
+            Some((src, s)) if s > 0.0 => src,
+            _ => "none",
+        }
+    };
+
+    let sources = UncertaintySourceBreakdown {
+        query:      ((query_score * 100.0).round() / 100.0).max(0.0),
+        db_state:   ((db_state_score * 100.0).round() / 100.0).max(0.0),
+        result_set: ((result_set_score * 100.0).round() / 100.0).max(0.0),
+        primary:    primary_source.to_string(),
+    };
+
+    UncertaintyReport {
+        level: level.to_string(),
+        score,
+        reasons,
+        recommended_action: recommended_action.to_string(),
+        recovery_suggestions,
+        exact_symbol_match,
+        sources,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Feedback State
+// ---------------------------------------------------------------------------
+
+use crate::feedback::{AsgFeedbackStore, FeedbackStore};
+
+/// Explicit description of feedback availability for the current query.
+///
+/// Allows agents to distinguish "no feedback exists" from "feedback exists
+/// but didn't fire" from "feedback applied and modified results" — so that
+/// a clean-room DB reset is never silently misread as a broken ranker.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FeedbackState {
+    /// Whether any feedback entries exist for this workspace at all.
+    pub available: bool,
+    /// Reason code:
+    /// - `"no_feedback_entries"` — clean-room or reset, nothing recorded
+    /// - `"entries_exist_no_query_match"` — feedback exists but none matches
+    /// - `"entries_applied"` — feedback entries influenced this query
+    pub reason: String,
+    /// Total feedback entries recorded across all symbols and queries.
+    pub entries_total: usize,
+    /// Number of feedback entries whose recorded query shares at least one
+    /// token with the current query.
+    pub query_matches: usize,
+}
+
+impl FeedbackState {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+/// Build a [`FeedbackState`] for `query` from the feedback store.
+///
+/// `entries_applied > 0` (from the `FeedbackMetrics` produced during ranking)
+/// is passed in so we can distinguish applied vs present-but-unmatched.
+pub fn build_feedback_state(
+    engine: &Engine,
+    ref_name: &str,
+    query: &str,
+    entries_applied: usize,
+) -> FeedbackState {
+    let fb_store = AsgFeedbackStore { repo: &engine.repo };
+    let all = fb_store.list_all(ref_name).unwrap_or_default();
+    let entries_total = all.len();
+
+    if entries_total == 0 {
+        return FeedbackState {
+            available: false,
+            reason: "no_feedback_entries".to_string(),
+            entries_total: 0,
+            query_matches: 0,
+        };
+    }
+
+    // Count entries whose recorded query shares ≥1 token with current query.
+    let q_tokens: std::collections::HashSet<String> = query
+        .split_whitespace()
+        .map(|t| t.to_lowercase())
+        .filter(|t| t.len() >= 2)
+        .collect();
+
+    let query_matches = all.iter().filter(|e| {
+        e.query
+            .split_whitespace()
+            .any(|t| q_tokens.contains(&t.to_lowercase()))
+    }).count();
+
+    let reason = if entries_applied > 0 {
+        "entries_applied"
+    } else if query_matches > 0 {
+        "entries_exist_no_query_match"   // query matched but score threshold not met
+    } else {
+        "entries_exist_no_query_match"
+    };
+
+    FeedbackState {
+        available: true,
+        reason: reason.to_string(),
+        entries_total,
+        query_matches,
+    }
 }

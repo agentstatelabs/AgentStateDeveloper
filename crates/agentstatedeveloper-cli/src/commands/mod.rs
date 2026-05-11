@@ -27,4 +27,6 @@ pub mod since;
 pub mod status;
 pub mod sync;
 pub mod trace;
+pub mod trust;
 pub mod verify_effects;
+pub mod workflow;

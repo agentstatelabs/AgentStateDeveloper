@@ -11,8 +11,8 @@ use agentstatedeveloper_core::{
     AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore,
     EffectStore, Engine, FeedbackStore, FeedbackVerdict, FtsFilters, IndexStore,
     LedgerStore, SearchDocsDb, SearchFtsDb,
-    apply_feedback_adjustments, apply_file_scope_feedback, classify_layer_sym, confidence_reason,
-    FeedbackMetrics,
+    apply_feedback_adjustments, apply_file_scope_feedback, build_feedback_state, classify_layer_sym,
+    compute_trust_score, confidence_reason, compute_uncertainty, FeedbackMetrics, FeedbackState,
     confidence_scores, detect_ambiguous_tokens, detect_confidence_warnings, detect_possible_misses,
     effect_detail_reason, estimate_tokens, explain_match, explain_feedback_impacts, extract_summary,
     gather_recency, hybrid_boost, in_memory_score,
@@ -441,9 +441,26 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 })
                 .collect();
 
+            let dq_state = compute_trust_score(&cfg.db_path).data_quality.state;
+            let uncertainty = compute_uncertainty(
+                &tokens, &ambiguous_terms, &possible_misses,
+                results.len(), &scoped_suggestions, &cfg.db_path,
+                Some(dq_state.as_str()),
+            );
+            let feedback_state = if let Ok(eng) = Engine::open_sqlite(&cfg.db_path) {
+                build_feedback_state(&eng, &eng.ref_name, &args.query, feedback_metrics.entries_applied)
+            } else {
+                FeedbackState {
+                    available: false,
+                    reason: "no_feedback_entries".to_string(),
+                    entries_total: 0,
+                    query_matches: 0,
+                }
+            };
             let raw = serde_json::json!({
                 "query": args.query,
                 "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
+                "uncertainty": uncertainty.to_json(),
                 "ambiguous_terms": ambiguous_terms,
                 "possible_misses": possible_misses,
                 "confidence_warnings": confidence_warnings,
@@ -453,6 +470,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 "feedback_suppressed": feedback_metrics.suppressed,
                 "feedback_suppressed_detail": feedback_suppressed_detail,
                 "boosted_outranked": boosted_outranked,
+                "feedback_state": feedback_state.to_json(),
                 "feedback_summary": {
                     "entries_applied": feedback_metrics.entries_applied,
                     "suppressed": feedback_metrics.suppressed,
@@ -461,6 +479,12 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     "recurring_fp_suppressed": feedback_metrics.recurring_fp_suppressed,
                     "boosted_outranked": boosted_outranked.len(),
                     "rules_applied": feedback_metrics.rules_applied,
+                    "entries_total": feedback_state.entries_total,
+                    "query_matches": feedback_state.query_matches,
+                    "coverage": if !feedback_state.available { "none" }
+                                else if feedback_state.query_matches == 0 { "none" }
+                                else if feedback_metrics.entries_applied > 0 { "applied" }
+                                else { "partial" },
                 },
                 "results": results,
                 "document_hits": doc_results,

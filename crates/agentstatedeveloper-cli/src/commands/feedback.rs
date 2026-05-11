@@ -74,6 +74,9 @@ pub struct ExportArgs {
     /// Output file path. Omit to write to stdout.
     #[arg(long)]
     pub output: Option<String>,
+    /// Emit a JSON summary to stdout instead of the full entry list.
+    #[arg(long)]
+    pub summary: bool,
 }
 
 #[derive(Debug, Args)]
@@ -87,6 +90,9 @@ pub struct ImportArgs {
     /// Author recorded for imported entries.
     #[arg(long, default_value = "asd-import")]
     pub author: String,
+    /// Show what would be imported without writing to the store.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 pub fn run(cfg: &Config, cmd: FeedbackCmd) -> Result<()> {
@@ -203,15 +209,43 @@ fn run_list(cfg: &Config, args: ListArgs) -> Result<()> {
     Ok(())
 }
 
+fn verdict_breakdown(entries: &[FeedbackEntry]) -> (usize, usize, usize, usize) {
+    let useful  = entries.iter().filter(|e| matches!(e.verdict, FeedbackVerdict::Useful)).count();
+    let noisy   = entries.iter().filter(|e| matches!(e.verdict, FeedbackVerdict::Noisy)).count();
+    let missing = entries.iter().filter(|e| matches!(e.verdict, FeedbackVerdict::Missing)).count();
+    let wl      = entries.iter().filter(|e| matches!(e.verdict, FeedbackVerdict::WrongLayer)).count();
+    (useful, noisy, missing, wl)
+}
+
 fn run_export(cfg: &Config, args: ExportArgs) -> Result<()> {
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let feedback_store = AsgFeedbackStore { repo: &engine.repo };
     let entries = feedback_store.list_all(&engine.ref_name)?;
+
+    if args.summary {
+        let (useful, noisy, missing, wl) = verdict_breakdown(&entries);
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "total": entries.len(),
+            "by_verdict": {
+                "useful": useful,
+                "noisy": noisy,
+                "missing": missing,
+                "wrong_layer": wl,
+            },
+            "db": cfg.db_path.display().to_string(),
+        }))?);
+        return Ok(());
+    }
+
     let json = serde_json::to_string_pretty(&entries)?;
+    let (useful, noisy, missing, wl) = verdict_breakdown(&entries);
     match args.output {
         Some(ref path) => {
             std::fs::write(path, &json)?;
-            eprintln!("asd: exported {} feedback entries to {}", entries.len(), path);
+            eprintln!(
+                "asd: exported {} feedback entries to {} (useful={}, noisy={}, missing={}, wrong_layer={})",
+                entries.len(), path, useful, noisy, missing, wl
+            );
         }
         None => println!("{}", json),
     }
@@ -235,7 +269,7 @@ fn run_import(cfg: &Config, args: ImportArgs) -> Result<()> {
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let feedback_store = AsgFeedbackStore { repo: &engine.repo };
 
-    let existing_ids: std::collections::HashSet<String> = if args.skip_existing {
+    let existing_ids: std::collections::HashSet<String> = if args.skip_existing || args.dry_run {
         feedback_store
             .list_all(&engine.ref_name)?
             .into_iter()
@@ -245,16 +279,38 @@ fn run_import(cfg: &Config, args: ImportArgs) -> Result<()> {
         std::collections::HashSet::new()
     };
 
-    let mut imported = 0usize;
+    let mut to_import: Vec<&FeedbackEntry> = Vec::new();
     let mut skipped = 0usize;
     for entry in &incoming {
-        if args.skip_existing && existing_ids.contains(&entry.entry_id) {
+        if (args.skip_existing || args.dry_run) && existing_ids.contains(&entry.entry_id) {
             skipped += 1;
             continue;
         }
-        feedback_store.record(&engine.ref_name, entry, &args.author)?;
-        imported += 1;
+        to_import.push(entry);
     }
-    eprintln!("asd: imported {imported} entries, skipped {skipped} duplicates");
+
+    let (useful, noisy, missing, wl) = {
+        let u = to_import.iter().filter(|e| matches!(e.verdict, FeedbackVerdict::Useful)).count();
+        let n = to_import.iter().filter(|e| matches!(e.verdict, FeedbackVerdict::Noisy)).count();
+        let m = to_import.iter().filter(|e| matches!(e.verdict, FeedbackVerdict::Missing)).count();
+        let w = to_import.iter().filter(|e| matches!(e.verdict, FeedbackVerdict::WrongLayer)).count();
+        (u, n, m, w)
+    };
+
+    if args.dry_run {
+        eprintln!(
+            "asd: [dry-run] would import {} entries, skip {} duplicates (useful={}, noisy={}, missing={}, wrong_layer={})",
+            to_import.len(), skipped, useful, noisy, missing, wl
+        );
+        return Ok(());
+    }
+
+    for entry in &to_import {
+        feedback_store.record(&engine.ref_name, entry, &args.author)?;
+    }
+    eprintln!(
+        "asd: imported {} entries, skipped {} duplicates (useful={}, noisy={}, missing={}, wrong_layer={})",
+        to_import.len(), skipped, useful, noisy, missing, wl
+    );
     Ok(())
 }

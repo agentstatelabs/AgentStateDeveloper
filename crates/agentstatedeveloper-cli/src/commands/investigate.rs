@@ -10,7 +10,9 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, Engine, FeedbackStore,
-    FeedbackMetrics, FtsFilters, IndexStore, LedgerStore, apply_feedback_adjustments, classify_layer_sym,
+    FtsFilters, IndexStore, LedgerStore, apply_feedback_adjustments,
+    build_feedback_state, compute_trust_score, FeedbackState,
+    classify_layer_sym, compute_uncertainty,
     confidence_scores, detect_ambiguous_tokens, detect_possible_misses, estimate_tokens,
     explain_match, extract_summary, find_candidates, gather_recency, git_dirty_files,
     intent_focus, intent_layer_order, load_layer_overrides, parse_intent, parse_query,
@@ -297,9 +299,33 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         detect_possible_misses(&args.query, &layers_present, entry_points.len())
     };
 
+    // Scoped suggestions (investigate doesn't compute these — pass empty slice).
+    let dq_state = compute_trust_score(&cfg.db_path).data_quality.state;
+    let uncertainty = compute_uncertainty(
+        &tokens, &ambiguous_terms, &possible_misses,
+        entry_points.len(), &[], &cfg.db_path,
+        Some(dq_state.as_str()),
+    );
+
     // Default: grouped by_layer output (compact, deduped by layer).
     // --flat restores the legacy flat entry_points array.
     // Invariants/hazards surfaced first so agents see constraints before call graphs.
+
+    let feedback_state = build_feedback_state(
+        &engine,
+        &engine.ref_name,
+        &args.query,
+        feedback_metrics.entries_applied,
+    );
+    let coverage = if !feedback_state.available {
+        "none"
+    } else if feedback_state.query_matches == 0 {
+        "none"
+    } else if feedback_metrics.entries_applied > 0 {
+        "applied"
+    } else {
+        "partial"
+    };
     let feedback_summary = json!({
         "entries_applied": feedback_metrics.entries_applied,
         "suppressed": feedback_metrics.suppressed,
@@ -307,6 +333,9 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         "boosted": feedback_metrics.boosted,
         "recurring_fp_suppressed": feedback_metrics.recurring_fp_suppressed,
         "rules_applied": feedback_metrics.rules_applied,
+        "entries_total": feedback_state.entries_total,
+        "query_matches": feedback_state.query_matches,
+        "coverage": coverage,
     });
     let out = if args.flat {
         json!({
@@ -314,10 +343,12 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             "intent": if intent.is_empty() { Value::Null } else { Value::String(intent.to_string()) },
             "focus": if focus.is_empty() { Value::Null } else { Value::String(focus.to_string()) },
             "tokens": tokens,
+            "uncertainty": uncertainty.to_json(),
             "ambiguous_terms": ambiguous_terms,
             "possible_misses": possible_misses,
             "scope_narrowed": scope_narrowed,
             "stale_symbols": stale_symbols,
+            "feedback_state": feedback_state.to_json(),
             "feedback_summary": feedback_summary,
             "invariants": all_invariants,
             "hazards": all_hazards,
@@ -329,10 +360,12 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             "intent": if intent.is_empty() { Value::Null } else { Value::String(intent.to_string()) },
             "focus": if focus.is_empty() { Value::Null } else { Value::String(focus.to_string()) },
             "tokens": tokens,
+            "uncertainty": uncertainty.to_json(),
             "ambiguous_terms": ambiguous_terms,
             "possible_misses": possible_misses,
             "scope_narrowed": scope_narrowed,
             "stale_symbols": stale_symbols,
+            "feedback_state": feedback_state.to_json(),
             "feedback_summary": feedback_summary,
             "invariants": all_invariants,
             "hazards": all_hazards,
