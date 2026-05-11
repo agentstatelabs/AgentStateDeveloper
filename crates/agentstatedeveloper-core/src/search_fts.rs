@@ -1277,6 +1277,48 @@ pub fn find_indexed_test_files(db_path: &std::path::Path, source_file: &str) -> 
         .collect()
 }
 
+/// Pre-fetch all test-tier file paths in a single DB open.
+/// Pass the result to [`test_files_for_source`] for per-file stem matching,
+/// avoiding repeated DB opens when processing many source files in a loop.
+pub fn fetch_all_test_file_paths(db_path: &std::path::Path) -> Vec<String> {
+    let Ok(db) = SearchFtsDb::open(db_path) else { return vec![]; };
+    let Ok(mut stmt) = db.conn.prepare(
+        "SELECT DISTINCT file_orig FROM asd_search_fts WHERE tier = 2"
+    ) else { return vec![]; };
+    stmt.query_map([], |r| r.get::<_, String>(0))
+        .map(|iter| iter.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+}
+
+/// Filter `all_test_files` (from [`fetch_all_test_file_paths`]) for those
+/// whose stem matches `source_file`'s stem. Same logic as [`find_indexed_test_files`]
+/// but avoids the per-call DB open.
+pub fn test_files_for_source(all_test_files: &[String], source_file: &str) -> Vec<String> {
+    let stem = std::path::Path::new(source_file)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if stem.is_empty() { return vec![]; }
+    all_test_files.iter()
+        .filter(|f| {
+            let f_stem = std::path::Path::new(f.as_str())
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            f_stem.contains(&stem)
+                || stem.contains(
+                    f_stem
+                        .trim_end_matches("tests")
+                        .trim_end_matches("test")
+                        .trim_end_matches("spec"),
+                )
+        })
+        .cloned()
+        .collect()
+}
+
 pub fn propose_test_path(source_file: &str) -> String {
     let path = std::path::Path::new(source_file);
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown");

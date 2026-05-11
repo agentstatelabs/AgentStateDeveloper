@@ -20,10 +20,11 @@ use agentstatedeveloper_core::{
     FeedbackStore, FtsFilters, IndexStore, LedgerKind, LedgerStore, SearchFtsDb,
     apply_feedback_adjustments, compute_trust_score, compute_uncertainty, FeedbackMetrics,
     classify_layer_sym, confidence_scores, derive_cold_hints, detect_ambiguous_tokens,
-    detect_possible_misses, estimate_tokens, explain_match, extract_summary, find_candidates,
-    find_indexed_test_files, gather_recency, git_dirty_files, glob_match, intent_focus,
-    intent_layer_order, load_layer_overrides, parse_intent, parse_query, propose_test_path,
-    resolve_scope, result_bucket, stale_warning, symbol_tier, trim_for_agent,
+    detect_possible_misses, estimate_tokens, explain_match, extract_summary, fetch_all_test_file_paths,
+    find_candidates, gather_recency, git_dirty_files, glob_match,
+    intent_focus, intent_layer_order, load_layer_overrides, parse_intent, parse_query,
+    propose_test_path, resolve_scope, result_bucket, stale_warning, symbol_tier,
+    test_files_for_source, trim_for_agent,
 };
 
 use crate::commands::{
@@ -183,8 +184,15 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     );
 
     // Apply durable feedback adjustments (Useful/Noisy/WrongLayer verdicts).
+    // list_all() is hoisted here and reused for wrong_layer_files below — avoids two separate
+    // git-object reads for the same feedback data.
     let feedback_store = AsgFeedbackStore { repo: &engine.repo };
-    let feedback_verdicts = feedback_store.flat_verdicts(&engine.ref_name).unwrap_or_default();
+    let all_fb = feedback_store.list_all(&engine.ref_name).unwrap_or_default();
+    // Derive flat_verdicts from the hoisted list (same logic as the FeedbackStore default impl).
+    let feedback_verdicts: Vec<(String, String, agentstatedeveloper_core::FeedbackVerdict)> = all_fb.iter()
+        .filter(|e| e.file_scope.is_none())
+        .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict))
+        .collect();
     let feedback_metrics = apply_feedback_adjustments(&engine, &index_store, &cfg.db_path, &args.description, &mut candidates, &feedback_verdicts);
 
     // Recency pass (one git call for all files).
@@ -325,6 +333,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         b.4.cmp(&a.4) // hot first
             .then_with(|| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal))
     });
+    // Hoist git_dirty_files() — reused for conflict_risk below and stale_symbols further down.
     let dirty_files = git_dirty_files();
     let likely_edit_files: Vec<Value> = file_scores
         .iter()
@@ -471,20 +480,23 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     let recently_touched = git_recent_touches_pub(&top_files, args.git_depth);
 
     // --- Staleness warnings -----------------------------------------------
-    let dirty = git_dirty_files();
+    // Reuse dirty_files hoisted above — no second git status run.
     let stale_symbols: Vec<&str> = file_scores
         .iter()
-        .filter(|(_, f, _, _, _)| dirty.contains(f.as_str()))
+        .filter(|(_, f, _, _, _)| dirty_files.contains(f.as_str()))
         .map(|(_, f, _, _, _)| f.as_str())
         .collect();
 
     // --- Test-gap detection -----------------------------------------------
+    // Pre-fetch all indexed test file paths once — reused for proposed_test_path
+    // and the recipe_edit per-file coverage lookup, avoiding N separate DB opens.
+    let all_test_file_paths = fetch_all_test_file_paths(&cfg.db_path);
     let test_gap = affected_tests.is_empty();
     // Try to find a real indexed test file before falling back to a suggested path.
     let proposed_test_path = test_gap.then(|| {
         let source = file_scores.first().map(|(_, f, _, _, _)| f.as_str()).unwrap_or("");
         if source.is_empty() { return None; }
-        let real = find_indexed_test_files(&cfg.db_path, source);
+        let real = test_files_for_source(&all_test_file_paths, source);
         if real.is_empty() {
             Some(format!("no known test target (suggested: {})", propose_test_path(source)))
         } else {
@@ -676,9 +688,9 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         .collect();
     // t-005: Find files where a matching symbol has a WrongLayer verdict for
     // the current query family. Those impl files are demoted to recipe_reference.
+    // Uses all_fb hoisted above — no second list_all() call needed.
     use std::collections::HashSet as _HSet;
     let wrong_layer_files: _HSet<String> = {
-        let all_fb = feedback_store.list_all(&engine.ref_name).unwrap_or_default();
         let desc_norm = args.description.to_lowercase();
         let desc_tokens: std::collections::HashSet<String> = desc_norm
             .split(|c: char| !c.is_alphabetic())
@@ -753,7 +765,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         .map(|f| {
             // t-005: attach covering tests and run command to each edit entry.
             let file = f["file"].as_str().unwrap_or("");
-            let mut indexed = find_indexed_test_files(&cfg.db_path, file);
+            let mut indexed = test_files_for_source(&all_test_file_paths, file);
             if let Some(extra) = file_to_tests.get(file) {
                 for t in extra {
                     if !indexed.contains(t) { indexed.push(t.clone()); }
