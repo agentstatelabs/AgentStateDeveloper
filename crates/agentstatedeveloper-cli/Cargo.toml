@@ -24,6 +24,7 @@ toml = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
 directories = { workspace = true }
+rusqlite = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]

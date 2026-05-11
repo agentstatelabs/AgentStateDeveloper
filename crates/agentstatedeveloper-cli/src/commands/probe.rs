@@ -41,6 +41,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::{Args, Subcommand};
+use rusqlite::{Connection, params};
 use serde_json::Value;
 
 use agentstatedeveloper_core::{SearchFtsDb, stale_warning};
@@ -65,6 +66,15 @@ pub enum ProbeSub {
     Add(ProbeAddArgs),
     /// Show probe run history from .asd/probe-history.jsonl.
     History(ProbeHistoryArgs),
+    /// Rebuild probe-analytics.db from probe-history.jsonl.
+    Reindex(ProbeReindexArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ProbeReindexArgs {
+    /// Drop and rebuild even if the DB already exists.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -190,6 +200,147 @@ pub fn run(cfg: &Config, cmd: ProbeCmd) -> Result<()> {
         ProbeSub::Run(args) => run_probes(cfg, args),
         ProbeSub::Add(args) => add_probe(cfg, args),
         ProbeSub::History(args) => show_history(cfg, args),
+        ProbeSub::Reindex(args) => reindex_analytics(cfg, args),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// probe-analytics.db — schema + helpers
+// ---------------------------------------------------------------------------
+
+fn analytics_path(cfg: &Config) -> PathBuf {
+    let db_dir = Path::new(&cfg.db_path)
+        .parent()
+        .unwrap_or(Path::new("."));
+    db_dir.join(".asd").join("probe-analytics.db")
+}
+
+fn open_analytics_db(path: &Path) -> rusqlite::Result<Connection> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let conn = Connection::open(path)?;
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS probe_runs (
+            run_id                TEXT PRIMARY KEY,
+            asd_version           TEXT NOT NULL,
+            started_at            TEXT NOT NULL,
+            finished_at           TEXT,
+            probe_file            TEXT,
+            db_state              TEXT,
+            symbol_count          INTEGER,
+            scope                 TEXT NOT NULL DEFAULT 'all',
+            total                 INTEGER NOT NULL,
+            passed                INTEGER NOT NULL,
+            failed                INTEGER NOT NULL,
+            budget_failed         INTEGER NOT NULL DEFAULT 0,
+            wall_time_ms          INTEGER NOT NULL,
+            worker_count          INTEGER,
+            performance_budget_ms INTEGER,
+            filter_name           TEXT,
+            filter_tag            TEXT
+        );
+        CREATE TABLE IF NOT EXISTS probe_results (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id      TEXT NOT NULL REFERENCES probe_runs(run_id),
+            name        TEXT NOT NULL,
+            command     TEXT,
+            assertion   TEXT,
+            tags        TEXT,
+            passed      INTEGER NOT NULL DEFAULT 1,
+            slow        INTEGER NOT NULL DEFAULT 0,
+            timed_out   INTEGER NOT NULL DEFAULT 0,
+            duration_ms INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pr_run    ON probe_results(run_id);
+        CREATE INDEX IF NOT EXISTS idx_pr_name   ON probe_results(name);
+        CREATE INDEX IF NOT EXISTS idx_pr_trend  ON probe_results(name, duration_ms);
+        CREATE INDEX IF NOT EXISTS idx_runs_ver  ON probe_runs(asd_version);
+        CREATE INDEX IF NOT EXISTS idx_runs_at   ON probe_runs(started_at);
+    ")?;
+    Ok(conn)
+}
+
+/// Derive the scope string from filter fields (mirrors show_history logic).
+fn scope_from_record(record: &Value) -> String {
+    match (
+        record.get("filter_name").and_then(Value::as_str),
+        record.get("filter_tag").and_then(Value::as_str),
+    ) {
+        (Some(n), _) => format!("name:{}", n),
+        (_, Some(t)) => format!("tag:{}", t),
+        _            => "all".to_string(),
+    }
+}
+
+/// Insert one run record + its per-probe rows.  Idempotent: skips if run_id exists.
+/// Silently returns on any DB error — analytics is best-effort.
+fn insert_run_to_analytics(conn: &Connection, record: &Value) {
+    let run_id = match record.get("started_at").and_then(Value::as_str) {
+        Some(s) => s,
+        None => return,
+    };
+
+    // Skip if already present.
+    let exists: bool = conn
+        .query_row("SELECT 1 FROM probe_runs WHERE run_id=?1", params![run_id], |_| Ok(true))
+        .unwrap_or(false);
+    if exists { return; }
+
+    let scope = scope_from_record(record);
+
+    let res = conn.execute(
+        "INSERT OR IGNORE INTO probe_runs
+         (run_id, asd_version, started_at, finished_at, probe_file, db_state, symbol_count,
+          scope, total, passed, failed, budget_failed, wall_time_ms, worker_count,
+          performance_budget_ms, filter_name, filter_tag)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+        params![
+            run_id,
+            record.get("asd_version").and_then(Value::as_str).unwrap_or(""),
+            record.get("started_at").and_then(Value::as_str).unwrap_or(""),
+            record.get("finished_at").and_then(Value::as_str),
+            record.get("probe_file").and_then(Value::as_str),
+            record.get("db_state").and_then(Value::as_str),
+            record.get("symbol_count").and_then(Value::as_i64),
+            scope,
+            record.get("total").and_then(Value::as_i64).unwrap_or(0),
+            record.get("passed").and_then(Value::as_i64).unwrap_or(0),
+            record.get("failed").and_then(Value::as_i64).unwrap_or(0),
+            record.get("budget_failed").and_then(Value::as_bool).map(|b| b as i64).unwrap_or(0),
+            record.get("wall_time_ms").and_then(Value::as_i64).unwrap_or(0),
+            record.get("worker_count").and_then(Value::as_i64),
+            record.get("performance_budget_ms").and_then(Value::as_i64),
+            record.get("filter_name").and_then(Value::as_str),
+            record.get("filter_tag").and_then(Value::as_str),
+        ],
+    );
+    if res.is_err() { return; }
+
+    // Insert per-probe rows from the `probes` array (present from this version onward).
+    if let Some(probes) = record.get("probes").and_then(Value::as_array) {
+        for p in probes {
+            let tags_str = p.get("tags")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "[]".to_string());
+            let _ = conn.execute(
+                "INSERT INTO probe_results
+                 (run_id, name, command, assertion, tags, passed, slow, timed_out, duration_ms)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![
+                    run_id,
+                    p.get("name").and_then(Value::as_str).unwrap_or(""),
+                    p.get("command").and_then(Value::as_str),
+                    p.get("assertion").and_then(Value::as_str),
+                    tags_str,
+                    p.get("passed").and_then(Value::as_bool).map(|b| b as i64).unwrap_or(1),
+                    p.get("slow").and_then(Value::as_bool).map(|b| b as i64).unwrap_or(0),
+                    p.get("timed_out").and_then(Value::as_bool).map(|b| b as i64).unwrap_or(0),
+                    p.get("duration_ms").and_then(Value::as_i64).unwrap_or(0),
+                ],
+            );
+        }
     }
 }
 
@@ -470,7 +621,21 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
     }
 
     // Always append a compact record to probe-history.jsonl regardless of output mode.
-    // Omits per-probe results and debug_payload — operational telemetry only.
+    // Includes per-probe compact rows (no debug_payload) — canonical source of truth
+    // for per-probe trend analysis.  The analytics SQLite DB mirrors this.
+    let probes_compact: Vec<Value> = results.iter().map(|r| {
+        let is_slow = fail_slow.map_or(false, |ms| r.duration_ms > ms as u128);
+        serde_json::json!({
+            "name": r.name,
+            "command": r.command,
+            "assertion": r.assertion,
+            "tags": r.tags,
+            "passed": r.error.is_none(),
+            "slow": is_slow,
+            "timed_out": r.timed_out,
+            "duration_ms": r.duration_ms,
+        })
+    }).collect();
     let history_record = serde_json::json!({
         "kind": "probe_run",
         "asd_version": env!("CARGO_PKG_VERSION"),
@@ -489,8 +654,14 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
         "filter_name": args.name,
         "filter_tag": args.tag,
         "slowest": slowest_top5,
+        "probes": probes_compact,
     });
     append_history(cfg, &history_record);
+
+    // Mirror into analytics DB (best-effort; failures are silent).
+    if let Ok(conn) = open_analytics_db(&analytics_path(cfg)) {
+        insert_run_to_analytics(&conn, &history_record);
+    }
 
     if failed > 0 || !slow_violations.is_empty() {
         std::process::exit(1);
@@ -955,6 +1126,68 @@ fn summarize_debug_payload(json: &Value) -> Option<String> {
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// probe reindex
+// ---------------------------------------------------------------------------
+
+fn reindex_analytics(cfg: &Config, args: ProbeReindexArgs) -> Result<()> {
+    let jsonl_path = history_path(cfg);
+    if !jsonl_path.exists() {
+        println!("No probe history found at {}", jsonl_path.display());
+        return Ok(());
+    }
+
+    let db_path = analytics_path(cfg);
+
+    // Drop the existing DB if --force or if it doesn't exist yet.
+    if db_path.exists() {
+        if args.force {
+            std::fs::remove_file(&db_path)
+                .with_context(|| format!("removing {}", db_path.display()))?;
+            eprintln!("Dropped existing {}", db_path.display());
+        }
+        // Without --force we do incremental (INSERT OR IGNORE), which is fine.
+    }
+
+    let conn = open_analytics_db(&db_path)
+        .with_context(|| format!("opening {}", db_path.display()))?;
+
+    let raw = std::fs::read_to_string(&jsonl_path)
+        .with_context(|| format!("reading {}", jsonl_path.display()))?;
+
+    let mut runs = 0usize;
+    let mut probes = 0usize;
+    let mut skipped = 0usize;
+
+    for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+        match serde_json::from_str::<Value>(line) {
+            Ok(record) => {
+                // Check if already present before insert so we can count skips.
+                let run_id = record.get("started_at").and_then(Value::as_str).unwrap_or("");
+                let already: bool = conn
+                    .query_row("SELECT 1 FROM probe_runs WHERE run_id=?1", params![run_id], |_| Ok(true))
+                    .unwrap_or(false);
+                if already {
+                    skipped += 1;
+                    continue;
+                }
+                let probe_count = record.get("probes")
+                    .and_then(Value::as_array)
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                insert_run_to_analytics(&conn, &record);
+                runs += 1;
+                probes += probe_count;
+            }
+            Err(_) => {} // malformed line — skip silently
+        }
+    }
+
+    println!("Indexed {} run(s) ({} probe rows) into {}  [{} already present, skipped]",
+        runs, probes, db_path.display(), skipped);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
