@@ -1239,9 +1239,15 @@ pub fn apply_feedback_adjustments(
             _        => SymbolKind::Function,
         };
 
-        // Sibling file suppression: any symbol sharing a file with a noisy symbol
-        // is suppressed unless it has an explicit Useful verdict or is a Class/Module
-        // container (which may host unrelated symbols in the same file).
+        // Sibling file suppression: a symbol sharing a file with a noisy symbol
+        // is suppressed only when it passes ALL three guards:
+        //   1. Not a Class/Module container (those host unrelated symbols).
+        //   2. Not the noisy symbol itself (already handled below).
+        //   3. Its name tokens overlap with the noisy symbol's name tokens
+        //      (t-001: avoid collateral demotions on unrelated symbols).
+        //   4. It has no explicit Useful verdict for this query family.
+        //   5. It has no independent query affinity (its own name doesn't match
+        //      the current query tokens — if it does, it's genuinely relevant).
         if let Some(noisy_syms) = noisy_file_syms.get(&sym_file) {
             let is_container = matches!(sym_kind_enum, SymbolKind::Class | SymbolKind::Module);
             let is_the_noisy_sym = noisy_syms.iter().any(|ns| ns.sym_id == *sym_id);
@@ -1252,9 +1258,24 @@ pub fn apply_feedback_adjustments(
                         && query_family_matches(&current_tokens, fq)
                 });
                 if !has_useful {
-                    *score = f64::NEG_INFINITY;
-                    record_rule!("same_file_sibling_suppression");
-                    continue;
+                    // t-001: name-specificity guard — only suppress if the sibling's
+                    // own name tokens overlap with those of the noisy symbol.
+                    // Symbols with no name overlap are unrelated and must not be demoted.
+                    let sibling_tokens = name_tokens_from_qname(qname);
+                    let name_related = noisy_syms.iter().any(|ns| {
+                        ns.sym_id != *sym_id
+                            && sibling_tokens.iter().any(|t| ns.name_tokens.contains(t))
+                    });
+                    // Query-affinity guard: if the sibling's own name matches the current
+                    // query tokens it is independently relevant and must be preserved.
+                    let query_relevant = sibling_tokens.iter().any(|t| current_tokens.contains(t));
+                    if name_related && !query_relevant {
+                        *score = f64::NEG_INFINITY;
+                        record_rule!("same_file_sibling_suppression");
+                        continue;
+                    } else {
+                        preserved_useful_siblings += 1;
+                    }
                 } else {
                     preserved_useful_siblings += 1;
                 }
