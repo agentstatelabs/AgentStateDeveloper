@@ -1,8 +1,7 @@
-use std::path::Path;
-
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
 
+use crate::engine::Engine;
 use crate::error::{AsdError, Result};
 use crate::paths;
 use crate::schema::EffectDecl;
@@ -21,28 +20,29 @@ pub trait EffectStore {
 
 pub struct AsgEffectStore<'a> {
     pub repo: &'a Repository,
-    /// When `Some`, enables the SQLite write-through cache.
-    pub db_path: Option<&'a Path>,
+    /// Borrowed FTS connection from the owning `Engine`.  When `Some`,
+    /// enables the SQLite write-through cache without a per-call
+    /// `Connection::open`.
+    pub fts: Option<&'a SearchFtsDb>,
 }
 
 impl<'a> AsgEffectStore<'a> {
     pub fn new(repo: &'a Repository) -> Self {
-        Self { repo, db_path: None }
+        Self { repo, fts: None }
     }
-    pub fn with_cache(repo: &'a Repository, db_path: &'a Path) -> Self {
-        Self { repo, db_path: Some(db_path) }
+    /// Convenience: borrow the FTS connection already open in `engine`.
+    pub fn from_engine(engine: &'a Engine) -> Self {
+        Self { repo: &engine.repo, fts: engine.fts.as_ref() }
     }
 }
 
 impl<'a> EffectStore for AsgEffectStore<'a> {
     fn get_effects(&self, ref_name: &str, symbol_id: &str) -> Result<Option<EffectDecl>> {
         // Fast path: SQLite cache.
-        if let Some(db) = self.db_path {
-            if let Ok(fts) = SearchFtsDb::open(db) {
-                if fts.effects_cached_for(symbol_id, ref_name) {
-                    if let Ok(opt) = fts.get_effects_for(symbol_id, ref_name) {
-                        return Ok(opt);
-                    }
+        if let Some(fts) = self.fts {
+            if fts.effects_cached_for(symbol_id, ref_name) {
+                if let Ok(opt) = fts.get_effects_for(symbol_id, ref_name) {
+                    return Ok(opt);
                 }
             }
         }
@@ -55,10 +55,8 @@ impl<'a> EffectStore for AsgEffectStore<'a> {
             Err(e) => Err(AsdError::Repo(e)),
         };
         if let Ok(Some(ref decl)) = result {
-            if let Some(db) = self.db_path {
-                if let Ok(fts) = SearchFtsDb::open(db) {
-                    let _ = fts.upsert_effects(symbol_id, ref_name, decl);
-                }
+            if let Some(fts) = self.fts {
+                let _ = fts.upsert_effects(symbol_id, ref_name, decl);
             }
         }
         result
@@ -81,10 +79,8 @@ impl<'a> EffectStore for AsgEffectStore<'a> {
         );
         self.repo.set_json(ref_name, &path, &value, opts)?;
         // Best-effort SQLite write-through.
-        if let Some(db) = self.db_path {
-            if let Ok(fts) = SearchFtsDb::open(db) {
-                let _ = fts.upsert_effects(symbol_id, ref_name, decl);
-            }
+        if let Some(fts) = self.fts {
+            let _ = fts.upsert_effects(symbol_id, ref_name, decl);
         }
         Ok(())
     }

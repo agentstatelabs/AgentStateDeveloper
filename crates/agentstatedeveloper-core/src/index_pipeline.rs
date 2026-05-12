@@ -505,7 +505,7 @@ pub fn run_index(
             }
         };
 
-        match SearchFtsDb::open(db) {
+        let fts_ok = match SearchFtsDb::open(db) {
             Ok(fts) => {
                 // Keep last-seen symbol per qname, matching by_qname semantics.
                 let mut seen: std::collections::HashMap<&str, usize> =
@@ -517,10 +517,39 @@ pub fn run_index(
                 deduped.sort_by(|a, b| a.qname.cmp(&b.qname));
                 if let Err(e) = fts.rebuild_refs(&deduped, &ledger_data) {
                     eprintln!("asd: FTS rebuild warning: {e}");
+                    false
+                } else {
+                    true
                 }
             }
             Err(e) => {
                 eprintln!("asd: FTS index unavailable (non-fatal): {e}");
+                false
+            }
+        };
+
+        // Record the FTS rebuild outcome so `asd status` can distinguish
+        // "symbols fresh / FTS stale" from a fully-fresh index. Best-effort:
+        // a second open may also fail if the DB is still locked, in which case
+        // stale_warning() falls back to the previous behaviour (old timestamp).
+        if let Ok(meta) = SearchFtsDb::open(db) {
+            let _ = meta.mark_symbols_indexed(fts_ok);
+        }
+
+        // Populate the symbol and call-edge SQLite caches so subsequent
+        // `callers`, `callees`, `context-for`, and `investigate` calls can
+        // skip the full git tree walk entirely.  Non-fatal: a cache miss just
+        // falls back to the authoritative git path.
+        if let Ok(cache) = SearchFtsDb::open(db) {
+            if let Some(f) = on_phase {
+                f("  caching symbols and edges…");
+            }
+            let sym_refs: Vec<&Symbol> = indexed_symbols.iter().collect();
+            if let Err(e) = cache.sync_symbols(&sym_refs, ref_name) {
+                eprintln!("asd: symbol cache sync warning: {e}");
+            }
+            if let Err(e) = cache.sync_call_edges(&callees_of, &callers_of, ref_name) {
+                eprintln!("asd: edge cache sync warning: {e}");
             }
         }
     }

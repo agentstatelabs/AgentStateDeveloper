@@ -97,9 +97,9 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
     let intent = args.intent.as_deref().and_then(parse_intent).unwrap_or("");
     let layer_overrides = load_layer_overrides(&cfg.db_path);
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let index_store = AsgIndexStore { repo: &engine.repo };
-    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
-    let effect_store = AsgEffectStore::with_cache(&engine.repo, &cfg.db_path);
+    let index_store = AsgIndexStore::from_engine(&engine);
+    let ledger_store = AsgLedgerStore::from_engine(&engine);
+    let effect_store = AsgEffectStore::from_engine(&engine);
     let id_map = build_id_map(&engine);
 
     let (mut tokens, mut exclusions) = parse_query(&args.query);
@@ -148,7 +148,6 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
 
     let mut candidates = find_candidates(
         &engine,
-        &cfg.db_path,
         &args.query,
         &tokens,
         &filters,
@@ -158,9 +157,9 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
     );
 
     // Apply durable feedback adjustments (Useful/Noisy/WrongLayer verdicts).
-    let feedback_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&cfg.db_path) };
+    let feedback_store = AsgFeedbackStore::from_engine(&engine);
     let feedback_verdicts = feedback_store.flat_verdicts(&engine.ref_name).unwrap_or_default();
-    apply_feedback_adjustments(&engine, &index_store, &cfg.db_path, &args.query, &mut candidates, &feedback_verdicts);
+    apply_feedback_adjustments(&engine, &index_store, &args.query, &mut candidates, &feedback_verdicts);
 
     // --- Files to inspect -------------------------------------------------
     let mut files_to_inspect: Vec<Value> = Vec::new();

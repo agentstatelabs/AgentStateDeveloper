@@ -81,8 +81,8 @@ pub fn run(cfg: &Config, args: TraceArgs) -> Result<()> {
         .with_context(|| format!("parse trace report at {}", args.out.display()))?;
 
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let index_store = AsgIndexStore { repo: &engine.repo };
-    let effect_store = AsgEffectStore::with_cache(&engine.repo, &cfg.db_path);
+    let index_store = AsgIndexStore::from_engine(&engine);
+    let effect_store = AsgEffectStore::from_engine(&engine);
 
     let mut traced_qnames: usize = 0;
     let mut updates: Vec<serde_json::Value> = Vec::new();

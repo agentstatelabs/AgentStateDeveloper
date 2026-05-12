@@ -162,8 +162,8 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
     let scoped = !paths_filter.is_empty();
 
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let effect_store = AsgEffectStore::with_cache(&engine.repo, &cfg.db_path);
-    let feedback_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&cfg.db_path) };
+    let effect_store = AsgEffectStore::from_engine(&engine);
+    let feedback_store = AsgFeedbackStore::from_engine(&engine);
 
     // Bulk load index — one git read instead of N.
     let all_syms: Vec<Symbol> = {

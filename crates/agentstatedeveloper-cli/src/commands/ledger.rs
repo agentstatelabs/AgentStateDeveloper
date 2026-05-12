@@ -290,7 +290,7 @@ fn approve(cfg: &Config, args: ApproveArgs) -> Result<()> {
             &cfg.agent_id,
         )
     } else {
-        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
         ledger_store.approve_entry(
             &engine.ref_name,
             &args.entry_id,
@@ -368,7 +368,7 @@ fn reject(cfg: &Config, args: RejectArgs) -> Result<()> {
             &cfg.agent_id,
         )
     } else {
-        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
         ledger_store.reject_entry(
             &engine.ref_name,
             &args.entry_id,
@@ -444,7 +444,7 @@ fn withdraw(cfg: &Config, args: WithdrawArgs) -> Result<()> {
             &cfg.agent_id,
         )
     } else {
-        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
         ledger_store.withdraw_entry(
             &engine.ref_name,
             &args.entry_id,
@@ -498,7 +498,7 @@ fn withdraw(cfg: &Config, args: WithdrawArgs) -> Result<()> {
 
 fn supersede(cfg: &Config, args: SupersedeArgs) -> Result<()> {
     let engine = open_engine(cfg)?;
-    let index_store = AsgIndexStore { repo: &engine.repo };
+    let index_store = AsgIndexStore::from_engine(&engine);
     let symbol = index_store
         .get_symbol_by_qname(&engine.ref_name, &args.qname)?
         .ok_or_else(|| anyhow::anyhow!("symbol not found: {}", args.qname))?;
@@ -534,7 +534,7 @@ fn supersede(cfg: &Config, args: SupersedeArgs) -> Result<()> {
     entry.supersedes = args.supersedes.clone();
     entry.tags.push("supersedes".to_string());
 
-    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
+    let ledger_store = AsgLedgerStore::from_engine(&engine);
     match ledger_store.append_entry(&engine.ref_name, &entry, &cfg.agent_id) {
         Ok(()) => {
             let event = AuditEvent::new(
@@ -580,7 +580,7 @@ fn supersede(cfg: &Config, args: SupersedeArgs) -> Result<()> {
 fn append(cfg: &Config, args: AppendArgs) -> Result<()> {
     let engine = open_engine(cfg)?;
 
-    let index_store = AsgIndexStore { repo: &engine.repo };
+    let index_store = AsgIndexStore::from_engine(&engine);
     let symbol = index_store
         .get_symbol_by_qname(&engine.ref_name, &args.qname)?
         .ok_or_else(|| anyhow::anyhow!("symbol not found: {}", args.qname))?;
@@ -667,7 +667,7 @@ fn append(cfg: &Config, args: AppendArgs) -> Result<()> {
         }
     }
 
-    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
+    let ledger_store = AsgLedgerStore::from_engine(&engine);
     ledger_store.append_entry(&engine.ref_name, &entry, &cfg.agent_id)?;
 
     let status = match &decision {
@@ -722,7 +722,7 @@ fn rebind(cfg: &Config, args: RebindArgs) -> Result<()> {
     }
 
     // Resolve qnames → symbol_ids.
-    let index_store = AsgIndexStore { repo: &engine.repo };
+    let index_store = AsgIndexStore::from_engine(&engine);
     let from_symbol = index_store
         .get_symbol_by_qname(&engine.ref_name, &args.from)?
         .ok_or_else(|| anyhow::anyhow!("from qname not found in index: {} — run `asd index` first", args.from))?;
@@ -754,7 +754,7 @@ fn rebind(cfg: &Config, args: RebindArgs) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     // Re-parent all ledger entries from old symbol_id to new symbol_id.
-    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
+    let ledger_store = AsgLedgerStore::from_engine(&engine);
     let entries = ledger_store.list_entries_with_superseded(&engine.ref_name, &from_symbol.symbol_id)?;
     let count = entries.len();
     for mut entry in entries {

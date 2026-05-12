@@ -99,8 +99,8 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
     // Concept-gap detection: symbols with Ownership but no Concept entry.
     let concept_gaps: Vec<serde_json::Value> = if args.json {
         if let Ok(engine) = Engine::open_sqlite(&cfg.db_path) {
-            let index_store = AsgIndexStore { repo: &engine.repo };
-            let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
+            let index_store = AsgIndexStore::from_engine(&engine);
+            let ledger_store = AsgLedgerStore::from_engine(&engine);
             let tree = engine.repo
                 .get_tree(&engine.ref_name, "/asd/v1/index/by-qname")
                 .unwrap_or(serde_json::Value::Object(Default::default()));

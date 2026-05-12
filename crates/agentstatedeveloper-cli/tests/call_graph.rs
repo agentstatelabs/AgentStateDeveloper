@@ -83,7 +83,7 @@ fn index_extracts_at_least_one_call_edge() {
     // read at least one call edge for a known target. We try a few likely
     // candidates and accept the first one with a non-empty result.
     let engine = Engine::open_sqlite(&db).expect("open engine");
-    let store = AsgIndexStore { repo: &engine.repo };
+    let store = AsgIndexStore::new(&engine.repo);
 
     let candidates = [
         // pipeline.py is engineered to have several intra-module call edges

@@ -19,7 +19,7 @@ fn make_entry(symbol_id: &str, author_id: &str, tags: &[&str]) -> LedgerEntry {
 }
 
 fn seed(engine: &Engine, entry: &LedgerEntry) {
-    let store = AsgLedgerStore { repo: &engine.repo };
+    let store = AsgLedgerStore::new(&engine.repo);
     store.append_entry(&engine.ref_name, entry, "test-agent").expect("append");
 }
 

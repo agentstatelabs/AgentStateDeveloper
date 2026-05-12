@@ -618,7 +618,7 @@ impl AsdMcpServer {
             _ => return "[]".to_string(),
         };
 
-        let index = AsgIndexStore { repo: &engine.repo };
+        let index = AsgIndexStore::from_engine(&engine);
         let mut symbols = Vec::new();
         let kind_filter = p.kind.as_deref().map(|k| k.to_lowercase());
         let name_filter = p.name_contains.as_deref();
@@ -706,7 +706,7 @@ impl AsdMcpServer {
             .and_then(|fts| fts.search(&p.query, &filters, limit * 4).ok());
 
         if let Some(hits) = fts_result {
-            let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
+            let ledger_store = AsgLedgerStore::from_engine(&engine);
             let mut scored: Vec<(f64, _)> = hits
                 .into_iter()
                 .map(|hit| {
@@ -737,7 +737,7 @@ impl AsdMcpServer {
             scored.truncate(limit);
 
             let recency = gather_recency(200, 14.0);
-            let index_store = AsgIndexStore { repo: &engine.repo };
+            let index_store = AsgIndexStore::from_engine(&engine);
             let raw_scores: Vec<f64> = scored.iter().map(|(s, _)| *s).collect();
             let confidences = confidence_scores(&raw_scores);
             let mut layers_present: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -778,7 +778,7 @@ impl AsdMcpServer {
                 })
             }).collect();
             let layers_ref: std::collections::HashSet<&str> = layers_present.iter().map(|s| s.as_str()).collect();
-            let ambiguous_terms = detect_ambiguous_tokens(&tokens, &db_path, &filters);
+            let ambiguous_terms = detect_ambiguous_tokens(&tokens, engine.fts.as_ref(), &filters);
             let possible_misses = detect_possible_misses(&p.query, &layers_ref, results.len());
             // Document hits from the broad corpus (markdown, config, manifests, etc.)
             let doc_hits: Vec<serde_json::Value> = SearchDocsDb::open(&db_path)
@@ -816,8 +816,8 @@ impl AsdMcpServer {
             Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
             _ => return "[]".to_string(),
         };
-        let index = AsgIndexStore { repo: &engine.repo };
-        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
+        let index = AsgIndexStore::from_engine(&engine);
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
         let mut scored: Vec<(u32, agentstatedeveloper_core::Symbol)> = Vec::new();
         for qname in &qnames {
             let sym = match index.get_symbol_by_qname(&ref_name, qname) {
@@ -909,21 +909,21 @@ impl AsdMcpServer {
             paths_filter,
         };
 
-        let index = AsgIndexStore { repo: &engine.repo };
-        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
-        let effect_store = AsgEffectStore::with_cache(&engine.repo, &self.db_path);
+        let index = AsgIndexStore::from_engine(&engine);
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
+        let effect_store = AsgEffectStore::from_engine(&engine);
 
         let mut top_qnames = find_candidates(
-            &engine, &db_path, &p.query, &tokens, &filters,
+            &engine, &p.query, &tokens, &filters,
             &ledger_store, &index, depth,
         );
 
         // Apply durable feedback adjustments.
         {
             use agentstatedeveloper_core::{apply_feedback_adjustments, FeedbackStore};
-            let fb_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&self.db_path) };
+            let fb_store = AsgFeedbackStore::from_engine(&engine);
             let fb = fb_store.flat_verdicts(&ref_name).unwrap_or_default();
-            apply_feedback_adjustments(&engine, &index, &db_path, &p.query, &mut top_qnames, &fb);
+            apply_feedback_adjustments(&engine, &index, &p.query, &mut top_qnames, &fb);
         }
 
         // Build id_map for call graph resolution.
@@ -1057,7 +1057,7 @@ impl AsdMcpServer {
         let layers_present: std::collections::HashSet<&str> = entry_points.iter()
             .filter_map(|ep| ep.get("layer").and_then(serde_json::Value::as_str))
             .collect();
-        let ambiguous_terms = detect_ambiguous_tokens(&tokens, &db_path, &filters);
+        let ambiguous_terms = detect_ambiguous_tokens(&tokens, engine.fts.as_ref(), &filters);
         let possible_misses = detect_possible_misses(&p.query, &layers_present, entry_points.len());
         serde_json::to_string(&serde_json::json!({
             "query": p.query,
@@ -1080,20 +1080,20 @@ impl AsdMcpServer {
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
 
-        let index = AsgIndexStore { repo: &engine.repo };
+        let index = AsgIndexStore::from_engine(&engine);
         let symbol = match index.get_symbol_by_qname(&ref_name, &p.qname) {
             Ok(Some(s)) => s,
             Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
             Err(e) => return err_json(&e.to_string()),
         };
 
-        let effects_store = AsgEffectStore::with_cache(&engine.repo, &self.db_path);
+        let effects_store = AsgEffectStore::from_engine(&engine);
         let effects = match effects_store.get_effects(&ref_name, &symbol.symbol_id) {
             Ok(e) => e,
             Err(e) => return err_json(&e.to_string()),
         };
 
-        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
         let ledger = match ledger_store.list_entries(&ref_name, &symbol.symbol_id) {
             Ok(e) => e,
             Err(e) => return err_json(&e.to_string()),
@@ -1115,14 +1115,14 @@ impl AsdMcpServer {
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
 
-        let index = AsgIndexStore { repo: &engine.repo };
+        let index = AsgIndexStore::from_engine(&engine);
         let symbol = match index.get_symbol_by_qname(&ref_name, &p.qname) {
             Ok(Some(s)) => s,
             Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
             Err(e) => return err_json(&e.to_string()),
         };
 
-        let effects_store = AsgEffectStore::with_cache(&engine.repo, &self.db_path);
+        let effects_store = AsgEffectStore::from_engine(&engine);
         match effects_store.get_effects(&ref_name, &symbol.symbol_id) {
             Ok(Some(decl)) => {
                 serde_json::to_string(&decl).unwrap_or_else(|_| "null".to_string())
@@ -1139,7 +1139,7 @@ impl AsdMcpServer {
         let p = params.0;
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
-        let index = AsgIndexStore { repo: &engine.repo };
+        let index = AsgIndexStore::from_engine(&engine);
         let target = match index.get_symbol_by_qname(&ref_name, &p.qname) {
             Ok(Some(s)) => s,
             Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
@@ -1163,7 +1163,7 @@ impl AsdMcpServer {
         let p = params.0;
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
-        let index = AsgIndexStore { repo: &engine.repo };
+        let index = AsgIndexStore::from_engine(&engine);
         let target = match index.get_symbol_by_qname(&ref_name, &p.qname) {
             Ok(Some(s)) => s,
             Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
@@ -1188,14 +1188,14 @@ impl AsdMcpServer {
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
 
-        let index = AsgIndexStore { repo: &engine.repo };
+        let index = AsgIndexStore::from_engine(&engine);
         let symbol = match index.get_symbol_by_qname(&ref_name, &p.qname) {
             Ok(Some(s)) => s,
             Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
             Err(e) => return err_json(&e.to_string()),
         };
 
-        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
         let entries = match ledger_store.list_entries(&ref_name, &symbol.symbol_id) {
             Ok(e) => e,
             Err(e) => return err_json(&e.to_string()),
@@ -1302,7 +1302,7 @@ impl AsdMcpServer {
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
 
-        let index = AsgIndexStore { repo: &engine.repo };
+        let index = AsgIndexStore::from_engine(&engine);
         let symbol = match index.get_symbol_by_qname(&ref_name, &p.qname) {
             Ok(Some(s)) => s,
             Ok(None) => {
@@ -1421,7 +1421,7 @@ impl AsdMcpServer {
             }
         }
 
-        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
         if let Err(e) = ledger_store.append_entry(&ref_name, &entry, &p.author_id) {
             let event = AuditEvent::new(
                 event_types::LEDGER_APPEND,
@@ -1492,7 +1492,7 @@ impl AsdMcpServer {
                 reason, matched_policy
             ));
         }
-        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
         match ledger_store.approve_entry(
             &ref_name,
             &p.entry_id,
@@ -1559,7 +1559,7 @@ impl AsdMcpServer {
                 reason, matched_policy
             ));
         }
-        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
         match ledger_store.reject_entry(
             &ref_name,
             &p.entry_id,
@@ -1627,7 +1627,7 @@ impl AsdMcpServer {
                 reason, matched_policy
             ));
         }
-        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
         match ledger_store.withdraw_entry(&ref_name, &p.entry_id, &p.author_id, "asd-mcp") {
             Ok(outcome) => {
                 let status = if outcome.already_resolved {
@@ -1687,7 +1687,7 @@ impl AsdMcpServer {
 
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
-        let index = AsgIndexStore { repo: &engine.repo };
+        let index = AsgIndexStore::from_engine(&engine);
         let symbol = match index.get_symbol_by_qname(&ref_name, &p.qname) {
             Ok(Some(s)) => s,
             Ok(None) => {
@@ -1746,7 +1746,7 @@ impl AsdMcpServer {
         entry.supersedes = p.supersedes.clone();
         entry.tags.push("supersedes".to_string());
 
-        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
         match ledger_store.append_entry(&ref_name, &entry, "asd-mcp") {
             Ok(()) => {
                 let event = AuditEvent::new(
@@ -1808,7 +1808,7 @@ impl AsdMcpServer {
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
 
-        let index = AsgIndexStore { repo: &engine.repo };
+        let index = AsgIndexStore::from_engine(&engine);
         let symbol = match index.get_symbol_by_qname(&ref_name, &p.qname) {
             Ok(Some(s)) => s,
             Ok(None) => {
@@ -1837,7 +1837,7 @@ impl AsdMcpServer {
             }
         };
 
-        let effects_store = AsgEffectStore::with_cache(&engine.repo, &self.db_path);
+        let effects_store = AsgEffectStore::from_engine(&engine);
         let existing = match effects_store.get_effects(&ref_name, &symbol.symbol_id) {
             Ok(e) => e,
             Err(e) => {
@@ -2002,7 +2002,7 @@ impl AsdMcpServer {
         let p = params.0;
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
-        let index = AsgIndexStore { repo: &engine.repo };
+        let index = AsgIndexStore::from_engine(&engine);
         let symbol = match index.get_symbol_by_qname(&ref_name, &p.qname) {
             Ok(Some(s)) => s,
             Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
@@ -2097,7 +2097,7 @@ impl AsdMcpServer {
         }
 
         // Resolve new qname → Symbol via index
-        let index_store = AsgIndexStore { repo: &engine.repo };
+        let index_store = AsgIndexStore::from_engine(&engine);
         let new_symbol = match index_store.get_symbol_by_qname(ref_name, &p.to_qname) {
             Ok(Some(s)) => s,
             Ok(None) => {
@@ -2136,7 +2136,7 @@ impl AsdMcpServer {
         }
 
         // Re-parent ledger entries
-        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
         let entries = match ledger_store.list_entries_with_superseded(ref_name, &p.from_symbol_id) {
             Ok(v) => v,
             Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
@@ -2283,7 +2283,7 @@ impl AsdMcpServer {
 
         // Resolve --symbol to symbol_id.
         if let Some(ref qname) = p.symbol {
-            let index = AsgIndexStore { repo: &engine.repo };
+            let index = AsgIndexStore::from_engine(&engine);
             match index.get_symbol_by_qname(&ref_name, qname) {
                 Ok(Some(sym)) => { entry.symbol_id = Some(sym.symbol_id); }
                 Ok(None) => return err_json(&format!("symbol not found: {qname}")),
@@ -2326,7 +2326,7 @@ impl AsdMcpServer {
         };
 
         if let Some(ref qname) = p.symbol {
-            let index = AsgIndexStore { repo: &engine.repo };
+            let index = AsgIndexStore::from_engine(&engine);
             match index.get_symbol_by_qname(&ref_name, qname) {
                 Ok(Some(sym)) => { filter.symbol_id = Some(sym.symbol_id); }
                 Ok(None) => return err_json(&format!("symbol not found: {qname}")),
@@ -2398,7 +2398,7 @@ impl AsdMcpServer {
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
         let scratch_store = AsgScratchStore { repo: &engine.repo };
-        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
 
         // 1. Read scratch entry.
         let entry = match scratch_store.read_entry(&ref_name, &p.scratch_id) {
@@ -2408,7 +2408,7 @@ impl AsdMcpServer {
 
         // 2. Resolve symbol_id.
         let symbol_id = if let Some(ref qname) = p.qname {
-            let index = AsgIndexStore { repo: &engine.repo };
+            let index = AsgIndexStore::from_engine(&engine);
             match index.get_symbol_by_qname(&ref_name, qname) {
                 Ok(Some(sym)) => sym.symbol_id,
                 Ok(None) => return err_json(&format!("symbol not found: {qname}")),
@@ -2539,9 +2539,9 @@ impl AsdMcpServer {
             paths_filter,
         };
 
-        let index = AsgIndexStore { repo: &engine.repo };
-        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
-        let effect_store = AsgEffectStore::with_cache(&engine.repo, &self.db_path);
+        let index = AsgIndexStore::from_engine(&engine);
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
+        let effect_store = AsgEffectStore::from_engine(&engine);
 
         let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
         let all_qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
@@ -2557,16 +2557,16 @@ impl AsdMcpServer {
         }
 
         let mut candidates = find_candidates(
-            &engine, &db_path, &p.description, &tokens, &filters,
+            &engine, &p.description, &tokens, &filters,
             &ledger_store, &index, depth,
         );
 
         // Apply durable feedback adjustments.
         {
             use agentstatedeveloper_core::{apply_feedback_adjustments, FeedbackStore};
-            let fb_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&self.db_path) };
+            let fb_store = AsgFeedbackStore::from_engine(&engine);
             let fb = fb_store.flat_verdicts(&ref_name).unwrap_or_default();
-            apply_feedback_adjustments(&engine, &index, &db_path, &p.description, &mut candidates, &fb);
+            apply_feedback_adjustments(&engine, &index, &p.description, &mut candidates, &fb);
         }
 
         let recency = gather_recency(200, 14.0);
@@ -2790,7 +2790,7 @@ impl AsdMcpServer {
         let layers_present_pc: std::collections::HashSet<&str> = file_scores.iter()
             .map(|(_, _, layer, _, _)| layer.as_str())
             .collect();
-        let ambiguous_terms = detect_ambiguous_tokens(&tokens, &db_path, &filters);
+        let ambiguous_terms = detect_ambiguous_tokens(&tokens, engine.fts.as_ref(), &filters);
         let possible_misses = detect_possible_misses(&p.description, &layers_present_pc, file_scores.len());
         serde_json::to_string(&serde_json::json!({
             "description": p.description,
@@ -2854,9 +2854,9 @@ impl AsdMcpServer {
             paths_filter,
         };
 
-        let index = AsgIndexStore { repo: &engine.repo };
-        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
-        let effect_store = AsgEffectStore::with_cache(&engine.repo, &self.db_path);
+        let index = AsgIndexStore::from_engine(&engine);
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
+        let effect_store = AsgEffectStore::from_engine(&engine);
 
         // Build id_map for test BFS.
         let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
@@ -2873,16 +2873,16 @@ impl AsdMcpServer {
         }
 
         let mut candidates = find_candidates(
-            &engine, &db_path, &p.query, &tokens, &filters,
+            &engine, &p.query, &tokens, &filters,
             &ledger_store, &index, depth,
         );
 
         // Apply durable feedback adjustments.
         {
             use agentstatedeveloper_core::{apply_feedback_adjustments, FeedbackStore};
-            let fb_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&self.db_path) };
+            let fb_store = AsgFeedbackStore::from_engine(&engine);
             let fb = fb_store.flat_verdicts(&ref_name).unwrap_or_default();
-            apply_feedback_adjustments(&engine, &index, &db_path, &p.query, &mut candidates, &fb);
+            apply_feedback_adjustments(&engine, &index, &p.query, &mut candidates, &fb);
         }
 
         let mut files_to_inspect: Vec<serde_json::Value> = Vec::new();
@@ -3045,7 +3045,7 @@ impl AsdMcpServer {
         let layers_present_cl: std::collections::HashSet<&str> = files_to_inspect.iter()
             .filter_map(|f| f.get("layer").and_then(serde_json::Value::as_str))
             .collect();
-        let ambiguous_terms_cl = detect_ambiguous_tokens(&tokens, &db_path, &filters);
+        let ambiguous_terms_cl = detect_ambiguous_tokens(&tokens, engine.fts.as_ref(), &filters);
         let possible_misses_cl = detect_possible_misses(&p.query, &layers_present_cl, files_to_inspect.len());
         serde_json::to_string(&serde_json::json!({
             "query": p.query,
@@ -3076,9 +3076,9 @@ impl AsdMcpServer {
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
 
-        let index = AsgIndexStore { repo: &engine.repo };
-        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
-        let effect_store = AsgEffectStore::with_cache(&engine.repo, &self.db_path);
+        let index = AsgIndexStore::from_engine(&engine);
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
+        let effect_store = AsgEffectStore::from_engine(&engine);
 
         let symbol = match index.get_symbol_by_qname(&ref_name, &p.qname) {
             Ok(Some(s)) => s,
@@ -3212,9 +3212,9 @@ impl AsdMcpServer {
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
 
-        let index = AsgIndexStore { repo: &engine.repo };
-        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
-        let effect_store = AsgEffectStore::with_cache(&engine.repo, &self.db_path);
+        let index = AsgIndexStore::from_engine(&engine);
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
+        let effect_store = AsgEffectStore::from_engine(&engine);
 
         // Build id_map.
         let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
@@ -3358,7 +3358,7 @@ impl AsdMcpServer {
         let Ok(engine) = Engine::open_sqlite(&self.db_path) else {
             return err_json("failed to open database");
         };
-        let index_store = AsgIndexStore { repo: &engine.repo };
+        let index_store = AsgIndexStore::from_engine(&engine);
         let Ok(Some(symbol)) = index_store.get_symbol_by_qname(&engine.ref_name, &p.qname) else {
             return err_json(&format!("symbol not found: {}", p.qname));
         };
@@ -3369,7 +3369,7 @@ impl AsdMcpServer {
             p.summary.clone(),
             author,
         );
-        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
         match ledger_store.append_entry(&engine.ref_name, &entry, "asd-mcp") {
             Ok(_) => serde_json::to_string(&serde_json::json!({
                 "status": "added",
@@ -3390,10 +3390,10 @@ impl AsdMcpServer {
         let Ok(engine) = Engine::open_sqlite(&self.db_path) else {
             return err_json("failed to open database");
         };
-        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
 
         let rows: Vec<serde_json::Value> = if let Some(qname) = p.qname {
-            let index_store = AsgIndexStore { repo: &engine.repo };
+            let index_store = AsgIndexStore::from_engine(&engine);
             match index_store.get_symbol_by_qname(&engine.ref_name, &qname) {
                 Ok(Some(symbol)) => {
                     ledger_store
@@ -3419,7 +3419,7 @@ impl AsdMcpServer {
                 _ => return serde_json::to_string(&serde_json::json!({ "invariants": [] }))
                     .unwrap_or_else(|_| "{}".to_string()),
             };
-            let index_store_all = AsgIndexStore { repo: &engine.repo };
+            let index_store_all = AsgIndexStore::from_engine(&engine);
             let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
             let all_qnames: Vec<String> = match engine.repo.get_tree(ref_name, &prefix) {
                 Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
@@ -3482,7 +3482,7 @@ impl AsdMcpServer {
         };
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
-        let index_store = AsgIndexStore { repo: &engine.repo };
+        let index_store = AsgIndexStore::from_engine(&engine);
         let symbol = match index_store.get_symbol_by_qname(&ref_name, &p.qname) {
             Ok(Some(s)) => s,
             Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
@@ -3500,7 +3500,7 @@ impl AsdMcpServer {
             created_at: chrono::Utc::now(),
             file_scope: None,
         };
-        let feedback_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&self.db_path) };
+        let feedback_store = AsgFeedbackStore::from_engine(&engine);
         match feedback_store.record(&ref_name, &entry, &p.author_id) {
             Ok(()) => serde_json::to_string(&serde_json::json!({
                 "ok": true,
@@ -3519,7 +3519,7 @@ impl AsdMcpServer {
         let p = params.0;
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
-        let index_store = AsgIndexStore { repo: &engine.repo };
+        let index_store = AsgIndexStore::from_engine(&engine);
         let symbol = match index_store.get_symbol_by_qname(&ref_name, &p.qname) {
             Ok(Some(s)) => s,
             Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
@@ -3533,7 +3533,7 @@ impl AsdMcpServer {
             Author { kind: author_kind, id: p.author_id.clone() },
         );
         entry.tags = vec!["promote-as-truth".to_string()];
-        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
         match ledger_store.append_entry(&ref_name, &entry, &p.author_id) {
             Ok(()) => serde_json::to_string(&serde_json::json!({
                 "ok": true,
@@ -3553,9 +3553,9 @@ impl AsdMcpServer {
         let p = params.0;
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
-        let feedback_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&self.db_path) };
+        let feedback_store = AsgFeedbackStore::from_engine(&engine);
         let entries: Vec<serde_json::Value> = if let Some(ref qname) = p.qname {
-            let index_store = AsgIndexStore { repo: &engine.repo };
+            let index_store = AsgIndexStore::from_engine(&engine);
             match index_store.get_symbol_by_qname(&ref_name, qname) {
                 Ok(Some(sym)) => feedback_store
                     .list_for_symbol(&ref_name, &sym.symbol_id)
@@ -3667,7 +3667,7 @@ fn resolve_symbols_by_ids(
         serde_json::Value::Object(map) => map.keys().cloned().collect(),
         _ => return Ok(Vec::new()),
     };
-    let index = AsgIndexStore { repo: &engine.repo };
+    let index = AsgIndexStore::from_engine(&engine);
     let id_set: std::collections::HashSet<&String> = ids.iter().collect();
     let mut out = Vec::new();
     for qn in qnames {

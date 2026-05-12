@@ -204,7 +204,7 @@ async fn list_symbols(
         _ => return Ok(Json(Vec::new())),
     };
 
-    let index = AsgIndexStore { repo: &engine.repo };
+    let index = AsgIndexStore::from_engine(&engine);
     let mut symbols = Vec::new();
     for qname in qnames {
         if let Some(sym) = index
@@ -237,18 +237,18 @@ async fn get_symbol(
     let engine = state.engine.lock().await;
     let ref_name = engine.ref_name.clone();
 
-    let index = AsgIndexStore { repo: &engine.repo };
+    let index = AsgIndexStore::from_engine(&engine);
     let symbol = index
         .get_symbol_by_qname(&ref_name, &qname)
         .map_err(ApiError::from)?
         .ok_or_else(|| ApiError::NotFound(format!("symbol not found: {}", qname)))?;
 
-    let effects_store = AsgEffectStore::with_cache(&engine.repo, &state.db_path);
+    let effects_store = AsgEffectStore::from_engine(&engine);
     let effects = effects_store
         .get_effects(&ref_name, &symbol.symbol_id)
         .map_err(ApiError::from)?;
 
-    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &state.db_path);
+    let ledger_store = AsgLedgerStore::from_engine(&engine);
     let mut ledger = ledger_store
         .list_entries(&ref_name, &symbol.symbol_id)
         .map_err(ApiError::from)?;
@@ -268,13 +268,13 @@ async fn get_symbol_ledger(
     let engine = state.engine.lock().await;
     let ref_name = engine.ref_name.clone();
 
-    let index = AsgIndexStore { repo: &engine.repo };
+    let index = AsgIndexStore::from_engine(&engine);
     let symbol = index
         .get_symbol_by_qname(&ref_name, &qname)
         .map_err(ApiError::from)?
         .ok_or_else(|| ApiError::NotFound(format!("symbol not found: {}", qname)))?;
 
-    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &state.db_path);
+    let ledger_store = AsgLedgerStore::from_engine(&engine);
     let entries = ledger_store
         .list_entries(&ref_name, &symbol.symbol_id)
         .map_err(ApiError::from)?;
@@ -287,7 +287,7 @@ async fn get_symbol_callers(
 ) -> Result<Json<Vec<agentstatedeveloper_core::Symbol>>, ApiError> {
     let engine = state.engine.lock().await;
     let ref_name = engine.ref_name.clone();
-    let index = AsgIndexStore { repo: &engine.repo };
+    let index = AsgIndexStore::from_engine(&engine);
     let target = index
         .get_symbol_by_qname(&ref_name, &qname)
         .map_err(ApiError::from)?
@@ -305,7 +305,7 @@ async fn get_symbol_callees(
 ) -> Result<Json<Vec<agentstatedeveloper_core::Symbol>>, ApiError> {
     let engine = state.engine.lock().await;
     let ref_name = engine.ref_name.clone();
-    let index = AsgIndexStore { repo: &engine.repo };
+    let index = AsgIndexStore::from_engine(&engine);
     let target = index
         .get_symbol_by_qname(&ref_name, &qname)
         .map_err(ApiError::from)?
@@ -334,7 +334,7 @@ fn resolve_symbols_by_ids(
         _ => return Ok(Vec::new()),
     };
 
-    let index = AsgIndexStore { repo: &engine.repo };
+    let index = AsgIndexStore::from_engine(&engine);
     let id_set: std::collections::HashSet<&String> = ids.iter().collect();
     let mut out = Vec::new();
     for qn in qnames {
@@ -727,13 +727,13 @@ async fn get_symbol_effects(
     let engine = state.engine.lock().await;
     let ref_name = engine.ref_name.clone();
 
-    let index = AsgIndexStore { repo: &engine.repo };
+    let index = AsgIndexStore::from_engine(&engine);
     let symbol = index
         .get_symbol_by_qname(&ref_name, &qname)
         .map_err(ApiError::from)?
         .ok_or_else(|| ApiError::NotFound(format!("symbol not found: {}", qname)))?;
 
-    let effects_store = AsgEffectStore::with_cache(&engine.repo, &state.db_path);
+    let effects_store = AsgEffectStore::from_engine(&engine);
     let effects = effects_store
         .get_effects(&ref_name, &symbol.symbol_id)
         .map_err(ApiError::from)?;

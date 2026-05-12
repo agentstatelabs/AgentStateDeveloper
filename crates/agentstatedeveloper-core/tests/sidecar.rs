@@ -37,7 +37,7 @@ fn seed_engine(e: &Engine) -> (Symbol, EffectDecl, LedgerEntry) {
         signature: Some("def charge_card(amount: int) -> bool".to_string()),
         doc: None,
     };
-    let index = AsgIndexStore { repo: &e.repo };
+    let index = AsgIndexStore::new(&e.repo);
     index
         .put_symbol(&e.ref_name, &symbol, "test-agent")
         .expect("put symbol");
@@ -75,7 +75,7 @@ fn seed_engine(e: &Engine) -> (Symbol, EffectDecl, LedgerEntry) {
         },
     );
     entry.tags.push("awaiting-approval".to_string());
-    let ledger = AsgLedgerStore { repo: &e.repo };
+    let ledger = AsgLedgerStore::new(&e.repo);
     ledger
         .append_entry(&e.ref_name, &entry, "test-agent")
         .expect("append entry");
@@ -132,7 +132,7 @@ fn hydrate_into_fresh_engine_reproduces_state() {
     assert_eq!(summary.ledger_entries_loaded, 1);
     assert!(!summary.missing_schema_version);
 
-    let index = AsgIndexStore { repo: &dst.repo };
+    let index = AsgIndexStore::new(&dst.repo);
     let got_sym = index
         .get_symbol_by_qname(&dst.ref_name, &symbol.qname)
         .expect("lookup")
@@ -149,7 +149,7 @@ fn hydrate_into_fresh_engine_reproduces_state() {
     assert_eq!(got_decl.declared[0].effect, EffectCategory::IoNetOut);
     assert_eq!(got_decl.confidence, decl.confidence);
 
-    let ledger = AsgLedgerStore { repo: &dst.repo };
+    let ledger = AsgLedgerStore::new(&dst.repo);
     let got_entries = ledger
         .list_entries(&dst.ref_name, &symbol.symbol_id)
         .expect("list");
@@ -186,8 +186,8 @@ fn invariant_survives_hydrate_roundtrip() {
     // Verify they survive a sync → wipe → hydrate cycle so agents see them on a
     // fresh clone without rerunning `asd index`.
     let src = Engine::open_in_memory().expect("open src");
-    let index = AsgIndexStore { repo: &src.repo };
-    let ledger = AsgLedgerStore { repo: &src.repo };
+    let index = AsgIndexStore::new(&src.repo);
+    let ledger = AsgLedgerStore::new(&src.repo);
 
     let sym = Symbol {
         symbol_id: "sym_refreshDriftPlayhead".to_string(),
@@ -222,7 +222,7 @@ fn invariant_survives_hydrate_roundtrip() {
     assert_eq!(hydrate_summary.ledger_entries_loaded, 1, "invariant loaded from sidecar");
 
     // Verify the invariant is present and correct.
-    let dst_ledger = AsgLedgerStore { repo: &dst.repo };
+    let dst_ledger = AsgLedgerStore::new(&dst.repo);
     let entries = dst_ledger
         .list_entries(&dst.ref_name, &sym.symbol_id)
         .expect("list entries");
@@ -276,8 +276,8 @@ fn sidecar_roundtrip_with_chained_rebinds() {
     use agentstatedeveloper_core::{AsgIndexStore, IndexStore, Position, SymbolKind};
 
     let src = Engine::open_in_memory().expect("open src");
-    let index = AsgIndexStore { repo: &src.repo };
-    let ledger = AsgLedgerStore { repo: &src.repo };
+    let index = AsgIndexStore::new(&src.repo);
+    let ledger = AsgLedgerStore::new(&src.repo);
 
     // Create three symbols.
     for (id, qname) in [("sym_a", "mod.fn_a"), ("sym_b", "mod.fn_b"), ("sym_c", "mod.fn_c")] {
@@ -350,7 +350,7 @@ fn sidecar_roundtrip_with_chained_rebinds() {
     assert_eq!(hydrate_summary.rebinds_replayed, 2, "two rebind records replayed");
 
     // Entry should be under C in the hydrated engine.
-    let dst_ledger = AsgLedgerStore { repo: &dst.repo };
+    let dst_ledger = AsgLedgerStore::new(&dst.repo);
     let entries_c = dst_ledger.list_entries(&dst.ref_name, "sym_c").expect("list C");
     assert_eq!(entries_c.len(), 1, "entry under C after hydrate");
     assert_eq!(entries_c[0].summary, "original decision");

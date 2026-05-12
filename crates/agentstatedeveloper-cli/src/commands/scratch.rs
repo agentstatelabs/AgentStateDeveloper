@@ -268,7 +268,7 @@ fn write_cmd(cfg: &Config, args: WriteArgs) -> Result<()> {
 
     // Resolve --symbol to symbol_id.
     if let Some(ref qname) = args.symbol {
-        let index = AsgIndexStore { repo: &engine.repo };
+        let index = AsgIndexStore::from_engine(&engine);
         let sym = index
             .get_symbol_by_qname(&engine.ref_name, qname)?
             .ok_or_else(|| anyhow::anyhow!("symbol not found: {qname}"))?;
@@ -321,7 +321,7 @@ fn list_cmd(cfg: &Config, args: ListArgs) -> Result<()> {
 
     // Resolve --symbol qname → symbol_id for filtering.
     let sym_id_filter: Option<String> = if let Some(ref qname) = args.symbol {
-        let index = AsgIndexStore { repo: &engine.repo };
+        let index = AsgIndexStore::from_engine(&engine);
         let sym = index
             .get_symbol_by_qname(&engine.ref_name, qname)?
             .ok_or_else(|| anyhow::anyhow!("symbol not found: {qname}"))?;
@@ -424,14 +424,14 @@ fn promote_cmd(cfg: &Config, args: PromoteArgs) -> Result<()> {
     // Policy + audit wired through open_engine_public.
     let engine = open_engine_public(cfg)?;
     let scratch_store = AsgScratchStore { repo: &engine.repo };
-    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
+    let ledger_store = AsgLedgerStore::from_engine(&engine);
 
     // 1. Read the scratch entry.
     let entry = scratch_store.read_entry(&engine.ref_name, &args.scratch_id)?;
 
     // 2. Resolve symbol_id: --symbol flag wins, then fall back to entry.symbol_id.
     let symbol_id = if let Some(ref qname) = args.symbol {
-        let index = AsgIndexStore { repo: &engine.repo };
+        let index = AsgIndexStore::from_engine(&engine);
         let sym = index
             .get_symbol_by_qname(&engine.ref_name, qname)?
             .ok_or_else(|| anyhow::anyhow!("symbol not found: {qname}"))?;

@@ -33,7 +33,7 @@ fn prime_db(db_path: &std::path::Path) {
     let mut files = Vec::new();
     collect_py(&sample_root, &mut files);
 
-    let index_store = AsgIndexStore { repo: &engine.repo };
+    let index_store = AsgIndexStore::new(&engine.repo);
     let effect_store = AsgEffectStore { repo: &engine.repo };
 
     for file in &files {

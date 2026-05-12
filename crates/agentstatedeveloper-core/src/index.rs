@@ -1,9 +1,13 @@
+use std::collections::HashMap;
+
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
 
+use crate::engine::Engine;
 use crate::error::{AsdError, Result};
 use crate::paths;
 use crate::schema::Symbol;
+use crate::search_fts::SearchFtsDb;
 
 pub trait IndexStore {
     fn put_symbol(&self, ref_name: &str, symbol: &Symbol, agent_id: &str) -> Result<()>;
@@ -22,8 +26,57 @@ pub trait IndexStore {
     }
 }
 
+/// ASD index reader/writer.
+///
+/// Hot-path read methods (`get_symbol_by_qname`, `get_callers`, `get_callees`,
+/// `build_id_map`) hit the SQLite cache populated at `asd index` time.  Git is
+/// only consulted on cache miss.
+///
+/// The FTS connection is **borrowed** from the owning `Engine` (opened once in
+/// `Engine::open_sqlite`) so no `Connection::open` occurs at store construction
+/// or on any method call.
 pub struct AsgIndexStore<'a> {
     pub repo: &'a Repository,
+    /// Borrowed FTS connection from the owning `Engine`.
+    fts: Option<&'a SearchFtsDb>,
+}
+
+impl<'a> AsgIndexStore<'a> {
+    /// Construct without SQLite caching (tests, one-off internal calls).
+    pub fn new(repo: &'a Repository) -> Self {
+        Self { repo, fts: None }
+    }
+
+    /// Convenience: borrow the FTS connection already open in `engine`.
+    pub fn from_engine(engine: &'a Engine) -> Self {
+        Self { repo: &engine.repo, fts: engine.fts.as_ref() }
+    }
+
+    /// Build the full `symbol_id → Symbol` map using the borrowed FTS connection.
+    /// Falls back to the git by-qname tree walk on cache miss.
+    pub fn build_id_map(&self, engine: &Engine) -> HashMap<String, Symbol> {
+        if let Some(fts) = &self.fts {
+            if fts.symbols_cached_for(&engine.ref_name) {
+                let map = fts.build_id_map_cached(&engine.ref_name);
+                if !map.is_empty() {
+                    return map;
+                }
+            }
+        }
+        // Git fallback (cold cache or first run).
+        let tree = engine
+            .repo
+            .get_tree(&engine.ref_name, "/asd/v1/index/by-qname")
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+        tree.as_object()
+            .map(|m| {
+                m.values()
+                    .filter_map(|v| serde_json::from_value::<Symbol>(v.clone()).ok())
+                    .map(|s| (s.symbol_id.clone(), s))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 impl<'a> IndexStore for AsgIndexStore<'a> {
@@ -51,6 +104,13 @@ impl<'a> IndexStore for AsgIndexStore<'a> {
     }
 
     fn get_symbol_by_qname(&self, ref_name: &str, qname: &str) -> Result<Option<Symbol>> {
+        // Fast path: reuse the open FTS connection — no extra open().
+        if let Some(fts) = &self.fts {
+            if fts.symbols_cached_for(ref_name) {
+                return Ok(fts.get_symbol_by_qname_cached(qname, ref_name));
+            }
+        }
+        // Authoritative git path.
         let path = paths::qname_index_path(qname);
         match self.repo.get_json(ref_name, &path) {
             Ok(v) => Ok(Some(serde_json::from_value(v)?)),
@@ -60,6 +120,13 @@ impl<'a> IndexStore for AsgIndexStore<'a> {
     }
 
     fn get_callees(&self, ref_name: &str, symbol_id: &str) -> Result<Vec<String>> {
+        // Fast path: reuse open FTS connection.
+        if let Some(fts) = &self.fts {
+            if fts.symbols_cached_for(ref_name) {
+                return Ok(fts.get_neighbors_cached(symbol_id, "callee", ref_name));
+            }
+        }
+        // Authoritative git path.
         let path = paths::callees_path(symbol_id);
         match self.repo.get_json(ref_name, &path) {
             Ok(v) => Ok(extract_string_array(&v, "callees")),
@@ -68,6 +135,13 @@ impl<'a> IndexStore for AsgIndexStore<'a> {
     }
 
     fn get_callers(&self, ref_name: &str, symbol_id: &str) -> Result<Vec<String>> {
+        // Fast path: reuse open FTS connection.
+        if let Some(fts) = &self.fts {
+            if fts.symbols_cached_for(ref_name) {
+                return Ok(fts.get_neighbors_cached(symbol_id, "caller", ref_name));
+            }
+        }
+        // Authoritative git path.
         let path = paths::callers_path(symbol_id);
         match self.repo.get_json(ref_name, &path) {
             Ok(v) => Ok(extract_string_array(&v, "callers")),

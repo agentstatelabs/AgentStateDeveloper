@@ -16,11 +16,12 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, IndexStore, LedgerStore,
-    OwnershipSignal, Symbol, discover_symbol_ownership, find_covering_tests, stale_warning,
+    OwnershipSignal, SearchFtsDb, Symbol, discover_symbol_ownership, find_covering_tests,
+    stale_warning,
 };
 use agentstatedeveloper_core::schema::VerificationStatus;
 
-use crate::commands::graph::build_id_map;
+use crate::commands::graph::{AsdTimer, build_id_map};
 use crate::config::Config;
 
 #[derive(Debug, Args)]
@@ -41,20 +42,27 @@ pub struct ContextForArgs {
     /// Suppress the stale-index warning.
     #[arg(long)]
     pub quiet: bool,
+
+    /// Print per-phase timing to stderr.
+    #[arg(long)]
+    pub timing: bool,
 }
 
 pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
+    let mut t = AsdTimer::new(args.timing);
     if !args.quiet {
         if let Some(warn) = agentstatedeveloper_core::stale_warning(&cfg.db_path, 3600) {
             eprintln!("{warn}");
         }
     }
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let index_store = AsgIndexStore { repo: &engine.repo };
-    let effect_store = AsgEffectStore::with_cache(&engine.repo, &cfg.db_path);
-    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
+    t.phase("open_engine");
+    let index_store = AsgIndexStore::from_engine(&engine);
+    let effect_store = AsgEffectStore::from_engine(&engine);
+    let ledger_store = AsgLedgerStore::from_engine(&engine);
 
-    let id_map = build_id_map(&engine);
+    let id_map = index_store.build_id_map(&engine);
+    t.phase("build_id_map");
 
     let qnames: Vec<&str> = args.qnames.split(',').map(|s| s.trim()).collect();
     let budget_chars = args.budget_tokens.map(|t| t * 4);
@@ -69,6 +77,7 @@ pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
                 continue;
             }
         };
+        t.phase("symbol_lookup");
 
         let sym_ctx = assemble_symbol_context(
             &engine,
@@ -78,9 +87,10 @@ pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
             &symbol,
             &id_map,
             args.include_body,
-            Some(&cfg.db_path),
+            engine.fts.as_ref(),
             None,  // single symbol — compute ownership fresh
         )?;
+        t.phase("assemble_context");
         symbols_out.push(sym_ctx);
     }
 
@@ -102,6 +112,7 @@ pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
     }
 
     println!("{output}");
+    t.total("context-for");
     Ok(())
 }
 
@@ -113,7 +124,9 @@ pub(crate) fn assemble_symbol_context(
     symbol: &Symbol,
     id_map: &HashMap<String, Symbol>,
     include_body: bool,
-    db_path: Option<&std::path::Path>,
+    // Borrowed FTS connection from the owning Engine — used for covering-test
+    // lookup.  `None` skips the test scan (tests, one-off calls).
+    fts: Option<&SearchFtsDb>,
     // Pre-computed ownership signal for this symbol's file.  When `Some`,
     // skips the `discover_symbol_ownership` git blame/log calls entirely —
     // pass this when processing multiple symbols to share per-file results.
@@ -209,19 +222,15 @@ pub(crate) fn assemble_symbol_context(
     }
 
     // t-003: Find test symbols that cover this impl symbol (with file + run command).
-    let covering_tests: Vec<Value> = if let Some(db) = db_path {
-        find_covering_tests(db, &symbol.qname)
-            .into_iter()
-            .map(|ct| json!({
-                "qname": ct.qname,
-                "file": ct.file,
-                "line": ct.line,
-                "run_command": ct.run_command,
-            }))
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let covering_tests: Vec<Value> = find_covering_tests(fts, &symbol.qname)
+        .into_iter()
+        .map(|ct| json!({
+            "qname": ct.qname,
+            "file": ct.file,
+            "line": ct.line,
+            "run_command": ct.run_command,
+        }))
+        .collect();
 
     // t-002: Per-effect verification detail — cross-reference declared effects
     // against the verification mismatches so agents see ok/mismatch/unverified per effect.

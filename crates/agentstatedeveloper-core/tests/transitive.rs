@@ -62,7 +62,7 @@ fn put_simple_effect_decl(
 #[test]
 fn propagates_transitive_effects_with_via_chains() {
     let engine = Engine::open_in_memory().expect("open engine");
-    let index_store = AsgIndexStore { repo: &engine.repo };
+    let index_store = AsgIndexStore::new(&engine.repo);
     let effect_store = AsgEffectStore { repo: &engine.repo };
 
     // A declares io.fs.read; B declares io.net.out; C declares nothing.
@@ -164,7 +164,7 @@ fn propagates_transitive_effects_with_via_chains() {
 #[test]
 fn handles_cycles_without_infinite_loop() {
     let engine = Engine::open_in_memory().expect("open engine");
-    let index_store = AsgIndexStore { repo: &engine.repo };
+    let index_store = AsgIndexStore::new(&engine.repo);
     let effect_store = AsgEffectStore { repo: &engine.repo };
 
     put_simple_effect_decl(&engine, "A", vec![EffectCategory::IoFsRead]);

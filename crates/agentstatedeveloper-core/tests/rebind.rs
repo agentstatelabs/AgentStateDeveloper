@@ -30,7 +30,7 @@ fn make_symbol(id: &str, qname: &str) -> Symbol {
 fn seed_two_symbols(engine: &Engine) -> (Symbol, Symbol) {
     let sym_a = make_symbol("sym_a", "mod.old_fn");
     let sym_b = make_symbol("sym_b", "mod.new_fn");
-    let index = AsgIndexStore { repo: &engine.repo };
+    let index = AsgIndexStore::new(&engine.repo);
     index.put_symbol(&engine.ref_name, &sym_a, "test").expect("put sym_a");
     index.put_symbol(&engine.ref_name, &sym_b, "test").expect("put sym_b");
     (sym_a, sym_b)
@@ -43,7 +43,7 @@ fn append_entry(engine: &Engine, symbol_id: &str, summary: &str) -> LedgerEntry 
         summary,
         Author { kind: AuthorKind::Agent, id: "test-agent".to_string() },
     );
-    let ledger = AsgLedgerStore { repo: &engine.repo };
+    let ledger = AsgLedgerStore::new(&engine.repo);
     ledger.append_entry(&engine.ref_name, &entry, "test").expect("append entry");
     entry
 }
@@ -68,7 +68,7 @@ fn do_rebind(engine: &Engine, from_symbol_id: &str, to_symbol_id: &str, to_qname
         CommitOptions::new("test", IntentCategory::Refine, "rebind"),
     ).expect("write rebind record");
 
-    let ledger = AsgLedgerStore { repo: &engine.repo };
+    let ledger = AsgLedgerStore::new(&engine.repo);
     let entries = ledger
         .list_entries_with_superseded(&engine.ref_name, from_symbol_id)
         .expect("list entries");
@@ -96,7 +96,7 @@ fn rebind_reparents_entries_to_new_symbol() {
     let (sym_a, sym_b) = seed_two_symbols(&engine);
     let e1 = append_entry(&engine, &sym_a.symbol_id, "first decision");
     let e2 = append_entry(&engine, &sym_a.symbol_id, "second decision");
-    let ledger = AsgLedgerStore { repo: &engine.repo };
+    let ledger = AsgLedgerStore::new(&engine.repo);
 
     // Pre-rebind: both entries under A.
     let before = ledger.list_entries(&engine.ref_name, &sym_a.symbol_id).expect("list before");
@@ -146,7 +146,7 @@ fn rebind_with_no_entries_is_idempotent() {
     // Should not panic or error.
     do_rebind(&engine, &sym_a.symbol_id, &sym_b.symbol_id, &sym_b.qname);
 
-    let ledger = AsgLedgerStore { repo: &engine.repo };
+    let ledger = AsgLedgerStore::new(&engine.repo);
     let entries_b = ledger.list_entries(&engine.ref_name, &sym_b.symbol_id).expect("list");
     assert_eq!(entries_b.len(), 0, "still no entries after rebind of empty symbol");
 
@@ -163,11 +163,11 @@ fn rebind_to_unknown_qname_does_not_write_rebind_record() {
     // prevents any writes when the target doesn't exist.
     let engine = Engine::open_in_memory().expect("open engine");
     let sym_a = make_symbol("sym_a", "mod.old_fn");
-    let index = AsgIndexStore { repo: &engine.repo };
+    let index = AsgIndexStore::new(&engine.repo);
     index.put_symbol(&engine.ref_name, &sym_a, "test").expect("put sym_a");
     append_entry(&engine, &sym_a.symbol_id, "entry");
 
-    let missing = AsgIndexStore { repo: &engine.repo }
+    let missing = AsgIndexStore::new(&engine.repo)
         .get_symbol_by_qname(&engine.ref_name, "mod.nonexistent")
         .expect("lookup ok");
     assert!(missing.is_none(), "B not in index — caller should bail before writing");

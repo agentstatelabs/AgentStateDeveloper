@@ -173,7 +173,7 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
     // hit the fast path immediately after `asd index`.
     if let Ok(fts) = SearchFtsDb::open(&cfg.db_path) {
         // Feedback
-        let fb_store = AsgFeedbackStore { repo: &engine.repo, db_path: None };
+        let fb_store = AsgFeedbackStore::new(&engine.repo);
         if let Ok(all_fb) = fb_store.list_all(&engine.ref_name) {
             if !all_fb.is_empty() {
                 if let Err(e) = fts.sync_feedback_entries(&all_fb) {

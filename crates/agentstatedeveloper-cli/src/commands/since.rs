@@ -78,9 +78,9 @@ pub fn run(cfg: &Config, args: SinceArgs) -> Result<()> {
     let intent = args.intent.as_deref().and_then(parse_intent).unwrap_or("");
     let layer_overrides = load_layer_overrides(&cfg.db_path);
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let index_store = AsgIndexStore { repo: &engine.repo };
-    let effect_store = AsgEffectStore::with_cache(&engine.repo, &cfg.db_path);
-    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
+    let index_store = AsgIndexStore::from_engine(&engine);
+    let effect_store = AsgEffectStore::from_engine(&engine);
+    let ledger_store = AsgLedgerStore::from_engine(&engine);
     let id_map = build_id_map(&engine);
 
     // --- Get changed files since <sha> ------------------------------------

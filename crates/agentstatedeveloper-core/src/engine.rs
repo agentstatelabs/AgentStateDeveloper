@@ -6,6 +6,7 @@ use agentstategraph_storage::SqliteStorage;
 
 use crate::audit::{AuditSink, AuditEvent, NullSink, emit_audit, event_types};
 use crate::error::{AsdError, Result};
+use crate::search_fts::SearchFtsDb;
 use crate::index::{AsgIndexStore, IndexStore};
 use crate::ledger::{AsgLedgerStore, LedgerStore, RatifyOps};
 use crate::policy::{Decision, PermissivePolicyGate, PolicyGate, PolicyStoreGate, Situation, actions};
@@ -32,6 +33,14 @@ pub struct Engine {
     /// ledger approve/reject/withdraw return a commercial-feature error.
     /// Set by `asd-pro` at startup via [`Engine::set_ratify_ops`].
     pub ratify: Option<Arc<dyn RatifyOps>>,
+    /// Path to the SQLite backing store, when opened via `open_sqlite`.
+    /// `None` for in-memory engines (tests, etc.).  Commands that bypass
+    /// the git layer for SQLite-cached reads (symbol map, edges) use this.
+    pub db_path: Option<std::path::PathBuf>,
+    /// Single open connection to the ASD SQLite file.  Opened once in
+    /// `open_sqlite` and shared (by borrow) across all stores for the
+    /// lifetime of the command — eliminates per-call `Connection::open`.
+    pub fts: Option<SearchFtsDb>,
 }
 
 impl Engine {
@@ -45,12 +54,17 @@ impl Engine {
         let repo = Repository::new(Box::new(storage));
         repo.init()?;
 
+        // Open FTS connection once — reused by all stores for this engine's lifetime.
+        let fts = SearchFtsDb::open(db_path).ok();
+
         let engine = Self {
             repo,
             policy: Arc::new(PermissivePolicyGate),
             audit: Arc::new(NullSink),
             ref_name: "main".to_string(),
             ratify: None,
+            db_path: Some(db_path.to_path_buf()),
+            fts,
         };
 
         // Auto-hydrate from sidecar when the DB is empty (fresh clone or
@@ -63,11 +77,24 @@ impl Engine {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let sidecar_root = project_root.join(".asd/v1");
-        let is_empty = engine.repo
-            .get_tree(&engine.ref_name, "/asd/v1/index/by-qname")
-            .ok()
-            .and_then(|v| v.as_object().map(|m| m.is_empty()))
-            .unwrap_or(true);
+        // Fast emptiness check: reuse the already-open FTS connection — avoids
+        // a second `Connection::open` that the 0.9.72 code used.
+        let is_empty = {
+            let sqlite_has_symbols = engine.fts.as_ref()
+                .map(|fts| fts.symbols_cached_for(&engine.ref_name))
+                .unwrap_or(false);
+            if sqlite_has_symbols {
+                false  // SQLite says there are symbols — definitely not empty.
+            } else {
+                // Cache absent (old version DB, fresh install, or blank slate).
+                // Fall back to git tree walk.
+                engine.repo
+                    .get_tree(&engine.ref_name, "/asd/v1/index/by-qname")
+                    .ok()
+                    .and_then(|v| v.as_object().map(|m| m.is_empty()))
+                    .unwrap_or(true)
+            }
+        };
         if is_empty && sidecar_root.exists() {
             let _ = hydrate_from_dir(&engine.repo, &engine.ref_name, &project_root, "asd-auto-hydrate");
         }
@@ -87,6 +114,8 @@ impl Engine {
             audit: Arc::new(NullSink),
             ref_name: "main".to_string(),
             ratify: None,
+            db_path: None,
+            fts: None,
         })
     }
 
@@ -137,7 +166,7 @@ impl Engine {
             }
         };
 
-        let store = AsgLedgerStore { repo: &self.repo, db_path: None };
+        let store = AsgLedgerStore { repo: &self.repo, fts: self.fts.as_ref() };
         store.append_entry(&self.ref_name, entry, agent_id)?;
 
         let event = AuditEvent::new(
@@ -157,7 +186,7 @@ impl Engine {
     /// Write a symbol to the index. Policy-neutral (no gate); emits no audit
     /// event — indexing is a bulk background operation, not a user action.
     pub fn put_symbol(&self, symbol: &Symbol, agent_id: &str) -> Result<()> {
-        let store = AsgIndexStore { repo: &self.repo };
+        let store = AsgIndexStore::new(&self.repo);
         store.put_symbol(&self.ref_name, symbol, agent_id)
     }
 }

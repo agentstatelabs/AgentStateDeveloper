@@ -411,7 +411,6 @@ const ASD_PATH_PREFIX: &str = "/asd/v1";
 /// 4. Falls back to in-memory O(N) scoring when FTS is unavailable.
 pub fn find_candidates(
     engine: &Engine,
-    db_path: &Path,
     query: &str,
     tokens: &[String],
     filters: &FtsFilters,
@@ -420,15 +419,11 @@ pub fn find_candidates(
     depth: usize,
 ) -> Vec<(f64, String)> {
     // --- FTS path ---
-    // M62: open once, reuse across stem injection, filter passes, and anchor
-    // pass — eliminates up to 4 extra Connection::open() calls per query.
-    // Fetch depth*2 candidates (was depth*8). The overfetch factor is needed so
-    // ledger/SOT boosts can reorder candidates after BM25 ranking; *2 keeps
-    // accuracy well enough for the golden probe suite while cutting ledger-read
-    // count to 25% of the original. Bump to *3/*4/*8 if ranking regressions appear.
-    let fts = SearchFtsDb::open(db_path).ok();
+    // Borrow the engine's already-open FTS connection — no additional
+    // Connection::open() per call.  `fts` is `Option<&SearchFtsDb>` and
+    // replaces the former `Option<SearchFtsDb>` that was opened per-call.
+    let fts: Option<&SearchFtsDb> = engine.fts.as_ref();
     let fts_result = fts
-        .as_ref()
         .filter(|f| f.has_data())
         .and_then(|f| f.search(query, filters, depth * 2).ok());
 
@@ -509,7 +504,7 @@ pub fn find_candidates(
         let query_lower = query.to_lowercase();
         let is_view_query = VIEW_STEM_HINTS.iter().any(|h| query_lower.contains(h));
         // M62: one UNION ALL query for all tokens — replaces N serial round-trips.
-        if let Some(fts) = fts.as_ref() {
+        if let Some(fts) = fts {
             let limit = depth * 2 * tokens.len().max(1);
             if let Ok(stem_hits) = fts.file_stem_candidates_batch(tokens, filters, limit) {
                 for hit in stem_hits {
@@ -570,13 +565,13 @@ pub fn find_candidates(
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(depth);
 
-        apply_paths_filter(engine, index_store, fts.as_ref(), &filters.paths_filter, &mut scored);
-        apply_exclusions(engine, index_store, fts.as_ref(), &filters.exclude_terms, &mut scored);
+        apply_paths_filter(engine, index_store, fts, &filters.paths_filter, &mut scored);
+        apply_exclusions(engine, index_store, fts, &filters.exclude_terms, &mut scored);
 
         // Ledger-anchor pass: inject invariant/hazard-bearing symbols that
         // matched query tokens but were dropped by dedup or FTS ranking.
         // M62: pass shared fts handle — no extra Connection::open() call.
-        ledger_anchor_pass(engine, fts.as_ref(), tokens, &mut scored);
+        ledger_anchor_pass(engine, fts, tokens, &mut scored);
 
         return scored;
     }
@@ -612,9 +607,9 @@ pub fn find_candidates(
     }
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(depth);
-    apply_paths_filter(engine, index_store, fts.as_ref(), &filters.paths_filter, &mut scored);
-    apply_exclusions(engine, index_store, fts.as_ref(), &filters.exclude_terms, &mut scored);
-    ledger_anchor_pass(engine, fts.as_ref(), tokens, &mut scored);
+    apply_paths_filter(engine, index_store, fts, &filters.paths_filter, &mut scored);
+    apply_exclusions(engine, index_store, fts, &filters.exclude_terms, &mut scored);
+    ledger_anchor_pass(engine, fts, tokens, &mut scored);
     scored
 }
 
@@ -760,12 +755,12 @@ pub fn confidence_reason(match_reasons: &[String], has_ledger: bool, is_hot: boo
 /// (previously N separate fts.search() calls, each fetching and iterating rows).
 pub fn detect_ambiguous_tokens(
     tokens: &[String],
-    db_path: &Path,
+    fts: Option<&SearchFtsDb>,
     filters: &FtsFilters,
 ) -> Vec<String> {
     const THRESHOLD: usize = 25;
-    let fts = match SearchFtsDb::open(db_path) {
-        Ok(f) if f.has_data() => f,
+    let fts = match fts {
+        Some(f) if f.has_data() => f,
         _ => return vec![],
     };
     let candidates: Vec<&str> = tokens.iter()
@@ -959,7 +954,7 @@ pub fn detect_confidence_warnings(
     tokens: &[String],
     result_count: usize,
     ambiguous_terms: &[String],
-    db_path: &Path,
+    fts: Option<&SearchFtsDb>,
 ) -> Vec<serde_json::Value> {
     use serde_json::json;
     let mut warnings = Vec::new();
@@ -979,8 +974,7 @@ pub fn detect_confidence_warnings(
     // Sparse index: very few results but no ambiguous terms → index may be thin.
     if result_count < 3 && ambiguous_terms.is_empty() && !tokens.is_empty() {
         // Check total indexed symbol count as a proxy for index completeness.
-        let total = SearchFtsDb::open(db_path)
-            .ok()
+        let total = fts
             .filter(|f| f.has_data())
             .and_then(|f| f.search("", &FtsFilters::default(), 1).ok())
             .is_some();
@@ -1116,7 +1110,6 @@ pub struct FeedbackMetrics {
 pub fn apply_feedback_adjustments(
     engine: &Engine,
     index_store: &AsgIndexStore,
-    db_path: &Path,
     query: &str,
     scored: &mut Vec<(f64, String)>,
     feedback_entries: &[(String, String, crate::schema::FeedbackVerdict)],
@@ -1180,8 +1173,7 @@ pub fn apply_feedback_adjustments(
             .collect();
         if !noisy_ids.is_empty() {
             // M60: bulk-resolve noisy symbol_ids via FTS — one SQL query.
-            let resolved = SearchFtsDb::open(db_path)
-                .ok()
+            let resolved = engine.fts.as_ref()
                 .map(|fts| fts.resolve_symbol_ids_bulk(&noisy_ids))
                 .unwrap_or_default();
             if !resolved.is_empty() {
@@ -1215,8 +1207,7 @@ pub fn apply_feedback_adjustments(
 
     // M60: pre-fetch all scored qnames in one SQL batch — no per-symbol git read.
     let scored_qnames: Vec<&str> = scored.iter().map(|(_, q)| q.as_str()).collect();
-    let resolved_map = SearchFtsDb::open(db_path)
-        .ok()
+    let resolved_map = engine.fts.as_ref()
         .map(|fts| fts.resolve_qnames_bulk(&scored_qnames))
         .unwrap_or_default();
 
@@ -1339,7 +1330,6 @@ pub struct FeedbackImpact {
 pub fn explain_feedback_impacts(
     engine: &Engine,
     index_store: &AsgIndexStore,
-    db_path: &Path,
     query: &str,
     qnames: &[String],
     feedback_entries: &[crate::schema::FeedbackEntry],
@@ -1361,8 +1351,7 @@ pub fn explain_feedback_impacts(
             .map(|e| e.symbol_id.as_str())
             .collect();
         if !noisy_ids.is_empty() {
-            let resolved = SearchFtsDb::open(db_path)
-                .ok()
+            let resolved = engine.fts.as_ref()
                 .map(|fts| fts.resolve_symbol_ids_bulk(&noisy_ids))
                 .unwrap_or_default();
             if !resolved.is_empty() {
@@ -1394,8 +1383,7 @@ pub fn explain_feedback_impacts(
 
     // M60: pre-fetch all qnames in one SQL batch.
     let qname_strs: Vec<&str> = qnames.iter().map(|q| q.as_str()).collect();
-    let resolved_map = SearchFtsDb::open(db_path)
-        .ok()
+    let resolved_map = engine.fts.as_ref()
         .map(|fts| fts.resolve_qnames_bulk(&qname_strs))
         .unwrap_or_default();
 
@@ -1473,7 +1461,6 @@ pub fn explain_feedback_impacts(
 pub fn apply_file_scope_feedback(
     engine: &Engine,
     index_store: &AsgIndexStore,
-    db_path: &Path,
     query: &str,
     scored: &mut Vec<(f64, String)>,
     file_scope_entries: &[(String, crate::schema::FeedbackVerdict, String)],
@@ -1484,8 +1471,7 @@ pub fn apply_file_scope_feedback(
 
     // M60: pre-fetch all scored qnames in one SQL batch — no per-symbol git read.
     let qname_strs: Vec<&str> = scored.iter().map(|(_, q)| q.as_str()).collect();
-    let resolved_map = SearchFtsDb::open(db_path)
-        .ok()
+    let resolved_map = engine.fts.as_ref()
         .map(|fts| fts.resolve_qnames_bulk(&qname_strs))
         .unwrap_or_default();
 
@@ -1671,7 +1657,7 @@ impl UncertaintyReport {
 /// - `possible_misses` — prose warnings from `detect_possible_misses` (parsed for layer names)
 /// - `result_count` — number of results returned
 /// - `scoped_suggestions` — suggestions from `suggest_scoped_queries`
-/// - `db_path` — used to look up per-token file counts for richer reason data
+/// - `fts` — borrowed FTS connection used to look up per-token file counts for richer reason data
 /// - `db_state` — optional data-quality state from `compute_trust_score` (e.g. "unannotated").
 ///   When `Some("unannotated")` or `Some("clean_room")`, a `DbStateUnannotated` reason is added.
 pub fn compute_uncertainty(
@@ -1680,7 +1666,7 @@ pub fn compute_uncertainty(
     possible_misses: &[String],
     result_count: usize,
     scoped_suggestions: &[String],
-    db_path: &Path,
+    fts: Option<&SearchFtsDb>,
     db_state: Option<&str>,
 ) -> UncertaintyReport {
     let mut reasons: Vec<UncertaintyReason> = Vec::new();
@@ -1690,9 +1676,8 @@ pub fn compute_uncertainty(
     // -----------------------------------------------------------------------
     let per_token_counts: HashMap<String, usize> = if !ambiguous_terms.is_empty() {
         let tok_refs: Vec<&str> = ambiguous_terms.iter().map(|s| s.as_str()).collect();
-        SearchFtsDb::open(db_path)
-            .ok()
-            .and_then(|fts| fts.count_distinct_files_per_token(&tok_refs, false).ok())
+        fts
+            .and_then(|f| f.count_distinct_files_per_token(&tok_refs, false).ok())
             .unwrap_or_default()
             .into_iter()
             .collect()
@@ -1822,9 +1807,8 @@ pub fn compute_uncertainty(
         // Only check if the token looks like a proper name (starts with uppercase
         // or is >= 5 chars to avoid false-positives on tiny common words).
         if tok.len() >= 5 || tok.chars().next().map_or(false, |c| c.is_uppercase()) {
-            SearchFtsDb::open(db_path)
-                .ok()
-                .map(|fts| fts.has_exact_symbol_name(tok))
+            fts
+                .map(|f| f.has_exact_symbol_name(tok))
                 .unwrap_or(false)
         } else {
             false
@@ -2048,7 +2032,7 @@ pub fn build_feedback_state(
     query: &str,
     entries_applied: usize,
 ) -> FeedbackState {
-    let fb_store = AsgFeedbackStore { repo: &engine.repo, db_path: None };
+    let fb_store = AsgFeedbackStore::from_engine(engine);
     let all = fb_store.list_all(ref_name).unwrap_or_default();
     build_feedback_state_from_entries(&all, query, entries_applied)
 }

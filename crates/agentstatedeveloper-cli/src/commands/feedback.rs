@@ -125,7 +125,7 @@ fn run_mark(cfg: &Config, args: MarkArgs) -> Result<()> {
         // File-scoped verdict: no specific symbol required.
         (format!("__file_scope__{}", Uuid::new_v4().simple()), glob.clone())
     } else {
-        let index_store = AsgIndexStore { repo: &engine.repo };
+        let index_store = AsgIndexStore::from_engine(&engine);
         let symbol = match index_store.get_symbol_by_qname(&engine.ref_name, &args.qname)? {
             Some(s) => s,
             None => bail!("symbol not found: {}", args.qname),
@@ -143,7 +143,7 @@ fn run_mark(cfg: &Config, args: MarkArgs) -> Result<()> {
         created_at: chrono::Utc::now(),
         file_scope: args.file_scope.clone(),
     };
-    let feedback_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&cfg.db_path) };
+    let feedback_store = AsgFeedbackStore::from_engine(&engine);
     feedback_store.record(&engine.ref_name, &entry, &args.author)?;
     if args.file_scope.is_some() {
         println!("recorded {} for files matching {:?} ({})", args.verdict, symbol_qname, entry.entry_id);
@@ -155,7 +155,7 @@ fn run_mark(cfg: &Config, args: MarkArgs) -> Result<()> {
 
 fn run_promote_as_truth(cfg: &Config, args: PromoteAsTruthArgs) -> Result<()> {
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let index_store = AsgIndexStore { repo: &engine.repo };
+    let index_store = AsgIndexStore::from_engine(&engine);
     let symbol = match index_store.get_symbol_by_qname(&engine.ref_name, &args.qname)? {
         Some(s) => s,
         None => bail!("symbol not found: {}", args.qname),
@@ -168,7 +168,7 @@ fn run_promote_as_truth(cfg: &Config, args: PromoteAsTruthArgs) -> Result<()> {
         Author { kind: author_kind, id: args.author.clone() },
     );
     entry.tags = vec!["promote-as-truth".to_string()];
-    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
+    let ledger_store = AsgLedgerStore::from_engine(&engine);
     ledger_store.append_entry(&engine.ref_name, &entry, &args.author)?;
     println!("promoted {} as source-of-truth for \"{}\" ({})", args.qname, args.concept, entry.entry_id);
     Ok(())
@@ -176,9 +176,9 @@ fn run_promote_as_truth(cfg: &Config, args: PromoteAsTruthArgs) -> Result<()> {
 
 fn run_list(cfg: &Config, args: ListArgs) -> Result<()> {
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let feedback_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&cfg.db_path) };
+    let feedback_store = AsgFeedbackStore::from_engine(&engine);
     let entries = if let Some(ref qname) = args.qname {
-        let index_store = AsgIndexStore { repo: &engine.repo };
+        let index_store = AsgIndexStore::from_engine(&engine);
         match index_store.get_symbol_by_qname(&engine.ref_name, qname)? {
             Some(sym) => feedback_store.list_for_symbol(&engine.ref_name, &sym.symbol_id)?,
             None => bail!("symbol not found: {}", qname),
@@ -219,7 +219,7 @@ fn verdict_breakdown(entries: &[FeedbackEntry]) -> (usize, usize, usize, usize) 
 
 fn run_export(cfg: &Config, args: ExportArgs) -> Result<()> {
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let feedback_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&cfg.db_path) };
+    let feedback_store = AsgFeedbackStore::from_engine(&engine);
     let entries = feedback_store.list_all(&engine.ref_name)?;
 
     if args.summary {
@@ -267,7 +267,7 @@ fn run_import(cfg: &Config, args: ImportArgs) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to parse feedback JSON: {e}"))?;
 
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let feedback_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&cfg.db_path) };
+    let feedback_store = AsgFeedbackStore::from_engine(&engine);
 
     let existing_ids: std::collections::HashSet<String> = if args.skip_existing || args.dry_run {
         feedback_store

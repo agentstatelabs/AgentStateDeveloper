@@ -116,10 +116,10 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     }
     let layer_overrides = load_layer_overrides(&cfg.db_path);
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let index_store = AsgIndexStore { repo: &engine.repo };
-    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
-    let effect_store = AsgEffectStore::with_cache(&engine.repo, &cfg.db_path);
-    let id_map = build_id_map(&engine);
+    let index_store = AsgIndexStore::from_engine(&engine);
+    let ledger_store = AsgLedgerStore::from_engine(&engine);
+    let effect_store = AsgEffectStore::from_engine(&engine);
+    let id_map = index_store.build_id_map(&engine);
 
     let (tokens, mut exclusions) = parse_query(&args.query);
     if let Some(ref excl) = args.exclude {
@@ -153,7 +153,6 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     let limit = args.limit.unwrap_or(args.depth);
     let mut candidates: Vec<(f64, String)> = find_candidates(
         &engine,
-        &cfg.db_path,
         &args.query,
         &tokens,
         &filters,
@@ -164,13 +163,13 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
 
     // Apply durable feedback adjustments (Useful/Noisy/WrongLayer verdicts).
     // list_all() hoisted once — reused for build_feedback_state_from_entries below.
-    let feedback_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&cfg.db_path) };
+    let feedback_store = AsgFeedbackStore::from_engine(&engine);
     let all_fb = feedback_store.list_all(&engine.ref_name).unwrap_or_default();
     let feedback_verdicts: Vec<(String, String, agentstatedeveloper_core::FeedbackVerdict)> = all_fb.iter()
         .filter(|e| e.file_scope.is_none())
         .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict))
         .collect();
-    let feedback_metrics = apply_feedback_adjustments(&engine, &index_store, &cfg.db_path, &args.query, &mut candidates, &feedback_verdicts);
+    let feedback_metrics = apply_feedback_adjustments(&engine, &index_store, &args.query, &mut candidates, &feedback_verdicts);
 
     // One git pass to gather recency for all candidate files (hot = 14 days).
     let recency = gather_recency(200, 14.0);
@@ -214,7 +213,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             &sym,
             &id_map,
             args.include_body,
-            Some(&cfg.db_path),
+            engine.fts.as_ref(),
             Some(ownership_hint),
         )?;
         let bucket = result_bucket(&sym.file, &match_reasons, has_ledger, hot);
@@ -307,7 +306,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         .map(|s| s.to_string())
         .collect();
 
-    let ambiguous_terms = detect_ambiguous_tokens(&tokens, &cfg.db_path, &filters);
+    let ambiguous_terms = detect_ambiguous_tokens(&tokens, engine.fts.as_ref(), &filters);
     let layers_present: std::collections::HashSet<&str> = entry_points.iter()
         .filter_map(|ep| ep.get("layer").and_then(Value::as_str))
         .collect();
@@ -323,7 +322,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     let dq_state = compute_trust_score(&cfg.db_path).data_quality.state;
     let uncertainty = compute_uncertainty(
         &tokens, &ambiguous_terms, &possible_misses,
-        entry_points.len(), &[], &cfg.db_path,
+        entry_points.len(), &[], engine.fts.as_ref(),
         Some(dq_state.as_str()),
     );
 

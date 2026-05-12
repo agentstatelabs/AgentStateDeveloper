@@ -121,10 +121,10 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     let intent = args.intent.as_deref().and_then(parse_intent).unwrap_or("");
     let layer_overrides = load_layer_overrides(&cfg.db_path);
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let index_store = AsgIndexStore { repo: &engine.repo };
-    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
-    let effect_store = AsgEffectStore::with_cache(&engine.repo, &cfg.db_path);
-    let id_map = build_id_map(&engine);
+    let index_store = AsgIndexStore::from_engine(&engine);
+    let ledger_store = AsgLedgerStore::from_engine(&engine);
+    let effect_store = AsgEffectStore::from_engine(&engine);
+    let id_map = index_store.build_id_map(&engine);
 
     let (mut tokens, mut exclusions) = parse_query(&args.description);
     if let Some(ref excl) = args.exclude {
@@ -174,7 +174,6 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
 
     let mut candidates = find_candidates(
         &engine,
-        &cfg.db_path,
         &args.description,
         &tokens,
         &filters,
@@ -186,14 +185,14 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // Apply durable feedback adjustments (Useful/Noisy/WrongLayer verdicts).
     // list_all() is hoisted here and reused for wrong_layer_files below — avoids two separate
     // git-object reads for the same feedback data.
-    let feedback_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&cfg.db_path) };
+    let feedback_store = AsgFeedbackStore::from_engine(&engine);
     let all_fb = feedback_store.list_all(&engine.ref_name).unwrap_or_default();
     // Derive flat_verdicts from the hoisted list (same logic as the FeedbackStore default impl).
     let feedback_verdicts: Vec<(String, String, agentstatedeveloper_core::FeedbackVerdict)> = all_fb.iter()
         .filter(|e| e.file_scope.is_none())
         .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict))
         .collect();
-    let feedback_metrics = apply_feedback_adjustments(&engine, &index_store, &cfg.db_path, &args.description, &mut candidates, &feedback_verdicts);
+    let feedback_metrics = apply_feedback_adjustments(&engine, &index_store, &args.description, &mut candidates, &feedback_verdicts);
 
     // Recency pass (one git call for all files).
     let recency = gather_recency(200, 14.0);
@@ -547,7 +546,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         .map(|s| json!(s))
         .collect();
 
-    let ambiguous_terms = detect_ambiguous_tokens(&tokens, &cfg.db_path, &filters);
+    let ambiguous_terms = detect_ambiguous_tokens(&tokens, engine.fts.as_ref(), &filters);
     // t-001: broad_query = at least half the query tokens are flagged as ambiguous.
     let broad_query = !ambiguous_terms.is_empty() && {
         let amb_set: HashSet<&str> = ambiguous_terms.iter().map(|s| s.as_str()).collect();
@@ -1059,7 +1058,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // Re-use the db_state already computed for edit_confidence (trust score above).
     let uncertainty = compute_uncertainty(
         &tokens, &ambiguous_terms, &possible_misses,
-        file_scores.len(), &scoped_suggestions_pc, &cfg.db_path,
+        file_scores.len(), &scoped_suggestions_pc, engine.fts.as_ref(),
         Some(trust_dq.data_quality.state.as_str()),
     );
 

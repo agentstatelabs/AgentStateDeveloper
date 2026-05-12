@@ -6,19 +6,18 @@
 //!
 //! ## SQLite write-through cache
 //!
-//! `AsgFeedbackStore` optionally holds a `db_path` — when present, `list_all`
-//! returns the SQLite cache (fast, ~0 git reads) and `record` additionally
-//! writes to SQLite after the git commit.  The git object store remains
-//! authoritative: if SQLite is empty (e.g. first run after `git pull`), we
-//! fall back to the git tree walk and re-populate the cache as a side effect.
-//! Running `asd index` / `asd reindex` calls `sync_feedback_entries` for a
-//! full reconciliation.
-
-use std::path::Path;
+//! `AsgFeedbackStore` optionally holds a borrowed `fts` connection — when
+//! present, `list_all` returns the SQLite cache (fast, ~0 git reads) and
+//! `record` additionally writes to SQLite after the git commit.  The git
+//! object store remains authoritative: if SQLite is empty (e.g. first run
+//! after `git pull`), we fall back to the git tree walk and re-populate the
+//! cache as a side effect.  Running `asd index` / `asd reindex` calls
+//! `sync_feedback_entries` for a full reconciliation.
 
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
 
+use crate::engine::Engine;
 use crate::error::Result;
 use crate::paths;
 use crate::schema::{FeedbackEntry, FeedbackVerdict};
@@ -72,9 +71,21 @@ pub trait FeedbackStore {
 
 pub struct AsgFeedbackStore<'a> {
     pub repo: &'a Repository,
-    /// When `Some`, enables the SQLite write-through cache: `list_all` reads
-    /// from SQLite if populated, `record` writes to SQLite after the git commit.
-    pub db_path: Option<&'a Path>,
+    /// Borrowed FTS connection from the owning `Engine`.  When `Some`,
+    /// enables the SQLite write-through cache: `list_all` reads from SQLite
+    /// if populated, `record` writes to SQLite after the git commit.
+    pub fts: Option<&'a SearchFtsDb>,
+}
+
+impl<'a> AsgFeedbackStore<'a> {
+    /// Construct without SQLite caching (tests, internal calls).
+    pub fn new(repo: &'a Repository) -> Self {
+        Self { repo, fts: None }
+    }
+    /// Convenience: borrow the FTS connection already open in `engine`.
+    pub fn from_engine(engine: &'a Engine) -> Self {
+        Self { repo: &engine.repo, fts: engine.fts.as_ref() }
+    }
 }
 
 impl<'a> FeedbackStore for AsgFeedbackStore<'a> {
@@ -89,10 +100,8 @@ impl<'a> FeedbackStore for AsgFeedbackStore<'a> {
         );
         self.repo.set_json(ref_name, &path, &value, opts)?;
         // Best-effort SQLite write-through; failures are non-fatal.
-        if let Some(db) = self.db_path {
-            if let Ok(fts) = SearchFtsDb::open(db) {
-                let _ = fts.upsert_feedback(entry);
-            }
+        if let Some(fts) = self.fts {
+            let _ = fts.upsert_feedback(entry);
         }
         Ok(())
     }
@@ -114,12 +123,10 @@ impl<'a> FeedbackStore for AsgFeedbackStore<'a> {
 
     fn list_all(&self, ref_name: &str) -> Result<Vec<FeedbackEntry>> {
         // Fast path: SQLite cache — zero git tree walks when populated.
-        if let Some(db) = self.db_path {
-            if let Ok(fts) = SearchFtsDb::open(db) {
-                if fts.feedback_count() > 0 {
-                    if let Ok(entries) = fts.list_all_feedback() {
-                        return Ok(entries);
-                    }
+        if let Some(fts) = self.fts {
+            if fts.feedback_count() > 0 {
+                if let Ok(entries) = fts.list_all_feedback() {
+                    return Ok(entries);
                 }
             }
         }
@@ -148,10 +155,8 @@ impl<'a> FeedbackStore for AsgFeedbackStore<'a> {
 
         // Populate the SQLite cache for the next call — best effort.
         if !entries.is_empty() {
-            if let Some(db) = self.db_path {
-                if let Ok(fts) = SearchFtsDb::open(db) {
-                    let _ = fts.sync_feedback_entries(&entries);
-                }
+            if let Some(fts) = self.fts {
+                let _ = fts.sync_feedback_entries(&entries);
             }
         }
 

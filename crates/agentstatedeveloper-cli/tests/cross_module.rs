@@ -98,7 +98,7 @@ fn index_resolves_cross_module_call_edges() {
     );
 
     let engine = Engine::open_sqlite(&db).expect("open engine");
-    let store = AsgIndexStore { repo: &engine.repo };
+    let store = AsgIndexStore::new(&engine.repo);
 
     // Look at `driver_wrapper.main` (our synthesized driver function) —
     // every call in its body is cross-module.

@@ -114,8 +114,8 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
     }
     let layer_overrides = load_layer_overrides(&cfg.db_path);
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
-    let effect_store = AsgEffectStore::with_cache(&engine.repo, &cfg.db_path);
+    let ledger_store = AsgLedgerStore::from_engine(&engine);
+    let effect_store = AsgEffectStore::from_engine(&engine);
     // Hoist trust/data-quality state — used by uncertainty model and avoid
     // re-opening the DB or sidecar inside the hot search path.
     let dq_state_str: String = {
@@ -125,7 +125,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
     // Hoist all feedback entries — previously called 2-3× per search (once for
     // score adjustment, once for result annotation, once for display badges).
     let all_feedback: Vec<agentstatedeveloper_core::FeedbackEntry> = {
-        let fb_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&cfg.db_path) };
+        let fb_store = AsgFeedbackStore::from_engine(&engine);
         fb_store.list_all(&engine.ref_name).unwrap_or_default()
     };
 
@@ -261,7 +261,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         let mut feedback_metrics = FeedbackMetrics::default();
         let mut feedback_suppressed_detail: Vec<String> = Vec::new();
         {
-            let idx = AsgIndexStore { repo: &engine.repo };
+            let idx = AsgIndexStore::from_engine(&engine);
             if !all_feedback.is_empty() {
                 let fb_tuples: Vec<_> = all_feedback.iter()
                     .filter(|e| e.file_scope.is_none())
@@ -273,8 +273,8 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 let mut adj: Vec<(f64, String)> = scored.iter()
                     .map(|(s, h)| (*s, h.qname.clone()))
                     .collect();
-                feedback_metrics = apply_feedback_adjustments(&engine, &idx, &cfg.db_path, &args.query, &mut adj, &fb_tuples);
-                apply_file_scope_feedback(&engine, &idx, &cfg.db_path, &args.query, &mut adj, &fs_tuples);
+                feedback_metrics = apply_feedback_adjustments(&engine, &idx, &args.query, &mut adj, &fb_tuples);
+                apply_file_scope_feedback(&engine, &idx, &args.query, &mut adj, &fs_tuples);
                 // Collect suppressed qnames before consuming adj.
                 let surviving: std::collections::HashSet<&str> =
                     adj.iter().map(|(_, q)| q.as_str()).collect();
@@ -305,12 +305,12 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         // One git pass to annotate with recency (hot = changed in last 14 days).
         let recency = gather_recency(200, 14.0);
 
-        let index_store = AsgIndexStore { repo: &engine.repo };
+        let index_store = AsgIndexStore::from_engine(&engine);
         // Uncertainty: compute confidence scores across the result set.
         let raw_scores: Vec<f64> = scored.iter().map(|(s, _)| *s).collect();
         let confidences = confidence_scores(&raw_scores);
         // Uncertainty: detect ambiguous query tokens.
-        let ambiguous_terms = detect_ambiguous_tokens(&tokens, &cfg.db_path, &filters);
+        let ambiguous_terms = detect_ambiguous_tokens(&tokens, engine.fts.as_ref(), &filters);
         if args.agent {
             // Pre-compute feedback impacts for ALL result qnames at once using the
             // hoisted all_feedback — no extra list_all() call here.
@@ -318,7 +318,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             // calling it per-result meant 20 full tree scans. One batch call eliminates that.
             let all_result_qnames: Vec<String> = scored.iter().map(|(_, h)| h.qname.clone()).collect();
             let all_feedback_impacts = explain_feedback_impacts(
-                &engine, &AsgIndexStore { repo: &engine.repo }, &cfg.db_path,
+                &engine, &AsgIndexStore::from_engine(&engine),
                 &args.query, &all_result_qnames, &all_feedback,
             );
 
@@ -402,7 +402,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             };
             // t-003: typed confidence warnings (ambiguous vs sparse).
             let confidence_warnings = detect_confidence_warnings(
-                &tokens, results.len(), &ambiguous_terms, &cfg.db_path,
+                &tokens, results.len(), &ambiguous_terms, engine.fts.as_ref(),
             );
             // t-004/t-005: query improvement suggestions.
             let query_suggestions = if scope_narrowed { vec![] } else {
@@ -450,7 +450,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             // Use hoisted dq_state_str — avoids re-opening sidecar/DB for trust data.
             let uncertainty = compute_uncertainty(
                 &tokens, &ambiguous_terms, &possible_misses,
-                results.len(), &scoped_suggestions, &cfg.db_path,
+                results.len(), &scoped_suggestions, engine.fts.as_ref(),
                 Some(dq_state_str.as_str()),
             );
             // Use hoisted all_feedback — avoids a second list_all() call.
@@ -641,7 +641,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         _ => vec![],
     };
 
-    let index = AsgIndexStore { repo: &engine.repo };
+    let index = AsgIndexStore::from_engine(&engine);
     let mut scored: Vec<(u32, agentstatedeveloper_core::Symbol)> = Vec::new();
 
     for qname in &qnames {
@@ -667,7 +667,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
     // Apply durable feedback on fallback path too.
     // Reuse hoisted all_feedback — no extra list_all() call.
     {
-        let idx = AsgIndexStore { repo: &engine.repo };
+        let idx = AsgIndexStore::from_engine(&engine);
         let fb = &all_feedback;
         if !fb.is_empty() {
             let fb_tuples: Vec<_> = fb.iter()
@@ -680,8 +680,8 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             let mut adj: Vec<(f64, String)> = scored.iter()
                 .map(|(s, sym)| (*s as f64, sym.qname.clone()))
                 .collect();
-            let _ = apply_feedback_adjustments(&engine, &idx, &cfg.db_path, &args.query, &mut adj, &fb_tuples);
-            apply_file_scope_feedback(&engine, &idx, &cfg.db_path, &args.query, &mut adj, &fs_tuples);
+            let _ = apply_feedback_adjustments(&engine, &idx, &args.query, &mut adj, &fb_tuples);
+            apply_file_scope_feedback(&engine, &idx, &args.query, &mut adj, &fs_tuples);
             let surviving: std::collections::HashSet<String> =
                 adj.into_iter().map(|(_, q)| q).collect();
             scored.retain(|(_, sym)| surviving.contains(&sym.qname));

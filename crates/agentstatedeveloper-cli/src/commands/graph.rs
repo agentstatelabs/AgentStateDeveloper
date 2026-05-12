@@ -4,6 +4,7 @@
 //! `--depth N` for transitive BFS expansion up to N hops.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::Instant;
 
 use anyhow::Result;
 use clap::Args;
@@ -15,9 +16,21 @@ use crate::config::Config;
 
 // ── shared helper ────────────────────────────────────────────────────────────
 
-/// Build a `symbol_id → Symbol` lookup map from the indexed by-qname tree.
-/// Used by `read`, `callers`, and `callees` commands.
+/// Build a `symbol_id → Symbol` lookup map.
+///
+/// Fast path: reads from `asd_symbols_cache` via the engine's shared FTS connection.
+/// Fallback: walks the `/asd/v1/index/by-qname` git tree.
 pub fn build_id_map(engine: &Engine) -> HashMap<String, Symbol> {
+    // Fast path: SQLite symbol cache — reuse engine's already-open connection.
+    if let Some(fts) = engine.fts.as_ref() {
+        if fts.symbols_cached_for(&engine.ref_name) {
+            let map = fts.build_id_map_cached(&engine.ref_name);
+            if !map.is_empty() {
+                return map;
+            }
+        }
+    }
+    // Authoritative git fallback.
     let tree = engine
         .repo
         .get_tree(&engine.ref_name, "/asd/v1/index/by-qname")
@@ -42,17 +55,27 @@ pub struct CallersArgs {
     /// Traversal depth (1 = direct callers only).
     #[arg(long, default_value = "1")]
     pub depth: usize,
+
+    /// Print per-phase timing to stderr.
+    #[arg(long)]
+    pub timing: bool,
 }
 
 pub fn run_callers(cfg: &Config, args: CallersArgs) -> Result<()> {
+    let t = AsdTimer::new(args.timing);
+    let mut t = t;
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let index_store = AsgIndexStore { repo: &engine.repo };
+    t.phase("open_engine");
+    let index_store = AsgIndexStore::from_engine(&engine);
 
     let symbol = index_store
         .get_symbol_by_qname(&engine.ref_name, &args.qname)?
         .ok_or_else(|| anyhow::anyhow!("symbol not found: {}", args.qname))?;
+    t.phase("symbol_lookup");
 
-    let id_map = build_id_map(&engine);
+    let id_map = index_store.build_id_map(&engine);
+    t.phase("build_id_map");
+
     let results = traverse(
         &engine,
         &index_store,
@@ -61,6 +84,7 @@ pub fn run_callers(cfg: &Config, args: CallersArgs) -> Result<()> {
         Direction::Callers,
         &id_map,
     );
+    t.phase("traverse");
 
     println!(
         "{}",
@@ -71,6 +95,7 @@ pub fn run_callers(cfg: &Config, args: CallersArgs) -> Result<()> {
             "callers": results,
         }))?
     );
+    t.total("callers");
     Ok(())
 }
 
@@ -84,17 +109,27 @@ pub struct CalleesArgs {
     /// Traversal depth (1 = direct callees only).
     #[arg(long, default_value = "1")]
     pub depth: usize,
+
+    /// Print per-phase timing to stderr.
+    #[arg(long)]
+    pub timing: bool,
 }
 
 pub fn run_callees(cfg: &Config, args: CalleesArgs) -> Result<()> {
+    let t = AsdTimer::new(args.timing);
+    let mut t = t;
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let index_store = AsgIndexStore { repo: &engine.repo };
+    t.phase("open_engine");
+    let index_store = AsgIndexStore::from_engine(&engine);
 
     let symbol = index_store
         .get_symbol_by_qname(&engine.ref_name, &args.qname)?
         .ok_or_else(|| anyhow::anyhow!("symbol not found: {}", args.qname))?;
+    t.phase("symbol_lookup");
 
-    let id_map = build_id_map(&engine);
+    let id_map = index_store.build_id_map(&engine);
+    t.phase("build_id_map");
+
     let results = traverse(
         &engine,
         &index_store,
@@ -103,6 +138,7 @@ pub fn run_callees(cfg: &Config, args: CalleesArgs) -> Result<()> {
         Direction::Callees,
         &id_map,
     );
+    t.phase("traverse");
 
     println!(
         "{}",
@@ -113,7 +149,44 @@ pub fn run_callees(cfg: &Config, args: CalleesArgs) -> Result<()> {
             "callees": results,
         }))?
     );
+    t.total("callees");
     Ok(())
+}
+
+// ── phase timer ──────────────────────────────────────────────────────────────
+
+pub(crate) struct AsdTimer {
+    start: Instant,
+    last: Instant,
+    enabled: bool,
+}
+
+impl AsdTimer {
+    pub(crate) fn new(enabled: bool) -> Self {
+        let now = Instant::now();
+        Self { start: now, last: now, enabled }
+    }
+    pub(crate) fn phase(&mut self, name: &str) {
+        if self.enabled {
+            let now = Instant::now();
+            eprintln!(
+                "[timing] {:20} {:5.0}ms  (total {:5.0}ms)",
+                name,
+                (now - self.last).as_secs_f64() * 1000.0,
+                (now - self.start).as_secs_f64() * 1000.0,
+            );
+            self.last = now;
+        }
+    }
+    pub(crate) fn total(&self, label: &str) {
+        if self.enabled {
+            eprintln!(
+                "[timing] {:20}         total {:5.0}ms",
+                label,
+                self.start.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+    }
 }
 
 // ── BFS traversal ─────────────────────────────────────────────────────────────

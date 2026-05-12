@@ -495,7 +495,14 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
     }
 
     // Gather DB metadata + trust score once before running probes (cheap reads).
-    let db_state = if stale_warning(&cfg.db_path, 3600).is_none() { "fresh" } else { "stale" };
+    let db_state = {
+        let warn = stale_warning(&cfg.db_path, 3600);
+        match warn {
+            None => "fresh",
+            Some(ref s) if s.contains("FTS search index failed") => "symbols-fresh/fts-stale",
+            Some(_) => "stale",
+        }
+    };
     let symbol_count: Option<u64> = SearchFtsDb::open(&cfg.db_path).ok()
         .map(|fts| fts.symbol_count() as u64);
     let trust = compute_trust_score(&cfg.db_path);
@@ -1209,7 +1216,7 @@ fn run_hydrate_roundtrip_probe(_cfg: &Config) -> Result<String, String> {
         doc: Some("ASD hydrate roundtrip probe sentinel symbol".to_string()),
         signature: Some("fn roundtrip_sentinel()".to_string()),
     };
-    let store_a = AsgIndexStore { repo: &engine_a.repo };
+    let store_a = AsgIndexStore::from_engine(&engine_a);
     store_a.put_symbol(&engine_a.ref_name, &sym, "asd-roundtrip-probe")
         .map_err(|e| format!("failed to write sentinel symbol: {e}"))?;
 
@@ -1223,7 +1230,7 @@ fn run_hydrate_roundtrip_probe(_cfg: &Config) -> Result<String, String> {
     );
     entry.tags = vec!["trust-probe".to_string(), "probe-roundtrip".to_string()];
 
-    let ledger_a = AsgLedgerStore { repo: &engine_a.repo, db_path: None };
+    let ledger_a = AsgLedgerStore::new(&engine_a.repo);
     ledger_a.append_entry(&engine_a.ref_name, &entry, "asd-roundtrip-probe")
         .map_err(|e| format!("failed to write sentinel ledger entry: {e}"))?;
 
@@ -1239,7 +1246,7 @@ fn run_hydrate_roundtrip_probe(_cfg: &Config) -> Result<String, String> {
         .map_err(|e| format!("hydrate_from_dir failed: {e}"))?;
 
     // Step 5 — verify the sentinel entry survived.
-    let ledger_b = AsgLedgerStore { repo: &engine_b.repo, db_path: None };
+    let ledger_b = AsgLedgerStore::new(&engine_b.repo);
     let entries = ledger_b
         .list_entries(&engine_b.ref_name, "asd-probe-roundtrip-sym")
         .map_err(|e| format!("failed to read ledger from Engine B: {e}"))?;

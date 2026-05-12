@@ -31,7 +31,7 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
-    AsgLedgerStore, Engine, LedgerKind, LedgerStore, Symbol, kind_str,
+    AsgIndexStore, AsgLedgerStore, Engine, IndexStore, LedgerKind, LedgerStore, Symbol, kind_str,
     schema::{Author, AuthorKind, LedgerEntry},
 };
 
@@ -137,24 +137,19 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
 
     // ---- Resolve symbols for changed files --------------------------------
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
+    let index_store = AsgIndexStore::from_engine(&engine);
+    let ledger_store = AsgLedgerStore::from_engine(&engine);
 
-    // Read all indexed symbols from the git tree (same approach as build_id_map).
-    let tree = engine.repo
-        .get_tree(&engine.ref_name, "/asd/v1/index/by-qname")
-        .unwrap_or(serde_json::Value::Object(Default::default()));
-    let all_syms: Vec<Symbol> = tree.as_object()
-        .map(|m| m.values()
-            .filter_map(|v| serde_json::from_value::<Symbol>(v.clone()).ok())
-            .collect())
-        .unwrap_or_default();
+    // Load all indexed symbols via the SQLite cache (avoids a full git tree walk).
+    let all_syms: Vec<Symbol> = index_store.build_id_map(&engine).into_values().collect();
 
     let mut touched_symbols: Vec<Symbol> = Vec::new();
     let mut seen_ids: HashSet<String> = HashSet::new();
-    for sym in all_syms {
+    // Borrow (not move) so all_syms stays available for the docs-only candidate scan below.
+    for sym in &all_syms {
         if changed_files.iter().any(|f| sym.file.ends_with(f.as_str()) || sym.file == *f) {
             if seen_ids.insert(sym.symbol_id.clone()) {
-                touched_symbols.push(sym);
+                touched_symbols.push(sym.clone());
             }
         }
     }
@@ -186,16 +181,11 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
                 .collect()
         };
 
-        // Load all non-doc candidate symbols once.
-        let tree2 = engine.repo
-            .get_tree(&engine.ref_name, "/asd/v1/index/by-qname")
-            .unwrap_or(serde_json::Value::Object(Default::default()));
-        let candidate_syms: Vec<Symbol> = tree2.as_object()
-            .map(|m| m.values()
-                .filter_map(|v| serde_json::from_value::<Symbol>(v.clone()).ok())
-                .filter(|s| !is_doc_file(&s.file))
-                .collect())
-            .unwrap_or_default();
+        // Filter non-doc candidate symbols from the already-loaded all_syms
+        // (no second git tree walk needed).
+        let candidate_syms: Vec<&Symbol> = all_syms.iter()
+            .filter(|s| !is_doc_file(&s.file))
+            .collect();
 
         // Per-file pass: find the best-matching symbol for each changed doc file
         // independently. This produces one concept cluster per doc domain rather
@@ -207,7 +197,7 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
             let file_terms = extract_terms(doc_file);
             if file_terms.is_empty() { continue; }
             // combined_score is isize so test-file symbols can receive a negative bonus.
-            let mut ranked: Vec<(isize, usize, &Symbol)> = candidate_syms.iter()
+            let mut ranked: Vec<(isize, usize, &Symbol)> = candidate_syms.iter().copied()
                 .map(|s| {
                     let haystack = format!("{} {}", s.qname.to_lowercase(), s.file.to_lowercase());
                     let term_score = file_terms.iter().filter(|t| haystack.contains(t.as_str())).count();
@@ -323,7 +313,7 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
             let doc_dirs: Vec<&str> = changed_files.iter()
                 .filter_map(|f| Path::new(f).parent()?.to_str())
                 .collect();
-            let mut dir_scored: Vec<(usize, Symbol)> = candidate_syms.into_iter()
+            let mut dir_scored: Vec<(usize, &Symbol)> = candidate_syms.iter().copied()
                 .map(|s| {
                     let score = doc_dirs.iter().filter(|d| {
                         !d.is_empty() && **d != "." && s.file.contains(**d)
@@ -334,7 +324,7 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
             dir_scored.sort_by(|a, b| b.0.cmp(&a.0));
             for (_, sym) in dir_scored.into_iter().take(5) {
                 if seen_ids.insert(sym.symbol_id.clone()) {
-                    touched_symbols.push(sym);
+                    touched_symbols.push((*sym).clone());
                 }
             }
         }

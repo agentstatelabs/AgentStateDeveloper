@@ -495,36 +495,24 @@ fn count_dirty_source_files(project_root: &Path) -> usize {
 /// Derive ledger density and concept-gap count from the ASG.
 /// Returns (density, gap_count). Falls back to (0.0, 0) if Engine can't open.
 fn ledger_signals(db_path: &Path, symbol_count: u64) -> (f64, usize) {
-    // Fast path: if the FTS index shows zero annotated symbols, skip the expensive
-    // per-symbol git tree walk entirely (unannotated / clean-room DBs).
-    let annotated = SearchFtsDb::open(db_path)
-        .ok()
+    let engine = match Engine::open_sqlite(db_path) {
+        Ok(e) => e,
+        Err(_) => return (0.0, 0),
+    };
+    let index_store = AsgIndexStore::from_engine(&engine);
+    let ledger_store = AsgLedgerStore::from_engine(&engine);
+
+    // Fast path: if the FTS index shows zero annotated symbols, skip the
+    // per-symbol ledger walks entirely (unannotated / clean-room DBs).
+    let annotated = engine.fts.as_ref()
         .map(|fts| fts.annotated_symbol_count())
         .unwrap_or(0);
     if annotated == 0 {
         return (0.0, 0);
     }
 
-    let engine = match Engine::open_sqlite(db_path) {
-        Ok(e) => e,
-        Err(_) => return (0.0, 0),
-    };
-    let index_store = AsgIndexStore { repo: &engine.repo };
-    let ledger_store = AsgLedgerStore { repo: &engine.repo, db_path: None };
-
-    // Walk the by-qname index to count symbols with/without ledger entries.
-    let tree = match engine.repo.get_tree(&engine.ref_name, "/asd/v1/index/by-qname") {
-        Ok(v) => v,
-        Err(_) => return (0.0, 0),
-    };
-    let syms: Vec<Symbol> = tree
-        .as_object()
-        .map(|m| {
-            m.values()
-                .filter_map(|v| serde_json::from_value::<Symbol>(v.clone()).ok())
-                .collect()
-        })
-        .unwrap_or_default();
+    // Load all symbols via the SQLite cache (avoids a full git tree walk).
+    let syms: Vec<Symbol> = index_store.build_id_map(&engine).into_values().collect();
 
     if syms.is_empty() {
         return (0.0, 0);

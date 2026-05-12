@@ -41,7 +41,7 @@ fn prime_db(db_path: &std::path::Path) {
     let parsed = adapter
         .parse_symbols(&file_str, &source)
         .expect("parse_symbols");
-    let index_store = AsgIndexStore { repo: &engine.repo };
+    let index_store = AsgIndexStore::new(&engine.repo);
     for p in &parsed {
         let symbol_id = canonical_symbol_id(&p.qname, p.kind, &file_str);
         let symbol_fp = symbol_fingerprint(&p.body);

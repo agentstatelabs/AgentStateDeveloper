@@ -308,6 +308,35 @@ impl SearchFtsDb {
             CREATE INDEX IF NOT EXISTS idx_asd_fb_verdict ON asd_feedback(verdict);"
         )?;
 
+        // asd_symbols_cache: full Symbol JSON for every indexed symbol.
+        // Populated at asd index time; eliminates the by-qname git tree walk
+        // in build_id_map (was ~2s on repos with hundreds of symbols).
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS asd_symbols_cache (
+                symbol_id   TEXT NOT NULL,
+                ref_name    TEXT NOT NULL,
+                qname       TEXT NOT NULL,
+                file        TEXT NOT NULL,
+                kind        TEXT NOT NULL DEFAULT '',
+                symbol_json TEXT NOT NULL,
+                PRIMARY KEY (symbol_id, ref_name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_asd_sc_qname
+                ON asd_symbols_cache(qname, ref_name);
+            -- asd_call_edges: directed caller/callee edges.
+            -- direction is 'caller' (this symbol is called by neighbor)
+            --            or 'callee' (this symbol calls neighbor).
+            CREATE TABLE IF NOT EXISTS asd_call_edges (
+                symbol_id   TEXT NOT NULL,
+                neighbor_id TEXT NOT NULL,
+                direction   TEXT NOT NULL,
+                ref_name    TEXT NOT NULL,
+                PRIMARY KEY (symbol_id, neighbor_id, direction, ref_name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_asd_ce_lookup
+                ON asd_call_edges(symbol_id, direction, ref_name);"
+        )?;
+
         self.conn.execute_batch(&format!(
             "CREATE VIRTUAL TABLE IF NOT EXISTS asd_search_fts USING fts5(
                 symbol_id    UNINDEXED,
@@ -410,6 +439,191 @@ impl SearchFtsDb {
             [],
             |r| r.get::<_, String>(0),
         ).ok().and_then(|s| s.parse().ok())
+    }
+
+    /// Whether the FTS rebuild succeeded during the last `asd index` run.
+    /// Returns `None` if no `mark_symbols_indexed` call has been recorded yet
+    /// (pre-0.9.70 index runs or DBs that have never been indexed with this version).
+    pub fn fts_last_rebuild_ok(&self) -> Option<bool> {
+        self.conn.query_row(
+            "SELECT value FROM asd_index_meta WHERE key = 'fts_last_rebuild_ok' LIMIT 1",
+            [],
+            |r| r.get::<_, String>(0),
+        ).ok().map(|s| s == "1")
+    }
+
+    /// Record the outcome of a symbol-indexing run. Call this from
+    /// `index_pipeline` after the FTS rebuild attempt (success *or* failure).
+    /// Writes `symbols_indexed_at` and `fts_last_rebuild_ok` into
+    /// `asd_index_meta`. This is the authoritative signal used by
+    /// `stale_warning()` to detect the "symbols fresh / FTS stale" state.
+    pub fn mark_symbols_indexed(&self, fts_succeeded: bool) -> rusqlite::Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.conn.execute(
+            "INSERT OR REPLACE INTO asd_index_meta (key, value) VALUES ('symbols_indexed_at', ?1)",
+            params![now.to_string()],
+        )?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO asd_index_meta (key, value) \
+             VALUES ('fts_last_rebuild_ok', ?1)",
+            params![if fts_succeeded { "1" } else { "0" }],
+        )?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Symbol + edge cache — O(1) reads vs. full git tree walks
+    // -----------------------------------------------------------------------
+
+    /// Returns `true` when `asd_symbols_cache` has at least one row for
+    /// `ref_name`. Used as the primary guard before attempting a cached read —
+    /// if the cache is empty the caller falls back to the git path.
+    pub fn symbols_cached_for(&self, ref_name: &str) -> bool {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM asd_symbols_cache WHERE ref_name = ?1 LIMIT 1",
+                params![ref_name],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+            .unwrap_or(false)
+    }
+
+    /// Full replace of `asd_symbols_cache` for `ref_name`. Called after every
+    /// `asd index` run so the cache always reflects the current snapshot.
+    pub fn sync_symbols(
+        &self,
+        symbols: &[&crate::schema::Symbol],
+        ref_name: &str,
+    ) -> rusqlite::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM asd_symbols_cache WHERE ref_name = ?1",
+            params![ref_name],
+        )?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO asd_symbols_cache
+                 (symbol_id, ref_name, qname, file, kind, symbol_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for sym in symbols {
+                let json = serde_json::to_string(sym).unwrap_or_default();
+                let kind = format!("{:?}", sym.kind).to_lowercase();
+                stmt.execute(params![
+                    sym.symbol_id,
+                    ref_name,
+                    sym.qname,
+                    sym.file,
+                    kind,
+                    json
+                ])?;
+            }
+        }
+        tx.commit()
+    }
+
+    /// Full replace of `asd_call_edges` for `ref_name`. `callees_of` maps
+    /// caller_id → [callee_id, …]; `callers_of` maps callee_id → [caller_id, …].
+    pub fn sync_call_edges(
+        &self,
+        callees_of: &HashMap<String, Vec<String>>,
+        callers_of: &HashMap<String, Vec<String>>,
+        ref_name: &str,
+    ) -> rusqlite::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM asd_call_edges WHERE ref_name = ?1",
+            params![ref_name],
+        )?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO asd_call_edges
+                 (symbol_id, neighbor_id, direction, ref_name)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for (caller_id, callee_ids) in callees_of {
+                for callee_id in callee_ids {
+                    stmt.execute(params![caller_id, callee_id, "callee", ref_name])?;
+                }
+            }
+            for (callee_id, caller_ids) in callers_of {
+                for caller_id in caller_ids {
+                    stmt.execute(params![callee_id, caller_id, "caller", ref_name])?;
+                }
+            }
+        }
+        tx.commit()
+    }
+
+    /// Build the full `symbol_id → Symbol` map from `asd_symbols_cache`.
+    /// Returns an empty map on any error (caller falls back to git).
+    pub fn build_id_map_cached(
+        &self,
+        ref_name: &str,
+    ) -> HashMap<String, crate::schema::Symbol> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT symbol_id, symbol_json FROM asd_symbols_cache WHERE ref_name = ?1",
+        ) {
+            Ok(s) => s,
+            Err(_) => return HashMap::new(),
+        };
+        let rows = match stmt.query_map(params![ref_name], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) {
+            Ok(r) => r,
+            Err(_) => return HashMap::new(),
+        };
+        let mut map = HashMap::new();
+        for row in rows.flatten() {
+            let (id, json) = row;
+            if let Ok(sym) = serde_json::from_str::<crate::schema::Symbol>(&json) {
+                map.insert(id, sym);
+            }
+        }
+        map
+    }
+
+    /// Look up a single Symbol by qname from the cache.
+    pub fn get_symbol_by_qname_cached(
+        &self,
+        qname: &str,
+        ref_name: &str,
+    ) -> Option<crate::schema::Symbol> {
+        self.conn
+            .query_row(
+                "SELECT symbol_json FROM asd_symbols_cache
+                 WHERE qname = ?1 AND ref_name = ?2 LIMIT 1",
+                params![qname, ref_name],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|json| serde_json::from_str(&json).ok())
+    }
+
+    /// Return the neighbor IDs for `symbol_id` in the given `direction`
+    /// (`"caller"` or `"callee"`). Empty Vec if none or on error.
+    pub fn get_neighbors_cached(
+        &self,
+        symbol_id: &str,
+        direction: &str,
+        ref_name: &str,
+    ) -> Vec<String> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT neighbor_id FROM asd_call_edges
+             WHERE symbol_id = ?1 AND direction = ?2 AND ref_name = ?3",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map(params![symbol_id, direction, ref_name], |r| {
+            r.get::<_, String>(0)
+        })
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
     }
 
     /// Number of rows in the FTS table (total indexed symbols).
@@ -1354,11 +1568,30 @@ pub fn format_age(indexed_at: i64) -> String {
 
 /// Return a stale-index warning string if the index is older than
 /// `threshold_secs` (default: 3600 = 1 hour), or `None` if fresh.
+///
+/// Distinguishes three degraded states:
+/// - **Empty** — FTS table has never been populated.
+/// - **Symbols fresh / FTS stale** — the last `asd index` run recorded an FTS
+///   rebuild failure (e.g. "database is locked"). Symbol data in git is current
+///   but search ranking reflects an older snapshot.
+/// - **Stale** — the last successful FTS rebuild is older than `threshold_secs`.
 pub fn stale_warning(db_path: &std::path::Path, threshold_secs: u64) -> Option<String> {
     let fts = SearchFtsDb::open(db_path).ok()?;
     if !fts.has_data() {
         return Some("asd: index is empty — run 'asd index <dir>' to build it.".to_string());
     }
+
+    // If the last index run recorded an FTS failure, surface it immediately
+    // regardless of age — the FTS may be out of sync with the symbol data.
+    if fts.fts_last_rebuild_ok() == Some(false) {
+        return Some(
+            "asd: symbols are indexed but the FTS search index failed to rebuild \
+             during the last 'asd index' run (database may have been locked). \
+             Search ranking may be stale — re-run 'asd index <dir>' to repair."
+                .to_string(),
+        );
+    }
+
     let indexed_at = fts.last_indexed_at()?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1971,7 +2204,7 @@ pub struct CoveringTest {
 ///
 /// Returns a list of `CoveringTest` with file path and exact run command.
 pub fn find_covering_tests(
-    db_path: &std::path::Path,
+    fts: Option<&SearchFtsDb>,
     impl_qname: &str,
 ) -> Vec<CoveringTest> {
     let leaf = impl_qname
@@ -1982,7 +2215,7 @@ pub fn find_covering_tests(
     if leaf.is_empty() || leaf.len() < 3 {
         return vec![];
     }
-    let Ok(db) = SearchFtsDb::open(db_path) else { return vec![]; };
+    let Some(db) = fts else { return vec![]; };
     // Query test-tier symbols whose qname or doc mentions the leaf name.
     let Ok(mut stmt) = db.conn.prepare(
         "SELECT qname_orig, file_orig, start_line FROM asd_search_fts WHERE tier = 2"

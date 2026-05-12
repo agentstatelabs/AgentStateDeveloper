@@ -88,7 +88,7 @@ fn index_typescript_sample_produces_symbols_and_cross_module_edges() {
     );
 
     let engine = Engine::open_sqlite(&db).expect("open engine");
-    let store = AsgIndexStore { repo: &engine.repo };
+    let store = AsgIndexStore::new(&engine.repo);
 
     // Sanity: at least one TS symbol showed up.
     let hello = store
