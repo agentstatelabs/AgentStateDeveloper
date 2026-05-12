@@ -48,7 +48,8 @@ pub use schema::{
 pub use scratch::{AsgScratchStore, CleanFilter, ScratchFilter, ScratchStore};
 pub use feedback::{AsgFeedbackStore, FeedbackStore};
 pub use candidates::{
-    apply_feedback_adjustments, apply_file_scope_feedback, build_feedback_state, confidence_reason,
+    apply_feedback_adjustments, apply_file_scope_feedback, build_feedback_state,
+    build_feedback_state_from_entries, confidence_reason,
     confidence_scores, compute_uncertainty, detect_ambiguous_tokens, detect_confidence_warnings,
     detect_possible_misses, explain_match, explain_feedback_impacts, FeedbackImpact, FeedbackMetrics,
     FeedbackState, find_candidates, glob_match, in_memory_score, kind_str, load_scope_aliases,

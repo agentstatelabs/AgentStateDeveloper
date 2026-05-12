@@ -1990,14 +1990,14 @@ impl FeedbackState {
 ///
 /// `entries_applied > 0` (from the `FeedbackMetrics` produced during ranking)
 /// is passed in so we can distinguish applied vs present-but-unmatched.
-pub fn build_feedback_state(
-    engine: &Engine,
-    ref_name: &str,
+/// Compute [`FeedbackState`] from a pre-fetched `entries` slice.
+/// Prefer this over [`build_feedback_state`] when the caller already holds
+/// the result of `list_all()` — avoids a second git-object read.
+pub fn build_feedback_state_from_entries(
+    all: &[crate::schema::FeedbackEntry],
     query: &str,
     entries_applied: usize,
 ) -> FeedbackState {
-    let fb_store = AsgFeedbackStore { repo: &engine.repo };
-    let all = fb_store.list_all(ref_name).unwrap_or_default();
     let entries_total = all.len();
 
     if entries_total == 0 {
@@ -2025,7 +2025,7 @@ pub fn build_feedback_state(
     let reason = if entries_applied > 0 {
         "entries_applied"
     } else if query_matches > 0 {
-        "entries_exist_no_query_match"   // query matched but score threshold not met
+        "entries_exist_no_query_match"
     } else {
         "entries_exist_no_query_match"
     };
@@ -2036,4 +2036,18 @@ pub fn build_feedback_state(
         entries_total,
         query_matches,
     }
+}
+
+/// Convenience wrapper that fetches feedback entries before calling
+/// [`build_feedback_state_from_entries`].  Use the `_from_entries` variant
+/// when you already hold a `list_all()` result.
+pub fn build_feedback_state(
+    engine: &Engine,
+    ref_name: &str,
+    query: &str,
+    entries_applied: usize,
+) -> FeedbackState {
+    let fb_store = AsgFeedbackStore { repo: &engine.repo };
+    let all = fb_store.list_all(ref_name).unwrap_or_default();
+    build_feedback_state_from_entries(&all, query, entries_applied)
 }

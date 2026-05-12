@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, Engine, FeedbackStore,
-    FtsFilters, IndexStore, LedgerStore, apply_feedback_adjustments,
-    build_feedback_state, compute_trust_score, FeedbackState,
+    FtsFilters, IndexStore, LedgerStore, OwnershipSignal, apply_feedback_adjustments,
+    build_feedback_state_from_entries, compute_trust_score, discover_symbol_ownership, FeedbackState,
     classify_layer_sym, compute_uncertainty,
     confidence_scores, detect_ambiguous_tokens, detect_possible_misses, estimate_tokens,
     explain_match, extract_summary, find_candidates, gather_recency, git_dirty_files,
@@ -163,12 +163,22 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     );
 
     // Apply durable feedback adjustments (Useful/Noisy/WrongLayer verdicts).
+    // list_all() hoisted once — reused for build_feedback_state_from_entries below.
     let feedback_store = AsgFeedbackStore { repo: &engine.repo };
-    let feedback_verdicts = feedback_store.flat_verdicts(&engine.ref_name).unwrap_or_default();
+    let all_fb = feedback_store.list_all(&engine.ref_name).unwrap_or_default();
+    let feedback_verdicts: Vec<(String, String, agentstatedeveloper_core::FeedbackVerdict)> = all_fb.iter()
+        .filter(|e| e.file_scope.is_none())
+        .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict))
+        .collect();
     let feedback_metrics = apply_feedback_adjustments(&engine, &index_store, &cfg.db_path, &args.query, &mut candidates, &feedback_verdicts);
 
     // One git pass to gather recency for all candidate files (hot = 14 days).
     let recency = gather_recency(200, 14.0);
+
+    // Per-file ownership cache: discover_symbol_ownership spawns git blame + git log.
+    // With up to 10 candidates, many may share files — computing once per file
+    // avoids up to N*2 redundant git subprocess spawns.
+    let mut ownership_cache: std::collections::HashMap<String, OwnershipSignal> = std::collections::HashMap::new();
 
     let mut entry_points: Vec<Value> = Vec::new();
     for (score, qname) in &candidates {
@@ -187,6 +197,15 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             .unwrap_or_default();
         let has_ledger = !ledger_entries.is_empty();
         let match_reasons = explain_match(&sym, &tokens, &ledger_entries, hot);
+        // Compute ownership once per unique file; reuse for all symbols in the same file.
+        let ownership_hint = ownership_cache
+            .entry(sym.file.clone())
+            .or_insert_with(|| discover_symbol_ownership(
+                &sym.file,
+                sym.start.line,
+                sym.end.line,
+                sym.doc.as_deref(),
+            ));
         let ctx = assemble_symbol_context(
             &engine,
             &index_store,
@@ -196,6 +215,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             &id_map,
             args.include_body,
             Some(&cfg.db_path),
+            Some(ownership_hint),
         )?;
         let bucket = result_bucket(&sym.file, &match_reasons, has_ledger, hot);
         let mut ep = json!({
@@ -311,9 +331,8 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     // --flat restores the legacy flat entry_points array.
     // Invariants/hazards surfaced first so agents see constraints before call graphs.
 
-    let feedback_state = build_feedback_state(
-        &engine,
-        &engine.ref_name,
+    let feedback_state = build_feedback_state_from_entries(
+        &all_fb,
         &args.query,
         feedback_metrics.entries_applied,
     );

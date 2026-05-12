@@ -11,7 +11,8 @@ use agentstatedeveloper_core::{
     AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore,
     EffectStore, Engine, FeedbackStore, FeedbackVerdict, FtsFilters, IndexStore,
     LedgerStore, SearchDocsDb, SearchFtsDb,
-    apply_feedback_adjustments, apply_file_scope_feedback, build_feedback_state, classify_layer_sym,
+    apply_feedback_adjustments, apply_file_scope_feedback, build_feedback_state_from_entries,
+    classify_layer_sym,
     compute_trust_score, confidence_reason, compute_uncertainty, FeedbackMetrics, FeedbackState,
     confidence_scores, detect_ambiguous_tokens, detect_confidence_warnings, detect_possible_misses,
     effect_detail_reason, estimate_tokens, explain_match, explain_feedback_impacts, extract_summary,
@@ -452,9 +453,9 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 results.len(), &scoped_suggestions, &cfg.db_path,
                 Some(dq_state_str.as_str()),
             );
-            // Use existing engine — avoids Engine::open_sqlite() a second time.
-            let feedback_state = build_feedback_state(
-                &engine, &engine.ref_name, &args.query, feedback_metrics.entries_applied,
+            // Use hoisted all_feedback — avoids a second list_all() call.
+            let feedback_state = build_feedback_state_from_entries(
+                &all_feedback, &args.query, feedback_metrics.entries_applied,
             );
             let raw = serde_json::json!({
                 "query": args.query,
@@ -664,27 +665,26 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
     }
 
     // Apply durable feedback on fallback path too.
+    // Reuse hoisted all_feedback — no extra list_all() call.
     {
-        let fb_store = AsgFeedbackStore { repo: &engine.repo };
         let idx = AsgIndexStore { repo: &engine.repo };
-        if let Ok(fb) = fb_store.list_all(&engine.ref_name) {
-            if !fb.is_empty() {
-                let fb_tuples: Vec<_> = fb.iter()
-                    .filter(|e| e.file_scope.is_none())
-                    .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict))
-                    .collect();
-                let fs_tuples: Vec<_> = fb.iter()
-                    .filter_map(|e| e.file_scope.as_ref().map(|g| (g.clone(), e.verdict, e.query.clone())))
-                    .collect();
-                let mut adj: Vec<(f64, String)> = scored.iter()
-                    .map(|(s, sym)| (*s as f64, sym.qname.clone()))
-                    .collect();
-                let _ = apply_feedback_adjustments(&engine, &idx, &cfg.db_path, &args.query, &mut adj, &fb_tuples);
-                apply_file_scope_feedback(&engine, &idx, &cfg.db_path, &args.query, &mut adj, &fs_tuples);
-                let surviving: std::collections::HashSet<String> =
-                    adj.into_iter().map(|(_, q)| q).collect();
-                scored.retain(|(_, sym)| surviving.contains(&sym.qname));
-            }
+        let fb = &all_feedback;
+        if !fb.is_empty() {
+            let fb_tuples: Vec<_> = fb.iter()
+                .filter(|e| e.file_scope.is_none())
+                .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict))
+                .collect();
+            let fs_tuples: Vec<_> = fb.iter()
+                .filter_map(|e| e.file_scope.as_ref().map(|g| (g.clone(), e.verdict, e.query.clone())))
+                .collect();
+            let mut adj: Vec<(f64, String)> = scored.iter()
+                .map(|(s, sym)| (*s as f64, sym.qname.clone()))
+                .collect();
+            let _ = apply_feedback_adjustments(&engine, &idx, &cfg.db_path, &args.query, &mut adj, &fb_tuples);
+            apply_file_scope_feedback(&engine, &idx, &cfg.db_path, &args.query, &mut adj, &fs_tuples);
+            let surviving: std::collections::HashSet<String> =
+                adj.into_iter().map(|(_, q)| q).collect();
+            scored.retain(|(_, sym)| surviving.contains(&sym.qname));
         }
     }
 

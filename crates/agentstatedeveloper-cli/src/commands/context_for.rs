@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, IndexStore, LedgerStore,
-    Symbol, discover_symbol_ownership, find_covering_tests, stale_warning,
+    OwnershipSignal, Symbol, discover_symbol_ownership, find_covering_tests, stale_warning,
 };
 use agentstatedeveloper_core::schema::VerificationStatus;
 
@@ -79,6 +79,7 @@ pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
             &id_map,
             args.include_body,
             Some(&cfg.db_path),
+            None,  // single symbol — compute ownership fresh
         )?;
         symbols_out.push(sym_ctx);
     }
@@ -113,6 +114,10 @@ pub(crate) fn assemble_symbol_context(
     id_map: &HashMap<String, Symbol>,
     include_body: bool,
     db_path: Option<&std::path::Path>,
+    // Pre-computed ownership signal for this symbol's file.  When `Some`,
+    // skips the `discover_symbol_ownership` git blame/log calls entirely —
+    // pass this when processing multiple symbols to share per-file results.
+    ownership_hint: Option<&OwnershipSignal>,
 ) -> Result<Value> {
     // Callers and callees.
     let callee_ids = index_store.get_callees(&engine.ref_name, &symbol.symbol_id)?;
@@ -170,12 +175,20 @@ pub(crate) fn assemble_symbol_context(
     }
 
     // t-003: Ownership discovery from git blame + doc-comment annotations.
-    let ownership_signal = discover_symbol_ownership(
-        &symbol.file,
-        symbol.start.line,
-        symbol.end.line,
-        symbol.doc.as_deref(),
-    );
+    // If the caller passes a pre-computed hint (e.g. per-file cache from investigate),
+    // skip the git subprocess spawns entirely.
+    let ownership_signal_owned;
+    let ownership_signal = if let Some(hint) = ownership_hint {
+        hint
+    } else {
+        ownership_signal_owned = discover_symbol_ownership(
+            &symbol.file,
+            symbol.start.line,
+            symbol.end.line,
+            symbol.doc.as_deref(),
+        );
+        &ownership_signal_owned
+    };
     // Merge discovered signals into the existing ledger ownership entries.
     let mut discovered_ownership: serde_json::Map<String, Value> = serde_json::Map::new();
     if let Some(ref author) = ownership_signal.primary_author {
