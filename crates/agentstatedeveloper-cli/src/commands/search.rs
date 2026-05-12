@@ -114,8 +114,8 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
     }
     let layer_overrides = load_layer_overrides(&cfg.db_path);
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
-    let effect_store = AsgEffectStore { repo: &engine.repo };
+    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
+    let effect_store = AsgEffectStore::with_cache(&engine.repo, &cfg.db_path);
     // Hoist trust/data-quality state — used by uncertainty model and avoid
     // re-opening the DB or sidecar inside the hot search path.
     let dq_state_str: String = {

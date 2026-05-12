@@ -1223,7 +1223,7 @@ fn run_hydrate_roundtrip_probe(_cfg: &Config) -> Result<String, String> {
     );
     entry.tags = vec!["trust-probe".to_string(), "probe-roundtrip".to_string()];
 
-    let ledger_a = AsgLedgerStore { repo: &engine_a.repo };
+    let ledger_a = AsgLedgerStore { repo: &engine_a.repo, db_path: None };
     ledger_a.append_entry(&engine_a.ref_name, &entry, "asd-roundtrip-probe")
         .map_err(|e| format!("failed to write sentinel ledger entry: {e}"))?;
 
@@ -1239,7 +1239,7 @@ fn run_hydrate_roundtrip_probe(_cfg: &Config) -> Result<String, String> {
         .map_err(|e| format!("hydrate_from_dir failed: {e}"))?;
 
     // Step 5 — verify the sentinel entry survived.
-    let ledger_b = AsgLedgerStore { repo: &engine_b.repo };
+    let ledger_b = AsgLedgerStore { repo: &engine_b.repo, db_path: None };
     let entries = ledger_b
         .list_entries(&engine_b.ref_name, "asd-probe-roundtrip-sym")
         .map_err(|e| format!("failed to read ledger from Engine B: {e}"))?;

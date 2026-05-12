@@ -168,7 +168,7 @@ fn run_promote_as_truth(cfg: &Config, args: PromoteAsTruthArgs) -> Result<()> {
         Author { kind: author_kind, id: args.author.clone() },
     );
     entry.tags = vec!["promote-as-truth".to_string()];
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
+    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
     ledger_store.append_entry(&engine.ref_name, &entry, &args.author)?;
     println!("promoted {} as source-of-truth for \"{}\" ({})", args.qname, args.concept, entry.entry_id);
     Ok(())

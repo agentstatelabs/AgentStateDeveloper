@@ -33,7 +33,7 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 
-use crate::schema::{FeedbackEntry, FeedbackVerdict, Symbol};
+use crate::schema::{EffectDecl, FeedbackEntry, FeedbackVerdict, LedgerEntry, Symbol};
 
 // ---------------------------------------------------------------------------
 // Stopwords
@@ -170,6 +170,16 @@ pub struct SearchFtsDb {
 
 impl SearchFtsDb {
     /// Open (or create) the FTS index in `db_path`.
+    ///
+    /// Pragmas are tuned adaptively based on DB file size.  Users can override
+    /// the defaults by adding a `[performance]` section to `.asd/config.toml`
+    /// in the project root (the directory that contains `.asd-state.db`):
+    ///
+    /// ```toml
+    /// [performance]
+    /// cache_size_kb = 32768   # override adaptive cache (default: ~80% of DB, 8–64 MB)
+    /// mmap_size_mb  = 512     # override mmap window (default: 256 MB)
+    /// ```
     pub fn open(db_path: &Path) -> rusqlite::Result<Self> {
         let conn = Connection::open(db_path)?;
         // Base pragmas: WAL for concurrent readers, NORMAL sync for durability/speed
@@ -178,21 +188,38 @@ impl SearchFtsDb {
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
-             PRAGMA temp_store=MEMORY;
-             PRAGMA mmap_size=268435456;",
+             PRAGMA temp_store=MEMORY;",
         )?;
+
         // Adaptive cache: scale to ~80 % of the current DB file size, clamped
         // 8 MB … 64 MB.  A negative value tells SQLite the number is in KiB.
-        // Small codebases (< 10 MB) get a proportional allocation; large ones
-        // (> 80 MB) are capped so we don't starve other processes on shared CI
-        // runners or small developer machines.
-        let cache_kb = {
-            let bytes = std::fs::metadata(db_path)
-                .map(|m| m.len() as usize)
-                .unwrap_or(0);
-            ((bytes * 8 / 10) / 1024).clamp(8_192, 65_536)
-        };
-        conn.execute_batch(&format!("PRAGMA cache_size=-{cache_kb};"))?;
+        let db_bytes = std::fs::metadata(db_path)
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
+        let mut cache_kb: usize = ((db_bytes * 8 / 10) / 1024).clamp(8_192, 65_536);
+        let mut mmap_bytes: u64 = 268_435_456; // 256 MB default
+
+        // P1: Check for user overrides in .asd/config.toml (derived from db_path).
+        // Silently use adaptive defaults on any read/parse failure.
+        if let Some(project_dir) = db_path.parent() {
+            let cfg_path = project_dir.join(".asd").join("config.toml");
+            if let Ok(raw) = std::fs::read_to_string(&cfg_path) {
+                if let Ok(table) = raw.parse::<toml::Table>() {
+                    if let Some(perf) = table.get("performance").and_then(|v| v.as_table()) {
+                        if let Some(v) = perf.get("cache_size_kb").and_then(|v| v.as_integer()) {
+                            cache_kb = (v as usize).clamp(1_024, 131_072);
+                        }
+                        if let Some(v) = perf.get("mmap_size_mb").and_then(|v| v.as_integer()) {
+                            mmap_bytes = (v as u64).clamp(64, 4096) * 1024 * 1024;
+                        }
+                    }
+                }
+            }
+        }
+
+        conn.execute_batch(&format!(
+            "PRAGMA mmap_size={mmap_bytes}; PRAGMA cache_size=-{cache_kb};"
+        ))?;
         let db = Self { conn };
         db.ensure_schema()?;
         Ok(db)
@@ -227,6 +254,35 @@ impl SearchFtsDb {
             "CREATE TABLE IF NOT EXISTS asd_index_meta (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );"
+        )?;
+
+        // asd_ledger_cache: write-through cache of LedgerEntry records.
+        // NOT version-gated — survives FTS schema bumps like asd_index_meta.
+        // Full entry stored as a JSON blob (body) so the round-trip is lossless
+        // and new LedgerEntry fields don't require a schema migration here.
+        // The secondary index on (symbol_id, ref_name) makes list_entries_for
+        // a single indexed scan with no full-table reads.
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS asd_ledger_cache (
+                entry_id   TEXT NOT NULL,
+                symbol_id  TEXT NOT NULL,
+                ref_name   TEXT NOT NULL,
+                body       TEXT NOT NULL,
+                PRIMARY KEY (entry_id, ref_name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_asd_lc_sym
+                ON asd_ledger_cache(symbol_id, ref_name);"
+        )?;
+
+        // asd_effects_cache: one row per (symbol_id, ref_name) — stores the
+        // full EffectDecl JSON blob for lossless round-trips.
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS asd_effects_cache (
+                symbol_id TEXT NOT NULL,
+                ref_name  TEXT NOT NULL,
+                body      TEXT NOT NULL,
+                PRIMARY KEY (symbol_id, ref_name)
             );"
         )?;
 
@@ -778,6 +834,157 @@ impl SearchFtsDb {
         })
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
         .unwrap_or_default()
+    }
+
+    // -----------------------------------------------------------------------
+    // Ledger write-through cache helpers
+    // -----------------------------------------------------------------------
+
+    /// Number of ledger rows cached for this (symbol_id, ref_name) pair.
+    /// Returns 0 when the symbol hasn't been cached yet — triggers git fallback.
+    pub fn ledger_entry_count_for(&self, symbol_id: &str, ref_name: &str) -> usize {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM asd_ledger_cache WHERE symbol_id = ?1 AND ref_name = ?2",
+                params![symbol_id, ref_name],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0) as usize
+    }
+
+    /// Insert or replace a single ledger entry for `ref_name`.
+    pub fn upsert_ledger_entry(
+        &self,
+        entry: &LedgerEntry,
+        ref_name: &str,
+    ) -> rusqlite::Result<()> {
+        let body = serde_json::to_string(entry)
+            .unwrap_or_else(|_| "{}".to_string());
+        self.conn.execute(
+            "INSERT OR REPLACE INTO asd_ledger_cache (entry_id, symbol_id, ref_name, body)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![entry.entry_id, entry.symbol_id, ref_name, body],
+        )?;
+        Ok(())
+    }
+
+    /// Return all ledger entries for a symbol (including superseded), newest first.
+    /// The caller's `list_entries` default method handles supersede filtering.
+    pub fn list_ledger_entries_for(
+        &self,
+        symbol_id: &str,
+        ref_name: &str,
+    ) -> rusqlite::Result<Vec<LedgerEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT body FROM asd_ledger_cache
+             WHERE symbol_id = ?1 AND ref_name = ?2
+             ORDER BY rowid DESC",
+        )?;
+        let entries = stmt
+            .query_map(params![symbol_id, ref_name], |row| {
+                let body: String = row.get(0)?;
+                Ok(body)
+            })?
+            .filter_map(|r| r.ok())
+            .filter_map(|body| serde_json::from_str::<LedgerEntry>(&body).ok())
+            .collect();
+        Ok(entries)
+    }
+
+    /// Bulk-insert ledger entries in a single transaction — used by `asd index`
+    /// to reconcile the SQLite cache from the authoritative git store.
+    /// `entries`: slice of `(symbol_id, LedgerEntry)` pairs.
+    pub fn sync_ledger_entries(
+        &self,
+        entries: &[(String, LedgerEntry)],
+        ref_name: &str,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute_batch("BEGIN;")?;
+        for (symbol_id, entry) in entries {
+            let body = serde_json::to_string(entry)
+                .unwrap_or_else(|_| "{}".to_string());
+            if let Err(err) = self.conn.execute(
+                "INSERT OR REPLACE INTO asd_ledger_cache (entry_id, symbol_id, ref_name, body)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![entry.entry_id, symbol_id, ref_name, body],
+            ) {
+                eprintln!("asd: ledger cache sync warning — {err}");
+            }
+        }
+        self.conn.execute_batch("COMMIT;")?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Effects write-through cache helpers
+    // -----------------------------------------------------------------------
+
+    /// True when an `EffectDecl` for this (symbol_id, ref_name) is cached.
+    pub fn effects_cached_for(&self, symbol_id: &str, ref_name: &str) -> bool {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM asd_effects_cache WHERE symbol_id = ?1 AND ref_name = ?2 LIMIT 1",
+                params![symbol_id, ref_name],
+                |_| Ok(()),
+            )
+            .is_ok()
+    }
+
+    /// Insert or replace the `EffectDecl` for a symbol.
+    pub fn upsert_effects(
+        &self,
+        symbol_id: &str,
+        ref_name: &str,
+        decl: &EffectDecl,
+    ) -> rusqlite::Result<()> {
+        let body = serde_json::to_string(decl)
+            .unwrap_or_else(|_| "{}".to_string());
+        self.conn.execute(
+            "INSERT OR REPLACE INTO asd_effects_cache (symbol_id, ref_name, body)
+             VALUES (?1, ?2, ?3)",
+            params![symbol_id, ref_name, body],
+        )?;
+        Ok(())
+    }
+
+    /// Return the cached `EffectDecl` for a symbol, or `None` if not cached.
+    pub fn get_effects_for(
+        &self,
+        symbol_id: &str,
+        ref_name: &str,
+    ) -> rusqlite::Result<Option<EffectDecl>> {
+        match self.conn.query_row(
+            "SELECT body FROM asd_effects_cache WHERE symbol_id = ?1 AND ref_name = ?2 LIMIT 1",
+            params![symbol_id, ref_name],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(body) => Ok(serde_json::from_str::<EffectDecl>(&body).ok()),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Bulk-insert effects in a single transaction.
+    /// `entries`: slice of `(symbol_id, EffectDecl)` pairs.
+    pub fn sync_effects(
+        &self,
+        entries: &[(String, EffectDecl)],
+        ref_name: &str,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute_batch("BEGIN;")?;
+        for (symbol_id, decl) in entries {
+            let body = serde_json::to_string(decl)
+                .unwrap_or_else(|_| "{}".to_string());
+            if let Err(err) = self.conn.execute(
+                "INSERT OR REPLACE INTO asd_effects_cache (symbol_id, ref_name, body)
+                 VALUES (?1, ?2, ?3)",
+                params![symbol_id, ref_name, body],
+            ) {
+                eprintln!("asd: effects cache sync warning — {err}");
+            }
+        }
+        self.conn.execute_batch("COMMIT;")?;
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -2476,16 +2683,31 @@ impl SearchDocsDb {
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
-             PRAGMA temp_store=MEMORY;
-             PRAGMA mmap_size=268435456;",
+             PRAGMA temp_store=MEMORY;",
         )?;
-        let cache_kb = {
-            let bytes = std::fs::metadata(db_path)
-                .map(|m| m.len() as usize)
-                .unwrap_or(0);
-            ((bytes * 8 / 10) / 1024).clamp(8_192, 65_536)
-        };
-        conn.execute_batch(&format!("PRAGMA cache_size=-{cache_kb};"))?;
+        let db_bytes = std::fs::metadata(db_path)
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
+        let mut cache_kb: usize = ((db_bytes * 8 / 10) / 1024).clamp(8_192, 65_536);
+        let mut mmap_bytes: u64 = 268_435_456;
+        if let Some(project_dir) = db_path.parent() {
+            let cfg_path = project_dir.join(".asd").join("config.toml");
+            if let Ok(raw) = std::fs::read_to_string(&cfg_path) {
+                if let Ok(table) = raw.parse::<toml::Table>() {
+                    if let Some(perf) = table.get("performance").and_then(|v| v.as_table()) {
+                        if let Some(v) = perf.get("cache_size_kb").and_then(|v| v.as_integer()) {
+                            cache_kb = (v as usize).clamp(1_024, 131_072);
+                        }
+                        if let Some(v) = perf.get("mmap_size_mb").and_then(|v| v.as_integer()) {
+                            mmap_bytes = (v as u64).clamp(64, 4096) * 1024 * 1024;
+                        }
+                    }
+                }
+            }
+        }
+        conn.execute_batch(&format!(
+            "PRAGMA mmap_size={mmap_bytes}; PRAGMA cache_size=-{cache_kb};"
+        ))?;
         let db = Self { conn };
         db.ensure_schema()?;
         Ok(db)

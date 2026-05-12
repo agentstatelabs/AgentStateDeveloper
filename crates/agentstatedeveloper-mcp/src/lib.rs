@@ -243,12 +243,12 @@ async fn get_symbol(
         .map_err(ApiError::from)?
         .ok_or_else(|| ApiError::NotFound(format!("symbol not found: {}", qname)))?;
 
-    let effects_store = AsgEffectStore { repo: &engine.repo };
+    let effects_store = AsgEffectStore::with_cache(&engine.repo, &state.db_path);
     let effects = effects_store
         .get_effects(&ref_name, &symbol.symbol_id)
         .map_err(ApiError::from)?;
 
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
+    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &state.db_path);
     let mut ledger = ledger_store
         .list_entries(&ref_name, &symbol.symbol_id)
         .map_err(ApiError::from)?;
@@ -274,7 +274,7 @@ async fn get_symbol_ledger(
         .map_err(ApiError::from)?
         .ok_or_else(|| ApiError::NotFound(format!("symbol not found: {}", qname)))?;
 
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
+    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &state.db_path);
     let entries = ledger_store
         .list_entries(&ref_name, &symbol.symbol_id)
         .map_err(ApiError::from)?;
@@ -733,7 +733,7 @@ async fn get_symbol_effects(
         .map_err(ApiError::from)?
         .ok_or_else(|| ApiError::NotFound(format!("symbol not found: {}", qname)))?;
 
-    let effects_store = AsgEffectStore { repo: &engine.repo };
+    let effects_store = AsgEffectStore::with_cache(&engine.repo, &state.db_path);
     let effects = effects_store
         .get_effects(&ref_name, &symbol.symbol_id)
         .map_err(ApiError::from)?;

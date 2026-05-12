@@ -162,7 +162,7 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
     let scoped = !paths_filter.is_empty();
 
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let effect_store = AsgEffectStore { repo: &engine.repo };
+    let effect_store = AsgEffectStore::with_cache(&engine.repo, &cfg.db_path);
     let feedback_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&cfg.db_path) };
 
     // Bulk load index — one git read instead of N.

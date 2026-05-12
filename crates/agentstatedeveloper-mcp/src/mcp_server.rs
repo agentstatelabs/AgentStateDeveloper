@@ -706,7 +706,7 @@ impl AsdMcpServer {
             .and_then(|fts| fts.search(&p.query, &filters, limit * 4).ok());
 
         if let Some(hits) = fts_result {
-            let ledger_store = AsgLedgerStore { repo: &engine.repo };
+            let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
             let mut scored: Vec<(f64, _)> = hits
                 .into_iter()
                 .map(|hit| {
@@ -817,7 +817,7 @@ impl AsdMcpServer {
             _ => return "[]".to_string(),
         };
         let index = AsgIndexStore { repo: &engine.repo };
-        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
         let mut scored: Vec<(u32, agentstatedeveloper_core::Symbol)> = Vec::new();
         for qname in &qnames {
             let sym = match index.get_symbol_by_qname(&ref_name, qname) {
@@ -910,8 +910,8 @@ impl AsdMcpServer {
         };
 
         let index = AsgIndexStore { repo: &engine.repo };
-        let ledger_store = AsgLedgerStore { repo: &engine.repo };
-        let effect_store = AsgEffectStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
+        let effect_store = AsgEffectStore::with_cache(&engine.repo, &self.db_path);
 
         let mut top_qnames = find_candidates(
             &engine, &db_path, &p.query, &tokens, &filters,
@@ -1087,13 +1087,13 @@ impl AsdMcpServer {
             Err(e) => return err_json(&e.to_string()),
         };
 
-        let effects_store = AsgEffectStore { repo: &engine.repo };
+        let effects_store = AsgEffectStore::with_cache(&engine.repo, &self.db_path);
         let effects = match effects_store.get_effects(&ref_name, &symbol.symbol_id) {
             Ok(e) => e,
             Err(e) => return err_json(&e.to_string()),
         };
 
-        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
         let ledger = match ledger_store.list_entries(&ref_name, &symbol.symbol_id) {
             Ok(e) => e,
             Err(e) => return err_json(&e.to_string()),
@@ -1122,7 +1122,7 @@ impl AsdMcpServer {
             Err(e) => return err_json(&e.to_string()),
         };
 
-        let effects_store = AsgEffectStore { repo: &engine.repo };
+        let effects_store = AsgEffectStore::with_cache(&engine.repo, &self.db_path);
         match effects_store.get_effects(&ref_name, &symbol.symbol_id) {
             Ok(Some(decl)) => {
                 serde_json::to_string(&decl).unwrap_or_else(|_| "null".to_string())
@@ -1195,7 +1195,7 @@ impl AsdMcpServer {
             Err(e) => return err_json(&e.to_string()),
         };
 
-        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
         let entries = match ledger_store.list_entries(&ref_name, &symbol.symbol_id) {
             Ok(e) => e,
             Err(e) => return err_json(&e.to_string()),
@@ -1421,7 +1421,7 @@ impl AsdMcpServer {
             }
         }
 
-        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
         if let Err(e) = ledger_store.append_entry(&ref_name, &entry, &p.author_id) {
             let event = AuditEvent::new(
                 event_types::LEDGER_APPEND,
@@ -1492,7 +1492,7 @@ impl AsdMcpServer {
                 reason, matched_policy
             ));
         }
-        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
         match ledger_store.approve_entry(
             &ref_name,
             &p.entry_id,
@@ -1559,7 +1559,7 @@ impl AsdMcpServer {
                 reason, matched_policy
             ));
         }
-        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
         match ledger_store.reject_entry(
             &ref_name,
             &p.entry_id,
@@ -1627,7 +1627,7 @@ impl AsdMcpServer {
                 reason, matched_policy
             ));
         }
-        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
         match ledger_store.withdraw_entry(&ref_name, &p.entry_id, &p.author_id, "asd-mcp") {
             Ok(outcome) => {
                 let status = if outcome.already_resolved {
@@ -1746,7 +1746,7 @@ impl AsdMcpServer {
         entry.supersedes = p.supersedes.clone();
         entry.tags.push("supersedes".to_string());
 
-        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
         match ledger_store.append_entry(&ref_name, &entry, "asd-mcp") {
             Ok(()) => {
                 let event = AuditEvent::new(
@@ -1837,7 +1837,7 @@ impl AsdMcpServer {
             }
         };
 
-        let effects_store = AsgEffectStore { repo: &engine.repo };
+        let effects_store = AsgEffectStore::with_cache(&engine.repo, &self.db_path);
         let existing = match effects_store.get_effects(&ref_name, &symbol.symbol_id) {
             Ok(e) => e,
             Err(e) => {
@@ -2136,7 +2136,7 @@ impl AsdMcpServer {
         }
 
         // Re-parent ledger entries
-        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
         let entries = match ledger_store.list_entries_with_superseded(ref_name, &p.from_symbol_id) {
             Ok(v) => v,
             Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
@@ -2398,7 +2398,7 @@ impl AsdMcpServer {
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
         let scratch_store = AsgScratchStore { repo: &engine.repo };
-        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
 
         // 1. Read scratch entry.
         let entry = match scratch_store.read_entry(&ref_name, &p.scratch_id) {
@@ -2540,8 +2540,8 @@ impl AsdMcpServer {
         };
 
         let index = AsgIndexStore { repo: &engine.repo };
-        let ledger_store = AsgLedgerStore { repo: &engine.repo };
-        let effect_store = AsgEffectStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
+        let effect_store = AsgEffectStore::with_cache(&engine.repo, &self.db_path);
 
         let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
         let all_qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
@@ -2855,8 +2855,8 @@ impl AsdMcpServer {
         };
 
         let index = AsgIndexStore { repo: &engine.repo };
-        let ledger_store = AsgLedgerStore { repo: &engine.repo };
-        let effect_store = AsgEffectStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
+        let effect_store = AsgEffectStore::with_cache(&engine.repo, &self.db_path);
 
         // Build id_map for test BFS.
         let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
@@ -3077,8 +3077,8 @@ impl AsdMcpServer {
         let ref_name = engine.ref_name.clone();
 
         let index = AsgIndexStore { repo: &engine.repo };
-        let ledger_store = AsgLedgerStore { repo: &engine.repo };
-        let effect_store = AsgEffectStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
+        let effect_store = AsgEffectStore::with_cache(&engine.repo, &self.db_path);
 
         let symbol = match index.get_symbol_by_qname(&ref_name, &p.qname) {
             Ok(Some(s)) => s,
@@ -3213,8 +3213,8 @@ impl AsdMcpServer {
         let ref_name = engine.ref_name.clone();
 
         let index = AsgIndexStore { repo: &engine.repo };
-        let ledger_store = AsgLedgerStore { repo: &engine.repo };
-        let effect_store = AsgEffectStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
+        let effect_store = AsgEffectStore::with_cache(&engine.repo, &self.db_path);
 
         // Build id_map.
         let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
@@ -3369,7 +3369,7 @@ impl AsdMcpServer {
             p.summary.clone(),
             author,
         );
-        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
         match ledger_store.append_entry(&engine.ref_name, &entry, "asd-mcp") {
             Ok(_) => serde_json::to_string(&serde_json::json!({
                 "status": "added",
@@ -3390,7 +3390,7 @@ impl AsdMcpServer {
         let Ok(engine) = Engine::open_sqlite(&self.db_path) else {
             return err_json("failed to open database");
         };
-        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
 
         let rows: Vec<serde_json::Value> = if let Some(qname) = p.qname {
             let index_store = AsgIndexStore { repo: &engine.repo };
@@ -3533,7 +3533,7 @@ impl AsdMcpServer {
             Author { kind: author_kind, id: p.author_id.clone() },
         );
         entry.tags = vec!["promote-as-truth".to_string()];
-        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &self.db_path);
         match ledger_store.append_entry(&ref_name, &entry, &p.author_id) {
             Ok(()) => serde_json::to_string(&serde_json::json!({
                 "ok": true,

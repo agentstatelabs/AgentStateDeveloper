@@ -16,7 +16,9 @@ use clap::Args;
 
 use agentstatedeveloper_adapters::default_adapters;
 use agentstatedeveloper_core::{
-    collect_source_files, run_index, sync_to_dir, AsgFeedbackStore, Engine, FeedbackStore,
+    collect_source_files, run_index, sync_to_dir,
+    AsgFeedbackStore, Engine, FeedbackStore,
+    paths, EffectDecl, LedgerEntry,
 };
 use agentstatedeveloper_core::search_fts::SearchFtsDb;
 
@@ -166,14 +168,56 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
         }
     }
 
-    // Sync feedback cache: pull authoritative git entries into SQLite so
-    // subsequent `list_all()` calls hit the fast path immediately.
-    let fb_store = AsgFeedbackStore { repo: &engine.repo, db_path: None };
-    if let Ok(all_fb) = fb_store.list_all(&engine.ref_name) {
-        if !all_fb.is_empty() {
-            if let Ok(fts) = SearchFtsDb::open(&cfg.db_path) {
+    // --- SQLite cache reconciliation ---
+    // Pull authoritative git entries into SQLite so subsequent hot-path reads
+    // hit the fast path immediately after `asd index`.
+    if let Ok(fts) = SearchFtsDb::open(&cfg.db_path) {
+        // Feedback
+        let fb_store = AsgFeedbackStore { repo: &engine.repo, db_path: None };
+        if let Ok(all_fb) = fb_store.list_all(&engine.ref_name) {
+            if !all_fb.is_empty() {
                 if let Err(e) = fts.sync_feedback_entries(&all_fb) {
                     eprintln!("asd: feedback cache sync warning: {e}");
+                }
+            }
+        }
+
+        // Ledger — walk the full tree and bulk-insert into SQLite.
+        let ledger_prefix = format!("{}/ledger", paths::ASD_ROOT);
+        if let Ok(serde_json::Value::Object(by_symbol)) =
+            engine.repo.get_tree(&engine.ref_name, &ledger_prefix)
+        {
+            let mut ledger_pairs: Vec<(String, LedgerEntry)> = Vec::new();
+            for (sym_id, per_symbol) in &by_symbol {
+                if let serde_json::Value::Object(entries_map) = per_symbol {
+                    for ev in entries_map.values() {
+                        if let Ok(e) = serde_json::from_value::<LedgerEntry>(ev.clone()) {
+                            ledger_pairs.push((sym_id.clone(), e));
+                        }
+                    }
+                }
+            }
+            if !ledger_pairs.is_empty() {
+                if let Err(e) = fts.sync_ledger_entries(&ledger_pairs, &engine.ref_name) {
+                    eprintln!("asd: ledger cache sync warning: {e}");
+                }
+            }
+        }
+
+        // Effects — walk the effects tree and bulk-insert into SQLite.
+        let effects_prefix = format!("{}/effects", paths::ASD_ROOT);
+        if let Ok(serde_json::Value::Object(by_symbol)) =
+            engine.repo.get_tree(&engine.ref_name, &effects_prefix)
+        {
+            let mut effects_pairs: Vec<(String, EffectDecl)> = Vec::new();
+            for (sym_id, val) in &by_symbol {
+                if let Ok(decl) = serde_json::from_value::<EffectDecl>(val.clone()) {
+                    effects_pairs.push((sym_id.clone(), decl));
+                }
+            }
+            if !effects_pairs.is_empty() {
+                if let Err(e) = fts.sync_effects(&effects_pairs, &engine.ref_name) {
+                    eprintln!("asd: effects cache sync warning: {e}");
                 }
             }
         }

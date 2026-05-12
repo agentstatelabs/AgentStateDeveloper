@@ -22,8 +22,8 @@ pub fn run(cfg: &Config, args: ReadArgs) -> Result<()> {
     let engine = Engine::open_sqlite(&cfg.db_path)?;
 
     let index_store = AsgIndexStore { repo: &engine.repo };
-    let effect_store = AsgEffectStore { repo: &engine.repo };
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
+    let effect_store = AsgEffectStore::with_cache(&engine.repo, &cfg.db_path);
+    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
 
     let symbol = index_store
         .get_symbol_by_qname(&engine.ref_name, &args.qname)?

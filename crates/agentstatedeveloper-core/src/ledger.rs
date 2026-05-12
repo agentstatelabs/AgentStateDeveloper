@@ -1,10 +1,13 @@
+use std::collections::HashSet;
+use std::path::Path;
+
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
-use std::collections::HashSet;
 
 use crate::error::{AsdError, Result};
 use crate::paths;
 use crate::schema::LedgerEntry;
+use crate::search_fts::SearchFtsDb;
 
 // ---------------------------------------------------------------------------
 // RatifyOps — narrower trait for the approve/reject/withdraw operations.
@@ -145,6 +148,21 @@ pub trait LedgerStore {
 
 pub struct AsgLedgerStore<'a> {
     pub repo: &'a Repository,
+    /// When `Some`, enables the SQLite write-through cache: `list_entries`
+    /// reads from SQLite when populated, `append_entry` writes to SQLite
+    /// after the git commit.
+    pub db_path: Option<&'a Path>,
+}
+
+impl<'a> AsgLedgerStore<'a> {
+    /// Construct without SQLite caching (tests, internal engine calls).
+    pub fn new(repo: &'a Repository) -> Self {
+        Self { repo, db_path: None }
+    }
+    /// Construct with SQLite write-through cache enabled.
+    pub fn with_cache(repo: &'a Repository, db_path: &'a Path) -> Self {
+        Self { repo, db_path: Some(db_path) }
+    }
 }
 
 impl<'a> LedgerStore for AsgLedgerStore<'a> {
@@ -167,6 +185,13 @@ impl<'a> LedgerStore for AsgLedgerStore<'a> {
             format!("ledger-idx {}", entry.entry_id),
         );
         self.repo.set_json(ref_name, &idx_path, &idx_val, idx_opts)?;
+
+        // Best-effort SQLite write-through; failures are non-fatal.
+        if let Some(db) = self.db_path {
+            if let Ok(fts) = SearchFtsDb::open(db) {
+                let _ = fts.upsert_ledger_entry(entry, ref_name);
+            }
+        }
         Ok(())
     }
 
@@ -175,6 +200,19 @@ impl<'a> LedgerStore for AsgLedgerStore<'a> {
         ref_name: &str,
         symbol_id: &str,
     ) -> Result<Vec<LedgerEntry>> {
+        // Fast path: SQLite cache — zero git tree walks when populated.
+        if let Some(db) = self.db_path {
+            if let Ok(fts) = SearchFtsDb::open(db) {
+                if fts.ledger_entry_count_for(symbol_id, ref_name) > 0 {
+                    if let Ok(entries) = fts.list_ledger_entries_for(symbol_id, ref_name) {
+                        return Ok(entries);
+                    }
+                }
+            }
+        }
+
+        // Authoritative git path — also runs when SQLite is empty (first run
+        // after `git pull`).  Populates the cache as a side effect.
         let parent = paths::ledger_symbol_path(symbol_id);
         let json = match self.repo.get_json(ref_name, &parent) {
             Ok(v) => v,
@@ -193,6 +231,18 @@ impl<'a> LedgerStore for AsgLedgerStore<'a> {
             }
         }
         entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+        // Populate cache for next call — best effort.
+        if !entries.is_empty() {
+            if let Some(db) = self.db_path {
+                if let Ok(fts) = SearchFtsDb::open(db) {
+                    for entry in &entries {
+                        let _ = fts.upsert_ledger_entry(entry, ref_name);
+                    }
+                }
+            }
+        }
+
         Ok(entries)
     }
 }

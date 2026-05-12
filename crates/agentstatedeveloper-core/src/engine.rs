@@ -137,7 +137,7 @@ impl Engine {
             }
         };
 
-        let store = AsgLedgerStore { repo: &self.repo };
+        let store = AsgLedgerStore { repo: &self.repo, db_path: None };
         store.append_entry(&self.ref_name, entry, agent_id)?;
 
         let event = AuditEvent::new(

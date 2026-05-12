@@ -424,7 +424,7 @@ fn promote_cmd(cfg: &Config, args: PromoteArgs) -> Result<()> {
     // Policy + audit wired through open_engine_public.
     let engine = open_engine_public(cfg)?;
     let scratch_store = AsgScratchStore { repo: &engine.repo };
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
+    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
 
     // 1. Read the scratch entry.
     let entry = scratch_store.read_entry(&engine.ref_name, &args.scratch_id)?;

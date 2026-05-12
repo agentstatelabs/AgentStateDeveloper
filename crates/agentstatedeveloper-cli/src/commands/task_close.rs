@@ -66,7 +66,7 @@ pub struct TaskCloseArgs {
 pub fn run(cfg: &Config, args: TaskCloseArgs) -> Result<()> {
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let index_store = AsgIndexStore { repo: &engine.repo };
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
+    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
 
     // Resolve CTX plan/task from args or env vars (t-001).
     let plan_id = args.plan.clone()

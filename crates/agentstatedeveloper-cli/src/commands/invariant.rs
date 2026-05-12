@@ -84,7 +84,7 @@ fn add(cfg: &Config, args: AddArgs) -> Result<()> {
         author,
     );
 
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
+    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
     ledger_store.append_entry(&engine.ref_name, &entry, &cfg.agent_id)?;
 
     println!(
@@ -112,7 +112,7 @@ fn list(cfg: &Config, args: ListArgs) -> Result<()> {
 
     let rows: Vec<serde_json::Value> = if let Some(ref qname) = args.qname {
         let index_store = AsgIndexStore { repo: &engine.repo };
-        let ledger_store = AsgLedgerStore { repo: &engine.repo };
+        let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
         let symbol = index_store
             .get_symbol_by_qname(&engine.ref_name, qname)?
             .ok_or_else(|| anyhow::anyhow!("symbol not found: {qname}"))?;
@@ -160,7 +160,7 @@ fn list(cfg: &Config, args: ListArgs) -> Result<()> {
 
 fn rm(cfg: &Config, args: RmArgs) -> Result<()> {
     let engine = open_engine_public(cfg)?;
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
+    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
     let outcome = ledger_store.withdraw_entry(
         &engine.ref_name,
         &args.entry_id,

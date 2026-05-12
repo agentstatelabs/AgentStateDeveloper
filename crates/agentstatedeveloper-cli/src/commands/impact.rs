@@ -82,8 +82,8 @@ pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
     let layer_overrides = load_layer_overrides(&cfg.db_path);
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let index_store = AsgIndexStore { repo: &engine.repo };
-    let effect_store = AsgEffectStore { repo: &engine.repo };
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
+    let effect_store = AsgEffectStore::with_cache(&engine.repo, &cfg.db_path);
+    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
     let id_map = build_id_map(&engine);
 
     let symbol = index_store

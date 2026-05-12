@@ -82,7 +82,7 @@ pub fn run(cfg: &Config, args: TraceArgs) -> Result<()> {
 
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let index_store = AsgIndexStore { repo: &engine.repo };
-    let effect_store = AsgEffectStore { repo: &engine.repo };
+    let effect_store = AsgEffectStore::with_cache(&engine.repo, &cfg.db_path);
 
     let mut traced_qnames: usize = 0;
     let mut updates: Vec<serde_json::Value> = Vec::new();

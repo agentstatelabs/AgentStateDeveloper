@@ -137,7 +137,7 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
 
     // ---- Resolve symbols for changed files --------------------------------
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
+    let ledger_store = AsgLedgerStore::with_cache(&engine.repo, &cfg.db_path);
 
     // Read all indexed symbols from the git tree (same approach as build_id_map).
     let tree = engine.repo

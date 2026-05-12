@@ -510,7 +510,7 @@ fn ledger_signals(db_path: &Path, symbol_count: u64) -> (f64, usize) {
         Err(_) => return (0.0, 0),
     };
     let index_store = AsgIndexStore { repo: &engine.repo };
-    let ledger_store = AsgLedgerStore { repo: &engine.repo };
+    let ledger_store = AsgLedgerStore { repo: &engine.repo, db_path: None };
 
     // Walk the by-qname index to count symbols with/without ledger entries.
     let tree = match engine.repo.get_tree(&engine.ref_name, "/asd/v1/index/by-qname") {

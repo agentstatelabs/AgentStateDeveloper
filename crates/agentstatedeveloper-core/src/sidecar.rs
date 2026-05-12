@@ -420,7 +420,7 @@ pub fn hydrate_from_dir(
     let rebinds_dir = root.join("rebinds");
     let meta_dir = root.join("meta");
 
-    let ledger_store = AsgLedgerStore { repo };
+    let ledger_store = AsgLedgerStore { repo, db_path: None };
 
     // -----------------------------------------------------------------------
     // Symbols — bulk load: read all sidecar files into memory maps, then
