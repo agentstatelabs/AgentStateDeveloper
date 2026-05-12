@@ -125,7 +125,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
     // Hoist all feedback entries — previously called 2-3× per search (once for
     // score adjustment, once for result annotation, once for display badges).
     let all_feedback: Vec<agentstatedeveloper_core::FeedbackEntry> = {
-        let fb_store = AsgFeedbackStore { repo: &engine.repo };
+        let fb_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&cfg.db_path) };
         fb_store.list_all(&engine.ref_name).unwrap_or_default()
     };
 

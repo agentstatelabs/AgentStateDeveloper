@@ -462,6 +462,18 @@ impl FeedbackVerdict {
             Self::WrongLayer => "wrong-layer",
         }
     }
+
+    /// Parse from the string produced by [`as_str`].  Returns `None` on
+    /// unrecognized values so callers can decide on a fallback.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "useful"      => Some(Self::Useful),
+            "noisy"       => Some(Self::Noisy),
+            "missing"     => Some(Self::Missing),
+            "wrong-layer" => Some(Self::WrongLayer),
+            _ => None,
+        }
+    }
 }
 
 /// A single feedback record: a (query, symbol, verdict) triple stored durably.

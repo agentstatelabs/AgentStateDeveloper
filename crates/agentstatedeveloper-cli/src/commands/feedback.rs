@@ -143,7 +143,7 @@ fn run_mark(cfg: &Config, args: MarkArgs) -> Result<()> {
         created_at: chrono::Utc::now(),
         file_scope: args.file_scope.clone(),
     };
-    let feedback_store = AsgFeedbackStore { repo: &engine.repo };
+    let feedback_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&cfg.db_path) };
     feedback_store.record(&engine.ref_name, &entry, &args.author)?;
     if args.file_scope.is_some() {
         println!("recorded {} for files matching {:?} ({})", args.verdict, symbol_qname, entry.entry_id);
@@ -176,7 +176,7 @@ fn run_promote_as_truth(cfg: &Config, args: PromoteAsTruthArgs) -> Result<()> {
 
 fn run_list(cfg: &Config, args: ListArgs) -> Result<()> {
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let feedback_store = AsgFeedbackStore { repo: &engine.repo };
+    let feedback_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&cfg.db_path) };
     let entries = if let Some(ref qname) = args.qname {
         let index_store = AsgIndexStore { repo: &engine.repo };
         match index_store.get_symbol_by_qname(&engine.ref_name, qname)? {
@@ -219,7 +219,7 @@ fn verdict_breakdown(entries: &[FeedbackEntry]) -> (usize, usize, usize, usize) 
 
 fn run_export(cfg: &Config, args: ExportArgs) -> Result<()> {
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let feedback_store = AsgFeedbackStore { repo: &engine.repo };
+    let feedback_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&cfg.db_path) };
     let entries = feedback_store.list_all(&engine.ref_name)?;
 
     if args.summary {
@@ -267,7 +267,7 @@ fn run_import(cfg: &Config, args: ImportArgs) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to parse feedback JSON: {e}"))?;
 
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let feedback_store = AsgFeedbackStore { repo: &engine.repo };
+    let feedback_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&cfg.db_path) };
 
     let existing_ids: std::collections::HashSet<String> = if args.skip_existing || args.dry_run {
         feedback_store

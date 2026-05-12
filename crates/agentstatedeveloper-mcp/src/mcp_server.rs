@@ -921,7 +921,7 @@ impl AsdMcpServer {
         // Apply durable feedback adjustments.
         {
             use agentstatedeveloper_core::{apply_feedback_adjustments, FeedbackStore};
-            let fb_store = AsgFeedbackStore { repo: &engine.repo };
+            let fb_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&self.db_path) };
             let fb = fb_store.flat_verdicts(&ref_name).unwrap_or_default();
             apply_feedback_adjustments(&engine, &index, &db_path, &p.query, &mut top_qnames, &fb);
         }
@@ -2564,7 +2564,7 @@ impl AsdMcpServer {
         // Apply durable feedback adjustments.
         {
             use agentstatedeveloper_core::{apply_feedback_adjustments, FeedbackStore};
-            let fb_store = AsgFeedbackStore { repo: &engine.repo };
+            let fb_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&self.db_path) };
             let fb = fb_store.flat_verdicts(&ref_name).unwrap_or_default();
             apply_feedback_adjustments(&engine, &index, &db_path, &p.description, &mut candidates, &fb);
         }
@@ -2880,7 +2880,7 @@ impl AsdMcpServer {
         // Apply durable feedback adjustments.
         {
             use agentstatedeveloper_core::{apply_feedback_adjustments, FeedbackStore};
-            let fb_store = AsgFeedbackStore { repo: &engine.repo };
+            let fb_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&self.db_path) };
             let fb = fb_store.flat_verdicts(&ref_name).unwrap_or_default();
             apply_feedback_adjustments(&engine, &index, &db_path, &p.query, &mut candidates, &fb);
         }
@@ -3500,7 +3500,7 @@ impl AsdMcpServer {
             created_at: chrono::Utc::now(),
             file_scope: None,
         };
-        let feedback_store = AsgFeedbackStore { repo: &engine.repo };
+        let feedback_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&self.db_path) };
         match feedback_store.record(&ref_name, &entry, &p.author_id) {
             Ok(()) => serde_json::to_string(&serde_json::json!({
                 "ok": true,
@@ -3553,7 +3553,7 @@ impl AsdMcpServer {
         let p = params.0;
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
-        let feedback_store = AsgFeedbackStore { repo: &engine.repo };
+        let feedback_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&self.db_path) };
         let entries: Vec<serde_json::Value> = if let Some(ref qname) = p.qname {
             let index_store = AsgIndexStore { repo: &engine.repo };
             match index_store.get_symbol_by_qname(&ref_name, qname) {

@@ -30,9 +30,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 
-use crate::schema::Symbol;
+use crate::schema::{FeedbackEntry, FeedbackVerdict, Symbol};
 
 // ---------------------------------------------------------------------------
 // Stopwords
@@ -171,7 +172,27 @@ impl SearchFtsDb {
     /// Open (or create) the FTS index in `db_path`.
     pub fn open(db_path: &Path) -> rusqlite::Result<Self> {
         let conn = Connection::open(db_path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        // Base pragmas: WAL for concurrent readers, NORMAL sync for durability/speed
+        // balance, MEMORY temp store avoids disk spills for sort/group operations,
+        // and mmap lets the OS page cache do the heavy lifting.
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA temp_store=MEMORY;
+             PRAGMA mmap_size=268435456;",
+        )?;
+        // Adaptive cache: scale to ~80 % of the current DB file size, clamped
+        // 8 MB … 64 MB.  A negative value tells SQLite the number is in KiB.
+        // Small codebases (< 10 MB) get a proportional allocation; large ones
+        // (> 80 MB) are capped so we don't starve other processes on shared CI
+        // runners or small developer machines.
+        let cache_kb = {
+            let bytes = std::fs::metadata(db_path)
+                .map(|m| m.len() as usize)
+                .unwrap_or(0);
+            ((bytes * 8 / 10) / 1024).clamp(8_192, 65_536)
+        };
+        conn.execute_batch(&format!("PRAGMA cache_size=-{cache_kb};"))?;
         let db = Self { conn };
         db.ensure_schema()?;
         Ok(db)
@@ -207,6 +228,28 @@ impl SearchFtsDb {
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );"
+        )?;
+
+        // asd_feedback is a write-through cache of git-backed FeedbackEntry
+        // records.  It is NOT version-gated — like asd_index_meta it survives
+        // FTS schema bumps.  The git object store remains authoritative; this
+        // table is the fast read path.  `asd index` / `asd reindex` reconciles
+        // any drift via sync_feedback_entries().
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS asd_feedback (
+                entry_id     TEXT PRIMARY KEY,
+                symbol_id    TEXT NOT NULL,
+                symbol_qname TEXT NOT NULL,
+                query        TEXT NOT NULL,
+                verdict      TEXT NOT NULL,
+                author       TEXT NOT NULL,
+                created_at   TEXT NOT NULL,
+                note         TEXT,
+                file_scope   TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_asd_fb_symbol  ON asd_feedback(symbol_id);
+            CREATE INDEX IF NOT EXISTS idx_asd_fb_qname   ON asd_feedback(symbol_qname);
+            CREATE INDEX IF NOT EXISTS idx_asd_fb_verdict ON asd_feedback(verdict);"
         )?;
 
         self.conn.execute_batch(&format!(
@@ -737,6 +780,90 @@ impl SearchFtsDb {
         .unwrap_or_default()
     }
 
+    // -----------------------------------------------------------------------
+    // Feedback write-through cache helpers
+    // -----------------------------------------------------------------------
+
+    /// Number of feedback rows currently cached in SQLite.
+    /// Used as a guard: if 0, the caller should fall back to git.
+    pub fn feedback_count(&self) -> usize {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM asd_feedback", [], |r| r.get::<_, i64>(0))
+            .unwrap_or(0) as usize
+    }
+
+    /// Insert or replace a single feedback entry.
+    ///
+    /// `created_at` is stored as an RFC 3339 string so it sorts correctly
+    /// in text order and round-trips through `list_all_feedback` accurately.
+    pub fn upsert_feedback(&self, e: &FeedbackEntry) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO asd_feedback
+             (entry_id, symbol_id, symbol_qname, query, verdict, author, created_at, note, file_scope)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                e.entry_id,
+                e.symbol_id,
+                e.symbol_qname,
+                e.query,
+                e.verdict.as_str(),
+                e.author,
+                e.created_at.to_rfc3339(),
+                e.note,
+                e.file_scope,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Return all feedback entries from the SQLite cache, newest first.
+    pub fn list_all_feedback(&self) -> rusqlite::Result<Vec<FeedbackEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT entry_id, symbol_id, symbol_qname, query, verdict, author, created_at, note, file_scope
+             FROM asd_feedback
+             ORDER BY created_at DESC",
+        )?;
+        let entries = stmt
+            .query_map([], |row| {
+                let verdict_str: String = row.get(4)?;
+                let verdict = FeedbackVerdict::from_str(&verdict_str)
+                    .unwrap_or(FeedbackVerdict::Useful);
+                let ts_str: String = row.get(6)?;
+                let created_at: DateTime<Utc> = DateTime::parse_from_rfc3339(&ts_str)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                Ok(FeedbackEntry {
+                    entry_id:     row.get(0)?,
+                    symbol_id:    row.get(1)?,
+                    symbol_qname: row.get(2)?,
+                    query:        row.get(3)?,
+                    verdict,
+                    author:       row.get(5)?,
+                    created_at,
+                    note:         row.get(7)?,
+                    file_scope:   row.get(8)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(entries)
+    }
+
+    /// Bulk-insert feedback entries from an authoritative slice (e.g. from the
+    /// git store after `asd index`).  Uses INSERT OR REPLACE so existing rows
+    /// are overwritten.  Wraps all inserts in a single transaction for speed.
+    pub fn sync_feedback_entries(&self, entries: &[FeedbackEntry]) -> rusqlite::Result<()> {
+        self.conn.execute_batch("BEGIN;")?;
+        for e in entries {
+            if let Err(err) = self.upsert_feedback(e) {
+                // Best-effort: log and continue rather than aborting the whole sync.
+                eprintln!("asd: feedback sync warning — {err}");
+            }
+        }
+        self.conn.execute_batch("COMMIT;")?;
+        Ok(())
+    }
+
     /// Secondary file-stem scan: return one representative symbol per file
     /// whose stored path contains `token` (case-insensitive substring match).
     ///
@@ -796,6 +923,88 @@ impl SearchFtsDb {
                 })
             })?
             .filter_map(|r| r.ok())
+            .collect();
+        Ok(hits)
+    }
+
+    /// Batch version of [`file_stem_candidates`]: query all `tokens` in a
+    /// single SQL UNION ALL instead of one round-trip per token.
+    ///
+    /// Returns one representative symbol per distinct file (lowest line number),
+    /// deduplicated across token arms.  Results are capped at `limit`.
+    ///
+    /// Falls back to an empty vec if `tokens` is empty or all tokens are
+    /// shorter than 2 characters.
+    pub fn file_stem_candidates_batch(
+        &self,
+        tokens: &[String],
+        filters: &FtsFilters,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<FtsHit>> {
+        // Keep only tokens long enough to be useful stem matches.
+        let valid: Vec<String> = tokens
+            .iter()
+            .filter(|t| t.len() >= 2)
+            .map(|t| t.to_lowercase())
+            .collect();
+        if valid.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let test_clause = if filters.include_tests { "" } else { "AND tier != '2'" };
+        let kind_clause = filters
+            .kind
+            .as_deref()
+            .map(|k| format!("AND kind = '{}'", k.to_lowercase().replace('\'', "")))
+            .unwrap_or_default();
+
+        // Build one SELECT arm per token; each arm uses ?N positional binding.
+        let arm_sql = |n: usize| -> String {
+            format!(
+                "SELECT symbol_id, language, kind, MIN(line) AS line, doc,
+                        qname_orig, sig_orig, file_orig, tier,
+                        ledger_text, ledger_flags
+                 FROM asd_search_fts
+                 WHERE lower(file_orig) LIKE '%' || ?{n} || '%'
+                 {test_clause}
+                 {kind_clause}
+                 GROUP BY file_orig"
+            )
+        };
+
+        let sql = valid
+            .iter()
+            .enumerate()
+            .map(|(i, _)| arm_sql(i + 1))
+            .collect::<Vec<_>>()
+            .join("\nUNION ALL\n");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut seen_files: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let hits: Vec<FtsHit> = stmt
+            .query_map(rusqlite::params_from_iter(valid.iter()), |row| {
+                let sig_orig: Option<String> = row.get(6)?;
+                let tier_str: String = row.get(8).unwrap_or_default();
+                let tier: SymbolTier = tier_str.parse().unwrap_or(0);
+                Ok(FtsHit {
+                    bm25_score: 0.0,
+                    symbol_id: row.get(0)?,
+                    language: row.get(1)?,
+                    kind: row.get(2)?,
+                    line: row.get::<_, u32>(3).unwrap_or(0),
+                    doc: row.get(4)?,
+                    qname: row.get(5)?,
+                    signature: sig_orig.filter(|s| !s.is_empty()),
+                    file: row.get(7)?,
+                    tier,
+                    ledger_text: row.get::<_, String>(9).unwrap_or_default(),
+                    ledger_flags: row.get::<_, String>(10).unwrap_or_default(),
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .filter(|h| seen_files.insert(h.file.clone()))
+            .take(limit)
             .collect();
         Ok(hits)
     }
@@ -2264,7 +2473,19 @@ impl SearchDocsDb {
 
     pub fn open(db_path: &Path) -> rusqlite::Result<Self> {
         let conn = Connection::open(db_path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA temp_store=MEMORY;
+             PRAGMA mmap_size=268435456;",
+        )?;
+        let cache_kb = {
+            let bytes = std::fs::metadata(db_path)
+                .map(|m| m.len() as usize)
+                .unwrap_or(0);
+            ((bytes * 8 / 10) / 1024).clamp(8_192, 65_536)
+        };
+        conn.execute_batch(&format!("PRAGMA cache_size=-{cache_kb};"))?;
         let db = Self { conn };
         db.ensure_schema()?;
         Ok(db)

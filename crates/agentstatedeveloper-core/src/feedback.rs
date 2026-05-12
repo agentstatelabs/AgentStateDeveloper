@@ -3,6 +3,18 @@
 //! Agents and users record verdicts on search results via `asd feedback mark`
 //! or the MCP `feedback_mark` tool. Verdicts are stored in the ASD sidecar
 //! and applied as score adjustments in `apply_feedback_adjustments`.
+//!
+//! ## SQLite write-through cache
+//!
+//! `AsgFeedbackStore` optionally holds a `db_path` — when present, `list_all`
+//! returns the SQLite cache (fast, ~0 git reads) and `record` additionally
+//! writes to SQLite after the git commit.  The git object store remains
+//! authoritative: if SQLite is empty (e.g. first run after `git pull`), we
+//! fall back to the git tree walk and re-populate the cache as a side effect.
+//! Running `asd index` / `asd reindex` calls `sync_feedback_entries` for a
+//! full reconciliation.
+
+use std::path::Path;
 
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
@@ -10,6 +22,7 @@ use agentstategraph_core::IntentCategory;
 use crate::error::Result;
 use crate::paths;
 use crate::schema::{FeedbackEntry, FeedbackVerdict};
+use crate::search_fts::SearchFtsDb;
 
 // ---------------------------------------------------------------------------
 // Trait
@@ -59,10 +72,14 @@ pub trait FeedbackStore {
 
 pub struct AsgFeedbackStore<'a> {
     pub repo: &'a Repository,
+    /// When `Some`, enables the SQLite write-through cache: `list_all` reads
+    /// from SQLite if populated, `record` writes to SQLite after the git commit.
+    pub db_path: Option<&'a Path>,
 }
 
 impl<'a> FeedbackStore for AsgFeedbackStore<'a> {
     fn record(&self, ref_name: &str, entry: &FeedbackEntry, agent_id: &str) -> Result<()> {
+        // Git is always written first — it's the authoritative store.
         let path = paths::feedback_entry_path(&entry.symbol_id, &entry.entry_id);
         let value = serde_json::to_value(entry)?;
         let opts = CommitOptions::new(
@@ -71,6 +88,12 @@ impl<'a> FeedbackStore for AsgFeedbackStore<'a> {
             format!("feedback {} for {}", entry.verdict.as_str(), entry.symbol_qname),
         );
         self.repo.set_json(ref_name, &path, &value, opts)?;
+        // Best-effort SQLite write-through; failures are non-fatal.
+        if let Some(db) = self.db_path {
+            if let Ok(fts) = SearchFtsDb::open(db) {
+                let _ = fts.upsert_feedback(entry);
+            }
+        }
         Ok(())
     }
 
@@ -90,6 +113,20 @@ impl<'a> FeedbackStore for AsgFeedbackStore<'a> {
     }
 
     fn list_all(&self, ref_name: &str) -> Result<Vec<FeedbackEntry>> {
+        // Fast path: SQLite cache — zero git tree walks when populated.
+        if let Some(db) = self.db_path {
+            if let Ok(fts) = SearchFtsDb::open(db) {
+                if fts.feedback_count() > 0 {
+                    if let Ok(entries) = fts.list_all_feedback() {
+                        return Ok(entries);
+                    }
+                }
+            }
+        }
+
+        // Authoritative git path — also runs when SQLite is empty (e.g. first
+        // run after `git pull`).  Re-populate the cache as a side effect so
+        // subsequent calls are fast.
         let prefix = format!("{}/feedback", paths::ASD_ROOT);
         let mut entries = Vec::new();
         if let Ok(serde_json::Value::Object(by_symbol)) =
@@ -108,6 +145,16 @@ impl<'a> FeedbackStore for AsgFeedbackStore<'a> {
             }
         }
         entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+        // Populate the SQLite cache for the next call — best effort.
+        if !entries.is_empty() {
+            if let Some(db) = self.db_path {
+                if let Ok(fts) = SearchFtsDb::open(db) {
+                    let _ = fts.sync_feedback_entries(&entries);
+                }
+            }
+        }
+
         Ok(entries)
     }
 }

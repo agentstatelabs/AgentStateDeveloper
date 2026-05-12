@@ -164,7 +164,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
 
     // Apply durable feedback adjustments (Useful/Noisy/WrongLayer verdicts).
     // list_all() hoisted once — reused for build_feedback_state_from_entries below.
-    let feedback_store = AsgFeedbackStore { repo: &engine.repo };
+    let feedback_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&cfg.db_path) };
     let all_fb = feedback_store.list_all(&engine.ref_name).unwrap_or_default();
     let feedback_verdicts: Vec<(String, String, agentstatedeveloper_core::FeedbackVerdict)> = all_fb.iter()
         .filter(|e| e.file_scope.is_none())

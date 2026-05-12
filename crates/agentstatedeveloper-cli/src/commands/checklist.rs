@@ -158,7 +158,7 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
     );
 
     // Apply durable feedback adjustments (Useful/Noisy/WrongLayer verdicts).
-    let feedback_store = AsgFeedbackStore { repo: &engine.repo };
+    let feedback_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&cfg.db_path) };
     let feedback_verdicts = feedback_store.flat_verdicts(&engine.ref_name).unwrap_or_default();
     apply_feedback_adjustments(&engine, &index_store, &cfg.db_path, &args.query, &mut candidates, &feedback_verdicts);
 

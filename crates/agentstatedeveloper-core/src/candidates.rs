@@ -231,16 +231,15 @@ pub fn resolve_scope(scope: &str, db_path: &Path) -> Vec<String> {
 fn apply_paths_filter(
     engine: &Engine,
     index_store: &AsgIndexStore,
-    db_path: &Path,
+    fts: Option<&SearchFtsDb>,
     paths_filter: &[String],
     scored: &mut Vec<(f64, String)>,
 ) {
     if paths_filter.is_empty() { return; }
-    // M60: bulk-resolve all qnames — one SQL query instead of N git reads.
+    // M62: reuse the caller's open connection — no extra open() per call.
     let qname_strs: Vec<&str> = scored.iter().map(|(_, q)| q.as_str()).collect();
-    let resolved = SearchFtsDb::open(db_path)
-        .ok()
-        .map(|fts| fts.resolve_qnames_bulk(&qname_strs))
+    let resolved = fts
+        .map(|f| f.resolve_qnames_bulk(&qname_strs))
         .unwrap_or_default();
     scored.retain(|(_, qname)| {
         if let Some(rsym) = resolved.get(qname.as_str()) {
@@ -263,16 +262,15 @@ fn apply_paths_filter(
 fn apply_exclusions(
     engine: &Engine,
     index_store: &AsgIndexStore,
-    db_path: &Path,
+    fts: Option<&SearchFtsDb>,
     exclude_terms: &[String],
     scored: &mut Vec<(f64, String)>,
 ) {
     if exclude_terms.is_empty() { return; }
-    // M60: bulk-resolve all qnames — one SQL query; FTS carries doc + sig_orig.
+    // M62: reuse the caller's open connection — no extra open() per call.
     let qname_strs: Vec<&str> = scored.iter().map(|(_, q)| q.as_str()).collect();
-    let resolved = SearchFtsDb::open(db_path)
-        .ok()
-        .map(|fts| fts.resolve_qnames_bulk(&qname_strs))
+    let resolved = fts
+        .map(|f| f.resolve_qnames_bulk(&qname_strs))
         .unwrap_or_default();
     scored.retain(|(_, qname)| {
         let qname_lower = qname.to_lowercase();
@@ -323,7 +321,7 @@ const MAX_ANCHORS: usize = 5;
 /// Falls back to the git-based path when the FTS index is unavailable.
 fn ledger_anchor_pass(
     engine: &Engine,
-    db_path: &Path,
+    fts: Option<&SearchFtsDb>,
     tokens: &[String],
     candidates: &mut Vec<(f64, String)>,
 ) {
@@ -331,8 +329,8 @@ fn ledger_anchor_pass(
 
     let existing_qnames: HashSet<String> = candidates.iter().map(|(_, q)| q.clone()).collect();
 
-    // Fast path: FTS denormalized columns — zero git reads.
-    if let Ok(fts) = SearchFtsDb::open(db_path) {
+    // Fast path: reuse caller's connection — zero extra open() calls.
+    if let Some(fts) = fts {
         if fts.has_data() {
             let hits = fts.anchor_candidates(tokens, &existing_qnames, MAX_ANCHORS);
             for (qname, _sym_id) in hits {
@@ -422,14 +420,17 @@ pub fn find_candidates(
     depth: usize,
 ) -> Vec<(f64, String)> {
     // --- FTS path ---
+    // M62: open once, reuse across stem injection, filter passes, and anchor
+    // pass — eliminates up to 4 extra Connection::open() calls per query.
     // Fetch depth*2 candidates (was depth*8). The overfetch factor is needed so
     // ledger/SOT boosts can reorder candidates after BM25 ranking; *2 keeps
     // accuracy well enough for the golden probe suite while cutting ledger-read
     // count to 25% of the original. Bump to *3/*4/*8 if ranking regressions appear.
-    let fts_result = SearchFtsDb::open(db_path)
-        .ok()
-        .filter(|fts| fts.has_data())
-        .and_then(|fts| fts.search(query, filters, depth * 2).ok());
+    let fts = SearchFtsDb::open(db_path).ok();
+    let fts_result = fts
+        .as_ref()
+        .filter(|f| f.has_data())
+        .and_then(|f| f.search(query, filters, depth * 2).ok());
 
     if let Some(hits) = fts_result {
         // Ledger-entry cache: read once per symbol during scoring, reuse in
@@ -507,27 +508,27 @@ pub fn find_candidates(
         ];
         let query_lower = query.to_lowercase();
         let is_view_query = VIEW_STEM_HINTS.iter().any(|h| query_lower.contains(h));
-        if let Ok(fts) = SearchFtsDb::open(db_path) {
-            for token in tokens {
-                if let Ok(stem_hits) = fts.file_stem_candidates(token, filters, depth * 2) {
-                    for hit in stem_hits {
-                        if !covered_files.contains(&hit.file) {
-                            let boost = hybrid_boost(&hit, tokens);
-                            let tier = hit.tier;
-                            let layer = classify_layer_sym(&hit.file, &hit.qname, tier, &[]);
-                            let view_boost = if is_view_query
-                                && (layer == "ui" || layer == "viewmodel")
-                            { 2.0 } else { 0.0 };
-                            // Extend maps so the has_ledger + file-dedup passes below
-                            // can use cache lookups instead of get_symbol_by_qname reads.
-                            qname_to_sym.entry(hit.qname.clone())
-                                .or_insert_with(|| (hit.symbol_id.clone(), hit.file.clone()));
-                            // M59: propagate ledger presence from stem hit into has_ledger_ids.
-                            if hit.has_ledger() {
-                                has_ledger_ids.insert(hit.symbol_id.clone());
-                            }
-                            scored.push((1.0 + boost + view_boost, hit.qname));
+        // M62: one UNION ALL query for all tokens — replaces N serial round-trips.
+        if let Some(fts) = fts.as_ref() {
+            let limit = depth * 2 * tokens.len().max(1);
+            if let Ok(stem_hits) = fts.file_stem_candidates_batch(tokens, filters, limit) {
+                for hit in stem_hits {
+                    if !covered_files.contains(&hit.file) {
+                        let boost = hybrid_boost(&hit, tokens);
+                        let tier = hit.tier;
+                        let layer = classify_layer_sym(&hit.file, &hit.qname, tier, &[]);
+                        let view_boost = if is_view_query
+                            && (layer == "ui" || layer == "viewmodel")
+                        { 2.0 } else { 0.0 };
+                        // Extend maps so the has_ledger + file-dedup passes below
+                        // can use cache lookups instead of get_symbol_by_qname reads.
+                        qname_to_sym.entry(hit.qname.clone())
+                            .or_insert_with(|| (hit.symbol_id.clone(), hit.file.clone()));
+                        // M59: propagate ledger presence from stem hit into has_ledger_ids.
+                        if hit.has_ledger() {
+                            has_ledger_ids.insert(hit.symbol_id.clone());
                         }
+                        scored.push((1.0 + boost + view_boost, hit.qname));
                     }
                 }
             }
@@ -569,13 +570,13 @@ pub fn find_candidates(
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(depth);
 
-        apply_paths_filter(engine, index_store, db_path, &filters.paths_filter, &mut scored);
-        apply_exclusions(engine, index_store, db_path, &filters.exclude_terms, &mut scored);
+        apply_paths_filter(engine, index_store, fts.as_ref(), &filters.paths_filter, &mut scored);
+        apply_exclusions(engine, index_store, fts.as_ref(), &filters.exclude_terms, &mut scored);
 
         // Ledger-anchor pass: inject invariant/hazard-bearing symbols that
         // matched query tokens but were dropped by dedup or FTS ranking.
-        // M60: uses FTS denormalized columns via db_path — no git reads.
-        ledger_anchor_pass(engine, db_path, tokens, &mut scored);
+        // M62: pass shared fts handle — no extra Connection::open() call.
+        ledger_anchor_pass(engine, fts.as_ref(), tokens, &mut scored);
 
         return scored;
     }
@@ -611,9 +612,9 @@ pub fn find_candidates(
     }
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(depth);
-    apply_paths_filter(engine, index_store, db_path, &filters.paths_filter, &mut scored);
-    apply_exclusions(engine, index_store, db_path, &filters.exclude_terms, &mut scored);
-    ledger_anchor_pass(engine, db_path, tokens, &mut scored);
+    apply_paths_filter(engine, index_store, fts.as_ref(), &filters.paths_filter, &mut scored);
+    apply_exclusions(engine, index_store, fts.as_ref(), &filters.exclude_terms, &mut scored);
+    ledger_anchor_pass(engine, fts.as_ref(), tokens, &mut scored);
     scored
 }
 
@@ -2047,7 +2048,7 @@ pub fn build_feedback_state(
     query: &str,
     entries_applied: usize,
 ) -> FeedbackState {
-    let fb_store = AsgFeedbackStore { repo: &engine.repo };
+    let fb_store = AsgFeedbackStore { repo: &engine.repo, db_path: None };
     let all = fb_store.list_all(ref_name).unwrap_or_default();
     build_feedback_state_from_entries(&all, query, entries_applied)
 }

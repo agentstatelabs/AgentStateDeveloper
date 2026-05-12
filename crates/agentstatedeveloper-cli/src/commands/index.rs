@@ -15,7 +15,10 @@ use anyhow::Result;
 use clap::Args;
 
 use agentstatedeveloper_adapters::default_adapters;
-use agentstatedeveloper_core::{collect_source_files, run_index, sync_to_dir, Engine};
+use agentstatedeveloper_core::{
+    collect_source_files, run_index, sync_to_dir, AsgFeedbackStore, Engine, FeedbackStore,
+};
+use agentstatedeveloper_core::search_fts::SearchFtsDb;
 
 use crate::commands::init::find_project_root;
 use crate::config::Config;
@@ -160,6 +163,19 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
             let msg = format!("asd: sidecar sync skipped: {e}");
             eprintln!("{msg}");
             if let Some(l) = &mut log { l.line(&msg); }
+        }
+    }
+
+    // Sync feedback cache: pull authoritative git entries into SQLite so
+    // subsequent `list_all()` calls hit the fast path immediately.
+    let fb_store = AsgFeedbackStore { repo: &engine.repo, db_path: None };
+    if let Ok(all_fb) = fb_store.list_all(&engine.ref_name) {
+        if !all_fb.is_empty() {
+            if let Ok(fts) = SearchFtsDb::open(&cfg.db_path) {
+                if let Err(e) = fts.sync_feedback_entries(&all_fb) {
+                    eprintln!("asd: feedback cache sync warning: {e}");
+                }
+            }
         }
     }
 

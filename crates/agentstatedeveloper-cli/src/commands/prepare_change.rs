@@ -186,7 +186,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // Apply durable feedback adjustments (Useful/Noisy/WrongLayer verdicts).
     // list_all() is hoisted here and reused for wrong_layer_files below — avoids two separate
     // git-object reads for the same feedback data.
-    let feedback_store = AsgFeedbackStore { repo: &engine.repo };
+    let feedback_store = AsgFeedbackStore { repo: &engine.repo, db_path: Some(&cfg.db_path) };
     let all_fb = feedback_store.list_all(&engine.ref_name).unwrap_or_default();
     // Derive flat_verdicts from the hoisted list (same logic as the FeedbackStore default impl).
     let feedback_verdicts: Vec<(String, String, agentstatedeveloper_core::FeedbackVerdict)> = all_fb.iter()
