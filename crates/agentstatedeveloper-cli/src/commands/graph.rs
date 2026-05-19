@@ -86,15 +86,20 @@ pub fn run_callers(cfg: &Config, args: CallersArgs) -> Result<()> {
     );
     t.phase("traverse");
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "symbol": args.qname,
-            "depth": args.depth,
-            "count": results.len(),
-            "callers": results,
-        }))?
-    );
+    if cfg.brief {
+        let lines = crate::commands::brief::brief_call_list(&results);
+        println!("{}", serde_json::to_string_pretty(&json!(lines))?);
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "symbol": args.qname,
+                "depth": args.depth,
+                "count": results.len(),
+                "callers": results,
+            }))?
+        );
+    }
     t.total("callers");
     Ok(())
 }
@@ -140,15 +145,20 @@ pub fn run_callees(cfg: &Config, args: CalleesArgs) -> Result<()> {
     );
     t.phase("traverse");
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "symbol": args.qname,
-            "depth": args.depth,
-            "count": results.len(),
-            "callees": results,
-        }))?
-    );
+    if cfg.brief {
+        let lines = crate::commands::brief::brief_call_list(&results);
+        println!("{}", serde_json::to_string_pretty(&json!(lines))?);
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "symbol": args.qname,
+                "depth": args.depth,
+                "count": results.len(),
+                "callees": results,
+            }))?
+        );
+    }
     t.total("callees");
     Ok(())
 }

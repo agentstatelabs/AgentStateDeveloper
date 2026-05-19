@@ -65,6 +65,13 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub audit_log: Option<PathBuf>,
 
+    /// Plan D t-001: emit compact output projecting each command down to
+    /// load-bearing fields (qname, file:line, signature, first doc line).
+    /// 60-80% token reduction vs default. Also honors `ASD_FORMAT=brief`.
+    /// `--json` (default) keeps the structured payload.
+    #[arg(long, global = true)]
+    pub brief: bool,
+
     #[command(subcommand)]
     pub cmd: Command,
 }
@@ -228,7 +235,12 @@ pub enum Command {
 
 /// Resolve [`Config`] from the parsed CLI flags.
 pub fn config_from_cli(cli: &Cli) -> Config {
-    Config::resolve(cli.db.clone(), cli.policy.clone(), cli.audit_log.clone())
+    Config::resolve_with_brief(
+        cli.db.clone(),
+        cli.policy.clone(),
+        cli.audit_log.clone(),
+        cli.brief,
+    )
 }
 
 /// Dispatch the OSS command set. `asd-pro` can call this for any

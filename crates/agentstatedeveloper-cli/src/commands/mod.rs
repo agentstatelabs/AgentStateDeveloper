@@ -1,4 +1,5 @@
 pub mod annotate_commit;
+pub mod brief;
 pub mod probe;
 pub mod scorecard;
 pub mod task_close;
