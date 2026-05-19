@@ -88,6 +88,8 @@ pub enum Command {
     Index(commands::index::IndexArgs),
 
     /// Read a symbol, its effects, and recent ledger entries.
+    /// Plan D t-003: also accepts `code_read` (MCP-era alias).
+    #[command(alias = "code_read")]
     Read(commands::read::ReadArgs),
 
     /// Ledger operations.
@@ -126,9 +128,13 @@ pub enum Command {
     List(commands::list::ListArgs),
 
     /// Show symbols that call the given symbol (direct or transitive).
+    /// Plan D t-003: also accepts `callers_of` (MCP-era alias).
+    #[command(alias = "callers_of")]
     Callers(commands::graph::CallersArgs),
 
     /// Show symbols called by the given symbol (direct or transitive).
+    /// Plan D t-003: also accepts `callees_of` (MCP-era alias).
+    #[command(alias = "callees_of")]
     Callees(commands::graph::CalleesArgs),
 
     /// Assemble agent query context for one or more symbols.
@@ -147,6 +153,8 @@ pub enum Command {
     Scratch(commands::scratch::ScratchCmd),
 
     /// Ranked concept search over indexed symbols.
+    /// Plan D t-003: also accepts `code_search` and `code_query` (MCP-era aliases).
+    #[command(aliases = ["code_search", "code_query"])]
     Search(commands::search::SearchArgs),
 
     /// Exact-symbol references via literal text scan + index definition lookup.
