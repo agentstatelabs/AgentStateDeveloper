@@ -157,6 +157,11 @@ pub enum Command {
     #[command(subcommand)]
     Conclusions(commands::conclusions::ConclusionsCmd),
 
+    /// Sidecar utilities. `migrate` flips a repo from the legacy `.asd/v1/`
+    /// layout (Plan A) to the compact `.asd/conclusions/` layout (Plan B).
+    #[command(subcommand)]
+    Sidecar(commands::sidecar::SidecarCmd),
+
     /// Broad feature archaeology: search → expand call chains, invariants,
     /// hazards, and effects for the top matching entry points in one pass.
     Investigate(commands::investigate::InvestigateArgs),
@@ -260,6 +265,7 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::References(args) => references::run(cfg, args),
         Command::Scopes(cmd) => scopes::run(cfg, cmd),
         Command::Conclusions(cmd) => conclusions::run(cfg, cmd),
+        Command::Sidecar(cmd) => sidecar::run(cfg, cmd),
         Command::Investigate(args) => investigate::run(cfg, args),
         Command::Status(args) => status::run(cfg, args),
         Command::Impact(args) => impact::run(cfg, args),
