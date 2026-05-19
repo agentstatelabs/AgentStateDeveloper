@@ -4,6 +4,7 @@ pub mod scorecard;
 pub mod task_close;
 pub mod audit;
 pub mod checklist;
+pub mod conclusions;
 pub mod feedback;
 pub mod impact;
 pub mod invariant;

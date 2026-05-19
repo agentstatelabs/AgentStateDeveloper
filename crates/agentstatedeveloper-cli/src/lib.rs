@@ -152,6 +152,11 @@ pub enum Command {
     #[command(subcommand)]
     Scopes(commands::scopes::ScopesCmd),
 
+    /// View ledger entries bucketed by the six Plan B conclusion classes
+    /// (decisions, classifications, mappings, hazards, recipes, followups).
+    #[command(subcommand)]
+    Conclusions(commands::conclusions::ConclusionsCmd),
+
     /// Broad feature archaeology: search → expand call chains, invariants,
     /// hazards, and effects for the top matching entry points in one pass.
     Investigate(commands::investigate::InvestigateArgs),
@@ -254,6 +259,7 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Search(args) => search::run(cfg, args),
         Command::References(args) => references::run(cfg, args),
         Command::Scopes(cmd) => scopes::run(cfg, cmd),
+        Command::Conclusions(cmd) => conclusions::run(cfg, cmd),
         Command::Investigate(args) => investigate::run(cfg, args),
         Command::Status(args) => status::run(cfg, args),
         Command::Impact(args) => impact::run(cfg, args),

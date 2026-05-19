@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 
 use agentstatedeveloper_adapters::default_adapters;
 use agentstatedeveloper_core::{
-    load_scope_aliases, stale_warning,
+    load_scope_aliases, stale_warning, ConclusionClass,
     ASD_PATH_PREFIX, AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore,
     AsgScratchStore, AuditEvent, Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory,
     EffectDecl, EffectStore, Engine, FeedbackEntry, FeedbackStore, FeedbackVerdict, FtsFilters,
@@ -107,6 +107,15 @@ pub struct ReferencesParams {
 }
 
 fn default_references_limit() -> u32 { 500 }
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ConclusionsListParams {
+    /// Restrict to one conclusion class: decisions | classifications |
+    /// mappings | hazards | recipes | followups. Omit to list all six.
+    pub class: Option<String>,
+    /// Restrict to one symbol qname. Omit to list across all symbols.
+    pub symbol: Option<String>,
+}
 
 #[derive(Deserialize, JsonSchema)]
 pub struct InvestigateParams {
@@ -346,6 +355,12 @@ pub struct LedgerAppendParams {
     /// Author id (default: "asd-mcp").
     #[serde(default = "default_author_id")]
     pub author_id: String,
+    /// Plan B t-002: optional classification role/intent tag
+    /// (e.g. "diagnostic-test", "fast-test", "fixture-path").
+    pub role: Option<String>,
+    /// Plan B t-002: optional canonical reproduction or validation command
+    /// (e.g. "swift test --filter SongPlayersTests").
+    pub command: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1068,6 +1083,103 @@ impl AsdMcpServer {
     }
 
     #[tool(
+        description = "List ledger entries bucketed by the six Plan B conclusion classes (decisions, classifications, mappings, hazards, recipes, followups). Optional `class` filters to one bucket; optional `symbol` filters to one qname. Use to audit what conclusions exist before exporting to .asd/conclusions/*.jsonl. (CLI: `asd conclusions list`.)"
+    )]
+    async fn conclusions_list(&self, params: Parameters<ConclusionsListParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let index = AsgIndexStore::from_engine(&engine);
+        let ledger = AsgLedgerStore::from_engine(&engine);
+
+        // Parse optional class filter.
+        let target_class: Option<ConclusionClass> = p.class.as_deref().and_then(|s| {
+            match s {
+                "decisions" => Some(ConclusionClass::Decisions),
+                "classifications" => Some(ConclusionClass::Classifications),
+                "mappings" => Some(ConclusionClass::Mappings),
+                "hazards" => Some(ConclusionClass::Hazards),
+                "recipes" => Some(ConclusionClass::Recipes),
+                "followups" => Some(ConclusionClass::FollowUps),
+                _ => None,
+            }
+        });
+        if p.class.is_some() && target_class.is_none() {
+            return err_json(&format!(
+                "unknown conclusion class: {}. valid: decisions, classifications, mappings, hazards, recipes, followups",
+                p.class.as_deref().unwrap_or("")
+            ));
+        }
+
+        // Resolve target symbols.
+        let symbol_ids: Vec<(String, String)> = if let Some(qname) = p.symbol.as_deref() {
+            match index.get_symbol_by_qname(&ref_name, qname) {
+                Ok(Some(sym)) => vec![(sym.symbol_id, sym.qname)],
+                _ => Vec::new(),
+            }
+        } else {
+            let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+            let tree = engine
+                .repo
+                .get_tree(&ref_name, &prefix)
+                .unwrap_or(serde_json::Value::Null);
+            let qnames: Vec<String> = match tree {
+                serde_json::Value::Object(m) => m.keys().cloned().collect(),
+                _ => Vec::new(),
+            };
+            let mut out = Vec::new();
+            for qn in qnames {
+                if let Ok(Some(sym)) = index.get_symbol_by_qname(&ref_name, &qn) {
+                    out.push((sym.symbol_id, sym.qname));
+                }
+            }
+            out
+        };
+
+        use std::collections::BTreeMap;
+        let mut buckets: BTreeMap<&'static str, Vec<serde_json::Value>> = BTreeMap::new();
+        for class in ConclusionClass::all() {
+            if target_class.is_none() || target_class == Some(*class) {
+                buckets.insert(class.filename_stem(), Vec::new());
+            }
+        }
+
+        for (sym_id, qname) in &symbol_ids {
+            let entries = ledger.list_entries(&ref_name, sym_id).unwrap_or_default();
+            for entry in entries {
+                let class = entry.kind.conclusion_class();
+                if let Some(filter) = target_class {
+                    if class != filter {
+                        continue;
+                    }
+                }
+                if let Some(bucket) = buckets.get_mut(class.filename_stem()) {
+                    bucket.push(serde_json::json!({
+                        "entry_id": entry.entry_id,
+                        "kind": entry.kind.as_str(),
+                        "qname": qname,
+                        "symbol_id": entry.symbol_id,
+                        "summary": entry.summary,
+                        "role": entry.role,
+                        "command": entry.command,
+                        "tags": entry.tags,
+                        "created_at": entry.created_at,
+                    }));
+                }
+            }
+        }
+
+        let total: usize = buckets.values().map(|v| v.len()).sum();
+        serde_json::to_string(&serde_json::json!({
+            "class": target_class.map(|c| c.filename_stem()),
+            "symbol": p.symbol,
+            "total": total,
+            "buckets": buckets,
+        }))
+        .unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[tool(
         description = "Exact-symbol references with rg parity. Returns the canonical definition(s) from the ASD index plus every literal text occurrence in the worktree via `rg --fixed-strings --word-regexp`. Use this when you want complete, predictable matches for a concrete identifier (no tokenization, no BM25). Requires `rg` on PATH. (CLI: `asd references`.)"
     )]
     async fn references(&self, params: Parameters<ReferencesParams>) -> String {
@@ -1674,6 +1786,8 @@ impl AsdMcpServer {
             entry.tags = tags;
         }
         entry.matched_policy = decision.matched_policy();
+        entry.role = p.role;
+        entry.command = p.command;
 
         // RequireApproval: tag the entry so downstream reviewers see it.
         if let Decision::RequireApproval {
@@ -5200,8 +5314,10 @@ fn parse_ledger_kind(s: &str) -> Result<LedgerKind, String> {
         "validation_scenario" | "validationscenario" => Ok(LedgerKind::ValidationScenario),
         "known_bug" | "knownbug" => Ok(LedgerKind::KnownBug),
         "concept" => Ok(LedgerKind::Concept),
+        "mapping" => Ok(LedgerKind::Mapping),
+        "follow_up" | "followup" => Ok(LedgerKind::FollowUp),
         other => Err(format!(
-            "unknown ledger kind: {}. Valid: decision, assumption, constraint, rationale, hazard, tradeoff, invariant, ownership, proof, validation_scenario, known_bug, concept",
+            "unknown ledger kind: {}. Valid: decision, assumption, constraint, rationale, hazard, tradeoff, invariant, ownership, proof, validation_scenario, known_bug, concept, mapping, follow_up",
             other
         )),
     }
@@ -5377,6 +5493,15 @@ mod tool_name_regression {
         assert!(
             AsdMcpServer::tool_router().has_route("scopes_list"),
             "expected `scopes_list` MCP tool to be registered"
+        );
+    }
+
+    #[test]
+    fn conclusions_list_tool_is_registered() {
+        // Plan B, t-003: bucketed view over the new conclusion classes.
+        assert!(
+            AsdMcpServer::tool_router().has_route("conclusions_list"),
+            "expected `conclusions_list` MCP tool to be registered"
         );
     }
 
