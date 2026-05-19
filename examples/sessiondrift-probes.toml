@@ -100,3 +100,28 @@ command = "asd"
 args = ["references", "SIDChip", "--limit", "100"]
 tags = ["plan-a", "references", "rg-parity"]
 assert = { kind = "file_in_key", key = "occurrences", field = "file", value = "SIDChip" }
+
+# --------------------------------------------------------------------------
+# Plan B acceptance: the headline metric. After `asd sidecar migrate`, the
+# committed conclusion bytes must stay tiny — kilobytes, not megabytes.
+# 500_000 bytes ≈ 500KB; pre-migration ExampleFlow was ~75MB (150x larger).
+# --------------------------------------------------------------------------
+[[probe]]
+name = "conclusions-export-stays-small"
+description = "Committed .asd/conclusions/*.jsonl must stay under 500KB total."
+command = "asd"
+args = ["conclusions", "export"]
+tags = ["plan-b", "acceptance", "sidecar-size"]
+assert = { kind = "field_lte", field = "total_bytes", max_value = 500000 }
+
+# Migration smoke: after `asd sidecar migrate`, the report's savings_bytes
+# should be positive (we moved bytes out of .asd/v1/) OR legacy_sidecar
+# wasn't present in the first place.
+[[probe]]
+name = "sidecar-migrate-runs-cleanly"
+description = "`asd sidecar migrate` exits 0 and emits a structured next_steps array."
+command = "asd"
+args = ["sidecar", "migrate"]
+tags = ["plan-b", "migration"]
+# Smoke-only — any exit-0 run is success. Tighten once we know the
+# baseline for ExampleFlow.

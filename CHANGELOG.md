@@ -5,6 +5,49 @@ Versions use semantic versioning; each milestone increments by 0.0.5.
 
 ---
 
+## [0.9.84] — 2026-05-19 — Plan B complete (compact conclusion sidecar)
+
+### Migrating an existing repo
+
+The committed sidecar shape changed in Plan B. Old layout was `.asd/v1/`
+(tens of MB on real projects). New layout is `.asd/conclusions/*.jsonl`
+(kilobytes). One-shot migration:
+
+```sh
+asd sidecar migrate           # writes .asd/conclusions/*.jsonl
+git rm -r --cached .asd/v1    # drop the old bloat from tracking
+git add .asd/conclusions/
+git commit -m "plan-b: switch to compact conclusion sidecar"
+```
+
+Re-running `asd init` afterwards is safe — it scaffolds the new layout
+and flips the git hooks (pre-commit → `asd conclusions export`;
+post-merge / post-checkout → `asd conclusions import`).
+
+### Added
+- `asd conclusions list|export|import` — read, write, and round-trip the
+  six conclusion classes (decisions, classifications, mappings, hazards,
+  recipes, followups). Byte-stable JSONL; idempotent import keyed by
+  `entry_id`.
+- `asd sidecar migrate` — one-shot migration with savings report and
+  `git rm --cached` instructions for the legacy `.asd/v1/` tree.
+- Two new `LedgerKind` variants: `Mapping` (legacy → new coverage
+  cross-refs) and `FollowUp` (open items tied to external task systems).
+- Two optional `LedgerEntry` fields: `role` (classification tag) and
+  `command` (canonical reproduction command).
+- New MCP tools: `conclusions_list`, `conclusions_export`,
+  `conclusions_import`.
+- `field_lte` probe assertion kind (used by the new sidecar-size probe).
+
+### Changed
+- `asd init` now scaffolds `.asd/conclusions/` (tracked) and `.asd/cache/`
+  (gitignored). Git hooks flipped from the old hydrate flow to the new
+  conclusions round-trip.
+- Updated `.gitignore` to add `.asd/cache/` alongside `.asd/v1/` (Plan A
+  line preserved). `.asd/conclusions/` is intentionally not ignored.
+
+---
+
 ## [0.8.5] — 2026-05-05
 
 ### Added
