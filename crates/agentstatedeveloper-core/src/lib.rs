@@ -40,10 +40,10 @@ pub use policy::{
     actions,
 };
 pub use schema::{
-    ASD_PATH_PREFIX, ASD_SCHEMA_VERSION, Author, AuthorKind, Effect, EffectCategory, EffectDecl,
-    Evidence, FeedbackEntry, FeedbackVerdict, LedgerEntry, LedgerKind, Mismatch, Position, Rebind,
-    ScratchEntry, ScratchStatus, Symbol, SymbolKind, TransitiveEffect, Verification,
-    VerificationSource, VerificationStatus,
+    ASD_PATH_PREFIX, ASD_SCHEMA_VERSION, Author, AuthorKind, ConclusionClass, Effect,
+    EffectCategory, EffectDecl, Evidence, FeedbackEntry, FeedbackVerdict, LedgerEntry, LedgerKind,
+    Mismatch, Position, Rebind, ScratchEntry, ScratchStatus, Symbol, SymbolKind, TransitiveEffect,
+    Verification, VerificationSource, VerificationStatus,
 };
 pub use scratch::{AsgScratchStore, CleanFilter, ScratchFilter, ScratchStore};
 pub use feedback::{AsgFeedbackStore, FeedbackStore};

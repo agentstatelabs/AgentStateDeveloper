@@ -56,6 +56,18 @@ pub struct LedgerEntry {
     pub tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_policy: Option<String>,
+    /// Plan B t-002: role/intent tag for classification entries
+    /// (e.g. "diagnostic-test", "fast-test", "fixture-path", "stale-api").
+    /// Optional; only meaningful for kind=Ownership/Concept (the
+    /// classification family). Skipped from JSON when None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Plan B t-002: canonical reproduction or validation command for
+    /// recipe-style entries (e.g. "swift test --filter SongPlayersTests").
+    /// Optional; only meaningful for kind=ValidationScenario/Proof or
+    /// kind=FollowUp (where it is the command that closes the follow-up).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -85,6 +97,72 @@ pub enum LedgerKind {
     KnownBug,
     /// A domain concept (e.g. "Drift Pad clip playhead") — first-class queryable entity.
     Concept,
+    /// Plan B t-002: replacement-coverage mapping. "Legacy SIDFileParserTests
+    /// coverage now lives in SIDParserAndPlayerTests." Body holds the cross-
+    /// reference in JSON (`from_qname`, `to_qname`, `rationale`).
+    Mapping,
+    /// Plan B t-002: open follow-up tied to an external task system.
+    /// "SID real-file diagnostics still need migration under t-024." The
+    /// `command` field on LedgerEntry may carry the closing command; the
+    /// `external_task_id` evidence variant carries the task pointer.
+    FollowUp,
+}
+
+impl LedgerKind {
+    /// Plan B t-001/t-002: map a LedgerKind to its conclusion class.
+    /// Drives export bucketing into .asd/conclusions/{class}.jsonl.
+    pub fn conclusion_class(self) -> ConclusionClass {
+        use LedgerKind::*;
+        match self {
+            Decision | Assumption | Constraint | Rationale | Tradeoff | Invariant => {
+                ConclusionClass::Decisions
+            }
+            Ownership | Concept => ConclusionClass::Classifications,
+            Mapping => ConclusionClass::Mappings,
+            Hazard | KnownBug => ConclusionClass::Hazards,
+            ValidationScenario | Proof => ConclusionClass::Recipes,
+            FollowUp => ConclusionClass::FollowUps,
+        }
+    }
+}
+
+/// The six conclusion-class buckets that drive `.asd/conclusions/*.jsonl`
+/// export and the Plan B sidecar redesign. Each class corresponds to one
+/// JSONL file; LedgerKind variants are bucketed via `conclusion_class()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConclusionClass {
+    Decisions,
+    Classifications,
+    Mappings,
+    Hazards,
+    Recipes,
+    FollowUps,
+}
+
+impl ConclusionClass {
+    /// Filename stem under `.asd/conclusions/` (e.g. `decisions` → `decisions.jsonl`).
+    pub fn filename_stem(self) -> &'static str {
+        match self {
+            Self::Decisions => "decisions",
+            Self::Classifications => "classifications",
+            Self::Mappings => "mappings",
+            Self::Hazards => "hazards",
+            Self::Recipes => "recipes",
+            Self::FollowUps => "followups",
+        }
+    }
+
+    /// All six classes in stable order — used by export to walk buckets.
+    pub fn all() -> &'static [ConclusionClass] {
+        &[
+            Self::Decisions,
+            Self::Classifications,
+            Self::Mappings,
+            Self::Hazards,
+            Self::Recipes,
+            Self::FollowUps,
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,6 +404,8 @@ impl LedgerEntry {
             created_at: Utc::now(),
             tags: Vec::new(),
             matched_policy: None,
+            role: None,
+            command: None,
         }
     }
 }
@@ -345,6 +425,8 @@ impl LedgerKind {
             LedgerKind::ValidationScenario => "validation_scenario",
             LedgerKind::KnownBug => "known_bug",
             LedgerKind::Concept => "concept",
+            LedgerKind::Mapping => "mapping",
+            LedgerKind::FollowUp => "follow_up",
         }
     }
 }
@@ -499,4 +581,109 @@ pub struct FeedbackEntry {
     /// path matches this pattern for queries in the same query family.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_scope: Option<String>,
+}
+
+#[cfg(test)]
+mod plan_b_schema_tests {
+    //! Plan B t-002: regression tests for the new LedgerKind variants and
+    //! optional LedgerEntry fields (role, command), and for the
+    //! LedgerKind → ConclusionClass mapping that drives JSONL export.
+
+    use super::*;
+
+    #[test]
+    fn new_kinds_serialize_to_snake_case() {
+        let json = serde_json::to_string(&LedgerKind::Mapping).unwrap();
+        assert_eq!(json, "\"mapping\"");
+        let json = serde_json::to_string(&LedgerKind::FollowUp).unwrap();
+        assert_eq!(json, "\"follow_up\"");
+    }
+
+    #[test]
+    fn new_kinds_round_trip_through_serde() {
+        for kind in [LedgerKind::Mapping, LedgerKind::FollowUp] {
+            let json = serde_json::to_string(&kind).unwrap();
+            let back: LedgerKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, kind);
+        }
+    }
+
+    #[test]
+    fn optional_fields_are_omitted_when_none() {
+        let entry = LedgerEntry::new(
+            "sym_test",
+            LedgerKind::Decision,
+            "some decision",
+            Author { kind: AuthorKind::Agent, id: "agent".into() },
+        );
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(!json.contains("\"role\""));
+        assert!(!json.contains("\"command\""));
+    }
+
+    #[test]
+    fn optional_fields_round_trip_when_set() {
+        let mut entry = LedgerEntry::new(
+            "sym_test",
+            LedgerKind::FollowUp,
+            "SID real-file diagnostics still need migration",
+            Author { kind: AuthorKind::Human, id: "craig".into() },
+        );
+        entry.role = Some("diagnostic-test".into());
+        entry.command = Some("swift test --filter SongPlayersTests".into());
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: LedgerEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.role.as_deref(), Some("diagnostic-test"));
+        assert_eq!(
+            back.command.as_deref(),
+            Some("swift test --filter SongPlayersTests")
+        );
+    }
+
+    #[test]
+    fn every_ledger_kind_buckets_to_a_conclusion_class() {
+        // If a new variant gets added without updating conclusion_class(),
+        // the compiler-exhaustive match in conclusion_class() will catch it.
+        // This test just exercises every existing variant to make sure no
+        // bucket is empty by accident.
+        use ConclusionClass::*;
+        let pairs = [
+            (LedgerKind::Decision, Decisions),
+            (LedgerKind::Assumption, Decisions),
+            (LedgerKind::Constraint, Decisions),
+            (LedgerKind::Rationale, Decisions),
+            (LedgerKind::Tradeoff, Decisions),
+            (LedgerKind::Invariant, Decisions),
+            (LedgerKind::Ownership, Classifications),
+            (LedgerKind::Concept, Classifications),
+            (LedgerKind::Mapping, Mappings),
+            (LedgerKind::Hazard, Hazards),
+            (LedgerKind::KnownBug, Hazards),
+            (LedgerKind::ValidationScenario, Recipes),
+            (LedgerKind::Proof, Recipes),
+            (LedgerKind::FollowUp, FollowUps),
+        ];
+        for (kind, expected) in pairs {
+            assert_eq!(
+                kind.conclusion_class(),
+                expected,
+                "kind {:?} should bucket to {:?}",
+                kind,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn conclusion_class_filename_stems_match_design() {
+        // Plan A DESIGN section names these exactly. Renaming requires a
+        // migration; lock them down with this test.
+        assert_eq!(ConclusionClass::Decisions.filename_stem(), "decisions");
+        assert_eq!(ConclusionClass::Classifications.filename_stem(), "classifications");
+        assert_eq!(ConclusionClass::Mappings.filename_stem(), "mappings");
+        assert_eq!(ConclusionClass::Hazards.filename_stem(), "hazards");
+        assert_eq!(ConclusionClass::Recipes.filename_stem(), "recipes");
+        assert_eq!(ConclusionClass::FollowUps.filename_stem(), "followups");
+        assert_eq!(ConclusionClass::all().len(), 6);
+    }
 }
