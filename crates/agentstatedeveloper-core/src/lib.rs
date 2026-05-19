@@ -7,6 +7,7 @@
 pub mod adapter;
 pub mod audit;
 pub mod candidates;
+pub mod conclusions_export;
 pub mod doc_adapters;
 pub mod effects;
 pub mod engine;

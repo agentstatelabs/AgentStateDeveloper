@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 
 use agentstatedeveloper_adapters::default_adapters;
 use agentstatedeveloper_core::{
-    load_scope_aliases, stale_warning, ConclusionClass,
+    conclusions_export, load_scope_aliases, stale_warning, ConclusionClass,
     ASD_PATH_PREFIX, AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore,
     AsgScratchStore, AuditEvent, Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory,
     EffectDecl, EffectStore, Engine, FeedbackEntry, FeedbackStore, FeedbackVerdict, FtsFilters,
@@ -115,6 +115,13 @@ pub struct ConclusionsListParams {
     pub class: Option<String>,
     /// Restrict to one symbol qname. Omit to list across all symbols.
     pub symbol: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ConclusionsExportParams {
+    /// Output directory for the JSONL files. Defaults to `.asd/conclusions/`
+    /// relative to the database parent directory.
+    pub out: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1177,6 +1184,46 @@ impl AsdMcpServer {
             "buckets": buckets,
         }))
         .unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[tool(
+        description = "Write all ledger conclusions to compact JSONL files (one per class) under `.asd/conclusions/`. Byte-stable when no new entries — safe to run from a pre-commit hook. Returns per-class entry + byte counts. (CLI: `asd conclusions export`.)"
+    )]
+    async fn conclusions_export(&self, params: Parameters<ConclusionsExportParams>) -> String {
+        let p = params.0;
+        let db_path = self.db_path.clone();
+        let engine = self.engine.lock().await;
+
+        let out_dir: std::path::PathBuf = p
+            .out
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                db_path
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .join(".asd")
+                    .join("conclusions")
+            });
+
+        match conclusions_export::export_all(&engine, &out_dir) {
+            Ok(counts) => {
+                let total_entries: usize = counts.iter().map(|(_, n, _)| n).sum();
+                let total_bytes: u64 = counts.iter().map(|(_, _, b)| b).sum();
+                serde_json::to_string(&serde_json::json!({
+                    "out_dir": out_dir.display().to_string(),
+                    "files": counts.iter().map(|(stem, n, b)| serde_json::json!({
+                        "class": stem,
+                        "file": format!("{stem}.jsonl"),
+                        "entries": n,
+                        "bytes": b,
+                    })).collect::<Vec<_>>(),
+                    "total_entries": total_entries,
+                    "total_bytes": total_bytes,
+                }))
+                .unwrap_or_else(|_| "{}".to_string())
+            }
+            Err(e) => err_json(&format!("conclusions export failed: {e}")),
+        }
     }
 
     #[tool(
@@ -5502,6 +5549,15 @@ mod tool_name_regression {
         assert!(
             AsdMcpServer::tool_router().has_route("conclusions_list"),
             "expected `conclusions_list` MCP tool to be registered"
+        );
+    }
+
+    #[test]
+    fn conclusions_export_tool_is_registered() {
+        // Plan B, t-004: write ledger → .asd/conclusions/*.jsonl.
+        assert!(
+            AsdMcpServer::tool_router().has_route("conclusions_export"),
+            "expected `conclusions_export` MCP tool to be registered"
         );
     }
 

@@ -11,6 +11,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde_json::json;
 
 use agentstatedeveloper_core::{
+    conclusions_export::{self, ExportRecord},
     AsgIndexStore, AsgLedgerStore, ConclusionClass, Engine, IndexStore, LedgerKind, LedgerStore,
 };
 
@@ -20,6 +21,10 @@ use crate::config::Config;
 pub enum ConclusionsCmd {
     /// List ledger entries grouped by conclusion class.
     List(ListArgs),
+    /// Write all ledger conclusions to compact JSONL files under
+    /// `.asd/conclusions/` (one file per class). Byte-stable when no new
+    /// entries — safe to run from a pre-commit hook.
+    Export(ExportArgs),
 }
 
 #[derive(Debug, Args)]
@@ -57,9 +62,22 @@ impl From<CliConclusionClass> for ConclusionClass {
     }
 }
 
+#[derive(Debug, Args)]
+pub struct ExportArgs {
+    /// Output directory for the JSONL files. Defaults to `.asd/conclusions/`
+    /// relative to the database parent directory.
+    #[arg(long)]
+    pub out: Option<std::path::PathBuf>,
+
+    /// Emit a one-line summary instead of full per-class counts.
+    #[arg(long)]
+    pub quiet: bool,
+}
+
 pub fn run(cfg: &Config, cmd: ConclusionsCmd) -> Result<()> {
     match cmd {
         ConclusionsCmd::List(args) => list(cfg, args),
+        ConclusionsCmd::Export(args) => export(cfg, args),
     }
 }
 
@@ -159,3 +177,51 @@ fn list(cfg: &Config, args: ListArgs) -> Result<()> {
 fn kind_str(k: LedgerKind) -> &'static str {
     k.as_str()
 }
+
+// -- Export ------------------------------------------------------------------
+//
+// The actual walk/serialize/write helpers live in
+// `agentstatedeveloper_core::conclusions_export` so the MCP `conclusions_export`
+// tool can call the same code without duplication.
+
+fn export(cfg: &Config, args: ExportArgs) -> Result<()> {
+    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let out_dir = args.out.unwrap_or_else(|| {
+        cfg.db_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join(".asd")
+            .join("conclusions")
+    });
+
+    let counts = conclusions_export::export_all(&engine, &out_dir)?;
+
+    if args.quiet {
+        let total_entries: usize = counts.iter().map(|(_, n, _)| n).sum();
+        let total_bytes: u64 = counts.iter().map(|(_, _, b)| b).sum();
+        println!(
+            "exported {} entries ({} bytes) to {}",
+            total_entries,
+            total_bytes,
+            out_dir.display()
+        );
+    } else {
+        let payload = json!({
+            "out_dir": out_dir.display().to_string(),
+            "files": counts.iter().map(|(stem, n, b)| json!({
+                "class": stem,
+                "file": format!("{stem}.jsonl"),
+                "entries": n,
+                "bytes": b,
+            })).collect::<Vec<_>>(),
+            "total_entries": counts.iter().map(|(_, n, _)| n).sum::<usize>(),
+            "total_bytes": counts.iter().map(|(_, _, b)| b).sum::<u64>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    }
+    Ok(())
+}
+
+// (write_jsonl, gather_buckets, ExportRecord and their tests live in
+//  agentstatedeveloper_core::conclusions_export — single source of truth
+//  shared by CLI and MCP.)
