@@ -496,3 +496,83 @@ Follows the same pattern as `/Apps/stategraph/` and `/Apps/CTXone/`.
   replaces `FilePolicyGate` as production path; action taxonomy formalized;
   `Situation` qualifiers enriched; policy evaluation wired into
   approve/reject/withdraw.
+
+## Plan B — compact conclusion sidecar (in design)
+
+Plan B redesigns the committed sidecar around *conclusions* — the expensive
+LLM-formed facts that are hard to reproduce — and drops everything that is
+derivable from source. Driven by the ExampleFlow field report showing the
+`.asd/v1/` sidecar reaching 75 MB.
+
+### Reframe from the t-001 audit
+
+The "75 MB sidecar" problem is **not** a ledger problem. Ledger entries
+already live in the ASG repo under `/asd/v1/ledger/{symbol_id}/{entry_id}`
+and are small. The bloat lives in derived subtrees the indexer writes:
+
+- `symbols/` — full Symbol JSON × N
+- `effects/` — EffectDecl JSON × N
+- `code/` — source snapshots
+- `index/{by-qname,callers,callees,effects-rev}/` — derived call/effect graph
+
+All four are regenerable from source via `asd index .`. Plan A t-003
+already gitignored `.asd/v1/`. Plan B's job is to add a *committed* shape
+for the part that is **not** regenerable (the ledger conclusions).
+
+### Six conclusion classes vs current LedgerKind
+
+| Class | Coverage today | Action |
+|---|---|---|
+| 1. Decisions | Decision, Rationale, Constraint, Assumption, Tradeoff, Invariant | reuse |
+| 2. Classifications | Ownership, Concept (partial — no role/intent enum) | optional `role: Option<String>` on LedgerEntry |
+| 3. Mappings (legacy → new coverage) | none | **new** `LedgerKind::Mapping` |
+| 4. Hazards | Hazard, KnownBug | reuse |
+| 5. Validation recipes | ValidationScenario, Proof, Evidence | optional `command: Option<String>` field |
+| 6. Follow-ups | none | **new** `LedgerKind::FollowUp` |
+
+Net schema delta: **2 new LedgerKind variants + 2 optional LedgerEntry
+fields**. Nothing else changes in core's ledger model.
+
+### Committed shape: `.asd/conclusions/*.jsonl`
+
+One file per class, each line a compact JSON object:
+
+```
+.asd/
+  conclusions/
+    decisions.jsonl        # Decision | Rationale | Constraint | Assumption | Tradeoff | Invariant
+    classifications.jsonl  # Ownership | Concept (+ role field)
+    mappings.jsonl         # new Mapping kind
+    hazards.jsonl          # Hazard | KnownBug
+    recipes.jsonl          # ValidationScenario | Proof (with command field)
+    followups.jsonl        # new FollowUp kind
+  cache/                   # gitignored — index/, symbols/, effects/, code/ go here
+```
+
+Each JSONL line carries the minimal anchoring needed for human review and
+round-trip:
+
+```json
+{"id":"led_…","symbol":"App.SongPlayers.tests","kind":"decision",
+ "summary":"SongPlayers tests must stay out of default AudioEngine",
+ "author":"ctx_user@…","created":"2026-05-19T16:54:00Z",
+ "evidence":[{"kind":"ctxone","value":"sg_8ad836e175f3"}]}
+```
+
+Field order is fixed so re-export is byte-stable (t-004 acceptance).
+
+### Round-trip
+
+- `asd conclusions export` — reads ledger, writes the 6 JSONL files
+- `asd conclusions import` — reads JSONL, upserts to ledger by entry_id
+  (idempotent; supersedes carry through)
+- `asd sidecar migrate` — drains existing `.asd/v1/ledger/` into JSONL,
+  then prints `git rm -r --cached .asd/v1` for the user to drop the bloat
+
+Hook flow after Plan B: `pre-commit` → `asd conclusions export` (kilobyte
+diff); `post-merge`/`post-checkout` → `asd conclusions import` (replaces
+the heavy `asd hydrate` flow).
+
+### Acceptance
+
+ExampleFlow sidecar drops from 75 MB → < 500 KB (t-008 probe).
