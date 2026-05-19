@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::engine::Engine;
 use crate::index::{AsgIndexStore, IndexStore};
@@ -19,25 +19,26 @@ use crate::paths::ASD_ROOT;
 use crate::schema::{AuthorKind, ConclusionClass};
 
 /// Compact JSONL record. `preserve_order` is on for serde_json in this
-/// workspace so field order is stable across runs.
-#[derive(Debug, Clone, Serialize)]
+/// workspace so field order is stable across runs. Plan B t-005 requires
+/// Deserialize too so import can round-trip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportRecord {
     pub id: String,
-    pub kind: &'static str,
+    pub kind: String,
     pub qname: String,
     pub file: String,
     pub summary: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<serde_json::Value>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supersedes: Vec<String>,
     pub author: String,
     pub created_at: String,
@@ -80,7 +81,7 @@ pub fn gather_buckets(
             let stem = class.filename_stem();
             let record = ExportRecord {
                 id: entry.entry_id,
-                kind: entry.kind.as_str(),
+                kind: entry.kind.as_str().to_string(),
                 qname: sym.qname.clone(),
                 file: sym.file.clone(),
                 summary: entry.summary,
@@ -157,6 +158,159 @@ fn author_kind_str(k: AuthorKind) -> &'static str {
     }
 }
 
+// -- Import (Plan B t-005) ---------------------------------------------------
+
+use crate::schema::{Author, Evidence, LedgerEntry, LedgerKind};
+use chrono::{DateTime, Utc};
+
+/// Outcome of importing one JSONL file.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ImportFileResult {
+    pub class: &'static str,
+    pub file: String,
+    pub imported: usize,
+    pub skipped_unknown_qname: usize,
+    pub skipped_parse_error: usize,
+}
+
+/// One-shot: read every `<class>.jsonl` under `in_dir` and upsert each
+/// record into the local ledger keyed by entry_id. Idempotent — re-import
+/// of unchanged JSONL is a no-op at the bytes level (set_json overwrites
+/// with identical content).
+///
+/// Records whose `qname` is not in the current index are skipped with a
+/// counter so callers can warn. Use after `git pull` / on a fresh clone.
+pub fn import_all(
+    engine: &Engine,
+    in_dir: &Path,
+    agent_id: &str,
+) -> std::io::Result<Vec<ImportFileResult>> {
+    let mut out = Vec::with_capacity(6);
+    for class in ConclusionClass::all() {
+        let stem = class.filename_stem();
+        let path = in_dir.join(format!("{stem}.jsonl"));
+        out.push(import_one(engine, &path, stem, agent_id)?);
+    }
+    Ok(out)
+}
+
+fn import_one(
+    engine: &Engine,
+    path: &Path,
+    stem: &'static str,
+    agent_id: &str,
+) -> std::io::Result<ImportFileResult> {
+    let mut result = ImportFileResult {
+        class: stem,
+        file: path.display().to_string(),
+        imported: 0,
+        skipped_unknown_qname: 0,
+        skipped_parse_error: 0,
+    };
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(result),
+        Err(e) => return Err(e),
+    };
+    let index = AsgIndexStore::from_engine(engine);
+    let ledger = AsgLedgerStore::from_engine(engine);
+    let ref_name = engine.ref_name.clone();
+
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let rec: ExportRecord = match serde_json::from_str(line) {
+            Ok(r) => r,
+            Err(_) => {
+                result.skipped_parse_error += 1;
+                continue;
+            }
+        };
+        let sym = match index.get_symbol_by_qname(&ref_name, &rec.qname) {
+            Ok(Some(s)) => s,
+            _ => {
+                result.skipped_unknown_qname += 1;
+                continue;
+            }
+        };
+        let entry = match record_to_entry(rec, &sym.symbol_id) {
+            Some(e) => e,
+            None => {
+                result.skipped_parse_error += 1;
+                continue;
+            }
+        };
+        if ledger.append_entry(&ref_name, &entry, agent_id).is_ok() {
+            result.imported += 1;
+        } else {
+            result.skipped_parse_error += 1;
+        }
+    }
+    Ok(result)
+}
+
+/// Rebuild a LedgerEntry from an ExportRecord. Returns None on unparseable
+/// kind, author, or timestamp — caller bumps skipped_parse_error.
+fn record_to_entry(rec: ExportRecord, symbol_id: &str) -> Option<LedgerEntry> {
+    let kind = parse_kind(&rec.kind)?;
+    let author = parse_author(&rec.author)?;
+    let created_at: DateTime<Utc> = DateTime::parse_from_rfc3339(&rec.created_at)
+        .ok()?
+        .with_timezone(&Utc);
+    let evidence: Vec<Evidence> = rec
+        .evidence
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect();
+    Some(LedgerEntry {
+        entry_id: rec.id,
+        symbol_id: symbol_id.to_string(),
+        kind,
+        summary: rec.summary,
+        body: rec.body,
+        author,
+        confidence: None,
+        evidence,
+        supersedes: rec.supersedes,
+        created_at,
+        tags: rec.tags,
+        matched_policy: None,
+        role: rec.role,
+        command: rec.command,
+    })
+}
+
+fn parse_kind(s: &str) -> Option<LedgerKind> {
+    match s {
+        "decision" => Some(LedgerKind::Decision),
+        "assumption" => Some(LedgerKind::Assumption),
+        "constraint" => Some(LedgerKind::Constraint),
+        "rationale" => Some(LedgerKind::Rationale),
+        "hazard" => Some(LedgerKind::Hazard),
+        "tradeoff" => Some(LedgerKind::Tradeoff),
+        "invariant" => Some(LedgerKind::Invariant),
+        "ownership" => Some(LedgerKind::Ownership),
+        "proof" => Some(LedgerKind::Proof),
+        "validation_scenario" => Some(LedgerKind::ValidationScenario),
+        "known_bug" => Some(LedgerKind::KnownBug),
+        "concept" => Some(LedgerKind::Concept),
+        "mapping" => Some(LedgerKind::Mapping),
+        "follow_up" => Some(LedgerKind::FollowUp),
+        _ => None,
+    }
+}
+
+fn parse_author(s: &str) -> Option<Author> {
+    let (kind_str, id) = s.split_once(':')?;
+    let kind = match kind_str {
+        "agent" => AuthorKind::Agent,
+        "human" => AuthorKind::Human,
+        _ => return None,
+    };
+    Some(Author { kind, id: id.to_string() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,7 +323,7 @@ mod tests {
         let recs = vec![
             ExportRecord {
                 id: "led_1".into(),
-                kind: "decision",
+                kind: "decision".into(),
                 qname: "App.A".into(),
                 file: "a.rs".into(),
                 summary: "first".into(),
@@ -195,7 +349,7 @@ mod tests {
     fn optional_fields_are_skipped_in_serialization() {
         let rec = ExportRecord {
             id: "led_abc".into(),
-            kind: "decision",
+            kind: "decision".into(),
             qname: "App.Foo.bar".into(),
             file: "src/foo.rs".into(),
             summary: "be careful".into(),
@@ -214,5 +368,124 @@ mod tests {
         assert!(!line.contains("\"command\""));
         assert!(!line.contains("\"tags\""));
         assert!(line.contains("\"id\":\"led_abc\""));
+    }
+
+    #[test]
+    fn export_import_round_trips_an_entry() {
+        use crate::engine::Engine;
+        use crate::index::{AsgIndexStore, IndexStore};
+        use crate::ledger::{AsgLedgerStore, LedgerStore};
+        use crate::schema::{
+            Author, AuthorKind, LedgerEntry, LedgerKind, Position, Symbol, SymbolKind,
+        };
+
+        let engine = Engine::open_in_memory().unwrap();
+        let index = AsgIndexStore::from_engine(&engine);
+        let ledger = AsgLedgerStore::from_engine(&engine);
+
+        // Seed one symbol.
+        let sym = Symbol {
+            symbol_id: "sym_round_trip".into(),
+            symbol_fp: "fp_rt".into(),
+            qname: "App.Round.trip".into(),
+            language: "rust".into(),
+            kind: SymbolKind::Function,
+            file: "src/rt.rs".into(),
+            start: Position { line: 1, col: 0 },
+            end: Position { line: 10, col: 0 },
+            signature: None,
+            doc: None,
+        };
+        index
+            .put_symbol(&engine.ref_name, &sym, "test")
+            .unwrap();
+
+        // Seed one ledger entry exercising the new fields.
+        let mut entry = LedgerEntry::new(
+            &sym.symbol_id,
+            LedgerKind::FollowUp,
+            "diagnostics still need migration",
+            Author { kind: AuthorKind::Agent, id: "claude".into() },
+        );
+        entry.role = Some("diagnostic-test".into());
+        entry.command = Some("swift test --filter X".into());
+        entry.tags = vec!["ctx:plan:p".into()];
+        let original_id = entry.entry_id.clone();
+        ledger.append_entry(&engine.ref_name, &entry, "test").unwrap();
+
+        // Export → import into a fresh engine that has the same symbol.
+        let tmp = tempdir().unwrap();
+        export_all(&engine, tmp.path()).unwrap();
+
+        let engine2 = Engine::open_in_memory().unwrap();
+        let index2 = AsgIndexStore::from_engine(&engine2);
+        index2
+            .put_symbol(&engine2.ref_name, &sym, "test")
+            .unwrap();
+        let results = import_all(&engine2, tmp.path(), "test").unwrap();
+
+        let total_imported: usize = results.iter().map(|r| r.imported).sum();
+        assert_eq!(total_imported, 1);
+
+        let ledger2 = AsgLedgerStore::from_engine(&engine2);
+        let entries = ledger2
+            .list_entries(&engine2.ref_name, &sym.symbol_id)
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        let imported = &entries[0];
+        assert_eq!(imported.entry_id, original_id);
+        assert_eq!(imported.kind, LedgerKind::FollowUp);
+        assert_eq!(imported.role.as_deref(), Some("diagnostic-test"));
+        assert_eq!(imported.command.as_deref(), Some("swift test --filter X"));
+        assert_eq!(imported.tags, vec!["ctx:plan:p".to_string()]);
+    }
+
+    #[test]
+    fn import_is_idempotent_when_run_twice() {
+        use crate::engine::Engine;
+        use crate::index::{AsgIndexStore, IndexStore};
+        use crate::ledger::{AsgLedgerStore, LedgerStore};
+        use crate::schema::{
+            Author, AuthorKind, LedgerEntry, LedgerKind, Position, Symbol, SymbolKind,
+        };
+
+        let engine = Engine::open_in_memory().unwrap();
+        let index = AsgIndexStore::from_engine(&engine);
+        let ledger = AsgLedgerStore::from_engine(&engine);
+        let sym = Symbol {
+            symbol_id: "sym_idem".into(),
+            symbol_fp: "fp_idem".into(),
+            qname: "App.Idem".into(),
+            language: "rust".into(),
+            kind: SymbolKind::Function,
+            file: "src/idem.rs".into(),
+            start: Position { line: 1, col: 0 },
+            end: Position { line: 2, col: 0 },
+            signature: None,
+            doc: None,
+        };
+        index.put_symbol(&engine.ref_name, &sym, "test").unwrap();
+        let entry = LedgerEntry::new(
+            &sym.symbol_id,
+            LedgerKind::Decision,
+            "x",
+            Author { kind: AuthorKind::Agent, id: "c".into() },
+        );
+        ledger.append_entry(&engine.ref_name, &entry, "test").unwrap();
+
+        let tmp = tempdir().unwrap();
+        export_all(&engine, tmp.path()).unwrap();
+
+        let engine2 = Engine::open_in_memory().unwrap();
+        AsgIndexStore::from_engine(&engine2)
+            .put_symbol(&engine2.ref_name, &sym, "test")
+            .unwrap();
+        import_all(&engine2, tmp.path(), "test").unwrap();
+        import_all(&engine2, tmp.path(), "test").unwrap();
+
+        let entries = AsgLedgerStore::from_engine(&engine2)
+            .list_entries(&engine2.ref_name, &sym.symbol_id)
+            .unwrap();
+        assert_eq!(entries.len(), 1, "second import must not duplicate");
     }
 }

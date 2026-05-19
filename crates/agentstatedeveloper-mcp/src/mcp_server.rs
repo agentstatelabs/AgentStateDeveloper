@@ -125,6 +125,14 @@ pub struct ConclusionsExportParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct ConclusionsImportParams {
+    /// Input directory containing `*.jsonl` files. Defaults to
+    /// `.asd/conclusions/` relative to the database parent directory.
+    #[serde(rename = "in")]
+    pub in_dir: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct InvestigateParams {
     /// Natural-language or keyword query.
     /// Supports inline exclusion syntax: "drift playhead -sample -waveform".
@@ -1223,6 +1231,49 @@ impl AsdMcpServer {
                 .unwrap_or_else(|_| "{}".to_string())
             }
             Err(e) => err_json(&format!("conclusions export failed: {e}")),
+        }
+    }
+
+    #[tool(
+        description = "Read `.asd/conclusions/*.jsonl` back into the local ledger. Idempotent (entries keyed by entry_id). Run after `git pull` or on a fresh clone to populate ASG with the committed conclusions. (CLI: `asd conclusions import`.)"
+    )]
+    async fn conclusions_import(&self, params: Parameters<ConclusionsImportParams>) -> String {
+        let p = params.0;
+        let db_path = self.db_path.clone();
+        let engine = self.engine.lock().await;
+
+        let in_dir: std::path::PathBuf = p
+            .in_dir
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                db_path
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .join(".asd")
+                    .join("conclusions")
+            });
+
+        match conclusions_export::import_all(&engine, &in_dir, "asd-mcp") {
+            Ok(results) => {
+                let total_imported: usize = results.iter().map(|r| r.imported).sum();
+                let total_unknown: usize = results.iter().map(|r| r.skipped_unknown_qname).sum();
+                let total_parse: usize = results.iter().map(|r| r.skipped_parse_error).sum();
+                serde_json::to_string(&serde_json::json!({
+                    "in_dir": in_dir.display().to_string(),
+                    "files": results.iter().map(|r| serde_json::json!({
+                        "class": r.class,
+                        "file": r.file,
+                        "imported": r.imported,
+                        "skipped_unknown_qname": r.skipped_unknown_qname,
+                        "skipped_parse_error": r.skipped_parse_error,
+                    })).collect::<Vec<_>>(),
+                    "total_imported": total_imported,
+                    "total_skipped_unknown_qname": total_unknown,
+                    "total_skipped_parse_error": total_parse,
+                }))
+                .unwrap_or_else(|_| "{}".to_string())
+            }
+            Err(e) => err_json(&format!("conclusions import failed: {e}")),
         }
     }
 
@@ -5558,6 +5609,15 @@ mod tool_name_regression {
         assert!(
             AsdMcpServer::tool_router().has_route("conclusions_export"),
             "expected `conclusions_export` MCP tool to be registered"
+        );
+    }
+
+    #[test]
+    fn conclusions_import_tool_is_registered() {
+        // Plan B, t-005: read .asd/conclusions/*.jsonl → ledger.
+        assert!(
+            AsdMcpServer::tool_router().has_route("conclusions_import"),
+            "expected `conclusions_import` MCP tool to be registered"
         );
     }
 

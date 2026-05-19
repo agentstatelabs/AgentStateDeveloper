@@ -25,6 +25,10 @@ pub enum ConclusionsCmd {
     /// `.asd/conclusions/` (one file per class). Byte-stable when no new
     /// entries — safe to run from a pre-commit hook.
     Export(ExportArgs),
+    /// Read `.asd/conclusions/*.jsonl` back into the local ledger.
+    /// Idempotent — entries are keyed by entry_id. Use after `git pull`
+    /// or on a fresh clone to populate ASG with the committed conclusions.
+    Import(ImportArgs),
 }
 
 #[derive(Debug, Args)]
@@ -74,11 +78,47 @@ pub struct ExportArgs {
     pub quiet: bool,
 }
 
+#[derive(Debug, Args)]
+pub struct ImportArgs {
+    /// Input directory containing the `*.jsonl` files. Defaults to
+    /// `.asd/conclusions/` relative to the database parent directory.
+    #[arg(long, name = "in")]
+    pub in_dir: Option<std::path::PathBuf>,
+}
+
 pub fn run(cfg: &Config, cmd: ConclusionsCmd) -> Result<()> {
     match cmd {
         ConclusionsCmd::List(args) => list(cfg, args),
         ConclusionsCmd::Export(args) => export(cfg, args),
+        ConclusionsCmd::Import(args) => import(cfg, args),
     }
+}
+
+fn import(cfg: &Config, args: ImportArgs) -> Result<()> {
+    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let in_dir = args.in_dir.unwrap_or_else(|| {
+        cfg.db_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join(".asd")
+            .join("conclusions")
+    });
+    let results = conclusions_export::import_all(&engine, &in_dir, &cfg.agent_id)?;
+    let payload = json!({
+        "in_dir": in_dir.display().to_string(),
+        "files": results.iter().map(|r| json!({
+            "class": r.class,
+            "file": r.file,
+            "imported": r.imported,
+            "skipped_unknown_qname": r.skipped_unknown_qname,
+            "skipped_parse_error": r.skipped_parse_error,
+        })).collect::<Vec<_>>(),
+        "total_imported": results.iter().map(|r| r.imported).sum::<usize>(),
+        "total_skipped_unknown_qname": results.iter().map(|r| r.skipped_unknown_qname).sum::<usize>(),
+        "total_skipped_parse_error": results.iter().map(|r| r.skipped_parse_error).sum::<usize>(),
+    });
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
 }
 
 fn list(cfg: &Config, args: ListArgs) -> Result<()> {
