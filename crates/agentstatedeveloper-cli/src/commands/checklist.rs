@@ -142,6 +142,7 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
         kind: args.kind.as_deref().map(|k| k.to_lowercase()),
         language: args.language.as_deref().map(|l| l.to_lowercase()),
         include_tests: args.include_tests,
+        tests_only: false,
         exclude_terms: exclusions,
         paths_filter,
     };

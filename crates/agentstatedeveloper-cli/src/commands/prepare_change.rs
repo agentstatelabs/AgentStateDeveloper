@@ -168,6 +168,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         kind: args.kind.as_deref().map(|k| k.to_lowercase()),
         language: args.language.as_deref().map(|l| l.to_lowercase()),
         include_tests: args.include_tests,
+        tests_only: false,
         exclude_terms: exclusions,
         paths_filter,
     };
@@ -212,9 +213,14 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // Only include effects from symbols scoring ≥25% of the top score to reduce noise.
     let effect_score_floor = candidates.first().map(|(s, _)| s * 0.25).unwrap_or(0.0);
 
-    // likely_edit_files: file → (score, layer, recency)
-    let mut file_scores: Vec<(f64, String, String, Option<f64>, bool)> = Vec::new();
+    // likely_edit_files: file → (score, layer, recency, top symbol qname, rationale)
+    // Plan A t-009: capturing the contributing symbol + match reasons so each
+    // suggested file carries a "why this file" hook. Files whose score is below
+    // the precision floor (25% of top) are dropped to reduce broad-query noise.
+    let mut file_scores: Vec<(f64, String, String, Option<f64>, bool, String, String)> =
+        Vec::new();
     let mut seen_files: HashSet<String> = HashSet::new();
+    let file_score_floor = candidates.first().map(|(s, _)| s * 0.25).unwrap_or(0.0);
 
     // Top entry point symbol id for impact BFS.
     let mut top_sym_id: Option<String> = None;
@@ -236,15 +242,29 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             top_sym_id = Some(sym.symbol_id.clone());
         }
 
-        // File tracking.
-        if seen_files.insert(sym.file.clone()) {
-            file_scores.push((*score, sym.file.clone(), layer.to_string(), last_touched_days, hot));
-        }
-
-        // Ledger entries.
+        // Ledger entries (pulled up because match_reasons needs them).
         let entries = ledger_store
             .list_entries(&engine.ref_name, &sym.symbol_id)
             .unwrap_or_default();
+
+        // File tracking — capture the contributing symbol + its top match
+        // reason so prepare-change can answer "why this file?".
+        if seen_files.insert(sym.file.clone()) && *score >= file_score_floor {
+            let reasons = explain_match(&sym, &tokens, &entries, hot);
+            let why = reasons
+                .first()
+                .cloned()
+                .unwrap_or_else(|| format!("contains symbol {}", sym.qname));
+            file_scores.push((
+                *score,
+                sym.file.clone(),
+                layer.to_string(),
+                last_touched_days,
+                hot,
+                sym.qname.clone(),
+                why,
+            ));
+        }
         for entry in &entries {
             let key = entry.summary.clone();
             match entry.kind {
@@ -336,7 +356,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     let dirty_files = git_dirty_files();
     let likely_edit_files: Vec<Value> = file_scores
         .iter()
-        .map(|(score, file, layer, days, hot)| {
+        .map(|(score, file, layer, days, hot, top_symbol, why)| {
             let file_role = classify_file_role(file);
             let conflict_risk = dirty_files.contains(file.as_str());
             let conflict_detail = if conflict_risk { explain_conflict_risk(file) } else { None };
@@ -349,6 +369,8 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
                 "file_role": file_role,
                 "conflict_risk": conflict_risk,
                 "conflict_detail": conflict_detail,
+                "top_symbol": top_symbol,
+                "why": why,
             })
         })
         .collect();
@@ -474,7 +496,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     let top_files: Vec<(String, usize)> = file_scores
         .iter()
         .take(3)
-        .map(|(_, f, _, _, _)| (f.clone(), 0))
+        .map(|(_, f, _, _, _, _, _)| (f.clone(), 0))
         .collect();
     let recently_touched = git_recent_touches_pub(&top_files, args.git_depth);
 
@@ -482,8 +504,8 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // Reuse dirty_files hoisted above — no second git status run.
     let stale_symbols: Vec<&str> = file_scores
         .iter()
-        .filter(|(_, f, _, _, _)| dirty_files.contains(f.as_str()))
-        .map(|(_, f, _, _, _)| f.as_str())
+        .filter(|(_, f, _, _, _, _, _)| dirty_files.contains(f.as_str()))
+        .map(|(_, f, _, _, _, _, _)| f.as_str())
         .collect();
 
     // --- Test-gap detection -----------------------------------------------
@@ -493,7 +515,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     let test_gap = affected_tests.is_empty();
     // Try to find a real indexed test file before falling back to a suggested path.
     let proposed_test_path = test_gap.then(|| {
-        let source = file_scores.first().map(|(_, f, _, _, _)| f.as_str()).unwrap_or("");
+        let source = file_scores.first().map(|(_, f, _, _, _, _, _)| f.as_str()).unwrap_or("");
         if source.is_empty() { return None; }
         let real = test_files_for_source(&all_test_file_paths, source);
         if real.is_empty() {
@@ -555,7 +577,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     };
 
     let layers_present: std::collections::HashSet<&str> = file_scores.iter()
-        .map(|(_, _, layer, _, _)| layer.as_str())
+        .map(|(_, _, layer, _, _, _, _)| layer.as_str())
         .collect();
     // Suppress possible-miss warnings when the user explicitly narrowed scope.
     let scope_narrowed = !filters.paths_filter.is_empty() || !filters.exclude_terms.is_empty();
@@ -570,6 +592,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // then merge with caller/callee-based omissions from the graph.
     let fts_omitted_files: Vec<Value> = if scope_narrowed && !filters.paths_filter.is_empty() {
         let unscoped_filters = FtsFilters {
+            tests_only: false,
             kind: filters.kind.clone(),
             language: filters.language.clone(),
             include_tests: filters.include_tests,
@@ -582,7 +605,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             .and_then(|fts| fts.search(&args.description, &unscoped_filters, 20).ok())
             .unwrap_or_default();
         let scoped_file_set: std::collections::HashSet<&str> = file_scores.iter()
-            .map(|(_, f, _, _, _)| f.as_str())
+            .map(|(_, f, _, _, _, _, _)| f.as_str())
             .collect();
         unscoped_hits.iter()
             .filter(|h| !filters.paths_filter.iter().any(|p| glob_match(p, &h.file)))
@@ -676,9 +699,10 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // T1: safe-change recipe — actionable sections for an agent or developer.
     // T4: manually_validate includes concrete ValidationScenario entries.
     let recipe_inspect: Vec<Value> = file_scores.iter()
-        .map(|(score, file, layer, days, hot)| json!({
+        .map(|(score, file, layer, days, hot, top_symbol, why)| json!({
             "file": file, "layer": layer, "score": score,
             "last_touched_days": days, "hot": hot,
+            "top_symbol": top_symbol, "why": why,
         }))
         .collect();
     let recipe_preserve: Vec<Value> = design_invariants.iter()
@@ -718,7 +742,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     let mut file_to_tests: HashMap<String, Vec<String>> = HashMap::new();
     for test in &affected_tests {
         if let Some(test_file) = test["file"].as_str() {
-            for (_, file, _, _, _) in &file_scores {
+            for (_, file, _, _, _, _, _) in &file_scores {
                 let entry = file_to_tests.entry(file.clone()).or_default();
                 let tf = test_file.to_string();
                 if !entry.contains(&tf) { entry.push(tf); }
@@ -847,7 +871,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         .collect();
     // If no test files discovered, still emit a command for the top impl file.
     if recipe_run.is_empty() {
-        if let Some((_, top_file, _, _, _)) = file_scores.first() {
+        if let Some((_, top_file, _, _, _, _, _)) = file_scores.first() {
             if let Some(cmd) = detect_test_command(top_file) {
                 recipe_run.push(json!({
                     "qname": Value::Null,

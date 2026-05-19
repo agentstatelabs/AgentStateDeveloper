@@ -150,7 +150,12 @@ pub struct FtsFilters {
     pub language: Option<String>,
     /// Include test symbols (files under test/tests/spec directories, etc.).
     /// Default: false — tests are excluded so production entry points rank first.
+    /// Ignored when `tests_only` is set.
     pub include_tests: bool,
+    /// Restrict to test symbols only. Overrides `include_tests` when true.
+    /// Use this when classifying test coverage, finding fixture usage, or
+    /// auditing test layout (Plan A, t-006).
+    pub tests_only: bool,
     /// Lowercase substring terms to exclude. Any candidate whose qname, file,
     /// doc, or signature contains one of these strings is dropped.
     pub exclude_terms: Vec<String>,
@@ -158,6 +163,20 @@ pub struct FtsFilters {
     /// When non-empty, only symbols whose file matches at least one pattern
     /// are kept. Patterns use `*` (within a segment) and `**` (any segments).
     pub paths_filter: Vec<String>,
+}
+
+/// Helper: build the SQL clause that handles the tri-state test filter.
+/// - `tests_only=true`  → `AND tier = '2'`
+/// - `include_tests=true` (and not tests_only) → no clause
+/// - default → `AND tier != '2'`
+fn tests_clause(include_tests: bool, tests_only: bool) -> &'static str {
+    if tests_only {
+        "AND tier = '2'"
+    } else if include_tests {
+        ""
+    } else {
+        "AND tier != '2'"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -726,7 +745,7 @@ impl SearchFtsDb {
             .unwrap_or_default();
         // Exclude tier=2 (tests) by default. Tier=1 (utility) is included but penalised
         // in hybrid_boost so production symbols rank above them.
-        let test_clause = if filters.include_tests { "" } else { "AND tier != '2'" };
+        let test_clause = tests_clause(filters.include_tests, filters.tests_only);
 
         // Fetch extra for hybrid ledger reranking.
         let fetch = (limit * 4).max(80);
@@ -1300,7 +1319,7 @@ impl SearchFtsDb {
         if token.len() < 2 {
             return Ok(vec![]);
         }
-        let test_clause = if filters.include_tests { "" } else { "AND tier != '2'" };
+        let test_clause = tests_clause(filters.include_tests, filters.tests_only);
         let kind_clause = filters
             .kind
             .as_deref()
@@ -1372,7 +1391,7 @@ impl SearchFtsDb {
             return Ok(vec![]);
         }
 
-        let test_clause = if filters.include_tests { "" } else { "AND tier != '2'" };
+        let test_clause = tests_clause(filters.include_tests, filters.tests_only);
         let kind_clause = filters
             .kind
             .as_deref()
@@ -3244,6 +3263,28 @@ mod tests {
         // With include_tests: both returned.
         let hits_all = fts.search("playhead", &FtsFilters { include_tests: true, ..Default::default() }, 10).unwrap();
         assert_eq!(hits_all.len(), 2, "both when include_tests");
+
+        // Plan A t-006: with tests_only, just the test symbol.
+        let hits_test_only = fts
+            .search(
+                "playhead",
+                &FtsFilters { tests_only: true, ..Default::default() },
+                10,
+            )
+            .unwrap();
+        assert_eq!(hits_test_only.len(), 1, "only test symbol when tests_only");
+        assert_eq!(hits_test_only[0].symbol_id, "sym_test");
+
+        // tests_only takes precedence over include_tests=false.
+        let hits_precedence = fts
+            .search(
+                "playhead",
+                &FtsFilters { tests_only: true, include_tests: false, ..Default::default() },
+                10,
+            )
+            .unwrap();
+        assert_eq!(hits_precedence.len(), 1, "tests_only overrides include_tests=false");
+        assert_eq!(hits_precedence[0].symbol_id, "sym_test");
     }
 
     #[test]

@@ -142,6 +142,16 @@ pub enum Command {
     /// Ranked concept search over indexed symbols.
     Search(commands::search::SearchArgs),
 
+    /// Exact-symbol references via literal text scan + index definition lookup.
+    /// Use this when you want rg-style completeness on a concrete identifier
+    /// (no tokenization, no BM25). Requires `rg` on PATH.
+    References(commands::references::ReferencesArgs),
+
+    /// List named scope aliases defined in `.asd/scopes.toml`. Discoverability
+    /// for the `--scope` and `--paths` flags supported by search and friends.
+    #[command(subcommand)]
+    Scopes(commands::scopes::ScopesCmd),
+
     /// Broad feature archaeology: search → expand call chains, invariants,
     /// hazards, and effects for the top matching entry points in one pass.
     Investigate(commands::investigate::InvestigateArgs),
@@ -242,6 +252,8 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Repair(args) => repair::run(cfg, args),
         Command::Scratch(cmd) => scratch::run(cfg, cmd),
         Command::Search(args) => search::run(cfg, args),
+        Command::References(args) => references::run(cfg, args),
+        Command::Scopes(cmd) => scopes::run(cfg, cmd),
         Command::Investigate(args) => investigate::run(cfg, args),
         Command::Status(args) => status::run(cfg, args),
         Command::Impact(args) => impact::run(cfg, args),

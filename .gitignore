@@ -11,8 +11,10 @@ target/
 Cargo.lock
 examples/sample-py-repo/.asd-state.db
 .asd-state.db
-# NOTE: do NOT ignore `.asd/` — the sidecar is designed to travel with
-# the git repo so a fresh clone can `asd hydrate` without a registry.
+# Plan A t-003: the .asd/v1/ sidecar is a derived cache (tens of MB on real
+# projects) and is regenerable from source via `asd index .`. It stays local
+# until Plan B ships a compact, committable conclusions schema.
+.asd/v1/
 web/node_modules/
 web/build/
 web/.svelte-kit/

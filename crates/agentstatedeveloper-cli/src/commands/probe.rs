@@ -2361,6 +2361,7 @@ fn bootstrap_probes(cfg: &Config, args: ProbeBootstrapArgs) -> Result<()> {
         kind: None,
         language: None,
         include_tests: false,
+        tests_only: false,
         exclude_terms: vec![],
         paths_filter: vec![],
     };

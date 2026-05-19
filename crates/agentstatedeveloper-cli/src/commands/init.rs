@@ -37,15 +37,15 @@ const HOOKS: &[HookDef] = &[
         filename: "pre-commit",
         trigger: "git commit",
         command: "asd sync --prune",
-        purpose: "flush ledger/effects to .asd/v1/ and remove stale entries",
+        purpose: "flush ledger/effects to the local .asd/v1/ sidecar (not committed)",
         script: "#!/usr/bin/env sh
 # ASD pre-commit hook — installed by `asd init`
-# Flushes live ASG state into the .asd/v1/ sidecar and removes any
-# orphaned files for symbols that have been renamed or deleted.
-# The sidecar files are then staged so they travel with this commit.
+# Flushes live ASG state into the local .asd/v1/ sidecar so it stays in
+# sync with the worktree. The sidecar is gitignored (it is a derived
+# cache that can grow to tens of MB); we do not stage it with the commit.
+# A compact, committable conclusions schema is on the roadmap (Plan B).
 set -e
 asd sync --prune
-git add .asd/v1/ 2>/dev/null || true
 ",
     },
     HookDef {
@@ -167,22 +167,21 @@ fn update_gitignore(root: &Path) -> Result<()> {
         String::new()
     };
 
-    let mut lines: Vec<&str> = existing.lines().collect();
+    let mut lines: Vec<String> = existing.lines().map(|l| l.to_string()).collect();
     let mut changed = false;
 
     // Ensure the SQLite db is ignored.
     if !lines.iter().any(|l| l.trim() == ".asd-state.db") {
-        lines.push(".asd-state.db");
+        lines.push(".asd-state.db".to_string());
         changed = true;
     }
-    // Ensure the sidecar data directory is NOT ignored (it travels with git).
-    // Remove any line that would blanket-ignore .asd/.
-    let before = lines.len();
-    lines.retain(|l| {
-        let t = l.trim();
-        t != ".asd/" && t != ".asd" && t != ".asd/*"
-    });
-    if lines.len() != before {
+
+    // Ensure the derived sidecar cache is ignored. It is large (tens of MB on
+    // real projects), regenerable from the source tree via `asd index .`, and
+    // not yet shaped for shared repo memory. A compact conclusions schema is
+    // planned (Plan B); until then `.asd/v1/` stays local.
+    if !lines.iter().any(|l| l.trim() == ".asd/v1/") {
+        lines.push(".asd/v1/".to_string());
         changed = true;
     }
 
@@ -190,7 +189,28 @@ fn update_gitignore(root: &Path) -> Result<()> {
         let content = lines.join("\n") + "\n";
         fs::write(&gi_path, content)
             .with_context(|| format!("failed to write {}", gi_path.display()))?;
-        println!(".gitignore: updated (.asd-state.db ignored; .asd/v1/ tracked)");
+        println!(
+            ".gitignore: updated (.asd-state.db and .asd/v1/ ignored — both are local derived state)"
+        );
+    }
+
+    // If the sidecar is already tracked from a prior install, tell the user
+    // how to untrack it. Don't run `git rm` ourselves — destructive ops belong
+    // to the user.
+    let sidecar_tracked = std::process::Command::new("git")
+        .args(["ls-files", "--error-unmatch", ".asd/v1"])
+        .current_dir(root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if sidecar_tracked {
+        println!();
+        println!("  NOTE: .asd/v1/ is currently tracked in git from a prior install.");
+        println!("  To untrack it without deleting your local copy, run:");
+        println!("      git rm -r --cached .asd/v1");
+        println!("      git commit -m 'stop tracking .asd/v1/ sidecar (regenerable cache)'");
     }
 
     Ok(())
@@ -290,4 +310,44 @@ pub fn find_project_root(db_path: &PathBuf) -> PathBuf {
         .filter(|p| !p.as_os_str().is_empty())
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+}
+
+#[cfg(test)]
+mod gitignore_tests {
+    //! Regression probe for Plan A t-003: the `.asd/v1/` sidecar must be
+    //! gitignored, not tracked. If this test fails, init has reverted to the
+    //! pre-Plan-A "ride sidecar in git" model.
+
+    use super::update_gitignore;
+    use tempfile::tempdir;
+
+    #[test]
+    fn fresh_repo_gets_sidecar_and_db_ignored() {
+        let tmp = tempdir().unwrap();
+        update_gitignore(tmp.path()).unwrap();
+        let gi = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert!(gi.lines().any(|l| l.trim() == ".asd-state.db"));
+        assert!(gi.lines().any(|l| l.trim() == ".asd/v1/"));
+    }
+
+    #[test]
+    fn pre_existing_gitignore_is_preserved() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "node_modules/\n*.log\n").unwrap();
+        update_gitignore(tmp.path()).unwrap();
+        let gi = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert!(gi.contains("node_modules/"));
+        assert!(gi.contains("*.log"));
+        assert!(gi.lines().any(|l| l.trim() == ".asd/v1/"));
+    }
+
+    #[test]
+    fn idempotent_on_already_correct_gitignore() {
+        let tmp = tempdir().unwrap();
+        let initial = ".asd-state.db\n.asd/v1/\n";
+        std::fs::write(tmp.path().join(".gitignore"), initial).unwrap();
+        update_gitignore(tmp.path()).unwrap();
+        let gi = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert_eq!(gi, initial);
+    }
 }

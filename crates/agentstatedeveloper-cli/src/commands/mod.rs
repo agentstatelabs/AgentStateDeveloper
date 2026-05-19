@@ -20,6 +20,8 @@ pub mod list;
 pub mod mcp;
 pub mod policy;
 pub mod read;
+pub mod references;
+pub mod scopes;
 pub mod repair;
 pub mod scratch;
 pub mod search;
