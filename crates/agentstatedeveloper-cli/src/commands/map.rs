@@ -101,6 +101,11 @@ pub fn run(cfg: &Config, args: MapArgs) -> Result<()> {
     author.id = cfg.agent_id.clone();
     author.kind = AuthorKind::Agent;
 
+    // Plan E t-011: pick up the active CTX task id once, pass to every
+    // write_map_entry call so the provenance tag lands consistently.
+    let db_parent = cfg.db_path.parent().map(|p| p.to_path_buf());
+    let ctx_task_id = read_active_ctx_task_id(db_parent.as_deref());
+
     for (pkg, sym) in &package_front_doors {
         packages_out.push(json!({
             "package": pkg,
@@ -116,6 +121,7 @@ pub fn run(cfg: &Config, args: MapArgs) -> Result<()> {
                 RoleTag::PackageBoundary,
                 &format!("package boundary: {pkg}"),
                 &author,
+                ctx_task_id.as_deref(),
             )?;
             written_pkg += 1;
         }
@@ -133,7 +139,15 @@ pub fn run(cfg: &Config, args: MapArgs) -> Result<()> {
                 RoleTag::DiagnosticTest => format!("diagnostic test (env-gate before CI): {file}"),
                 _ => format!("test: {file}"),
             };
-            write_map_entry(&ledger, &ref_name, sym, *role, &summary, &author)?;
+            write_map_entry(
+                &ledger,
+                &ref_name,
+                sym,
+                *role,
+                &summary,
+                &author,
+                ctx_task_id.as_deref(),
+            )?;
             written_test += 1;
         }
     }
@@ -164,6 +178,7 @@ fn write_map_entry(
     role: RoleTag,
     summary: &str,
     author: &Author,
+    ctx_task_id: Option<&str>,
 ) -> Result<()> {
     let mut entry = LedgerEntry::new(&sym.symbol_id, LedgerKind::Ownership, summary, author.clone());
     // Deterministic entry id so re-running `asd map` overwrites instead
@@ -171,8 +186,30 @@ fn write_map_entry(
     entry.entry_id = deterministic_entry_id(&sym.symbol_id, role.as_str());
     entry.role = Some(role.as_str().to_string());
     entry.tags.push("plan-c:asd-map".to_string());
+    // Plan E t-011: auto-tag with the active CTX task id so future
+    // scope-by-task filtering / audits can attribute the entries to
+    // the gesture that wrote them.
+    if let Some(id) = ctx_task_id {
+        let tag = format!("ctx:task:{id}");
+        if !entry.tags.iter().any(|t| t == &tag) {
+            entry.tags.push(tag);
+        }
+    }
     ledger.append_entry(ref_name, &entry, &author.id)?;
     Ok(())
+}
+
+/// Plan E t-011: read the active CTX task id from `CTX_ACTIVE_TASK`
+/// env var (JSON: `{"task_id": "..."}`) with a fallback to the
+/// `.asd/cache/active-task.json` file. Mirrors `candidates::
+/// read_active_task_scope` but extracts `task_id` instead of `scope[]`.
+fn read_active_ctx_task_id(db_parent: Option<&std::path::Path>) -> Option<String> {
+    let raw = std::env::var("CTX_ACTIVE_TASK").ok().or_else(|| {
+        let p = db_parent?.join(".asd").join("cache").join("active-task.json");
+        std::fs::read_to_string(p).ok()
+    })?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v.get("task_id")?.as_str().map(String::from)
 }
 
 fn deterministic_entry_id(sym_id: &str, role: &str) -> String {
@@ -321,6 +358,30 @@ mod tests {
     fn body_looks_diagnostic_false_for_missing_file() {
         // Defensive — body-sniff is opt-in refinement, never a hard req.
         assert!(!body_looks_diagnostic("/nonexistent/path/that/cannot/exist.py"));
+    }
+
+    // -- Plan E t-011: CTX task provenance --------------------------------
+
+    #[test]
+    fn read_active_ctx_task_id_extracts_from_env() {
+        // Use a private temp file as the fallback source so we don't
+        // mutate process env (parallel-safe — same pattern as t-002).
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().join(".asd/cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(
+            cache_dir.join("active-task.json"),
+            r#"{"task_id":"t-007","scope":["x/**"]}"#,
+        )
+        .unwrap();
+        let id = read_active_ctx_task_id(Some(tmp.path()));
+        assert_eq!(id.as_deref(), Some("t-007"));
+    }
+
+    #[test]
+    fn read_active_ctx_task_id_returns_none_when_no_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(read_active_ctx_task_id(Some(tmp.path())), None);
     }
 
     #[test]
