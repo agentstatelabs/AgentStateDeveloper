@@ -1128,11 +1128,22 @@ pub struct FeedbackMetrics {
 /// Returns None when no task state is found or the scope is empty. The
 /// caller treats a None return as "no bias to apply".
 pub fn read_active_task_scope(db_path_parent: Option<&std::path::Path>) -> Option<Vec<String>> {
-    let raw_json: Option<String> = std::env::var("CTX_ACTIVE_TASK").ok().or_else(|| {
+    let env_raw = std::env::var("CTX_ACTIVE_TASK").ok();
+    read_active_task_scope_from(env_raw.as_deref(), db_path_parent)
+}
+
+/// Plan E t-002: parallel-safe variant. Takes the raw env string
+/// explicitly so unit tests can exercise the parser without mutating
+/// process env (which is racy under `cargo test`'s default parallel
+/// runner). Production code path stays simple via the wrapper above.
+pub fn read_active_task_scope_from(
+    env_raw: Option<&str>,
+    db_path_parent: Option<&std::path::Path>,
+) -> Option<Vec<String>> {
+    let raw: String = env_raw.map(|s| s.to_string()).or_else(|| {
         let p = db_path_parent?.join(".asd").join("cache").join("active-task.json");
         std::fs::read_to_string(p).ok()
-    });
-    let raw = raw_json?;
+    })?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let arr = v.get("scope")?.as_array()?;
     let scope: Vec<String> = arr
@@ -2482,43 +2493,36 @@ mod plan_c_t003_tests {
         assert_eq!(scored[0].0, f64::NEG_INFINITY);
     }
 
+    // Plan E t-002: these tests now use read_active_task_scope_from()
+    // and pass the env string explicitly. No process-env mutation, so
+    // they're parallel-safe (the wrapper `read_active_task_scope` is a
+    // thin std::env::var call covered by integration / smoke testing).
+
     #[test]
-    fn read_active_task_scope_parses_env_var_json() {
-        let prev = std::env::var("CTX_ACTIVE_TASK").ok();
-        // SAFETY: tests within the same process share env; serial-test
-        // isn't pulled in here, so this is best-effort. The assertion
-        // is on the parsed Vec, not on side effects.
-        unsafe {
-            std::env::set_var(
-                "CTX_ACTIVE_TASK",
-                r#"{"task_id":"t-006","scope":["src/pkg/**","tests/pkg/**"]}"#,
-            );
-        }
-        let scope = super::read_active_task_scope(None);
+    fn read_active_task_scope_parses_json() {
+        let raw = r#"{"task_id":"t-006","scope":["src/pkg/**","tests/pkg/**"]}"#;
+        let scope = super::read_active_task_scope_from(Some(raw), None);
         assert_eq!(
             scope,
             Some(vec!["src/pkg/**".to_string(), "tests/pkg/**".to_string()])
         );
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("CTX_ACTIVE_TASK", v),
-                None => std::env::remove_var("CTX_ACTIVE_TASK"),
-            }
-        }
     }
 
     #[test]
     fn read_active_task_scope_returns_none_when_unset() {
-        let prev = std::env::var("CTX_ACTIVE_TASK").ok();
-        unsafe {
-            std::env::remove_var("CTX_ACTIVE_TASK");
-        }
-        let scope = super::read_active_task_scope(None);
+        let scope = super::read_active_task_scope_from(None, None);
         assert_eq!(scope, None);
-        if let Some(v) = prev {
-            unsafe {
-                std::env::set_var("CTX_ACTIVE_TASK", v);
-            }
-        }
+    }
+
+    #[test]
+    fn read_active_task_scope_returns_none_on_empty_scope_array() {
+        let raw = r#"{"task_id":"t-006","scope":[]}"#;
+        assert_eq!(super::read_active_task_scope_from(Some(raw), None), None);
+    }
+
+    #[test]
+    fn read_active_task_scope_returns_none_on_malformed_json() {
+        assert_eq!(super::read_active_task_scope_from(Some("not json"), None), None);
+        assert_eq!(super::read_active_task_scope_from(Some("{}"), None), None);
     }
 }
