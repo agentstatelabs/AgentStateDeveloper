@@ -106,16 +106,15 @@ pub fn run(cfg: &Config, cmd: FeedbackCmd) -> Result<()> {
 }
 
 fn parse_verdict(s: &str) -> Result<FeedbackVerdict> {
-    match s.to_lowercase().as_str() {
-        "useful" => Ok(FeedbackVerdict::Useful),
-        "noisy" => Ok(FeedbackVerdict::Noisy),
-        "missing" => Ok(FeedbackVerdict::Missing),
-        "wrong_layer" => Ok(FeedbackVerdict::WrongLayer),
-        other => bail!(
-            "unknown verdict {:?}; valid: useful, noisy, missing, wrong_layer",
-            other
-        ),
+    // Plan C t-005: delegate to FeedbackVerdict::from_str so the verdict
+    // taxonomy stays single-sourced in core. Forgiving on kebab/snake.
+    if let Some(v) = FeedbackVerdict::from_str(s) {
+        return Ok(v);
     }
+    bail!(
+        "unknown verdict {:?}; valid: useful, noisy, missing, wrong_layer, already_covered, diagnostic_only",
+        s
+    )
 }
 
 fn run_mark(cfg: &Config, args: MarkArgs) -> Result<()> {

@@ -620,6 +620,17 @@ pub enum FeedbackVerdict {
     Missing,
     /// This symbol appeared in the wrong architectural layer context.
     WrongLayer,
+    /// Plan C t-005: this symbol's behavior is already covered by another
+    /// symbol. Acts as suppression like `Noisy`; callers should also write
+    /// a `Mapping` ledger entry pointing at the covering symbol so future
+    /// queries see the connection durably.
+    AlreadyCovered,
+    /// Plan C t-005: this symbol is a diagnostic/instrumentation test, not
+    /// production validation. Acts as suppression like `Noisy`; callers
+    /// should also write a `Classification` (`role = diagnostic-test`)
+    /// ledger entry so the t-003 decisions-as-constraints pipeline can
+    /// demote it on future queries.
+    DiagnosticOnly,
 }
 
 impl FeedbackVerdict {
@@ -629,19 +640,37 @@ impl FeedbackVerdict {
             Self::Noisy => "noisy",
             Self::Missing => "missing",
             Self::WrongLayer => "wrong-layer",
+            Self::AlreadyCovered => "already-covered",
+            Self::DiagnosticOnly => "diagnostic-only",
         }
     }
 
     /// Parse from the string produced by [`as_str`].  Returns `None` on
-    /// unrecognized values so callers can decide on a fallback.
+    /// unrecognized values so callers can decide on a fallback. Accepts
+    /// underscores too (`already_covered` / `diagnostic_only`) for
+    /// forgiveness when agents type from memory.
     pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "useful"      => Some(Self::Useful),
-            "noisy"       => Some(Self::Noisy),
-            "missing"     => Some(Self::Missing),
-            "wrong-layer" => Some(Self::WrongLayer),
+        let norm = s.trim().to_ascii_lowercase().replace('_', "-");
+        match norm.as_str() {
+            "useful"          => Some(Self::Useful),
+            "noisy"           => Some(Self::Noisy),
+            "missing"         => Some(Self::Missing),
+            "wrong-layer"     => Some(Self::WrongLayer),
+            "already-covered" => Some(Self::AlreadyCovered),
+            "diagnostic-only" => Some(Self::DiagnosticOnly),
             _ => None,
         }
+    }
+
+    /// Plan C t-005: returns true when this verdict should suppress the
+    /// symbol from ranked results — used by `apply_feedback_adjustments`
+    /// to fold AlreadyCovered + DiagnosticOnly into the existing
+    /// NEG_INFINITY suppression path.
+    pub fn is_suppression(self) -> bool {
+        matches!(
+            self,
+            Self::Noisy | Self::WrongLayer | Self::AlreadyCovered | Self::DiagnosticOnly
+        )
     }
 }
 

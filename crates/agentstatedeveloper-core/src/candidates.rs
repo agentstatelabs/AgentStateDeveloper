@@ -1360,6 +1360,20 @@ pub fn apply_feedback_adjustments(
                     *score = f64::NEG_INFINITY;
                     record_rule!("exact_noisy");
                 }
+                crate::schema::FeedbackVerdict::AlreadyCovered => {
+                    // Plan C t-005: suppress like Noisy, plus a distinct
+                    // rule label so callers can tell what drove the cut.
+                    *score = f64::NEG_INFINITY;
+                    record_rule!("already_covered");
+                }
+                crate::schema::FeedbackVerdict::DiagnosticOnly => {
+                    // Plan C t-005: suppress like Noisy; the t-003
+                    // constraint-penalty pass will also catch the symbol
+                    // on later queries once the caller writes the matching
+                    // Classification entry.
+                    *score = f64::NEG_INFINITY;
+                    record_rule!("diagnostic_only");
+                }
                 crate::schema::FeedbackVerdict::Missing => {}
             }
         }
@@ -1569,13 +1583,18 @@ pub fn apply_file_scope_feedback(
         for (file_glob, verdict, entry_query) in file_scope_entries {
             if !query_family_matches(&current_tokens, entry_query) { continue; }
             if !glob_match(file_glob, &file) { continue; }
+            // Plan C t-005: all suppression verdicts collapse here. Boost
+            // and Missing handled explicitly; rest delegates to
+            // `verdict.is_suppression()` so future variants don't need a
+            // separate file-scope branch.
             match verdict {
                 crate::schema::FeedbackVerdict::Useful => *score += 1.5,
-                crate::schema::FeedbackVerdict::Noisy | crate::schema::FeedbackVerdict::WrongLayer => {
+                crate::schema::FeedbackVerdict::Missing => {}
+                v if v.is_suppression() => {
                     *score = f64::NEG_INFINITY;
                     break;
                 }
-                crate::schema::FeedbackVerdict::Missing => {}
+                _ => {}
             }
         }
     }
@@ -2224,5 +2243,79 @@ mod plan_c_t003_tests {
         assert_eq!(metrics.constraint_penalties_applied, 1);
         assert!(metrics.rules_applied.iter().any(|r| r == "constraint_penalty"));
         assert_eq!(scored[0].0, f64::NEG_INFINITY);
+    }
+
+    // -- Plan C t-005: AlreadyCovered + DiagnosticOnly verdicts ------------
+
+    fn seed_plain_symbol() -> (Engine, String) {
+        let engine = Engine::open_in_memory().unwrap();
+        let index = AsgIndexStore::from_engine(&engine);
+        let sym = Symbol {
+            symbol_id: "sym_a".into(),
+            symbol_fp: "fp_a".into(),
+            qname: "a.b.c".into(),
+            language: "python".into(),
+            kind: SymbolKind::Function,
+            file: "src/a.py".into(),
+            start: Position { line: 1, col: 0 },
+            end: Position { line: 5, col: 0 },
+            signature: None,
+            doc: None,
+        };
+        index.put_symbol(&engine.ref_name, &sym, "test").unwrap();
+        (engine, sym.symbol_id)
+    }
+
+    #[test]
+    fn already_covered_verdict_suppresses_and_labels_rule() {
+        let (engine, sym_id) = seed_plain_symbol();
+        let index = AsgIndexStore::from_engine(&engine);
+        let mut scored = vec![(10.0_f64, "a.b.c".to_string())];
+        let metrics = super::apply_feedback_adjustments(
+            &engine,
+            &index,
+            "match my query",
+            &mut scored,
+            &[(
+                sym_id,
+                "match my query".into(),
+                crate::schema::FeedbackVerdict::AlreadyCovered,
+            )],
+        );
+        // apply_feedback_adjustments retains only finite scores at the
+        // end, so a NEG_INFINITY-suppressed symbol is removed entirely.
+        assert!(scored.is_empty(), "suppressed symbol must be dropped");
+        assert!(metrics.rules_applied.iter().any(|r| r == "already_covered"));
+    }
+
+    #[test]
+    fn diagnostic_only_verdict_suppresses_and_labels_rule() {
+        let (engine, sym_id) = seed_plain_symbol();
+        let index = AsgIndexStore::from_engine(&engine);
+        let mut scored = vec![(10.0_f64, "a.b.c".to_string())];
+        let metrics = super::apply_feedback_adjustments(
+            &engine,
+            &index,
+            "match my query",
+            &mut scored,
+            &[(
+                sym_id,
+                "match my query".into(),
+                crate::schema::FeedbackVerdict::DiagnosticOnly,
+            )],
+        );
+        assert!(scored.is_empty(), "suppressed symbol must be dropped");
+        assert!(metrics.rules_applied.iter().any(|r| r == "diagnostic_only"));
+    }
+
+    #[test]
+    fn feedback_verdict_is_suppression_classification() {
+        use crate::schema::FeedbackVerdict::*;
+        assert!(!Useful.is_suppression());
+        assert!(!Missing.is_suppression());
+        assert!(Noisy.is_suppression());
+        assert!(WrongLayer.is_suppression());
+        assert!(AlreadyCovered.is_suppression());
+        assert!(DiagnosticOnly.is_suppression());
     }
 }

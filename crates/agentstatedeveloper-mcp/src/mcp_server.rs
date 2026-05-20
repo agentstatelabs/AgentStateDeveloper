@@ -4039,18 +4039,20 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Record a verdict on a search result: useful (good match), noisy (irrelevant), missing (should have appeared), wrong_layer (architectural misclassification). Verdicts are persisted and applied as score adjustments in future searches."
+        description = "Record a verdict on a search result. Verdicts: useful (good match), noisy (irrelevant), missing (should have appeared), wrong_layer (architectural misclassification), already_covered (this symbol's behavior is covered by another — Plan C t-005, also surface a Mapping ledger entry), diagnostic_only (this symbol is a diagnostic/instrumentation test — Plan C t-005, also surface a Classification entry with role=diagnostic-test). Persisted and applied as score adjustments in future searches."
     )]
     async fn feedback_mark(&self, params: Parameters<FeedbackMarkParams>) -> String {
         let p = params.0;
-        let verdict = match p.verdict.to_lowercase().as_str() {
-            "useful" => FeedbackVerdict::Useful,
-            "noisy" => FeedbackVerdict::Noisy,
-            "missing" => FeedbackVerdict::Missing,
-            "wrong_layer" => FeedbackVerdict::WrongLayer,
-            other => return err_json(&format!(
-                "unknown verdict {:?}; valid: useful, noisy, missing, wrong_layer", other
-            )),
+        // Plan C t-005: delegate to FeedbackVerdict::from_str so the
+        // taxonomy stays single-sourced in core.
+        let verdict = match FeedbackVerdict::from_str(&p.verdict) {
+            Some(v) => v,
+            None => {
+                return err_json(&format!(
+                    "unknown verdict {:?}; valid: useful, noisy, missing, wrong_layer, already_covered, diagnostic_only",
+                    p.verdict
+                ));
+            }
         };
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
