@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use agentstatedeveloper_core::{
     AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, FeedbackEntry,
-    FeedbackStore, FeedbackVerdict, IndexStore, LedgerEntry, LedgerKind, LedgerStore,
+    FeedbackStore, FeedbackVerdict, IndexStore, LedgerEntry, LedgerKind, LedgerStore, RoleTag,
 };
 
 use crate::config::Config;
@@ -46,6 +46,12 @@ pub struct MarkArgs {
     /// Apply verdict to all symbols in files matching this glob (e.g. "src/adapters/*.rs").
     #[arg(long)]
     pub file_scope: Option<String>,
+    /// Plan E t-009: when --verdict already_covered, the qname of the
+    /// symbol whose behavior covers this one. Auto-writes a paired
+    /// Mapping ledger entry (kind=mapping, body={from, to}) so the
+    /// coverage link is durable, not just a per-query verdict.
+    #[arg(long)]
+    pub covered_by: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -144,10 +150,63 @@ fn run_mark(cfg: &Config, args: MarkArgs) -> Result<()> {
     };
     let feedback_store = AsgFeedbackStore::from_engine(&engine);
     feedback_store.record(&engine.ref_name, &entry, &args.author)?;
+
+    // Plan E t-009: auto-write paired ledger entries that make the
+    // verdict's intent durable. AlreadyCovered + --covered-by → a
+    // Mapping entry; DiagnosticOnly → a Classification (Ownership with
+    // role=diagnostic-test). Skipped for file-scope verdicts (no
+    // concrete symbol to anchor the ledger entry on).
+    let mut paired_msg = String::new();
+    if args.file_scope.is_none() {
+        let author_kind = if args.author == "asd-cli" {
+            AuthorKind::Human
+        } else {
+            AuthorKind::Agent
+        };
+        let author_struct = Author { kind: author_kind, id: args.author.clone() };
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
+
+        if matches!(verdict, FeedbackVerdict::AlreadyCovered) {
+            let cover = args
+                .covered_by
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!(
+                    "--covered-by <qname> is required when --verdict already_covered"
+                ))?;
+            let body = serde_json::json!({
+                "from_qname": &args.qname,
+                "to_qname": cover,
+                "source": "feedback-pair",
+            })
+            .to_string();
+            let mut led = LedgerEntry::new(
+                &entry.symbol_id,
+                LedgerKind::Mapping,
+                format!("covered by {cover}"),
+                author_struct.clone(),
+            );
+            led.body = Some(body);
+            led.tags.push("plan-e:t-009".into());
+            ledger_store.append_entry(&engine.ref_name, &led, &args.author)?;
+            paired_msg = format!(" + Mapping ledger entry → {cover}");
+        } else if matches!(verdict, FeedbackVerdict::DiagnosticOnly) {
+            let mut led = LedgerEntry::new(
+                &entry.symbol_id,
+                LedgerKind::Ownership,
+                format!("diagnostic-only: {}", args.query),
+                author_struct.clone(),
+            );
+            led.role = Some(RoleTag::DiagnosticTest.as_str().to_string());
+            led.tags.push("plan-e:t-009".into());
+            ledger_store.append_entry(&engine.ref_name, &led, &args.author)?;
+            paired_msg = " + Classification ledger entry (role=diagnostic-test)".to_string();
+        }
+    }
+
     if args.file_scope.is_some() {
         println!("recorded {} for files matching {:?} ({})", args.verdict, symbol_qname, entry.entry_id);
     } else {
-        println!("recorded {} for {} ({})", args.verdict, args.qname, entry.entry_id);
+        println!("recorded {} for {} ({}){}", args.verdict, args.qname, entry.entry_id, paired_msg);
     }
     Ok(())
 }

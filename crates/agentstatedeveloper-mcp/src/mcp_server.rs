@@ -291,13 +291,18 @@ pub struct FeedbackMarkParams {
     pub query: String,
     /// Fully-qualified symbol name being rated.
     pub qname: String,
-    /// Verdict: "useful", "noisy", "missing", or "wrong_layer".
+    /// Verdict: "useful", "noisy", "missing", "wrong_layer",
+    /// "already_covered" (Plan C t-005), or "diagnostic_only" (Plan C t-005).
     pub verdict: String,
     /// Optional free-text note explaining the verdict.
     pub note: Option<String>,
     /// Agent/author identifier (default: "asd-mcp-agent").
     #[serde(default = "default_author_id")]
     pub author_id: String,
+    /// Plan E t-009: when verdict is "already_covered", the qname of
+    /// the symbol whose behavior covers this one. Auto-writes a paired
+    /// Mapping ledger entry alongside the FeedbackEntry.
+    pub covered_by: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -4146,15 +4151,66 @@ impl AsdMcpServer {
             file_scope: None,
         };
         let feedback_store = AsgFeedbackStore::from_engine(&engine);
-        match feedback_store.record(&ref_name, &entry, &p.author_id) {
-            Ok(()) => serde_json::to_string(&serde_json::json!({
-                "ok": true,
-                "entry_id": entry_id,
-                "verdict": p.verdict,
-                "qname": p.qname,
-            })).unwrap_or_else(|_| "{}".to_string()),
-            Err(e) => err_json(&e.to_string()),
+        if let Err(e) = feedback_store.record(&ref_name, &entry, &p.author_id) {
+            return err_json(&e.to_string());
         }
+
+        // Plan E t-009: auto-write paired ledger entries so the
+        // verdict's intent is durable, not just a per-query verdict.
+        let mut paired_kind: Option<&'static str> = None;
+        let author_struct = Author {
+            kind: AuthorKind::Agent,
+            id: p.author_id.clone(),
+        };
+        let ledger_store = AsgLedgerStore::from_engine(&engine);
+
+        if matches!(verdict, FeedbackVerdict::AlreadyCovered) {
+            let cover = match p.covered_by.as_deref() {
+                Some(c) if !c.is_empty() => c,
+                _ => return err_json(
+                    "covered_by is required when verdict=already_covered",
+                ),
+            };
+            let body = serde_json::json!({
+                "from_qname": &p.qname,
+                "to_qname": cover,
+                "source": "feedback-pair",
+            })
+            .to_string();
+            let mut led = LedgerEntry::new(
+                &symbol.symbol_id,
+                LedgerKind::Mapping,
+                format!("covered by {cover}"),
+                author_struct.clone(),
+            );
+            led.body = Some(body);
+            led.tags.push("plan-e:t-009".into());
+            if let Err(e) = ledger_store.append_entry(&ref_name, &led, &p.author_id) {
+                return err_json(&e.to_string());
+            }
+            paired_kind = Some("mapping");
+        } else if matches!(verdict, FeedbackVerdict::DiagnosticOnly) {
+            let mut led = LedgerEntry::new(
+                &symbol.symbol_id,
+                LedgerKind::Ownership,
+                format!("diagnostic-only: {}", p.query),
+                author_struct.clone(),
+            );
+            led.role = Some("diagnostic-test".to_string());
+            led.tags.push("plan-e:t-009".into());
+            if let Err(e) = ledger_store.append_entry(&ref_name, &led, &p.author_id) {
+                return err_json(&e.to_string());
+            }
+            paired_kind = Some("classification");
+        }
+
+        serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "entry_id": entry_id,
+            "verdict": p.verdict,
+            "qname": p.qname,
+            "paired_ledger": paired_kind,
+        })).unwrap_or_else(|_| "{}".to_string())
     }
 
     #[tool(
