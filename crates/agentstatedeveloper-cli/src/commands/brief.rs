@@ -11,6 +11,23 @@
 use agentstatedeveloper_core::Symbol;
 use serde_json::{json, Value};
 
+/// Plan D t-005: deterministic query id for wrapper-side dedup.
+/// `query_id("read", &["store.pricing.rates.get_rate"])` →
+/// `"Qf3a2b1c..."` (first 7 hex chars of blake3 of the joined input).
+/// Same inputs → same id; safe to compare across processes.
+pub fn query_id(cmd: &str, args: &[&str]) -> String {
+    let mut s = String::with_capacity(cmd.len() + 32);
+    s.push_str(cmd);
+    for a in args {
+        s.push('|');
+        s.push_str(a);
+    }
+    let h = blake3::hash(s.as_bytes());
+    let hex = h.to_hex();
+    let prefix: String = hex.chars().take(7).collect();
+    format!("Q{prefix}")
+}
+
 /// Project a Symbol down to the brief field set.
 pub fn brief_symbol(sym: &Symbol) -> Value {
     let doc_line = sym
@@ -161,5 +178,23 @@ mod tests {
         assert!(obj.get("ledger_count").is_none());
         // Symbol always present.
         assert!(obj.get("symbol").is_some());
+    }
+
+    #[test]
+    fn query_id_is_deterministic_and_starts_with_Q() {
+        let a = query_id("read", &["store.pricing.rates.get_rate"]);
+        let b = query_id("read", &["store.pricing.rates.get_rate"]);
+        assert_eq!(a, b);
+        assert!(a.starts_with('Q'));
+        assert_eq!(a.len(), 8); // 'Q' + 7 hex chars
+    }
+
+    #[test]
+    fn query_id_changes_with_args() {
+        let a = query_id("read", &["foo"]);
+        let b = query_id("read", &["bar"]);
+        assert_ne!(a, b);
+        let c = query_id("callers", &["foo"]);
+        assert_ne!(a, c);
     }
 }
