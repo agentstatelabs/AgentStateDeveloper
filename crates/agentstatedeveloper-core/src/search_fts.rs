@@ -1124,18 +1124,59 @@ impl SearchFtsDb {
         &self,
         ref_name: &str,
     ) -> rusqlite::Result<Vec<String>> {
-        // json_extract is built in to the bundled SQLite this workspace
-        // uses (rusqlite "bundled" feature). The WHERE clause is a
-        // single index-aided scan over (ref_name, kind, role).
+        let pairs = self.symbols_with_constraint_penalties_scoped(ref_name)?;
+        Ok(pairs.into_iter().map(|(sid, _)| sid).collect())
+    }
+
+    /// Plan E t-008: like `symbols_with_constraint_penalties` but also
+    /// returns the optional scope-glob list parsed from each entry's
+    /// `body` JSON. Schema: `body` MAY be a JSON object containing
+    /// `{"scope": ["glob1", "glob2", ...]}`. When present, the penalty
+    /// applies only to symbols whose file matches at least one glob;
+    /// when absent or unparseable, the penalty applies globally
+    /// (preserves the Plan E t-004 contract).
+    ///
+    /// The same symbol_id may appear multiple times in the result when
+    /// it has multiple penalty entries (e.g. one global + one scoped).
+    /// The caller suppresses on ANY match (most permissive scope wins).
+    pub fn symbols_with_constraint_penalties_scoped(
+        &self,
+        ref_name: &str,
+    ) -> rusqlite::Result<Vec<(String, Option<Vec<String>>)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT symbol_id FROM asd_ledger_cache
+            "SELECT symbol_id, body FROM asd_ledger_cache
              WHERE ref_name = ?1
                AND json_extract(body, '$.kind') IN ('decision', 'constraint')
                AND json_extract(body, '$.role') IN ('stale-api', 'audit-pending')",
         )?;
         let rows = stmt
-            .query_map(params![ref_name], |r| r.get::<_, String>(0))?
+            .query_map(params![ref_name], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
             .filter_map(|r| r.ok())
+            .map(|(sid, body)| {
+                let scope = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("body").and_then(|b| {
+                            // body field itself may be a JSON string or null
+                            b.as_str()
+                                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                                .or_else(|| Some(b.clone()))
+                        })
+                    })
+                    .and_then(|inner| {
+                        inner.get("scope").and_then(|s| s.as_array().cloned())
+                    })
+                    .map(|arr| {
+                        arr.into_iter()
+                            .filter_map(|g| g.as_str().map(String::from))
+                            .filter(|g| !g.is_empty())
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|v| !v.is_empty());
+                (sid, scope)
+            })
             .collect::<Vec<_>>();
         Ok(rows)
     }
