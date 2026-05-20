@@ -34,7 +34,10 @@ fn prime_db(db_path: &std::path::Path) {
     collect_py(&sample_root, &mut files);
 
     let index_store = AsgIndexStore::new(&engine.repo);
-    let effect_store = AsgEffectStore { repo: &engine.repo };
+    // Plan E t-001: AsgEffectStore gained an `fts: Option<&SearchFtsDb>`
+    // field; use the new() constructor so the test fixture survives
+    // future struct additions.
+    let effect_store = AsgEffectStore::new(&engine.repo);
 
     for file in &files {
         let source = match std::fs::read_to_string(file) {
