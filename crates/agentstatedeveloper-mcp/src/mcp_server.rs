@@ -17,6 +17,7 @@ use tokio::sync::Mutex;
 
 use agentstatedeveloper_adapters::default_adapters;
 use agentstatedeveloper_core::{
+    brief, conclusions_export, load_scope_aliases, recipes, stale_warning, ConclusionClass,
     ASD_PATH_PREFIX, AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore,
     AsgScratchStore, AuditEvent, Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory,
     EffectDecl, EffectStore, Engine, FeedbackEntry, FeedbackStore, FeedbackVerdict, FtsFilters,
@@ -75,6 +76,10 @@ pub struct CodeSearchParams {
     /// production entry points rank first).
     #[serde(default)]
     pub include_tests: bool,
+    /// Restrict to test symbols only. Overrides include_tests when true.
+    /// Use when classifying test coverage or auditing test layout.
+    #[serde(default)]
+    pub tests_only: bool,
     /// Comma-separated terms to exclude (e.g. "sample editor,waveform").
     pub exclude: Option<String>,
     /// Comma-separated glob patterns to restrict to specific paths (e.g. "App/**/DriftPad*").
@@ -84,6 +89,59 @@ pub struct CodeSearchParams {
 }
 
 fn default_search_limit() -> u32 { 20 }
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ReferencesParams {
+    /// Symbol name to find references for. Pass a qname (e.g. `pkg.mod.Type`)
+    /// for exact definition lookup, or a bare identifier (e.g. `MasterBusParams`)
+    /// to match any symbol whose qname ends with `.<name>` plus all literal
+    /// text occurrences in the worktree.
+    pub name: String,
+    /// Project root for the rg scan. Defaults to the current directory.
+    pub path: Option<String>,
+    /// Cap the number of occurrences returned (default: 500, 0 = unlimited).
+    #[serde(default = "default_references_limit")]
+    pub limit: u32,
+    /// Optional rg `--glob` filter, e.g. "**/*.swift". Comma-separated for multiple.
+    pub globs: Option<String>,
+}
+
+fn default_references_limit() -> u32 { 500 }
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ConclusionsListParams {
+    /// Restrict to one conclusion class: decisions | classifications |
+    /// mappings | hazards | recipes | followups. Omit to list all six.
+    pub class: Option<String>,
+    /// Restrict to one symbol qname. Omit to list across all symbols.
+    pub symbol: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ConclusionsExportParams {
+    /// Output directory for the JSONL files. Defaults to `.asd/conclusions/`
+    /// relative to the database parent directory.
+    pub out: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ConclusionsImportParams {
+    /// Input directory containing `*.jsonl` files. Defaults to
+    /// `.asd/conclusions/` relative to the database parent directory.
+    #[serde(rename = "in")]
+    pub in_dir: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RecipeClassifyTestMigrationParams {
+    /// Search query — finds candidate test symbols.
+    pub query: String,
+    /// Max candidates to classify (default: 50).
+    #[serde(default = "default_recipe_limit")]
+    pub limit: u32,
+}
+
+fn default_recipe_limit() -> u32 { 50 }
 
 #[derive(Deserialize, JsonSchema)]
 pub struct InvestigateParams {
@@ -323,6 +381,12 @@ pub struct LedgerAppendParams {
     /// Author id (default: "asd-mcp").
     #[serde(default = "default_author_id")]
     pub author_id: String,
+    /// Plan B t-002: optional classification role/intent tag
+    /// (e.g. "diagnostic-test", "fast-test", "fixture-path").
+    pub role: Option<String>,
+    /// Plan B t-002: optional canonical reproduction or validation command
+    /// (e.g. "swift test --filter SongPlayersTests").
+    pub command: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -666,6 +730,18 @@ pub struct AnnotateCommitParams {
 }
 
 // -- Tool implementations ---------------------------------------------------
+//
+// MCP tool naming conventions (see CLI parity audit):
+// - Tools that mirror a CLI verb 1:1 use the same name (search, callers, callees,
+//   impact, since, investigate, prepare_change, ...).
+// - `code_*` prefix is used for tools whose bare CLI name would collide in the
+//   flat MCP namespace shared with other servers: `code_search`, `code_read`,
+//   `code_query` — CLI equivalents are `asd search` and `asd read`.
+// - Subcommand-style CLI verbs are flattened with an underscore in MCP because
+//   MCP has no nested-command concept: MCP `ledger_append` = CLI `asd ledger append`,
+//   MCP `scratch_write` = CLI `asd scratch write`, and so on for feedback_*,
+//   invariant_*, audit_*.
+// - No `_of` suffix: use bare names (callers, callees, effects, traces).
 
 #[tool_router]
 impl AsdMcpServer {
@@ -719,17 +795,19 @@ impl AsdMcpServer {
             }
             _ => 0,
         };
+        let stale = stale_warning(&self.db_path, 3600);
         let payload = serde_json::json!({
             "status": "ok",
             "db_path": db_path,
             "symbol_count": symbol_count,
             "orphaned_symbol_count": orphan_count,
+            "stale": stale,
         });
         serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())
     }
 
     #[tool(
-        description = "Query indexed symbols. Filters (all optional, AND-combined): name_contains, kind, language. Returns up to `limit` symbol summaries."
+        description = "Query indexed symbols. Filters (all optional, AND-combined): name_contains, kind, language. Returns up to `limit` symbol summaries. (CLI: `asd search` covers the search variant.)"
     )]
     async fn code_query(&self, params: Parameters<CodeQueryParams>) -> String {
         let p = params.0;
@@ -787,7 +865,7 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Ranked concept search over indexed symbols using FTS5/BM25. Returns symbols sorted by relevance. Use this when you need to discover entry points for a feature or concept — 'playhead over clips', 'auth flow', 'export pipeline', etc."
+        description = "Ranked concept search over indexed symbols using FTS5/BM25. Returns symbols sorted by relevance. Use this when you need to discover entry points for a feature or concept — 'playhead over clips', 'auth flow', 'export pipeline', etc. (CLI: `asd search`.)"
     )]
     async fn code_search(&self, params: Parameters<CodeSearchParams>) -> String {
         let p = params.0;
@@ -819,6 +897,7 @@ impl AsdMcpServer {
             kind: p.kind.as_deref().map(|k| k.to_lowercase()),
             language: p.language.as_deref().map(|l| l.to_lowercase()),
             include_tests: p.include_tests,
+            tests_only: p.tests_only,
             exclude_terms: exclusions.clone(),
             paths_filter,
         };
@@ -922,12 +1001,31 @@ impl AsdMcpServer {
                     "owner_symbol_id": h.owner_symbol_id,
                 }))
                 .collect();
+            let stale = stale_warning(&db_path, 3600);
+            // Plan D t-007: brief mode projects each FTS hit down to
+            // {qname, file:line, signature, doc, score} and drops the
+            // ambiguous_terms / possible_misses / confidence / document_hits
+            // arrays that don't add per-hit information.
+            if brief::brief_from_env() {
+                let out = serde_json::json!({
+                    "query": p.query,
+                    "results": brief::brief_search_results(&results),
+                    "stale": stale,
+                    "query_id": brief::query_id("code_search", &[&p.query]),
+                });
+                return serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string());
+            }
             let out = serde_json::json!({
                 "query": p.query,
                 "ambiguous_terms": ambiguous_terms,
                 "possible_misses": possible_misses,
                 "results": results,
                 "document_hits": doc_hits,
+                "stale": stale,
+                "confidence": {
+                    "strong": "concept and cross-layer queries that span multiple terms (e.g. 'master volume strategy', 'export pipeline')",
+                    "weak": "exact-identifier lookups and 'all references to X' — use `references` for those; broad single-word queries may surface unrelated files",
+                },
             });
             return serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string());
         }
@@ -996,6 +1094,339 @@ impl AsdMcpServer {
     }
 
     #[tool(
+        description = "List named scope aliases from `.asd/scopes.toml`. Use this first when broad searches return noise — narrow with `--scope <name>` or `--paths <glob>` on search, prepare_change, investigate, impact, checklist, since. (CLI: `asd scopes list`.)"
+    )]
+    async fn scopes_list(&self) -> String {
+        let engine = self.engine.lock().await;
+        let db_path = self.db_path.clone();
+        drop(engine);
+        let aliases = load_scope_aliases(&db_path);
+        let scopes_file = db_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("scopes.toml")
+            .display()
+            .to_string();
+        let hint = if aliases.is_empty() {
+            "no scopes defined; create .asd/scopes.toml with entries like `audio-engine = [\"Packages/AudioEngine/**\"]`, or pass `--paths <glob>` directly to any scoped command"
+        } else {
+            "pass `--scope <name>` to search/prepare_change/investigate/impact/checklist/since"
+        };
+        serde_json::to_string(&serde_json::json!({
+            "scopes": aliases,
+            "count": aliases.len(),
+            "scopes_file": scopes_file,
+            "usage_hint": hint,
+        }))
+        .unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[tool(
+        description = "List ledger entries bucketed by the six Plan B conclusion classes (decisions, classifications, mappings, hazards, recipes, followups). Optional `class` filters to one bucket; optional `symbol` filters to one qname. Use to audit what conclusions exist before exporting to .asd/conclusions/*.jsonl. (CLI: `asd conclusions list`.)"
+    )]
+    async fn conclusions_list(&self, params: Parameters<ConclusionsListParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let index = AsgIndexStore::from_engine(&engine);
+        let ledger = AsgLedgerStore::from_engine(&engine);
+
+        // Parse optional class filter.
+        let target_class: Option<ConclusionClass> = p.class.as_deref().and_then(|s| {
+            match s {
+                "decisions" => Some(ConclusionClass::Decisions),
+                "classifications" => Some(ConclusionClass::Classifications),
+                "mappings" => Some(ConclusionClass::Mappings),
+                "hazards" => Some(ConclusionClass::Hazards),
+                "recipes" => Some(ConclusionClass::Recipes),
+                "followups" => Some(ConclusionClass::FollowUps),
+                _ => None,
+            }
+        });
+        if p.class.is_some() && target_class.is_none() {
+            return err_json(&format!(
+                "unknown conclusion class: {}. valid: decisions, classifications, mappings, hazards, recipes, followups",
+                p.class.as_deref().unwrap_or("")
+            ));
+        }
+
+        // Resolve target symbols.
+        let symbol_ids: Vec<(String, String)> = if let Some(qname) = p.symbol.as_deref() {
+            match index.get_symbol_by_qname(&ref_name, qname) {
+                Ok(Some(sym)) => vec![(sym.symbol_id, sym.qname)],
+                _ => Vec::new(),
+            }
+        } else {
+            let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+            let tree = engine
+                .repo
+                .get_tree(&ref_name, &prefix)
+                .unwrap_or(serde_json::Value::Null);
+            let qnames: Vec<String> = match tree {
+                serde_json::Value::Object(m) => m.keys().cloned().collect(),
+                _ => Vec::new(),
+            };
+            let mut out = Vec::new();
+            for qn in qnames {
+                if let Ok(Some(sym)) = index.get_symbol_by_qname(&ref_name, &qn) {
+                    out.push((sym.symbol_id, sym.qname));
+                }
+            }
+            out
+        };
+
+        use std::collections::BTreeMap;
+        let mut buckets: BTreeMap<&'static str, Vec<serde_json::Value>> = BTreeMap::new();
+        for class in ConclusionClass::all() {
+            if target_class.is_none() || target_class == Some(*class) {
+                buckets.insert(class.filename_stem(), Vec::new());
+            }
+        }
+
+        for (sym_id, qname) in &symbol_ids {
+            let entries = ledger.list_entries(&ref_name, sym_id).unwrap_or_default();
+            for entry in entries {
+                let class = entry.kind.conclusion_class();
+                if let Some(filter) = target_class {
+                    if class != filter {
+                        continue;
+                    }
+                }
+                if let Some(bucket) = buckets.get_mut(class.filename_stem()) {
+                    bucket.push(serde_json::json!({
+                        "entry_id": entry.entry_id,
+                        "kind": entry.kind.as_str(),
+                        "qname": qname,
+                        "symbol_id": entry.symbol_id,
+                        "summary": entry.summary,
+                        "role": entry.role,
+                        "command": entry.command,
+                        "tags": entry.tags,
+                        "created_at": entry.created_at,
+                    }));
+                }
+            }
+        }
+
+        let total: usize = buckets.values().map(|v| v.len()).sum();
+        serde_json::to_string(&serde_json::json!({
+            "class": target_class.map(|c| c.filename_stem()),
+            "symbol": p.symbol,
+            "total": total,
+            "buckets": buckets,
+        }))
+        .unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[tool(
+        description = "Write all ledger conclusions to compact JSONL files (one per class) under `.asd/conclusions/`. Byte-stable when no new entries — safe to run from a pre-commit hook. Returns per-class entry + byte counts. (CLI: `asd conclusions export`.)"
+    )]
+    async fn conclusions_export(&self, params: Parameters<ConclusionsExportParams>) -> String {
+        let p = params.0;
+        let db_path = self.db_path.clone();
+        let engine = self.engine.lock().await;
+
+        let out_dir: std::path::PathBuf = p
+            .out
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                db_path
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .join(".asd")
+                    .join("conclusions")
+            });
+
+        match conclusions_export::export_all(&engine, &out_dir) {
+            Ok(counts) => {
+                let total_entries: usize = counts.iter().map(|(_, n, _)| n).sum();
+                let total_bytes: u64 = counts.iter().map(|(_, _, b)| b).sum();
+                serde_json::to_string(&serde_json::json!({
+                    "out_dir": out_dir.display().to_string(),
+                    "files": counts.iter().map(|(stem, n, b)| serde_json::json!({
+                        "class": stem,
+                        "file": format!("{stem}.jsonl"),
+                        "entries": n,
+                        "bytes": b,
+                    })).collect::<Vec<_>>(),
+                    "total_entries": total_entries,
+                    "total_bytes": total_bytes,
+                }))
+                .unwrap_or_else(|_| "{}".to_string())
+            }
+            Err(e) => err_json(&format!("conclusions export failed: {e}")),
+        }
+    }
+
+    #[tool(
+        description = "Read `.asd/conclusions/*.jsonl` back into the local ledger. Idempotent (entries keyed by entry_id). Run after `git pull` or on a fresh clone to populate ASG with the committed conclusions. (CLI: `asd conclusions import`.)"
+    )]
+    async fn conclusions_import(&self, params: Parameters<ConclusionsImportParams>) -> String {
+        let p = params.0;
+        let db_path = self.db_path.clone();
+        let engine = self.engine.lock().await;
+
+        let in_dir: std::path::PathBuf = p
+            .in_dir
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                db_path
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .join(".asd")
+                    .join("conclusions")
+            });
+
+        match conclusions_export::import_all(&engine, &in_dir, "asd-mcp") {
+            Ok(results) => {
+                let total_imported: usize = results.iter().map(|r| r.imported).sum();
+                let total_unknown: usize = results.iter().map(|r| r.skipped_unknown_qname).sum();
+                let total_parse: usize = results.iter().map(|r| r.skipped_parse_error).sum();
+                serde_json::to_string(&serde_json::json!({
+                    "in_dir": in_dir.display().to_string(),
+                    "files": results.iter().map(|r| serde_json::json!({
+                        "class": r.class,
+                        "file": r.file,
+                        "imported": r.imported,
+                        "skipped_unknown_qname": r.skipped_unknown_qname,
+                        "skipped_parse_error": r.skipped_parse_error,
+                    })).collect::<Vec<_>>(),
+                    "total_imported": total_imported,
+                    "total_skipped_unknown_qname": total_unknown,
+                    "total_skipped_parse_error": total_parse,
+                }))
+                .unwrap_or_else(|_| "{}".to_string())
+            }
+            Err(e) => err_json(&format!("conclusions import failed: {e}")),
+        }
+    }
+
+    #[tool(
+        description = "Plan C t-004: classify test-tier symbols matching a query into migration actions (Delete / Gate / Run / KeepAsCovered / Review) based on their role-tagged ledger entries. Replaces a raw symbol list with a structured action plan. (CLI: `asd recipe classify-test-migration`.)"
+    )]
+    async fn recipe_classify_test_migration(
+        &self,
+        params: Parameters<RecipeClassifyTestMigrationParams>,
+    ) -> String {
+        let p = params.0;
+        let db_path = self.db_path.clone();
+        let engine = self.engine.lock().await;
+        let index = AsgIndexStore::from_engine(&engine);
+
+        // Resolve candidate test-tier symbols via FTS.
+        let fts = SearchFtsDb::open(&db_path).ok();
+        let candidate_qnames: Vec<String> = if let Some(fts) = fts {
+            let filters = FtsFilters {
+                kind: None,
+                language: None,
+                include_tests: true,
+                tests_only: true,
+                exclude_terms: vec![],
+                paths_filter: vec![],
+            };
+            fts.search(&p.query, &filters, p.limit as usize)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|h| h.qname)
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let recipe = recipes::classify_test_migration(&engine, &index, &candidate_qnames, &p.query);
+        serde_json::to_string(&recipe).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[tool(
+        description = "Exact-symbol references with rg parity. Returns the canonical definition(s) from the ASD index plus every literal text occurrence in the worktree via `rg --fixed-strings --word-regexp`. Use this when you want complete, predictable matches for a concrete identifier (no tokenization, no BM25). Requires `rg` on PATH. (CLI: `asd references`.)"
+    )]
+    async fn references(&self, params: Parameters<ReferencesParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let index = AsgIndexStore::from_engine(&engine);
+
+        // Definition lookup — qname-exact if `.` present, else basename-suffix match.
+        let definitions: Vec<Symbol> = if p.name.contains('.') {
+            match index.get_symbol_by_qname(&ref_name, &p.name) {
+                Ok(Some(s)) => vec![s],
+                Ok(None) => Vec::new(),
+                Err(e) => return err_json(&e.to_string()),
+            }
+        } else {
+            let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+            let qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
+                Ok(serde_json::Value::Object(m)) => m.keys().cloned().collect(),
+                _ => Vec::new(),
+            };
+            let needle_dot = format!(".{}", p.name);
+            let mut out = Vec::new();
+            for qn in qnames {
+                if qn == p.name || qn.ends_with(&needle_dot) {
+                    if let Ok(Some(s)) = index.get_symbol_by_qname(&ref_name, &qn) {
+                        out.push(s);
+                    }
+                }
+            }
+            out.sort_by(|a, b| a.qname.cmp(&b.qname));
+            out
+        };
+
+        // Drop engine lock before shelling out — rg can take a moment on large trees.
+        drop(engine);
+
+        let root = p
+            .path
+            .clone()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let globs: Vec<String> = p
+            .globs
+            .as_deref()
+            .map(|s| s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect())
+            .unwrap_or_default();
+        let limit = p.limit as usize;
+
+        let (occurrences, scan_status) = match rg_scan(&root, &p.name, &globs, limit) {
+            Ok(occ) => (occ, "ok".to_string()),
+            Err(e) => (Vec::new(), format!("error: {e}")),
+        };
+
+        let stale = stale_warning(&self.db_path, 3600);
+        // Plan D t-007: brief mode drops the confidence + scan metadata
+        // and projects definitions through brief_symbol so each is the
+        // compact 4-field shape.
+        if brief::brief_from_env() {
+            let brief_defs: Vec<serde_json::Value> =
+                definitions.iter().map(brief::brief_symbol).collect();
+            let payload = serde_json::json!({
+                "name": p.name,
+                "definitions": brief_defs,
+                "occurrences": occurrences,
+                "occurrence_count": occurrences.len(),
+                "stale": stale,
+                "query_id": brief::query_id("references", &[&p.name]),
+            });
+            return serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+        }
+        let payload = serde_json::json!({
+            "name": p.name,
+            "search_root": root.display().to_string(),
+            "definitions": definitions,
+            "occurrences": occurrences,
+            "occurrence_count": occurrences.len(),
+            "limit": p.limit,
+            "scan": { "tool": "rg", "status": scan_status, "flags": ["--fixed-strings", "--word-regexp"] },
+            "stale": stale,
+            "confidence": {
+                "strong": "exact-literal references for concrete identifiers (MasterBusParams, KSPatch.userFacingPresets); matches rg by construction",
+                "weak": "conceptual or cross-layer queries (e.g. 'master volume strategy') — use `code_search` or `investigate` for those",
+            },
+        });
+        serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[tool(
         description = "Feature archaeology in one pass: FTS5 search for entry points, then expand each with call chains, effects, invariants, and hazards. Use this at the start of any broad investigation — 'playhead over clips', 'auth flow', 'export pipeline', etc."
     )]
     async fn investigate(&self, params: Parameters<InvestigateParams>) -> String {
@@ -1029,6 +1460,7 @@ impl AsdMcpServer {
             kind: p.kind.as_deref().map(|k| k.to_lowercase()),
             language: p.language.as_deref().map(|l| l.to_lowercase()),
             include_tests: p.include_tests,
+            tests_only: false,
             exclude_terms: exclusions,
             paths_filter,
         };
@@ -1197,7 +1629,7 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Read a symbol by qname. Returns { symbol, effects, ledger } — full context needed to reason about the code unit."
+        description = "Read a symbol by qname. Returns { symbol, effects, ledger } — full context needed to reason about the code unit. (CLI: `asd read`.)"
     )]
     async fn code_read(&self, params: Parameters<CodeReadParams>) -> String {
         let p = params.0;
@@ -1223,6 +1655,27 @@ impl AsdMcpServer {
             Err(e) => return err_json(&e.to_string()),
         };
 
+        // Plan D t-007: honor ASD_FORMAT=brief at the per-call site.
+        if brief::brief_from_env() {
+            let effects_json = effects
+                .as_ref()
+                .and_then(|e| serde_json::to_value(e).ok());
+            let mut out = brief::brief_read(
+                &symbol,
+                &[], // code_read doesn't compute callers/callees inline
+                &[],
+                effects_json.as_ref(),
+                ledger.len(),
+            );
+            if let serde_json::Value::Object(ref mut m) = out {
+                m.insert(
+                    "query_id".into(),
+                    serde_json::Value::String(brief::query_id("code_read", &[&p.qname])),
+                );
+            }
+            return serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string());
+        }
+
         let payload = serde_json::json!({
             "symbol": symbol,
             "effects": effects,
@@ -1234,7 +1687,7 @@ impl AsdMcpServer {
     #[tool(
         description = "Return declared + transitive effects for a symbol (resolved via qname)."
     )]
-    async fn effects_of(&self, params: Parameters<EffectsOfParams>) -> String {
+    async fn effects(&self, params: Parameters<EffectsOfParams>) -> String {
         let p = params.0;
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
@@ -1259,7 +1712,7 @@ impl AsdMcpServer {
     #[tool(
         description = "List symbols that call the given symbol (inbound call edges, intra-module)."
     )]
-    async fn callers_of(&self, params: Parameters<CallersOfParams>) -> String {
+    async fn callers(&self, params: Parameters<CallersOfParams>) -> String {
         let p = params.0;
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
@@ -1283,7 +1736,7 @@ impl AsdMcpServer {
     #[tool(
         description = "List symbols called by the given symbol (outbound call edges, intra-module)."
     )]
-    async fn callees_of(&self, params: Parameters<CalleesOfParams>) -> String {
+    async fn callees(&self, params: Parameters<CalleesOfParams>) -> String {
         let p = params.0;
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
@@ -1528,6 +1981,24 @@ impl AsdMcpServer {
             entry.tags = tags;
         }
         entry.matched_policy = decision.matched_policy();
+        // Plan C t-002: warn on unknown role (stderr — visible to the
+        // MCP host's logs). Unknown tags are still stored; CLI/MCP just
+        // signal the typo.
+        if let Some(ref r) = p.role {
+            if agentstatedeveloper_core::RoleTag::from_str(r).is_none() {
+                let valid: Vec<&str> = agentstatedeveloper_core::RoleTag::all()
+                    .iter()
+                    .map(|t| t.as_str())
+                    .collect();
+                eprintln!(
+                    "asd-mcp: warning: role={:?} is not a canonical RoleTag. Valid: {}",
+                    r,
+                    valid.join(", ")
+                );
+            }
+        }
+        entry.role = p.role;
+        entry.command = p.command;
 
         // RequireApproval: tag the entry so downstream reviewers see it.
         if let Decision::RequireApproval {
@@ -2122,7 +2593,7 @@ impl AsdMcpServer {
     #[tool(
         description = "Return execution trace records stored for a symbol (written by `asd trace`). Returns newest-first, up to `limit` (default 20)."
     )]
-    async fn traces_of(&self, params: Parameters<TracesOfParams>) -> String {
+    async fn traces(&self, params: Parameters<TracesOfParams>) -> String {
         let p = params.0;
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
@@ -2659,6 +3130,7 @@ impl AsdMcpServer {
             kind: p.kind.as_deref().map(|k| k.to_lowercase()),
             language: p.language.as_deref().map(|l| l.to_lowercase()),
             include_tests: p.include_tests,
+            tests_only: false,
             exclude_terms: exclusions,
             paths_filter,
         };
@@ -2700,13 +3172,18 @@ impl AsdMcpServer {
         let mut known_hazards: Vec<serde_json::Value> = Vec::new();
         let mut validation_scenarios_ledger: Vec<serde_json::Value> = Vec::new();
         let mut effects_summary: Vec<serde_json::Value> = Vec::new();
-        let mut file_scores: Vec<(f64, String, String, Option<f64>, bool)> = Vec::new();
+        // Plan A t-009: file_scores carries (score, file, layer, days, hot,
+        // top_symbol, why) so each suggested file can answer "why this file?".
+        // Files below 25% of top score are dropped to reduce broad-query noise.
+        let mut file_scores: Vec<(f64, String, String, Option<f64>, bool, String, String)> =
+            Vec::new();
         let mut seen_files: HashSet<String> = HashSet::new();
         let mut seen_inv: HashSet<String> = HashSet::new();
         let mut seen_vs: HashSet<String> = HashSet::new();
         let mut seen_effect: HashSet<String> = HashSet::new();
         let mut top_sym_id: Option<String> = None;
         let effect_score_floor = candidates.first().map(|(s, _)| s * 0.25).unwrap_or(0.0);
+        let file_score_floor = effect_score_floor;
 
         for (score, qname) in &candidates {
             let sym = match index.get_symbol_by_qname(&ref_name, qname) { Ok(Some(s)) => s, _ => continue };
@@ -2717,10 +3194,23 @@ impl AsdMcpServer {
             let ltd = rec.and_then(|r| r.last_touched_days);
             let hot = rec.map(|r| r.hot).unwrap_or(false);
             if top_sym_id.is_none() { top_sym_id = Some(sym.symbol_id.clone()); }
-            if seen_files.insert(sym.file.clone()) {
-                file_scores.push((*score, sym.file.clone(), layer.to_string(), ltd, hot));
-            }
             let entries = ledger_store.list_entries(&ref_name, &sym.symbol_id).unwrap_or_default();
+            if seen_files.insert(sym.file.clone()) && *score >= file_score_floor {
+                let reasons = explain_match(&sym, &tokens, &entries, hot);
+                let why = reasons
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| format!("contains symbol {}", sym.qname));
+                file_scores.push((
+                    *score,
+                    sym.file.clone(),
+                    layer.to_string(),
+                    ltd,
+                    hot,
+                    sym.qname.clone(),
+                    why,
+                ));
+            }
             for entry in &entries {
                 match entry.kind {
                     LedgerKind::Invariant => {
@@ -2770,7 +3260,7 @@ impl AsdMcpServer {
 
         file_scores.sort_by(|a, b| b.4.cmp(&a.4).then_with(|| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)));
         let dirty_files_pc = git_dirty_files();
-        let likely_edit_files: Vec<serde_json::Value> = file_scores.iter().map(|(score, file, layer, days, hot)| {
+        let likely_edit_files: Vec<serde_json::Value> = file_scores.iter().map(|(score, file, layer, days, hot, top_symbol, why)| {
             let fl = file.to_lowercase();
             let file_role = if fl.contains("/example") || fl.contains("/sample") || fl.contains("/demo") { "example" }
                 else if fl.contains("/test") || fl.contains("/spec") || fl.contains("_test.") || fl.contains("spec.") { "test" }
@@ -2781,6 +3271,7 @@ impl AsdMcpServer {
                 "file": file, "layer": layer, "score": score,
                 "last_touched_days": days, "hot": hot,
                 "file_role": file_role, "conflict_risk": conflict_risk,
+                "top_symbol": top_symbol, "why": why,
             })
         }).collect();
 
@@ -2833,12 +3324,12 @@ impl AsdMcpServer {
         }
 
         // Recent git touches on top 3 files.
-        let top_files: Vec<(String, usize)> = file_scores.iter().take(3).map(|(_, f, _, _, _)| (f.clone(), 0)).collect();
+        let top_files: Vec<(String, usize)> = file_scores.iter().take(3).map(|(_, f, _, _, _, _, _)| (f.clone(), 0)).collect();
         let recently_touched = mcp_git_recent_touches(&top_files, git_depth);
 
         let test_gap = affected_tests.is_empty();
         let proposed_test_path = test_gap.then(|| {
-            file_scores.first().map(|(_, f, _, _, _)| propose_test_path(f))
+            file_scores.first().map(|(_, f, _, _, _, _, _)| propose_test_path(f))
         }).flatten();
         let suggested_test_coverage: Vec<String> = if test_gap {
             let mut hints: Vec<String> = design_invariants.iter()
@@ -2877,8 +3368,9 @@ impl AsdMcpServer {
 
         // T1: safe-change recipe.  T4: manually_validate includes ValidationScenario entries.
         let recipe_inspect: Vec<serde_json::Value> = file_scores.iter()
-            .map(|(score, file, layer, days, hot)| serde_json::json!({
+            .map(|(score, file, layer, days, hot, top_symbol, why)| serde_json::json!({
                 "file": file, "layer": layer, "score": score, "last_touched_days": days, "hot": hot,
+                "top_symbol": top_symbol, "why": why,
             }))
             .collect();
         let recipe_preserve: Vec<serde_json::Value> = design_invariants.iter()
@@ -2912,7 +3404,7 @@ impl AsdMcpServer {
 
         let focus = intent_focus(intent);
         let layers_present_pc: std::collections::HashSet<&str> = file_scores.iter()
-            .map(|(_, _, layer, _, _)| layer.as_str())
+            .map(|(_, _, layer, _, _, _, _)| layer.as_str())
             .collect();
         let ambiguous_terms = detect_ambiguous_tokens(&tokens, engine.fts.as_ref(), &filters);
         let possible_misses = detect_possible_misses(&p.description, &layers_present_pc, file_scores.len());
@@ -2936,6 +3428,11 @@ impl AsdMcpServer {
             "scenario_tests": scenario_tests,
             "effects_summary": effects_summary,
             "recently_touched": recently_touched,
+            "stale": stale_warning(&db_path, 3600),
+            "confidence": {
+                "strong": "orientation across layers (app/engine/UI/persistence) for a feature-level change description",
+                "weak": "narrow bug-fix work — verify each suggested file with `references` or `read` before editing; broad descriptions can surface unrelated files",
+            },
         })).unwrap_or_else(|_| "{}".to_string())
     }
 
@@ -2974,6 +3471,7 @@ impl AsdMcpServer {
             kind: p.kind.as_deref().map(|k| k.to_lowercase()),
             language: p.language.as_deref().map(|l| l.to_lowercase()),
             include_tests: p.include_tests,
+            tests_only: false,
             exclude_terms: exclusions,
             paths_filter,
         };
@@ -3591,18 +4089,20 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Record a verdict on a search result: useful (good match), noisy (irrelevant), missing (should have appeared), wrong_layer (architectural misclassification). Verdicts are persisted and applied as score adjustments in future searches."
+        description = "Record a verdict on a search result. Verdicts: useful (good match), noisy (irrelevant), missing (should have appeared), wrong_layer (architectural misclassification), already_covered (this symbol's behavior is covered by another — Plan C t-005, also surface a Mapping ledger entry), diagnostic_only (this symbol is a diagnostic/instrumentation test — Plan C t-005, also surface a Classification entry with role=diagnostic-test). Persisted and applied as score adjustments in future searches."
     )]
     async fn feedback_mark(&self, params: Parameters<FeedbackMarkParams>) -> String {
         let p = params.0;
-        let verdict = match p.verdict.to_lowercase().as_str() {
-            "useful" => FeedbackVerdict::Useful,
-            "noisy" => FeedbackVerdict::Noisy,
-            "missing" => FeedbackVerdict::Missing,
-            "wrong_layer" => FeedbackVerdict::WrongLayer,
-            other => return err_json(&format!(
-                "unknown verdict {:?}; valid: useful, noisy, missing, wrong_layer", other
-            )),
+        // Plan C t-005: delegate to FeedbackVerdict::from_str so the
+        // taxonomy stays single-sourced in core.
+        let verdict = match FeedbackVerdict::from_str(&p.verdict) {
+            Some(v) => v,
+            None => {
+                return err_json(&format!(
+                    "unknown verdict {:?}; valid: useful, noisy, missing, wrong_layer, already_covered, diagnostic_only",
+                    p.verdict
+                ));
+            }
         };
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
@@ -3750,6 +4250,7 @@ impl AsdMcpServer {
             kind: p.kind.as_deref().map(|k| k.to_lowercase()),
             language: p.language.as_deref().map(|l| l.to_lowercase()),
             include_tests: p.include_tests,
+            tests_only: false,
             exclude_terms: inline_exclusions.clone(),
             paths_filter: paths_filter.clone(),
         };
@@ -5026,8 +5527,10 @@ fn parse_ledger_kind(s: &str) -> Result<LedgerKind, String> {
         "validation_scenario" | "validationscenario" => Ok(LedgerKind::ValidationScenario),
         "known_bug" | "knownbug" => Ok(LedgerKind::KnownBug),
         "concept" => Ok(LedgerKind::Concept),
+        "mapping" => Ok(LedgerKind::Mapping),
+        "follow_up" | "followup" => Ok(LedgerKind::FollowUp),
         other => Err(format!(
-            "unknown ledger kind: {}. Valid: decision, assumption, constraint, rationale, hazard, tradeoff, invariant, ownership, proof, validation_scenario, known_bug, concept",
+            "unknown ledger kind: {}. Valid: decision, assumption, constraint, rationale, hazard, tradeoff, invariant, ownership, proof, validation_scenario, known_bug, concept, mapping, follow_up",
             other
         )),
     }
@@ -5068,5 +5571,191 @@ fn resolve_symbols_by_ids(
     }
     out.sort_by(|a, b| a.qname.cmp(&b.qname));
     Ok(out)
+}
+
+/// Shell out to `rg --json --fixed-strings --word-regexp <name>` and return
+/// a flat occurrence list. Used by the `references` MCP tool to provide rg
+/// parity for literal symbol queries (Plan A, t-004).
+fn rg_scan(
+    root: &std::path::Path,
+    name: &str,
+    globs: &[String],
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut cmd = Proc::new("rg");
+    cmd.arg("--json")
+        .arg("--fixed-strings")
+        .arg("--word-regexp")
+        .arg("--no-messages");
+    for g in globs {
+        cmd.arg("--glob").arg(g);
+    }
+    cmd.arg("--").arg(name).arg(".");
+    cmd.current_dir(root);
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to spawn `rg` ({e}). Install ripgrep or skip this tool."))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut occurrences = Vec::new();
+    for line in stdout.lines() {
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("match") {
+            continue;
+        }
+        let data = match v.get("data") {
+            Some(d) => d,
+            None => continue,
+        };
+        let path = data
+            .get("path")
+            .and_then(|p| p.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        let line_no = data.get("line_number").and_then(|n| n.as_u64()).unwrap_or(0);
+        let text = data
+            .get("lines")
+            .and_then(|l| l.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .trim_end_matches('\n')
+            .to_string();
+        let columns: Vec<u64> = data
+            .get("submatches")
+            .and_then(|s| s.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|sm| sm.get("start").and_then(|s| s.as_u64()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        occurrences.push(serde_json::json!({
+            "file": path,
+            "line": line_no,
+            "columns": columns,
+            "text": text,
+        }));
+        if limit > 0 && occurrences.len() >= limit {
+            break;
+        }
+    }
+    Ok(occurrences)
+}
+
+#[cfg(test)]
+mod tool_name_regression {
+    //! MCP/CLI parity regression probe (Plan A, t-002).
+    //!
+    //! Asserts that the canonical tool names land in the router and that the
+    //! drift patterns we explicitly retired (the `_of` suffix) do not return.
+    //! If this test fails, the parity audit needs to be redone.
+
+    use super::AsdMcpServer;
+
+    #[test]
+    fn renamed_tools_are_present_under_canonical_names() {
+        let r = AsdMcpServer::tool_router();
+        for name in ["callers", "callees", "effects", "traces"] {
+            assert!(
+                r.has_route(name),
+                "expected canonical MCP tool `{name}` to be registered"
+            );
+        }
+    }
+
+    #[test]
+    fn retired_of_suffix_names_are_absent() {
+        let r = AsdMcpServer::tool_router();
+        for name in ["callers_of", "callees_of", "effects_of", "traces_of"] {
+            assert!(
+                !r.has_route(name),
+                "retired MCP tool name `{name}` is registered — drift has crept back in"
+            );
+        }
+    }
+
+    #[test]
+    fn no_tool_name_uses_of_suffix() {
+        let r = AsdMcpServer::tool_router();
+        let offenders: Vec<String> = r
+            .into_iter()
+            .map(|route| route.attr.name.to_string())
+            .filter(|n| n.ends_with("_of"))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "MCP tool names must not end with `_of`; offenders: {offenders:?}"
+        );
+    }
+
+    #[test]
+    fn references_tool_is_registered() {
+        // Plan A, t-004: `references` is the exact-symbol rg-parity tool.
+        assert!(
+            AsdMcpServer::tool_router().has_route("references"),
+            "expected `references` MCP tool to be registered"
+        );
+    }
+
+    #[test]
+    fn scopes_list_tool_is_registered() {
+        // Plan A, t-005: discoverability for `--scope` / `--paths` filters.
+        assert!(
+            AsdMcpServer::tool_router().has_route("scopes_list"),
+            "expected `scopes_list` MCP tool to be registered"
+        );
+    }
+
+    #[test]
+    fn conclusions_list_tool_is_registered() {
+        // Plan B, t-003: bucketed view over the new conclusion classes.
+        assert!(
+            AsdMcpServer::tool_router().has_route("conclusions_list"),
+            "expected `conclusions_list` MCP tool to be registered"
+        );
+    }
+
+    #[test]
+    fn conclusions_export_tool_is_registered() {
+        // Plan B, t-004: write ledger → .asd/conclusions/*.jsonl.
+        assert!(
+            AsdMcpServer::tool_router().has_route("conclusions_export"),
+            "expected `conclusions_export` MCP tool to be registered"
+        );
+    }
+
+    #[test]
+    fn conclusions_import_tool_is_registered() {
+        // Plan B, t-005: read .asd/conclusions/*.jsonl → ledger.
+        assert!(
+            AsdMcpServer::tool_router().has_route("conclusions_import"),
+            "expected `conclusions_import` MCP tool to be registered"
+        );
+    }
+
+    #[test]
+    fn recipe_classify_test_migration_tool_is_registered() {
+        // Plan C t-004: first concrete recipe.
+        assert!(
+            AsdMcpServer::tool_router().has_route("recipe_classify_test_migration"),
+            "expected `recipe_classify_test_migration` MCP tool to be registered"
+        );
+    }
+
+    #[test]
+    fn prefix_drifted_tools_keep_code_prefix() {
+        // `code_*` names exist because the bare CLI counterparts (`search`,
+        // `read`) would collide in MCP's flat namespace.
+        let r = AsdMcpServer::tool_router();
+        for name in ["code_search", "code_read", "code_query"] {
+            assert!(
+                r.has_route(name),
+                "expected `{name}` to remain registered with the `code_` prefix"
+            );
+        }
+    }
 }
 

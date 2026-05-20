@@ -828,8 +828,10 @@ fn extract_call_edges_impl(
 
     // Parse the full source once to extract top-level imports. We need the
     // file-level tree (not individual symbol bodies) so we can pick up
-    // `import foo` / `from foo import bar` at module scope.
-    let imports = parse_imports(source, &mut parser);
+    // `import foo` / `from foo import bar` at module scope. module_prefix
+    // is passed so relative imports (`from . import x`, `from .foo import y`)
+    // can be resolved to absolute qnames — Plan D t-004.
+    let imports = parse_imports(source, &mut parser, &module_prefix);
 
     let mut edges: HashSet<CallEdge> = HashSet::new();
 
@@ -902,11 +904,16 @@ struct ImportBinding {
 /// - `from foo import bar` -> `bar -> ("foo.bar", symbol)`
 /// - `from foo import bar as b` -> `b -> ("foo.bar", symbol)`
 /// - `from foo import (a, b, c)` -> each as above
+/// - Plan D t-004: relative imports (`from . import x`, `from .foo import y`,
+///   `from ..pkg import z`) — resolved against `module_prefix`.
 ///
-/// Skips (M5 limitation):
+/// Skips:
 /// - `from foo import *` — can't statically resolve members.
-/// - Relative imports (`from . import x`, `from .foo import y`).
-fn parse_imports(source: &str, parser: &mut Parser) -> HashMap<String, ImportBinding> {
+fn parse_imports(
+    source: &str,
+    parser: &mut Parser,
+    module_prefix: &str,
+) -> HashMap<String, ImportBinding> {
     let mut out: HashMap<String, ImportBinding> = HashMap::new();
     let src_bytes = source.as_bytes();
     let tree = match parser.parse(src_bytes, None) {
@@ -921,11 +928,46 @@ fn parse_imports(source: &str, parser: &mut Parser) -> HashMap<String, ImportBin
     for child in root.children(&mut cursor) {
         match child.kind() {
             "import_statement" => collect_import_statement(child, src_bytes, &mut out),
-            "import_from_statement" => collect_import_from_statement(child, src_bytes, &mut out),
+            "import_from_statement" => {
+                collect_import_from_statement(child, src_bytes, module_prefix, &mut out)
+            }
             _ => {}
         }
     }
     out
+}
+
+/// Plan D t-004: resolve a relative-import dot prefix against the importing
+/// file's `module_prefix`. Returns the absolute module qname (e.g.
+/// "crucible.agents.base") that the dots + optional suffix point to, or
+/// None when the relative import escapes the workspace.
+fn resolve_relative_import(module_prefix: &str, raw: &str) -> Option<String> {
+    let dot_count = raw.chars().take_while(|c| *c == '.').count();
+    if dot_count == 0 {
+        return None;
+    }
+    let suffix = raw[dot_count..].trim().trim_matches('.');
+    let parts: Vec<&str> = if module_prefix.is_empty() {
+        Vec::new()
+    } else {
+        module_prefix.split('.').collect()
+    };
+    if dot_count > parts.len() {
+        return None;
+    }
+    let keep = parts.len() - dot_count;
+    let mut base = parts[..keep].join(".");
+    if !suffix.is_empty() {
+        if !base.is_empty() {
+            base.push('.');
+        }
+        base.push_str(suffix);
+    }
+    if base.is_empty() {
+        None
+    } else {
+        Some(base)
+    }
 }
 
 /// Handle `import a, b as c, d.e`.
@@ -1001,23 +1043,34 @@ fn collect_import_statement(
 fn collect_import_from_statement(
     node: Node<'_>,
     src: &[u8],
+    module_prefix: &str,
     out: &mut HashMap<String, ImportBinding>,
 ) {
     // `module_name` field holds a `dotted_name` or `relative_import`.
     let module_node = node.child_by_field_name("module_name");
     let module_kind = module_node.map(|n| n.kind()).unwrap_or("");
-    if module_kind == "relative_import" {
-        // Skip: `from . import x` / `from .foo import y` would need the
-        // importing module's package path to resolve. M5 limitation.
-        return;
-    }
-    let module = module_node
-        .and_then(|n| node_text(n, src))
-        .unwrap_or_default();
-    let module = module.trim().to_string();
-    if module.is_empty() {
-        return;
-    }
+    let module = if module_kind == "relative_import" {
+        // Plan D t-004: resolve `.`/`..`/etc. against the importing file's
+        // module_prefix. `from . import x` from crucible/agents/foo.py
+        // resolves to module "crucible.agents".
+        let raw = module_node
+            .and_then(|n| node_text(n, src))
+            .unwrap_or_default();
+        match resolve_relative_import(module_prefix, raw.trim()) {
+            Some(m) => m,
+            None => return,
+        }
+    } else {
+        let m = module_node
+            .and_then(|n| node_text(n, src))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if m.is_empty() {
+            return;
+        }
+        m
+    };
 
     // Detect `from foo import *` — tree-sitter-python represents the `*` as
     // a `wildcard_import` child (not a `name` field). Skip in that case.
@@ -1522,5 +1575,93 @@ def foo():
         let d = Dummy;
         let ws = WorkspaceSymbols::default();
         assert!(d.extract_call_edges("x", "", &[], &ws).is_empty());
+    }
+
+    // -- Plan D t-004: relative-import resolver -----------------------------
+
+    #[test]
+    fn relative_dot_resolves_to_current_package() {
+        // crucible/agents/litellm_agent.py → file qname = crucible.agents.litellm_agent
+        // `from . import base` → "crucible.agents.base"
+        let r = super::resolve_relative_import("crucible.agents.litellm_agent", ".").unwrap();
+        assert_eq!(r, "crucible.agents");
+    }
+
+    #[test]
+    fn relative_dot_with_suffix_appends_module() {
+        let r = super::resolve_relative_import("crucible.agents.litellm_agent", ".base").unwrap();
+        assert_eq!(r, "crucible.agents.base");
+    }
+
+    #[test]
+    fn relative_double_dot_goes_up_one_more() {
+        // `from ..util import x` from crucible/agents/litellm_agent.py
+        // current package = crucible.agents; parent = crucible; "..util" → crucible.util
+        let r = super::resolve_relative_import("crucible.agents.litellm_agent", "..util").unwrap();
+        assert_eq!(r, "crucible.util");
+    }
+
+    #[test]
+    fn relative_from_init_resolves_against_package() {
+        // crucible/agents/__init__.py has module_prefix = crucible.agents.__init__
+        // `from . import base` → drop 1 segment → crucible.agents; +"base" → crucible.agents.base
+        let r = super::resolve_relative_import("crucible.agents.__init__", ".base").unwrap();
+        assert_eq!(r, "crucible.agents.base");
+    }
+
+    #[test]
+    fn relative_escaping_workspace_returns_none() {
+        // Two dots when we only have one segment to drop.
+        assert!(super::resolve_relative_import("crucible", "..foo").is_none());
+    }
+
+    #[test]
+    fn extract_call_edges_resolves_relative_import_to_cross_module() {
+        // End-to-end: a relative import + a call should produce a cross-module
+        // CallEdge. This is the Crucible reproducer collapsed to a unit test.
+        use crate::PythonAdapter;
+        use agentstatedeveloper_core::{LanguageAdapter, ParsedSymbol, SymbolKind, WorkspaceSymbols};
+
+        let adapter = PythonAdapter::new();
+        let caller_src = "from .base import make_decision\n\ndef act():\n    return make_decision()\n";
+
+        let caller_syms = vec![ParsedSymbol {
+            qname: "crucible.agents.litellm_agent.act".into(),
+            kind: SymbolKind::Function,
+            start_line: 3,
+            start_col: 0,
+            end_line: 4,
+            end_col: 27,
+            signature: Some("def act()".into()),
+            body: caller_src.into(),
+            doc: None,
+        }];
+
+        let mut workspace = WorkspaceSymbols::default();
+        workspace.qnames.insert("crucible.agents.base.make_decision".into());
+        workspace
+            .kinds
+            .insert("crucible.agents.base.make_decision".into(), SymbolKind::Function);
+        workspace
+            .qnames
+            .insert("crucible.agents.litellm_agent.act".into());
+        workspace
+            .kinds
+            .insert("crucible.agents.litellm_agent.act".into(), SymbolKind::Function);
+        workspace.build_suffix_index();
+
+        let edges = adapter.extract_call_edges(
+            "crucible/agents/litellm_agent.py",
+            caller_src,
+            &caller_syms,
+            &workspace,
+        );
+
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.callee_qname == "crucible.agents.base.make_decision"),
+            "expected cross-module edge to crucible.agents.base.make_decision; got {edges:?}"
+        );
     }
 }

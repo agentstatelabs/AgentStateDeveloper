@@ -1709,6 +1709,26 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
             }
         }
 
+        // Plan B t-008: field_lte — output[dotted.path] <= max_value (numeric).
+        // Required: field (dot-path string), max_value (integer or float).
+        // Example: { kind = "field_lte", field = "total_bytes", max_value = 500000 }
+        "field_lte" => {
+            let field = str_field(map, "field")?;
+            let max_val: f64 = map.get("max_value")
+                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .ok_or_else(|| format!("assertion missing required numeric field \"max_value\""))?;
+            let actual = dot_path(output, field)
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            if actual <= max_val {
+                Ok(())
+            } else {
+                Err(format!(
+                    "field_lte: {field} = {actual} (expected <= {max_val})"
+                ))
+            }
+        }
+
         // array_field_count_lte: length of a dot-path array field <= max_count.
         // Required: field (dot-path string), max_count (integer).
         // Example: { kind = "array_field_count_lte", field = "safe_change_recipe.edit", max_count = 8 }
@@ -2361,6 +2381,7 @@ fn bootstrap_probes(cfg: &Config, args: ProbeBootstrapArgs) -> Result<()> {
         kind: None,
         language: None,
         include_tests: false,
+        tests_only: false,
         exclude_terms: vec![],
         paths_filter: vec![],
     };

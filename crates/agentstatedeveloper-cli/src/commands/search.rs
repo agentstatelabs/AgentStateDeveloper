@@ -49,6 +49,12 @@ pub struct SearchArgs {
     #[arg(long)]
     pub include_tests: bool,
 
+    /// Restrict results to test symbols only. Overrides --include-tests.
+    /// Use when classifying coverage, finding fixture usage, or auditing
+    /// test layout.
+    #[arg(long)]
+    pub tests_only: bool,
+
     /// Suppress the stale-index warning.
     #[arg(long)]
     pub quiet: bool,
@@ -146,6 +152,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         kind: args.kind.as_deref().map(|k| k.to_lowercase()),
         language: args.language.as_deref().map(|l| l.to_lowercase()),
         include_tests: args.include_tests,
+        tests_only: args.tests_only,
         exclude_terms: inline_exclusions,
         paths_filter,
     };

@@ -6,7 +6,10 @@
 
 pub mod adapter;
 pub mod audit;
+pub mod brief;
 pub mod candidates;
+pub mod conclusions_export;
+pub mod recipes;
 pub mod doc_adapters;
 pub mod effects;
 pub mod engine;
@@ -40,10 +43,10 @@ pub use policy::{
     actions,
 };
 pub use schema::{
-    ASD_PATH_PREFIX, ASD_SCHEMA_VERSION, Author, AuthorKind, Effect, EffectCategory, EffectDecl,
-    Evidence, FeedbackEntry, FeedbackVerdict, LedgerEntry, LedgerKind, Mismatch, Position, Rebind,
-    ScratchEntry, ScratchStatus, Symbol, SymbolKind, TransitiveEffect, Verification,
-    VerificationSource, VerificationStatus,
+    ASD_PATH_PREFIX, ASD_SCHEMA_VERSION, Author, AuthorKind, ConclusionClass, Effect,
+    EffectCategory, EffectDecl, Evidence, FeedbackEntry, FeedbackVerdict, LedgerEntry, LedgerKind,
+    Mismatch, Position, Rebind, RoleTag, ScratchEntry, ScratchStatus, Symbol, SymbolKind,
+    TransitiveEffect, Verification, VerificationSource, VerificationStatus,
 };
 pub use scratch::{AsgScratchStore, CleanFilter, ScratchFilter, ScratchStore};
 pub use feedback::{AsgFeedbackStore, FeedbackStore};

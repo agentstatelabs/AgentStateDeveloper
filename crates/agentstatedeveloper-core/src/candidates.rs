@@ -1089,8 +1089,20 @@ pub struct FeedbackMetrics {
     pub boosted: usize,
     /// Symbols suppressed by the recurring false-positive rule (≥2 noisy verdicts).
     pub recurring_fp_suppressed: usize,
+    /// Plan C t-003: symbols suppressed by an active Constraint/Decision
+    /// ledger entry carrying a penalty role (stale-api / audit-pending).
+    /// Independent of `suppressed` so callers can tell ranking-time
+    /// decisions apart from feedback-time verdicts.
+    #[serde(default)]
+    pub constraint_penalties_applied: usize,
+    /// Plan C t-006: candidates boosted by +1.0 because they fall inside
+    /// the active CTX task's recorded scope. Soft bias only.
+    #[serde(default)]
+    pub task_bias_boosted: usize,
     /// Unique rule names that fired, in first-encounter order.
-    /// Values: "exact_noisy", "same_file_sibling_suppression", "useful_boost", "recurring_fp".
+    /// Values: "exact_noisy", "same_file_sibling_suppression", "useful_boost",
+    /// "recurring_fp", "constraint_penalty" (Plan C t-003), "task_bias"
+    /// (Plan C t-006), "already_covered" / "diagnostic_only" (Plan C t-005).
     pub rules_applied: Vec<String>,
 }
 
@@ -1107,6 +1119,114 @@ pub struct FeedbackMetrics {
 ///   query token are suppressed for any query that overlaps those tokens.
 ///
 /// Called at CLI/MCP call sites after `find_candidates`.
+/// Plan C t-006: read the active CTX task scope (file globs) and return
+/// it for bias scoring. Source preference: `CTX_ACTIVE_TASK` env var
+/// (JSON object), else `.asd/cache/active-task.json` relative to the
+/// db's parent dir, else None. Schema: `{"task_id": "...", "scope":
+/// ["src/foo/**", ...]}` — only the `scope` array is consumed.
+///
+/// Returns None when no task state is found or the scope is empty. The
+/// caller treats a None return as "no bias to apply".
+pub fn read_active_task_scope(db_path_parent: Option<&std::path::Path>) -> Option<Vec<String>> {
+    let raw_json: Option<String> = std::env::var("CTX_ACTIVE_TASK").ok().or_else(|| {
+        let p = db_path_parent?.join(".asd").join("cache").join("active-task.json");
+        std::fs::read_to_string(p).ok()
+    });
+    let raw = raw_json?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let arr = v.get("scope")?.as_array()?;
+    let scope: Vec<String> = arr
+        .iter()
+        .filter_map(|s| s.as_str().map(|s| s.to_string()))
+        .filter(|s| !s.is_empty())
+        .collect();
+    if scope.is_empty() { None } else { Some(scope) }
+}
+
+/// Plan C t-006: apply a soft `boost` (default 1.0) to candidates whose
+/// file matches any glob in the active task's scope. Soft = additive,
+/// never a hard filter — so a wrong scope guess at most demotes the
+/// agent's intended targets relative to in-scope ones, never hides
+/// them. Returns the boosted count.
+pub fn apply_task_bias(
+    engine: &Engine,
+    index_store: &AsgIndexStore,
+    scored: &mut Vec<(f64, String)>,
+    scope: &[String],
+    boost: f64,
+) -> usize {
+    if scope.is_empty() {
+        return 0;
+    }
+    let mut boosted = 0;
+    for (score, qname) in scored.iter_mut() {
+        if !score.is_finite() {
+            continue;
+        }
+        let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+            Ok(Some(s)) => s,
+            _ => continue,
+        };
+        if scope.iter().any(|g| glob_match(g, &sym.file)) {
+            *score += boost;
+            boosted += 1;
+        }
+    }
+    boosted
+}
+
+/// Plan C t-003: synthesize WrongLayer-like suppression from
+/// Constraint/Decision ledger entries that carry a penalty `role`
+/// (currently `stale-api` and `audit-pending`). Walks each candidate's
+/// ledger entries via the existing AsgLedgerStore; matches go to
+/// `NEG_INFINITY` just like the existing Noisy/WrongLayer path.
+///
+/// Returns the count of candidates suppressed. Cheap on small candidate
+/// sets (one ledger walk per symbol via the SQLite cache); large
+/// candidate sets can be optimized later via index-time denormalization
+/// if needed.
+pub fn apply_constraint_penalties(
+    engine: &Engine,
+    index_store: &AsgIndexStore,
+    scored: &mut Vec<(f64, String)>,
+) -> usize {
+    let ledger_store = crate::ledger::AsgLedgerStore::from_engine(engine);
+    let mut suppressed = 0;
+    for (score, qname) in scored.iter_mut() {
+        if *score == f64::NEG_INFINITY {
+            continue;
+        }
+        let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+            Ok(Some(s)) => s,
+            _ => continue,
+        };
+        let entries = match ledger_store.list_entries(&engine.ref_name, &sym.symbol_id) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let hit = entries.iter().any(|entry| {
+            let kind_matches = matches!(
+                entry.kind,
+                crate::schema::LedgerKind::Constraint | crate::schema::LedgerKind::Decision
+            );
+            if !kind_matches {
+                return false;
+            }
+            entry
+                .role
+                .as_deref()
+                .and_then(crate::schema::RoleTag::from_str)
+                .map(|r| r.is_penalty_role())
+                .unwrap_or(false)
+        });
+        if hit {
+            *score = f64::NEG_INFINITY;
+            suppressed += 1;
+        }
+    }
+    suppressed
+}
+
 pub fn apply_feedback_adjustments(
     engine: &Engine,
     index_store: &AsgIndexStore,
@@ -1114,7 +1234,39 @@ pub fn apply_feedback_adjustments(
     scored: &mut Vec<(f64, String)>,
     feedback_entries: &[(String, String, crate::schema::FeedbackVerdict)],
 ) -> FeedbackMetrics {
-    if feedback_entries.is_empty() { return FeedbackMetrics::default(); }
+    // Plan C t-006: bias toward the active CTX task's scope first, so
+    // in-scope candidates start with a small head-start before
+    // suppression/boost rules run.
+    let task_bias_boosted = {
+        let parent = engine
+            .db_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf());
+        let scope = read_active_task_scope(parent.as_deref()).unwrap_or_default();
+        if scope.is_empty() {
+            0
+        } else {
+            apply_task_bias(engine, index_store, scored, &scope, 1.0)
+        }
+    };
+
+    // Plan C t-003: apply constraint penalties FIRST so feedback rules
+    // don't have to special-case symbols already suppressed.
+    let constraint_penalties_applied = apply_constraint_penalties(engine, index_store, scored);
+
+    if feedback_entries.is_empty() {
+        let mut m = FeedbackMetrics::default();
+        m.constraint_penalties_applied = constraint_penalties_applied;
+        m.task_bias_boosted = task_bias_boosted;
+        if constraint_penalties_applied > 0 {
+            m.rules_applied.push("constraint_penalty".to_string());
+        }
+        if task_bias_boosted > 0 {
+            m.rules_applied.push("task_bias".to_string());
+        }
+        return m;
+    }
     let query_norm = query.to_lowercase();
     let current_tokens: std::collections::HashSet<String> = fb_query_tokens(&query_norm);
     let current_tokens_vec: Vec<&str> = current_tokens.iter().map(|s| s.as_str()).collect();
@@ -1290,6 +1442,20 @@ pub fn apply_feedback_adjustments(
                     *score = f64::NEG_INFINITY;
                     record_rule!("exact_noisy");
                 }
+                crate::schema::FeedbackVerdict::AlreadyCovered => {
+                    // Plan C t-005: suppress like Noisy, plus a distinct
+                    // rule label so callers can tell what drove the cut.
+                    *score = f64::NEG_INFINITY;
+                    record_rule!("already_covered");
+                }
+                crate::schema::FeedbackVerdict::DiagnosticOnly => {
+                    // Plan C t-005: suppress like Noisy; the t-003
+                    // constraint-penalty pass will also catch the symbol
+                    // on later queries once the caller writes the matching
+                    // Classification entry.
+                    *score = f64::NEG_INFINITY;
+                    record_rule!("diagnostic_only");
+                }
                 crate::schema::FeedbackVerdict::Missing => {}
             }
         }
@@ -1308,7 +1474,22 @@ pub fn apply_feedback_adjustments(
     let before = scored.len();
     scored.retain(|(s, _)| s.is_finite());
     let suppressed = before - scored.len();
-    FeedbackMetrics { entries_applied, suppressed, preserved_useful_siblings, boosted, recurring_fp_suppressed, rules_applied }
+    if constraint_penalties_applied > 0 && !rules_applied.iter().any(|r| r == "constraint_penalty") {
+        rules_applied.push("constraint_penalty".to_string());
+    }
+    if task_bias_boosted > 0 && !rules_applied.iter().any(|r| r == "task_bias") {
+        rules_applied.push("task_bias".to_string());
+    }
+    FeedbackMetrics {
+        entries_applied,
+        suppressed,
+        preserved_useful_siblings,
+        boosted,
+        recurring_fp_suppressed,
+        constraint_penalties_applied,
+        task_bias_boosted,
+        rules_applied,
+    }
 }
 
 /// Per-result explanation of which feedback verdict affected a search hit.
@@ -1488,13 +1669,18 @@ pub fn apply_file_scope_feedback(
         for (file_glob, verdict, entry_query) in file_scope_entries {
             if !query_family_matches(&current_tokens, entry_query) { continue; }
             if !glob_match(file_glob, &file) { continue; }
+            // Plan C t-005: all suppression verdicts collapse here. Boost
+            // and Missing handled explicitly; rest delegates to
+            // `verdict.is_suppression()` so future variants don't need a
+            // separate file-scope branch.
             match verdict {
                 crate::schema::FeedbackVerdict::Useful => *score += 1.5,
-                crate::schema::FeedbackVerdict::Noisy | crate::schema::FeedbackVerdict::WrongLayer => {
+                crate::schema::FeedbackVerdict::Missing => {}
+                v if v.is_suppression() => {
                     *score = f64::NEG_INFINITY;
                     break;
                 }
-                crate::schema::FeedbackVerdict::Missing => {}
+                _ => {}
             }
         }
     }
@@ -2035,4 +2221,304 @@ pub fn build_feedback_state(
     let fb_store = AsgFeedbackStore::from_engine(engine);
     let all = fb_store.list_all(ref_name).unwrap_or_default();
     build_feedback_state_from_entries(&all, query, entries_applied)
+}
+
+#[cfg(test)]
+mod plan_c_t003_tests {
+    //! Decisions-as-constraints regression. A Constraint or Decision
+    //! ledger entry carrying a penalty `role` (stale-api / audit-pending)
+    //! must suppress its symbol in ranked results just like an explicit
+    //! `WrongLayer` feedback verdict would.
+
+    use crate::engine::Engine;
+    use crate::index::{AsgIndexStore, IndexStore};
+    use crate::ledger::{AsgLedgerStore, LedgerStore};
+    use crate::schema::{
+        Author, AuthorKind, LedgerEntry, LedgerKind, Position, Symbol, SymbolKind,
+    };
+
+    fn seed_engine_with_symbol() -> (Engine, String) {
+        let engine = Engine::open_in_memory().unwrap();
+        let index = AsgIndexStore::from_engine(&engine);
+        let sym = Symbol {
+            symbol_id: "sym_stale".into(),
+            symbol_fp: "fp_stale".into(),
+            qname: "store.legacy.api".into(),
+            language: "python".into(),
+            kind: SymbolKind::Function,
+            file: "store/legacy.py".into(),
+            start: Position { line: 1, col: 0 },
+            end: Position { line: 5, col: 0 },
+            signature: None,
+            doc: None,
+        };
+        index.put_symbol(&engine.ref_name, &sym, "test").unwrap();
+        (engine, sym.symbol_id)
+    }
+
+    fn append_constraint(engine: &Engine, sym_id: &str, role: Option<&str>) {
+        let ledger = AsgLedgerStore::from_engine(engine);
+        let mut entry = LedgerEntry::new(
+            sym_id,
+            LedgerKind::Constraint,
+            "legacy api should not be used in new code",
+            Author { kind: AuthorKind::Agent, id: "test".into() },
+        );
+        entry.role = role.map(str::to_string);
+        ledger.append_entry(&engine.ref_name, &entry, "test").unwrap();
+    }
+
+    #[test]
+    fn constraint_with_stale_api_role_suppresses_symbol() {
+        let (engine, sym_id) = seed_engine_with_symbol();
+        append_constraint(&engine, &sym_id, Some("stale-api"));
+        let index = AsgIndexStore::from_engine(&engine);
+
+        let mut scored = vec![(10.0_f64, "store.legacy.api".to_string())];
+        let suppressed = super::apply_constraint_penalties(&engine, &index, &mut scored);
+
+        assert_eq!(suppressed, 1);
+        assert_eq!(scored[0].0, f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn constraint_with_audit_pending_role_suppresses_symbol() {
+        let (engine, sym_id) = seed_engine_with_symbol();
+        append_constraint(&engine, &sym_id, Some("audit-pending"));
+        let index = AsgIndexStore::from_engine(&engine);
+        let mut scored = vec![(10.0_f64, "store.legacy.api".to_string())];
+        let suppressed = super::apply_constraint_penalties(&engine, &index, &mut scored);
+        assert_eq!(suppressed, 1);
+        assert_eq!(scored[0].0, f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn constraint_without_role_does_not_suppress() {
+        // A bare Constraint with no role is still a passive note —
+        // backward-compatible with the pre-Plan-C ledger model.
+        let (engine, sym_id) = seed_engine_with_symbol();
+        append_constraint(&engine, &sym_id, None);
+        let index = AsgIndexStore::from_engine(&engine);
+        let mut scored = vec![(10.0_f64, "store.legacy.api".to_string())];
+        let suppressed = super::apply_constraint_penalties(&engine, &index, &mut scored);
+        assert_eq!(suppressed, 0);
+        assert_eq!(scored[0].0, 10.0);
+    }
+
+    #[test]
+    fn non_penalty_role_does_not_suppress() {
+        // package-boundary is a BOOST role, not a penalty role — should
+        // not trigger NEG_INFINITY.
+        let (engine, sym_id) = seed_engine_with_symbol();
+        append_constraint(&engine, &sym_id, Some("package-boundary"));
+        let index = AsgIndexStore::from_engine(&engine);
+        let mut scored = vec![(10.0_f64, "store.legacy.api".to_string())];
+        let suppressed = super::apply_constraint_penalties(&engine, &index, &mut scored);
+        assert_eq!(suppressed, 0);
+    }
+
+    #[test]
+    fn apply_feedback_adjustments_reports_constraint_penalty_in_metrics() {
+        let (engine, sym_id) = seed_engine_with_symbol();
+        append_constraint(&engine, &sym_id, Some("stale-api"));
+        let index = AsgIndexStore::from_engine(&engine);
+        let mut scored = vec![(10.0_f64, "store.legacy.api".to_string())];
+        // Empty feedback set — exercises the early-return branch.
+        let metrics =
+            super::apply_feedback_adjustments(&engine, &index, "legacy", &mut scored, &[]);
+        assert_eq!(metrics.constraint_penalties_applied, 1);
+        assert!(metrics.rules_applied.iter().any(|r| r == "constraint_penalty"));
+        assert_eq!(scored[0].0, f64::NEG_INFINITY);
+    }
+
+    // -- Plan C t-005: AlreadyCovered + DiagnosticOnly verdicts ------------
+
+    fn seed_plain_symbol() -> (Engine, String) {
+        let engine = Engine::open_in_memory().unwrap();
+        let index = AsgIndexStore::from_engine(&engine);
+        let sym = Symbol {
+            symbol_id: "sym_a".into(),
+            symbol_fp: "fp_a".into(),
+            qname: "a.b.c".into(),
+            language: "python".into(),
+            kind: SymbolKind::Function,
+            file: "src/a.py".into(),
+            start: Position { line: 1, col: 0 },
+            end: Position { line: 5, col: 0 },
+            signature: None,
+            doc: None,
+        };
+        index.put_symbol(&engine.ref_name, &sym, "test").unwrap();
+        (engine, sym.symbol_id)
+    }
+
+    #[test]
+    fn already_covered_verdict_suppresses_and_labels_rule() {
+        let (engine, sym_id) = seed_plain_symbol();
+        let index = AsgIndexStore::from_engine(&engine);
+        let mut scored = vec![(10.0_f64, "a.b.c".to_string())];
+        let metrics = super::apply_feedback_adjustments(
+            &engine,
+            &index,
+            "match my query",
+            &mut scored,
+            &[(
+                sym_id,
+                "match my query".into(),
+                crate::schema::FeedbackVerdict::AlreadyCovered,
+            )],
+        );
+        // apply_feedback_adjustments retains only finite scores at the
+        // end, so a NEG_INFINITY-suppressed symbol is removed entirely.
+        assert!(scored.is_empty(), "suppressed symbol must be dropped");
+        assert!(metrics.rules_applied.iter().any(|r| r == "already_covered"));
+    }
+
+    #[test]
+    fn diagnostic_only_verdict_suppresses_and_labels_rule() {
+        let (engine, sym_id) = seed_plain_symbol();
+        let index = AsgIndexStore::from_engine(&engine);
+        let mut scored = vec![(10.0_f64, "a.b.c".to_string())];
+        let metrics = super::apply_feedback_adjustments(
+            &engine,
+            &index,
+            "match my query",
+            &mut scored,
+            &[(
+                sym_id,
+                "match my query".into(),
+                crate::schema::FeedbackVerdict::DiagnosticOnly,
+            )],
+        );
+        assert!(scored.is_empty(), "suppressed symbol must be dropped");
+        assert!(metrics.rules_applied.iter().any(|r| r == "diagnostic_only"));
+    }
+
+    #[test]
+    fn feedback_verdict_is_suppression_classification() {
+        use crate::schema::FeedbackVerdict::*;
+        assert!(!Useful.is_suppression());
+        assert!(!Missing.is_suppression());
+        assert!(Noisy.is_suppression());
+        assert!(WrongLayer.is_suppression());
+        assert!(AlreadyCovered.is_suppression());
+        assert!(DiagnosticOnly.is_suppression());
+    }
+
+    // -- Plan C t-006: CTX task bias ----------------------------------------
+
+    #[test]
+    fn apply_task_bias_boosts_in_scope_files_only() {
+        let engine = Engine::open_in_memory().unwrap();
+        let index = AsgIndexStore::from_engine(&engine);
+        for (qn, file) in [
+            ("pkg.in_scope.fn", "src/pkg/in_scope.py"),
+            ("pkg.out_of_scope.fn", "src/other/file.py"),
+        ] {
+            let sym = Symbol {
+                symbol_id: format!("sym_{qn}"),
+                symbol_fp: "fp".into(),
+                qname: qn.into(),
+                language: "python".into(),
+                kind: SymbolKind::Function,
+                file: file.into(),
+                start: Position { line: 1, col: 0 },
+                end: Position { line: 2, col: 0 },
+                signature: None,
+                doc: None,
+            };
+            index.put_symbol(&engine.ref_name, &sym, "test").unwrap();
+        }
+        let mut scored = vec![
+            (5.0_f64, "pkg.in_scope.fn".to_string()),
+            (5.0_f64, "pkg.out_of_scope.fn".to_string()),
+        ];
+        let scope = vec!["src/pkg/**".to_string()];
+        let n = super::apply_task_bias(&engine, &index, &mut scored, &scope, 1.0);
+        assert_eq!(n, 1);
+        // In-scope was boosted, out-of-scope was not.
+        let in_scope = scored.iter().find(|(_, q)| q == "pkg.in_scope.fn").unwrap();
+        let out_scope = scored.iter().find(|(_, q)| q == "pkg.out_of_scope.fn").unwrap();
+        assert_eq!(in_scope.0, 6.0);
+        assert_eq!(out_scope.0, 5.0);
+    }
+
+    #[test]
+    fn apply_task_bias_with_empty_scope_is_a_noop() {
+        let engine = Engine::open_in_memory().unwrap();
+        let index = AsgIndexStore::from_engine(&engine);
+        let mut scored = vec![(5.0_f64, "anything".to_string())];
+        let n = super::apply_task_bias(&engine, &index, &mut scored, &[], 1.0);
+        assert_eq!(n, 0);
+        assert_eq!(scored[0].0, 5.0);
+    }
+
+    #[test]
+    fn apply_task_bias_skips_already_suppressed_candidates() {
+        let engine = Engine::open_in_memory().unwrap();
+        let index = AsgIndexStore::from_engine(&engine);
+        let sym = Symbol {
+            symbol_id: "sym_z".into(),
+            symbol_fp: "fp".into(),
+            qname: "z.in_scope.fn".into(),
+            language: "python".into(),
+            kind: SymbolKind::Function,
+            file: "src/pkg/z.py".into(),
+            start: Position { line: 1, col: 0 },
+            end: Position { line: 2, col: 0 },
+            signature: None,
+            doc: None,
+        };
+        index.put_symbol(&engine.ref_name, &sym, "test").unwrap();
+        let mut scored = vec![(f64::NEG_INFINITY, "z.in_scope.fn".to_string())];
+        let n = super::apply_task_bias(
+            &engine,
+            &index,
+            &mut scored,
+            &["src/pkg/**".to_string()],
+            1.0,
+        );
+        assert_eq!(n, 0, "NEG_INFINITY candidates must not be revived by bias");
+        assert_eq!(scored[0].0, f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn read_active_task_scope_parses_env_var_json() {
+        let prev = std::env::var("CTX_ACTIVE_TASK").ok();
+        // SAFETY: tests within the same process share env; serial-test
+        // isn't pulled in here, so this is best-effort. The assertion
+        // is on the parsed Vec, not on side effects.
+        unsafe {
+            std::env::set_var(
+                "CTX_ACTIVE_TASK",
+                r#"{"task_id":"t-006","scope":["src/pkg/**","tests/pkg/**"]}"#,
+            );
+        }
+        let scope = super::read_active_task_scope(None);
+        assert_eq!(
+            scope,
+            Some(vec!["src/pkg/**".to_string(), "tests/pkg/**".to_string()])
+        );
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("CTX_ACTIVE_TASK", v),
+                None => std::env::remove_var("CTX_ACTIVE_TASK"),
+            }
+        }
+    }
+
+    #[test]
+    fn read_active_task_scope_returns_none_when_unset() {
+        let prev = std::env::var("CTX_ACTIVE_TASK").ok();
+        unsafe {
+            std::env::remove_var("CTX_ACTIVE_TASK");
+        }
+        let scope = super::read_active_task_scope(None);
+        assert_eq!(scope, None);
+        if let Some(v) = prev {
+            unsafe {
+                std::env::set_var("CTX_ACTIVE_TASK", v);
+            }
+        }
+    }
 }

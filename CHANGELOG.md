@@ -5,6 +5,152 @@ Versions use semantic versioning; each milestone increments by 0.0.5.
 
 ---
 
+## [0.9.99] — 2026-05-20 — Plan C complete (semantic-layer moat)
+
+The defining-feature release. Plan A built trust, Plan B built durable
+storage, Plan C makes ASD remember the expensive task-specific
+understanding the LLM forms so a new session doesn't re-derive the
+same project mental model.
+
+### The moat (what's new)
+
+- **Active decisions** — `Constraint`/`Decision` ledger entries carrying
+  a penalty role (`stale-api` / `audit-pending`) now actively suppress
+  their symbols in ranked search, the same way `WrongLayer` feedback
+  does. Memory becomes a ranking input, not a passive note. (t-003)
+- **First-class role-tag vocabulary** — `RoleTag` enum with 8 canonical
+  tags (`fast-test`, `diagnostic-test`, `fixture-path`, `stale-api`,
+  `package-boundary`, `replacement-coverage`, `performance-critical`,
+  `audit-pending`). CLI / MCP warn on unknown tags; old free-form
+  strings still round-trip. (t-002)
+- **Change-intent recipes** — `asd recipe classify-test-migration <q>`
+  returns a structured `{intent, actions[]}` plan
+  (`Delete` / `Gate` / `Run` / `KeepAsCovered` / `Review`) instead of a
+  flat symbol list. Pattern is reusable; more recipes will follow. (t-004)
+- **AlreadyCovered + DiagnosticOnly verdicts** — two new
+  `FeedbackVerdict` variants that suppress like `Noisy` and prompt the
+  caller to accrue a `Mapping` or `Classification` ledger entry in the
+  same gesture. (t-005)
+- **CTX task state → ASD ranking bias** — ASD now reads
+  `CTX_ACTIVE_TASK` (or `.asd/cache/active-task.json`) and applies a
+  soft +1.0 boost to candidates inside the task's recorded scope. Never
+  a hard filter. (t-006)
+- **`asd map`** — one-shot initial-read command that walks the index,
+  identifies package boundaries, classifies test files
+  (`fast-test` vs `diagnostic-test`), and writes `Ownership` ledger
+  entries with role tags. Idempotent via deterministic entry IDs. The
+  bootstrap that makes the downstream Plan C features useful on a fresh
+  project. (t-007)
+
+### How to adopt
+
+```sh
+asd index .                   # seed the index (unchanged)
+asd map                       # one-shot: seed role-tagged Ownership entries
+asd ledger append <qname> \\  # accrue a stale-api Constraint
+  --kind constraint --role stale-api \\
+  --summary "deprecated; do not use"
+asd conclusions export        # commit the new conclusions
+asd search "legacy"           # the stale-api symbol is demoted
+```
+
+Set `CTX_ACTIVE_TASK='{"task_id":"t-X","scope":["src/foo/**"]}'` once
+per session to bias all queries toward the current task's scope.
+
+### Acceptance probes
+
+Four new probes in `examples/exampleflow-probes.toml` tagged `plan-c`:
+recipe-returns-structured, diagnostic-only-verdict-suppresses,
+asd-map-writes-classifications, stale-api-constraint-demotes-symbol.
+
+---
+
+## [0.9.89] — 2026-05-20 — Plan D complete (Crucible token-efficiency)
+
+Five fixes driven by AgentStateCrucible's A/B testing, which showed
+the assisted arm paying 2.5–5.7× baseline tokens despite making
+fewer or similar tool calls.
+
+### Added
+- **`--brief` output mode** (0.9.85) — global `--brief` flag and
+  `ASD_FORMAT=brief` env var. Projects `read` / `callers` / `callees`
+  responses down to load-bearing fields (qname, file:line, signature,
+  first doc line). Drops `symbol_id`, `symbol_fp`, `language`, `kind`,
+  `col`, end positions, full doc body, empty arrays. Expected token
+  reduction: 60–80% on the cited commands.
+- **MCP-era name aliases on CLI** (0.9.87) — `asd code_read`,
+  `code_search`, `code_query`, `callers_of`, `callees_of` all route to
+  the canonical CLI subcommand. Agents trained on older MCP-era docs
+  no longer hit `unrecognized subcommand`.
+- **`query_id` in responses** (0.9.89) — deterministic blake3-derived
+  id (`Qf3a2b1c`) on `read` / `callers` / `callees` output so
+  wrapper-side tools can dedup repeated queries.
+
+### Fixed
+- **`asd investigate` accepts unquoted multi-word queries** (0.9.86) —
+  `asd investigate failing test store` now joins to one query. Crucible
+  captured 3 consecutive turns lost to this UX trap.
+- **Python relative-import call edges** (0.9.88) — `parse_imports`
+  had an early-return on `relative_import` nodes that silently dropped
+  every `from .foo import bar` site. Crucible's own package indexed
+  71 symbols with **0 cross-module edges**; the fix resolves `.`/`..`
+  prefixes against the importing file's module path. End-to-end
+  reproducer landed as a unit test.
+
+### Expected Crucible re-run outcomes
+When Crucible pins 0.9.89, the three scenarios should flip:
+- `asd-vs-baseline` — brief mode puts assisted ≤ baseline tokens.
+- `inheritance-bug` — tie becomes clean assisted win.
+- `cross-layer-tax` — assisted produces the reference fix
+  (rates.py + display.py) instead of the proximate `apply_tax` patch.
+
+Crucible posts the empirical delta report when the re-run completes.
+
+---
+
+## [0.9.84] — 2026-05-19 — Plan B complete (compact conclusion sidecar)
+
+### Migrating an existing repo
+
+The committed sidecar shape changed in Plan B. Old layout was `.asd/v1/`
+(tens of MB on real projects). New layout is `.asd/conclusions/*.jsonl`
+(kilobytes). One-shot migration:
+
+```sh
+asd sidecar migrate           # writes .asd/conclusions/*.jsonl
+git rm -r --cached .asd/v1    # drop the old bloat from tracking
+git add .asd/conclusions/
+git commit -m "plan-b: switch to compact conclusion sidecar"
+```
+
+Re-running `asd init` afterwards is safe — it scaffolds the new layout
+and flips the git hooks (pre-commit → `asd conclusions export`;
+post-merge / post-checkout → `asd conclusions import`).
+
+### Added
+- `asd conclusions list|export|import` — read, write, and round-trip the
+  six conclusion classes (decisions, classifications, mappings, hazards,
+  recipes, followups). Byte-stable JSONL; idempotent import keyed by
+  `entry_id`.
+- `asd sidecar migrate` — one-shot migration with savings report and
+  `git rm --cached` instructions for the legacy `.asd/v1/` tree.
+- Two new `LedgerKind` variants: `Mapping` (legacy → new coverage
+  cross-refs) and `FollowUp` (open items tied to external task systems).
+- Two optional `LedgerEntry` fields: `role` (classification tag) and
+  `command` (canonical reproduction command).
+- New MCP tools: `conclusions_list`, `conclusions_export`,
+  `conclusions_import`.
+- `field_lte` probe assertion kind (used by the new sidecar-size probe).
+
+### Changed
+- `asd init` now scaffolds `.asd/conclusions/` (tracked) and `.asd/cache/`
+  (gitignored). Git hooks flipped from the old hydrate flow to the new
+  conclusions round-trip.
+- Updated `.gitignore` to add `.asd/cache/` alongside `.asd/v1/` (Plan A
+  line preserved). `.asd/conclusions/` is intentionally not ignored.
+
+---
+
 ## [0.8.5] — 2026-05-05
 
 ### Added

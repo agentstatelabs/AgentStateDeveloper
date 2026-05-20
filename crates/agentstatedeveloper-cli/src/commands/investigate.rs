@@ -29,7 +29,11 @@ use crate::config::Config;
 pub struct InvestigateArgs {
     /// Natural-language or keyword query. Scored across symbol name,
     /// signature, doc comment, file path, and ledger entries.
-    pub query: String,
+    /// Plan D t-002: multi-word queries are accepted unquoted —
+    /// `asd investigate failing test store` joins to "failing test store".
+    /// Quoting still works for queries containing flag-like tokens.
+    #[arg(required = true, num_args = 1..)]
+    pub query: Vec<String>,
 
     /// Number of top entry-point symbols to fully expand (default: 10).
     /// Alias: --limit (both accepted).
@@ -102,6 +106,10 @@ pub struct InvestigateArgs {
 }
 
 pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
+    // Plan D t-002: join unquoted multi-word queries into a single string.
+    // `asd investigate failing test store` now works the same as
+    // `asd investigate "failing test store"`.
+    let query: String = args.query.join(" ");
     if !args.quiet {
         if let Some(warn) = stale_warning(&cfg.db_path, 3600) {
             eprintln!("{warn}");
@@ -121,14 +129,14 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     let effect_store = AsgEffectStore::from_engine(&engine);
     let id_map = index_store.build_id_map(&engine);
 
-    let (tokens, mut exclusions) = parse_query(&args.query);
+    let (tokens, mut exclusions) = parse_query(&query);
     if let Some(ref excl) = args.exclude {
         for term in excl.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()) {
             exclusions.push(term);
         }
     }
     if tokens.is_empty() {
-        println!("{}", json!({ "query": args.query, "entry_points": [] }));
+        println!("{}", json!({ "query": query, "entry_points": [] }));
         return Ok(());
     }
 
@@ -143,6 +151,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         kind: args.kind.as_deref().map(|k| k.to_lowercase()),
         language: args.language.as_deref().map(|l| l.to_lowercase()),
         include_tests: args.include_tests,
+        tests_only: false,
         exclude_terms: exclusions,
         paths_filter,
     };
@@ -153,7 +162,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     let limit = args.limit.unwrap_or(args.depth);
     let mut candidates: Vec<(f64, String)> = find_candidates(
         &engine,
-        &args.query,
+        &query,
         &tokens,
         &filters,
         &ledger_store,
@@ -169,7 +178,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         .filter(|e| e.file_scope.is_none())
         .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict))
         .collect();
-    let feedback_metrics = apply_feedback_adjustments(&engine, &index_store, &args.query, &mut candidates, &feedback_verdicts);
+    let feedback_metrics = apply_feedback_adjustments(&engine, &index_store, &query, &mut candidates, &feedback_verdicts);
 
     // One git pass to gather recency for all candidate files (hot = 14 days).
     let recency = gather_recency(200, 14.0);
@@ -315,7 +324,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     let possible_misses = if scope_narrowed {
         vec![]
     } else {
-        detect_possible_misses(&args.query, &layers_present, entry_points.len())
+        detect_possible_misses(&query, &layers_present, entry_points.len())
     };
 
     // Scoped suggestions (investigate doesn't compute these — pass empty slice).
@@ -332,7 +341,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
 
     let feedback_state = build_feedback_state_from_entries(
         &all_fb,
-        &args.query,
+        &query,
         feedback_metrics.entries_applied,
     );
     let coverage = if !feedback_state.available {
@@ -357,7 +366,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     });
     let out = if args.flat {
         json!({
-            "query": args.query,
+            "query": query,
             "intent": if intent.is_empty() { Value::Null } else { Value::String(intent.to_string()) },
             "focus": if focus.is_empty() { Value::Null } else { Value::String(focus.to_string()) },
             "tokens": tokens,
@@ -374,7 +383,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         })
     } else {
         json!({
-            "query": args.query,
+            "query": query,
             "intent": if intent.is_empty() { Value::Null } else { Value::String(intent.to_string()) },
             "focus": if focus.is_empty() { Value::Null } else { Value::String(focus.to_string()) },
             "tokens": tokens,

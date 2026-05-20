@@ -1,0 +1,184 @@
+# ExampleFlow regression probe template (Plan A, t-010).
+#
+# Copy this file to ExampleFlow's .asd/probes.toml (or merge with an existing
+# probes.toml). The six probes here capture the queries that drove Plan A's
+# field-feedback gap analysis. They establish a baseline so future ASD changes
+# can be measured against the same audit cases.
+#
+# Run with:
+#     asd probe run
+#     asd probe run --filter-tag plan-a
+#
+# Each probe asserts a structural property the ExampleFlow session previously
+# had to verify by hand (ASD result + rg cross-check). Tighten thresholds as
+# ASD ranking improves.
+
+# --------------------------------------------------------------------------
+# 1. Master volume — ASD's strongest win. One query must surface UI, engine
+#    params, sink-side state, and persistence in a single response.
+# --------------------------------------------------------------------------
+[[probe]]
+name = "master-volume-cross-layer"
+description = "Master volume query must surface UI + engine params + sink + persistence in one investigate pass."
+command = "asd"
+args = ["investigate", "master volume", "--agent"]
+tags = ["plan-a", "ranking", "cross-layer"]
+assert = { kind = "file_in_key", key = "entry_points", field = "qname", value = "MasterBusParams" }
+
+[[probe]]
+name = "master-volume-sink-present"
+description = "MasterBusParams investigation must reach SinkManager.setMasterBusParams."
+command = "asd"
+args = ["investigate", "master volume", "--agent"]
+tags = ["plan-a", "cross-layer"]
+assert = { kind = "file_in_key", key = "entry_points", field = "qname", value = "setMasterBusParams" }
+
+# --------------------------------------------------------------------------
+# 2. Karplus audit — mixed result; references should be exact, no token spray.
+# --------------------------------------------------------------------------
+[[probe]]
+name = "karplus-renderCore-references"
+description = "References for KarplusStrong.renderCore must include the definition file (rg-parity)."
+command = "asd"
+args = ["references", "renderCore", "--limit", "50"]
+tags = ["plan-a", "references", "rg-parity"]
+assert = { kind = "file_in_key", key = "occurrences", field = "file", value = "KarplusStrong" }
+
+# --------------------------------------------------------------------------
+# 3. Drum GM mapping — the weak case; goal is to prove ASD points at the
+#    right kit even if it can't find the fallback-voice bug directly.
+# --------------------------------------------------------------------------
+[[probe]]
+name = "drum-kit-orientation"
+description = "Search 'drum kit' must surface DrumKit / DrumSynth as top entry points."
+command = "asd"
+args = ["search", "drum kit", "--limit", "10"]
+tags = ["plan-a", "ranking"]
+assert = { kind = "qname_rank_lte", fragment = "DrumKit", max_rank = 5 }
+
+# --------------------------------------------------------------------------
+# 4. SongPlayers test migration — prepare-change must NOT surface unrelated
+#    synths like FM6Synth. Tests the t-009 precision floor + per-file rationale.
+# --------------------------------------------------------------------------
+[[probe]]
+name = "songplayers-prepare-no-noise"
+description = "prepare-change for SongPlayers migration must not include FM6Synth.swift."
+command = "asd"
+args = ["prepare-change", "migrate SongPlayers tests off default AudioEngine", "--agent"]
+tags = ["plan-a", "precision", "prepare-change"]
+assert = { kind = "file_not_in_key", key = "likely_edit_files", field = "file", value = "FM6Synth" }
+
+[[probe]]
+name = "songplayers-prepare-has-rationale"
+description = "Every likely_edit_files entry must carry a 'why' rationale (Plan A t-009)."
+command = "asd"
+args = ["prepare-change", "migrate SongPlayers tests off default AudioEngine", "--agent"]
+tags = ["plan-a", "rationale"]
+assert = { kind = "array_field_count_gte", field = "likely_edit_files", min_count = 1 }
+# Future: extend probe to assert every entry has non-null `why`. Today's
+# assert kinds don't include "all_have_field" — add as a follow-up probe kind.
+
+# --------------------------------------------------------------------------
+# 5. AnyChipPlayer / SharedAudioEngine boundary — ASD's package-boundary case.
+# --------------------------------------------------------------------------
+[[probe]]
+name = "anychipplayer-boundary"
+description = "Search 'AnyChipPlayer' must rank AnyChipPlayer above unrelated synth/player matches."
+command = "asd"
+args = ["search", "AnyChipPlayer", "--limit", "5"]
+tags = ["plan-a", "ranking", "boundary"]
+assert = { kind = "qname_rank_lte", fragment = "AnyChipPlayer", max_rank = 1 }
+
+# --------------------------------------------------------------------------
+# 6. SID converter — the case where exact-symbol search worked. References
+#    for SIDChip must return the implementation, not noise.
+# --------------------------------------------------------------------------
+[[probe]]
+name = "sidchip-exact-references"
+description = "References for SIDChip must include the SIDChip.swift definition file."
+command = "asd"
+args = ["references", "SIDChip", "--limit", "100"]
+tags = ["plan-a", "references", "rg-parity"]
+assert = { kind = "file_in_key", key = "occurrences", field = "file", value = "SIDChip" }
+
+# --------------------------------------------------------------------------
+# Plan B acceptance: the headline metric. After `asd sidecar migrate`, the
+# committed conclusion bytes must stay tiny — kilobytes, not megabytes.
+# 500_000 bytes ≈ 500KB; pre-migration ExampleFlow was ~75MB (150x larger).
+# --------------------------------------------------------------------------
+[[probe]]
+name = "conclusions-export-stays-small"
+description = "Committed .asd/conclusions/*.jsonl must stay under 500KB total."
+command = "asd"
+args = ["conclusions", "export"]
+tags = ["plan-b", "acceptance", "sidecar-size"]
+assert = { kind = "field_lte", field = "total_bytes", max_value = 500000 }
+
+# Migration smoke: after `asd sidecar migrate`, the report's savings_bytes
+# should be positive (we moved bytes out of .asd/v1/) OR legacy_sidecar
+# wasn't present in the first place.
+[[probe]]
+name = "sidecar-migrate-runs-cleanly"
+description = "`asd sidecar migrate` exits 0 and emits a structured next_steps array."
+command = "asd"
+args = ["sidecar", "migrate"]
+tags = ["plan-b", "migration"]
+# Smoke-only — any exit-0 run is success. Tighten once we know the
+# baseline for ExampleFlow.
+
+# --------------------------------------------------------------------------
+# Plan C semantic-layer probes. These exercise the moat features that
+# Plan A/B made possible. Each probe assumes the ExampleFlow ledger has
+# been seeded with at least one of the relevant entries (via `asd ledger
+# append --role <tag>` or `asd map`). On a freshly indexed project they
+# pass trivially (empty arrays).
+# --------------------------------------------------------------------------
+
+# t-004: recipes return structured action plans, not flat symbol lists.
+# Acceptance: response has an "intent" field and an "actions" array.
+[[probe]]
+name = "recipe-classify-test-migration-returns-structured"
+description = "recipe returns {intent, query, actions[]} not a flat list (Plan C t-004)."
+command = "asd"
+args = ["recipe", "classify-test-migration", "migrate stale tests"]
+tags = ["plan-c", "recipe"]
+assert = { kind = "field_eq", field = "intent", expected = "classify-test-migration" }
+
+# t-005: rules_applied surfaces the new verdict labels when fired.
+# Soft assertion — fires only when at least one DiagnosticOnly verdict
+# has been recorded on a query that matches "diagnostic".
+[[probe]]
+name = "diagnostic-only-verdict-suppresses"
+description = "Once a diagnostic-only verdict is recorded, the symbol is dropped from its query (Plan C t-005)."
+command = "asd"
+args = ["search", "diagnostic", "--limit", "20"]
+tags = ["plan-c", "feedback", "manual-seed"]
+# Smoke. Tighten with a file_not_in_key assertion once ExampleFlow
+# has a recorded diagnostic-only verdict.
+
+# t-006: `asd map` writes Ownership entries with role tags. After running
+# it once, `asd conclusions list --class classifications` should return
+# at least one entry per indexed package.
+[[probe]]
+name = "asd-map-writes-classifications"
+description = "After `asd map`, the classifications bucket is non-empty (Plan C t-007)."
+command = "sh"
+args = [
+    "-c",
+    "asd map > /dev/null && asd conclusions list --class classifications",
+]
+tags = ["plan-c", "asd-map"]
+assert = { kind = "field_gte", field = "total", min_value = 1 }
+
+# t-003: a Constraint with role=stale-api on a symbol demotes it on
+# unrelated queries — proves "decisions-as-constraints" works end-to-end.
+# Requires ExampleFlow to seed `asd ledger append --kind constraint
+# --role stale-api` on at least one symbol matching a known query.
+[[probe]]
+name = "stale-api-constraint-demotes-symbol"
+description = "A role=stale-api Constraint demotes its symbol in ranked search (Plan C t-003)."
+command = "asd"
+args = ["search", "legacy", "--limit", "20"]
+tags = ["plan-c", "decisions-as-constraints", "manual-seed"]
+# Smoke. Tighten with file_not_in_key once ExampleFlow has a recorded
+# stale-api Constraint on a known legacy symbol.

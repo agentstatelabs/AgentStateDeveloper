@@ -197,6 +197,18 @@ pub struct AppendArgs {
     /// Author identifier (email, agent-slug, etc.).
     #[arg(long, default_value = "asd-cli-user")]
     pub author_id: String,
+
+    /// Plan B t-002: classification role/intent tag (e.g. "diagnostic-test",
+    /// "fast-test", "fixture-path", "stale-api"). Optional; most meaningful
+    /// for kind=ownership/concept entries.
+    #[arg(long)]
+    pub role: Option<String>,
+
+    /// Plan B t-002: canonical reproduction or validation command
+    /// (e.g. "swift test --filter SongPlayersTests"). Optional; most
+    /// meaningful for kind=validation_scenario/proof/follow_up entries.
+    #[arg(long)]
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -221,6 +233,11 @@ pub enum CliLedgerKind {
     KnownBug,
     /// Domain concept (e.g. "Drift Pad clip playhead") — first-class queryable entity.
     Concept,
+    /// Plan B t-002: replacement-coverage mapping ("legacy X is covered by new Y").
+    Mapping,
+    /// Plan B t-002: open follow-up tied to an external task.
+    #[value(name = "follow_up")]
+    FollowUp,
 }
 
 impl From<CliLedgerKind> for LedgerKind {
@@ -238,6 +255,8 @@ impl From<CliLedgerKind> for LedgerKind {
             CliLedgerKind::ValidationScenario => LedgerKind::ValidationScenario,
             CliLedgerKind::KnownBug => LedgerKind::KnownBug,
             CliLedgerKind::Concept => LedgerKind::Concept,
+            CliLedgerKind::Mapping => LedgerKind::Mapping,
+            CliLedgerKind::FollowUp => LedgerKind::FollowUp,
         }
     }
 }
@@ -644,6 +663,24 @@ fn append(cfg: &Config, args: AppendArgs) -> Result<()> {
         entry.body = Some(text);
     }
     entry.matched_policy = decision.matched_policy();
+    // Plan C t-002: validate role against the canonical RoleTag set;
+    // emit a stderr warning on unknown so unknown tags don't break old
+    // data but the user notices the typo.
+    if let Some(ref r) = args.role {
+        if agentstatedeveloper_core::RoleTag::from_str(r).is_none() {
+            let valid: Vec<&str> = agentstatedeveloper_core::RoleTag::all()
+                .iter()
+                .map(|t| t.as_str())
+                .collect();
+            eprintln!(
+                "asd: warning: role={:?} is not a canonical RoleTag. Valid: {}",
+                r,
+                valid.join(", ")
+            );
+        }
+    }
+    entry.role = args.role;
+    entry.command = args.command;
 
     if let Decision::RequireApproval {
         approvers, reason, ..

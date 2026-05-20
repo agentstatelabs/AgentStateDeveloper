@@ -36,45 +36,46 @@ const HOOKS: &[HookDef] = &[
     HookDef {
         filename: "pre-commit",
         trigger: "git commit",
-        command: "asd sync --prune",
-        purpose: "flush ledger/effects to .asd/v1/ and remove stale entries",
+        command: "asd conclusions export",
+        purpose: "write committed conclusions (decisions/hazards/recipes/…) to .asd/conclusions/*.jsonl",
         script: "#!/usr/bin/env sh
 # ASD pre-commit hook — installed by `asd init`
-# Flushes live ASG state into the .asd/v1/ sidecar and removes any
-# orphaned files for symbols that have been renamed or deleted.
-# The sidecar files are then staged so they travel with this commit.
+# Plan B: write the compact, byte-stable conclusion JSONL files to
+# .asd/conclusions/. These files travel with the commit (kilobytes, not MB)
+# and carry the expensive LLM-formed conclusions a fresh clone needs.
+# The big derived cache lives at .asd/cache/ and is gitignored.
 set -e
-asd sync --prune
-git add .asd/v1/ 2>/dev/null || true
+asd conclusions export --quiet
+git add .asd/conclusions/ 2>/dev/null || true
 ",
     },
     HookDef {
         filename: "post-merge",
         trigger: "git merge / git pull",
-        command: "asd hydrate && asd index .",
-        purpose: "load new .asd/v1/ entries into local db and rebuild index",
+        command: "asd conclusions import && asd index .",
+        purpose: "import committed .asd/conclusions/ into local ledger and rebuild index",
         script: "#!/usr/bin/env sh
 # ASD post-merge hook — installed by `asd init`
-# Loads any new sidecar entries from the merged branch into the local
-# ASG database, then rebuilds the derived semantic index.
+# Plan B: pull any new conclusion entries from the merged branch into
+# the local ASG database, then rebuild the derived semantic index.
 set -e
-asd hydrate
+asd conclusions import 2>/dev/null || true
 asd index .
 ",
     },
     HookDef {
         filename: "post-checkout",
         trigger: "git checkout / git switch",
-        command: "asd hydrate && asd index .",
-        purpose: "sync local db to the checked-out branch's sidecar state",
+        command: "asd conclusions import && asd index .",
+        purpose: "sync local ledger to the checked-out branch's conclusions",
         script: "#!/usr/bin/env sh
 # ASD post-checkout hook — installed by `asd init`
-# Syncs the local ASG database to the sidecar state of the branch
-# you just switched to, then rebuilds the derived semantic index.
+# Plan B: align the local ledger with the checked-out branch's committed
+# conclusions, then rebuild the derived semantic index.
 # $3 is 1 for branch checkout, 0 for file checkout — only run on branch.
 [ \"$3\" = \"1\" ] || exit 0
 set -e
-asd hydrate
+asd conclusions import 2>/dev/null || true
 asd index .
 ",
     },
@@ -145,6 +146,11 @@ pub fn run(cfg: &Config, args: InitArgs) -> Result<()> {
     // Update .gitignore.
     update_gitignore(&project_root)?;
 
+    // Plan B t-006: scaffold the two new sidecar subdirs.
+    // `.asd/conclusions/` is the committed compact-JSONL home.
+    // `.asd/cache/` is the gitignored derived-cache home (call graph, etc.).
+    scaffold_sidecar_dirs(&project_root)?;
+
     // Install hooks unless --no-hooks.
     if args.no_hooks {
         println!("\ngit hooks: skipped (--no-hooks). Re-run `asd init` to install.");
@@ -167,22 +173,26 @@ fn update_gitignore(root: &Path) -> Result<()> {
         String::new()
     };
 
-    let mut lines: Vec<&str> = existing.lines().collect();
+    let mut lines: Vec<String> = existing.lines().map(|l| l.to_string()).collect();
     let mut changed = false;
 
     // Ensure the SQLite db is ignored.
     if !lines.iter().any(|l| l.trim() == ".asd-state.db") {
-        lines.push(".asd-state.db");
+        lines.push(".asd-state.db".to_string());
         changed = true;
     }
-    // Ensure the sidecar data directory is NOT ignored (it travels with git).
-    // Remove any line that would blanket-ignore .asd/.
-    let before = lines.len();
-    lines.retain(|l| {
-        let t = l.trim();
-        t != ".asd/" && t != ".asd" && t != ".asd/*"
-    });
-    if lines.len() != before {
+
+    // Plan A t-003: derived sidecar (tens of MB) — regenerable, stays local.
+    if !lines.iter().any(|l| l.trim() == ".asd/v1/") {
+        lines.push(".asd/v1/".to_string());
+        changed = true;
+    }
+
+    // Plan B t-006: derived cache (call graph, effects-rev, etc.). Same
+    // principle — regenerable from source, stays local. `.asd/conclusions/`
+    // (the committed compact JSONL) is intentionally NOT ignored.
+    if !lines.iter().any(|l| l.trim() == ".asd/cache/") {
+        lines.push(".asd/cache/".to_string());
         changed = true;
     }
 
@@ -190,9 +200,58 @@ fn update_gitignore(root: &Path) -> Result<()> {
         let content = lines.join("\n") + "\n";
         fs::write(&gi_path, content)
             .with_context(|| format!("failed to write {}", gi_path.display()))?;
-        println!(".gitignore: updated (.asd-state.db ignored; .asd/v1/ tracked)");
+        println!(
+            ".gitignore: updated (.asd-state.db and .asd/v1/ ignored — both are local derived state)"
+        );
     }
 
+    // If the sidecar is already tracked from a prior install, tell the user
+    // how to untrack it. Don't run `git rm` ourselves — destructive ops belong
+    // to the user.
+    let sidecar_tracked = std::process::Command::new("git")
+        .args(["ls-files", "--error-unmatch", ".asd/v1"])
+        .current_dir(root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if sidecar_tracked {
+        println!();
+        println!("  NOTE: .asd/v1/ is currently tracked in git from a prior install.");
+        println!("  To untrack it without deleting your local copy, run:");
+        println!("      git rm -r --cached .asd/v1");
+        println!("      git commit -m 'stop tracking .asd/v1/ sidecar (regenerable cache)'");
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Plan B sidecar scaffolding
+// ---------------------------------------------------------------------------
+
+/// Create `.asd/conclusions/` and `.asd/cache/`. Drop a small README in
+/// conclusions/ so git tracks the directory before any JSONL is exported.
+fn scaffold_sidecar_dirs(root: &Path) -> Result<()> {
+    let conclusions = root.join(".asd/conclusions");
+    let cache = root.join(".asd/cache");
+    fs::create_dir_all(&conclusions).ok();
+    fs::create_dir_all(&cache).ok();
+
+    let readme = conclusions.join("README.md");
+    if !readme.exists() {
+        let body = "# .asd/conclusions/\n\n\
+Compact JSONL home for ASD's six conclusion classes: decisions,\n\
+classifications, mappings, hazards, recipes, followups.\n\n\
+Files here travel with the git repo. They are written by\n\
+`asd conclusions export` (pre-commit) and read back by\n\
+`asd conclusions import` (post-merge / post-checkout).\n\n\
+Target size: kilobytes per project, not megabytes. The big derived\n\
+cache (call graph, effects-rev, symbol blobs) lives at `.asd/cache/`\n\
+which is gitignored.\n";
+        let _ = fs::write(&readme, body);
+    }
     Ok(())
 }
 
@@ -290,4 +349,58 @@ pub fn find_project_root(db_path: &PathBuf) -> PathBuf {
         .filter(|p| !p.as_os_str().is_empty())
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+}
+
+#[cfg(test)]
+mod gitignore_tests {
+    //! Regression probe for Plan A t-003: the `.asd/v1/` sidecar must be
+    //! gitignored, not tracked. If this test fails, init has reverted to the
+    //! pre-Plan-A "ride sidecar in git" model.
+
+    use super::update_gitignore;
+    use tempfile::tempdir;
+
+    #[test]
+    fn fresh_repo_gets_sidecar_and_db_ignored() {
+        let tmp = tempdir().unwrap();
+        update_gitignore(tmp.path()).unwrap();
+        let gi = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert!(gi.lines().any(|l| l.trim() == ".asd-state.db"));
+        assert!(gi.lines().any(|l| l.trim() == ".asd/v1/"));
+        // Plan B t-006: cache also ignored; conclusions/ intentionally not.
+        assert!(gi.lines().any(|l| l.trim() == ".asd/cache/"));
+        assert!(!gi.lines().any(|l| l.trim() == ".asd/conclusions/"));
+    }
+
+    #[test]
+    fn pre_existing_gitignore_is_preserved() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "node_modules/\n*.log\n").unwrap();
+        update_gitignore(tmp.path()).unwrap();
+        let gi = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert!(gi.contains("node_modules/"));
+        assert!(gi.contains("*.log"));
+        assert!(gi.lines().any(|l| l.trim() == ".asd/v1/"));
+    }
+
+    #[test]
+    fn idempotent_on_already_correct_gitignore() {
+        let tmp = tempdir().unwrap();
+        let initial = ".asd-state.db\n.asd/v1/\n.asd/cache/\n";
+        std::fs::write(tmp.path().join(".gitignore"), initial).unwrap();
+        update_gitignore(tmp.path()).unwrap();
+        let gi = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert_eq!(gi, initial);
+    }
+
+    #[test]
+    fn scaffold_creates_conclusions_and_cache_dirs() {
+        // Plan B t-006: init creates both subdirs; conclusions/ gets a
+        // tracked README so git follows the directory.
+        let tmp = tempdir().unwrap();
+        super::scaffold_sidecar_dirs(tmp.path()).unwrap();
+        assert!(tmp.path().join(".asd/conclusions").is_dir());
+        assert!(tmp.path().join(".asd/cache").is_dir());
+        assert!(tmp.path().join(".asd/conclusions/README.md").exists());
+    }
 }

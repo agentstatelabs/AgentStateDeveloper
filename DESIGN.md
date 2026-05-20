@@ -496,3 +496,229 @@ Follows the same pattern as `/Apps/stategraph/` and `/Apps/CTXone/`.
   replaces `FilePolicyGate` as production path; action taxonomy formalized;
   `Situation` qualifiers enriched; policy evaluation wired into
   approve/reject/withdraw.
+
+## Plan B — compact conclusion sidecar (in design)
+
+Plan B redesigns the committed sidecar around *conclusions* — the expensive
+LLM-formed facts that are hard to reproduce — and drops everything that is
+derivable from source. Driven by the ExampleFlow field report showing the
+`.asd/v1/` sidecar reaching 75 MB.
+
+### Reframe from the t-001 audit
+
+The "75 MB sidecar" problem is **not** a ledger problem. Ledger entries
+already live in the ASG repo under `/asd/v1/ledger/{symbol_id}/{entry_id}`
+and are small. The bloat lives in derived subtrees the indexer writes:
+
+- `symbols/` — full Symbol JSON × N
+- `effects/` — EffectDecl JSON × N
+- `code/` — source snapshots
+- `index/{by-qname,callers,callees,effects-rev}/` — derived call/effect graph
+
+All four are regenerable from source via `asd index .`. Plan A t-003
+already gitignored `.asd/v1/`. Plan B's job is to add a *committed* shape
+for the part that is **not** regenerable (the ledger conclusions).
+
+### Six conclusion classes vs current LedgerKind
+
+| Class | Coverage today | Action |
+|---|---|---|
+| 1. Decisions | Decision, Rationale, Constraint, Assumption, Tradeoff, Invariant | reuse |
+| 2. Classifications | Ownership, Concept (partial — no role/intent enum) | optional `role: Option<String>` on LedgerEntry |
+| 3. Mappings (legacy → new coverage) | none | **new** `LedgerKind::Mapping` |
+| 4. Hazards | Hazard, KnownBug | reuse |
+| 5. Validation recipes | ValidationScenario, Proof, Evidence | optional `command: Option<String>` field |
+| 6. Follow-ups | none | **new** `LedgerKind::FollowUp` |
+
+Net schema delta: **2 new LedgerKind variants + 2 optional LedgerEntry
+fields**. Nothing else changes in core's ledger model.
+
+### Committed shape: `.asd/conclusions/*.jsonl`
+
+One file per class, each line a compact JSON object:
+
+```
+.asd/
+  conclusions/
+    decisions.jsonl        # Decision | Rationale | Constraint | Assumption | Tradeoff | Invariant
+    classifications.jsonl  # Ownership | Concept (+ role field)
+    mappings.jsonl         # new Mapping kind
+    hazards.jsonl          # Hazard | KnownBug
+    recipes.jsonl          # ValidationScenario | Proof (with command field)
+    followups.jsonl        # new FollowUp kind
+  cache/                   # gitignored — index/, symbols/, effects/, code/ go here
+```
+
+Each JSONL line carries the minimal anchoring needed for human review and
+round-trip:
+
+```json
+{"id":"led_…","symbol":"App.SongPlayers.tests","kind":"decision",
+ "summary":"SongPlayers tests must stay out of default AudioEngine",
+ "author":"ctx_user@…","created":"2026-05-19T16:54:00Z",
+ "evidence":[{"kind":"ctxone","value":"sg_8ad836e175f3"}]}
+```
+
+Field order is fixed so re-export is byte-stable (t-004 acceptance).
+
+### Round-trip
+
+- `asd conclusions export` — reads ledger, writes the 6 JSONL files
+- `asd conclusions import` — reads JSONL, upserts to ledger by entry_id
+  (idempotent; supersedes carry through)
+- `asd sidecar migrate` — drains existing `.asd/v1/ledger/` into JSONL,
+  then prints `git rm -r --cached .asd/v1` for the user to drop the bloat
+
+Hook flow after Plan B: `pre-commit` → `asd conclusions export` (kilobyte
+diff); `post-merge`/`post-checkout` → `asd conclusions import` (replaces
+the heavy `asd hydrate` flow).
+
+### Acceptance
+
+ExampleFlow sidecar drops from 75 MB → < 500 KB (t-008 probe).
+
+## Plan C — semantic-layer moat (in design)
+
+Plan C makes ASD remember the **expensive task-specific understanding** the
+LLM forms — role tags, decisions-that-shape-ranking, change-intent recipes
+— so a new session doesn't re-derive the same project mental model every
+turn. Plan A built trust; Plan B built durable storage; Plan C builds the
+defining feature.
+
+### Audit takeaways (t-001 research)
+
+The existing ranking pipeline lives in `search_fts.rs` and `candidates.rs`
+and already does a lot: BM25 baseline, hybrid boost (path/name/phrase),
+ledger count-boost (Ownership/Invariant/Hazard), tier penalty, feedback
+verdicts (`Useful` ±1.5, `Noisy`/`WrongLayer` → `NEG_INFINITY`), and
+file-scope feedback via glob. **What is missing:** Decision/Constraint
+ledger entries are *flagged at index time but never consumed* — they're
+passive notes, not active constraints. And the `role` field added on
+`LedgerEntry` in Plan B t-002 is stored, exported, round-tripped, but
+**never read for ranking**. Plan C closes both gaps.
+
+### First-class role-tag vocabulary (t-002)
+
+| Tag | Applies to (entry kinds) | Meaning |
+|---|---|---|
+| **fast-test** | ValidationScenario, Proof, test-tier symbols | Lightweight; safe in tight feedback loops |
+| **diagnostic-test** | ValidationScenario, Proof | Debug/instrumentation; not part of main CI |
+| **fixture-path** | test-tier symbols, Concept | Shared fixture; multiple tests depend on it |
+| **stale-api** | Decision, Hazard | Deprecated interface; migration tracked |
+| **package-boundary** | Ownership, Invariant | Cross-package facade; changes need coordination |
+| **replacement-coverage** | Mapping | Legacy coverage handled by newer code |
+| **performance-critical** | Invariant, Decision | Hot path; changes need perf measurement |
+| **audit-pending** | Decision, Constraint, Assumption | Not yet reviewed; pending validation |
+
+Implemented as a `RoleTag` enum in core with `as_str()` and `from_str()`
+helpers. The `LedgerEntry.role` field stays `Option<String>` (so
+unknown/free-form tags don't break old data), but the CLI / MCP / API
+layers validate against the enum at write time and emit a warning for
+unknown tags. Tagged tests in core lock the enum to the design.
+
+### Decisions-as-constraints (t-003)
+
+Recommendation from t-001: **ride on top of `apply_feedback_adjustments`
+as synthetic verdicts** — do not add a new ranking stage. Constraint and
+Decision ledger entries with a penalty role (e.g. `stale-api`,
+`audit-pending`) get pre-processed at index time into a
+`constraint_penalties: HashMap<sym_id, Vec<(role, optional_scope_glob)>>`
+side-channel. During candidate scoring, the existing verdict loop applies
+the same `NEG_INFINITY` suppression it uses for `WrongLayer` feedback.
+
+Concrete shape:
+- A `Constraint`/`Decision` entry whose `role = "stale-api"` makes its
+  symbol behave like a `WrongLayer` verdict for queries that don't
+  explicitly include `--include-stale` or scope-narrow to that file.
+- An entry with `role = "package-boundary"` doesn't penalize directly,
+  but adds a **boost** to other symbols in the same package — surfacing
+  the inside-the-boundary alternatives first.
+- Entry body MAY carry a `scope: ["path/glob"]` JSON field; if present
+  the penalty/boost only applies to queries whose `paths_filter` is a
+  subset of the scope. Otherwise it applies globally.
+
+This keeps the machinery minimal: one new helper in core
+(`build_constraint_penalties` from ledger walk), one new SQLite UNINDEXED
+column (`constraint_roles` delimited string for fast hydration), and one
+new branch in the existing per-symbol verdict loop.
+
+### Change-intent recipes (t-004)
+
+Recipes are structured outputs that replace raw symbol lists for known
+task families. Shared `Recipe` schema in core:
+
+```rust
+struct Recipe {
+    intent: String,                // "migrate-stale-tests"
+    actions: Vec<RecipeAction>,    // ordered steps
+}
+struct RecipeAction {
+    kind: ActionKind,              // Move | Delete | Run | Gate | KeepAsCovered
+    file: String,
+    reason: String,                // one-line "why this file"
+    command: Option<String>,       // e.g. "swift test --filter X"
+}
+```
+
+First recipe: `classify-test-migration-candidates`. Given a query, walks
+test-tier symbols in scope, applies role-tag filters
+(`fast-test`/`diagnostic-test`/`fixture-path`/`stale-api`), looks up
+`Mapping` ledger entries for replacement-coverage links, and returns the
+structured Recipe instead of a flat symbol list. CLI: `asd recipe
+classify-test-migration`. MCP: `recipe_classify_test_migration`. The
+shape sets the pattern for future recipes (Plan C+).
+
+### Verdict feedback loop (t-005)
+
+Today's `FeedbackVerdict` has 4 variants
+(`Useful`/`Noisy`/`Missing`/`WrongLayer`). Plan C extends to a richer set
+that drives both ranking AND classification accrual:
+
+- `Useful` (existing) — boost stays
+- `Noisy` (existing) — suppression stays
+- `AlreadyCovered` (new) — implies a `Mapping` ledger entry from the
+  noisy symbol to whatever covers it; surface as a follow-up prompt
+- `DiagnosticOnly` (new) — implies a `Classification` entry with
+  `role = "diagnostic-test"`; affects future queries via t-003
+- `WrongLayer` (existing) — suppression stays, role tag stays free-form
+
+Surface: `asd feedback verdict --query <q> --symbol <s> --verdict
+already_covered --covered-by <other-sym>`. Each verdict can optionally
+auto-write a ledger entry (Mapping or Classification), so the same
+gesture that fixes today's query also accrues durable conclusions for
+tomorrow.
+
+### CTX task state → ASD ranking bias (t-006)
+
+Read `CTX_ACTIVE_TASK` env var (or `.asd/cache/active-task.json` written
+by an integrating hook). If present, parse a scope hint (file globs)
+from the task description and apply a **soft +1.0 boost** to candidates
+matching that scope — not a hard filter (the task's recorded scope may
+be wrong; agent should still see alternatives). Side effect: every
+ledger write during an active task auto-tags the entry with
+`ctx:task:<id>` so future Plan C constraints can scope by task too.
+
+### Initial-read `asd map` (t-007)
+
+One-shot command: walk the indexed project, classify package boundaries
+(directories with `__init__.py` / `Cargo.toml` / `package.json`), tag
+test files with `fast-test` vs `diagnostic-test` heuristics, identify
+entry-points-by-layer, and write the results as Classification and
+Concept ledger entries. The output rides Plan B's conclusions export
+into committed JSONL so the next clone gets the same project mental
+model without re-running `asd map`.
+
+### Acceptance probes (t-008)
+
+Add to `examples/exampleflow-probes.toml`:
+- A recorded `role=stale-api` Constraint on a symbol demotes it on
+  unrelated queries (decisions-as-constraints works).
+- A `Noisy` verdict on `(query, symbol)` persists across runs.
+- `recipe_classify_test_migration` returns role-tagged JSON, not a flat
+  list.
+- `asd map` writes ≥1 Classification entry per source-tier package.
+
+Acceptance: ExampleFlow queries that previously surfaced
+`AudioEngine` files for `SongPlayers` test work no longer do, because
+the relevant Constraint actively demotes them.
+

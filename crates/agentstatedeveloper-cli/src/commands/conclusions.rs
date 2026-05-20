@@ -1,0 +1,267 @@
+//! `asd conclusions list [--class <class>] [--symbol <qname>]` — view ledger
+//! entries bucketed by the six Plan B conclusion classes (decisions,
+//! classifications, mappings, hazards, recipes, followups).
+//!
+//! This is the read surface for the conclusion layer. Write happens through
+//! `asd ledger append` with the appropriate --kind (and optional --role /
+//! --command flags). Export to JSONL is t-004; round-trip import is t-005.
+
+use anyhow::Result;
+use clap::{Args, Subcommand, ValueEnum};
+use serde_json::json;
+
+use agentstatedeveloper_core::{
+    conclusions_export::{self, ExportRecord},
+    AsgIndexStore, AsgLedgerStore, ConclusionClass, Engine, IndexStore, LedgerKind, LedgerStore,
+};
+
+use crate::config::Config;
+
+#[derive(Debug, Subcommand)]
+pub enum ConclusionsCmd {
+    /// List ledger entries grouped by conclusion class.
+    List(ListArgs),
+    /// Write all ledger conclusions to compact JSONL files under
+    /// `.asd/conclusions/` (one file per class). Byte-stable when no new
+    /// entries — safe to run from a pre-commit hook.
+    Export(ExportArgs),
+    /// Read `.asd/conclusions/*.jsonl` back into the local ledger.
+    /// Idempotent — entries are keyed by entry_id. Use after `git pull`
+    /// or on a fresh clone to populate ASG with the committed conclusions.
+    Import(ImportArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ListArgs {
+    /// Restrict to one conclusion class. Omit to list all six.
+    #[arg(long, value_enum)]
+    pub class: Option<CliConclusionClass>,
+
+    /// Restrict to one symbol (qname). Omit to list across all symbols.
+    #[arg(long)]
+    pub symbol: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum CliConclusionClass {
+    Decisions,
+    Classifications,
+    Mappings,
+    Hazards,
+    Recipes,
+    #[value(name = "followups")]
+    FollowUps,
+}
+
+impl From<CliConclusionClass> for ConclusionClass {
+    fn from(c: CliConclusionClass) -> Self {
+        match c {
+            CliConclusionClass::Decisions => ConclusionClass::Decisions,
+            CliConclusionClass::Classifications => ConclusionClass::Classifications,
+            CliConclusionClass::Mappings => ConclusionClass::Mappings,
+            CliConclusionClass::Hazards => ConclusionClass::Hazards,
+            CliConclusionClass::Recipes => ConclusionClass::Recipes,
+            CliConclusionClass::FollowUps => ConclusionClass::FollowUps,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct ExportArgs {
+    /// Output directory for the JSONL files. Defaults to `.asd/conclusions/`
+    /// relative to the database parent directory.
+    #[arg(long)]
+    pub out: Option<std::path::PathBuf>,
+
+    /// Emit a one-line summary instead of full per-class counts.
+    #[arg(long)]
+    pub quiet: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ImportArgs {
+    /// Input directory containing the `*.jsonl` files. Defaults to
+    /// `.asd/conclusions/` relative to the database parent directory.
+    #[arg(long, name = "in")]
+    pub in_dir: Option<std::path::PathBuf>,
+}
+
+pub fn run(cfg: &Config, cmd: ConclusionsCmd) -> Result<()> {
+    match cmd {
+        ConclusionsCmd::List(args) => list(cfg, args),
+        ConclusionsCmd::Export(args) => export(cfg, args),
+        ConclusionsCmd::Import(args) => import(cfg, args),
+    }
+}
+
+fn import(cfg: &Config, args: ImportArgs) -> Result<()> {
+    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let in_dir = args.in_dir.unwrap_or_else(|| {
+        cfg.db_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join(".asd")
+            .join("conclusions")
+    });
+    let results = conclusions_export::import_all(&engine, &in_dir, &cfg.agent_id)?;
+    let payload = json!({
+        "in_dir": in_dir.display().to_string(),
+        "files": results.iter().map(|r| json!({
+            "class": r.class,
+            "file": r.file,
+            "imported": r.imported,
+            "skipped_unknown_qname": r.skipped_unknown_qname,
+            "skipped_parse_error": r.skipped_parse_error,
+        })).collect::<Vec<_>>(),
+        "total_imported": results.iter().map(|r| r.imported).sum::<usize>(),
+        "total_skipped_unknown_qname": results.iter().map(|r| r.skipped_unknown_qname).sum::<usize>(),
+        "total_skipped_parse_error": results.iter().map(|r| r.skipped_parse_error).sum::<usize>(),
+    });
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+fn list(cfg: &Config, args: ListArgs) -> Result<()> {
+    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let index = AsgIndexStore::from_engine(&engine);
+    let ledger = AsgLedgerStore::from_engine(&engine);
+    let ref_name = engine.ref_name.clone();
+
+    let target_class = args.class.map(ConclusionClass::from);
+
+    // Resolve which symbols to scan: one specific qname or all indexed.
+    let symbol_ids: Vec<(String, String)> = if let Some(qname) = args.symbol.as_deref() {
+        match index.get_symbol_by_qname(&ref_name, qname)? {
+            Some(sym) => vec![(sym.symbol_id, sym.qname)],
+            None => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "class": target_class.map(|c| c.filename_stem()),
+                        "symbol": qname,
+                        "buckets": {},
+                        "warning": "symbol not found",
+                    }))?
+                );
+                return Ok(());
+            }
+        }
+    } else {
+        let prefix = format!(
+            "{}/index/by-qname",
+            agentstatedeveloper_core::ASD_PATH_PREFIX
+        );
+        let tree = engine
+            .repo
+            .get_tree(&ref_name, &prefix)
+            .unwrap_or(serde_json::Value::Null);
+        let qnames: Vec<String> = match tree {
+            serde_json::Value::Object(map) => map.keys().cloned().collect(),
+            _ => Vec::new(),
+        };
+        let mut out = Vec::new();
+        for qn in qnames {
+            if let Some(sym) = index.get_symbol_by_qname(&ref_name, &qn)? {
+                out.push((sym.symbol_id, sym.qname));
+            }
+        }
+        out
+    };
+
+    // Bucket entries by class. Walk all symbols' ledger entries once.
+    use std::collections::BTreeMap;
+    let mut buckets: BTreeMap<&'static str, Vec<serde_json::Value>> = BTreeMap::new();
+    for class in ConclusionClass::all() {
+        if target_class.is_none() || target_class == Some(*class) {
+            buckets.insert(class.filename_stem(), Vec::new());
+        }
+    }
+
+    for (sym_id, qname) in &symbol_ids {
+        let entries = ledger.list_entries(&ref_name, sym_id).unwrap_or_default();
+        for entry in entries {
+            let class = entry.kind.conclusion_class();
+            if let Some(filter) = target_class {
+                if class != filter {
+                    continue;
+                }
+            }
+            let stem = class.filename_stem();
+            if let Some(bucket) = buckets.get_mut(stem) {
+                bucket.push(json!({
+                    "entry_id": entry.entry_id,
+                    "kind": kind_str(entry.kind),
+                    "qname": qname,
+                    "symbol_id": entry.symbol_id,
+                    "summary": entry.summary,
+                    "role": entry.role,
+                    "command": entry.command,
+                    "tags": entry.tags,
+                    "created_at": entry.created_at,
+                }));
+            }
+        }
+    }
+
+    let total: usize = buckets.values().map(|v| v.len()).sum();
+    let payload = json!({
+        "class": target_class.map(|c| c.filename_stem()),
+        "symbol": args.symbol,
+        "total": total,
+        "buckets": buckets,
+    });
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+fn kind_str(k: LedgerKind) -> &'static str {
+    k.as_str()
+}
+
+// -- Export ------------------------------------------------------------------
+//
+// The actual walk/serialize/write helpers live in
+// `agentstatedeveloper_core::conclusions_export` so the MCP `conclusions_export`
+// tool can call the same code without duplication.
+
+fn export(cfg: &Config, args: ExportArgs) -> Result<()> {
+    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let out_dir = args.out.unwrap_or_else(|| {
+        cfg.db_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join(".asd")
+            .join("conclusions")
+    });
+
+    let counts = conclusions_export::export_all(&engine, &out_dir)?;
+
+    if args.quiet {
+        let total_entries: usize = counts.iter().map(|(_, n, _)| n).sum();
+        let total_bytes: u64 = counts.iter().map(|(_, _, b)| b).sum();
+        println!(
+            "exported {} entries ({} bytes) to {}",
+            total_entries,
+            total_bytes,
+            out_dir.display()
+        );
+    } else {
+        let payload = json!({
+            "out_dir": out_dir.display().to_string(),
+            "files": counts.iter().map(|(stem, n, b)| json!({
+                "class": stem,
+                "file": format!("{stem}.jsonl"),
+                "entries": n,
+                "bytes": b,
+            })).collect::<Vec<_>>(),
+            "total_entries": counts.iter().map(|(_, n, _)| n).sum::<usize>(),
+            "total_bytes": counts.iter().map(|(_, _, b)| b).sum::<u64>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    }
+    Ok(())
+}
+
+// (write_jsonl, gather_buckets, ExportRecord and their tests live in
+//  agentstatedeveloper_core::conclusions_export — single source of truth
+//  shared by CLI and MCP.)

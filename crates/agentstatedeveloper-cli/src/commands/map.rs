@@ -1,0 +1,272 @@
+//! `asd map` — initial-read project summary (Plan C t-007).
+//!
+//! Walks the indexed project, identifies package boundaries from
+//! `__init__.py` / `Cargo.toml` / `package.json` markers, and classifies
+//! test files into `fast-test` vs `diagnostic-test` per file-name and
+//! body heuristics. Results land as `Ownership` ledger entries with
+//! Plan C role tags, so the next session inherits the project mental
+//! model without re-deriving it.
+//!
+//! Idempotent: entry IDs are deterministic hashes of (symbol_id + role)
+//! so re-running `asd map` overwrites prior tags rather than appending
+//! duplicates.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use anyhow::Result;
+use clap::Args;
+use serde_json::json;
+
+use agentstatedeveloper_core::{
+    AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, IndexStore, LedgerEntry, LedgerKind,
+    LedgerStore, RoleTag, Symbol, ASD_PATH_PREFIX,
+};
+
+use crate::config::Config;
+
+#[derive(Debug, Args)]
+pub struct MapArgs {
+    /// Dry-run: emit the summary without writing any ledger entries.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+pub fn run(cfg: &Config, args: MapArgs) -> Result<()> {
+    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let index = AsgIndexStore::from_engine(&engine);
+    let ledger = AsgLedgerStore::from_engine(&engine);
+    let ref_name = engine.ref_name.clone();
+
+    // Collect every indexed symbol.
+    let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+    let tree = engine
+        .repo
+        .get_tree(&ref_name, &prefix)
+        .unwrap_or(serde_json::Value::Null);
+    let qnames: Vec<String> = match tree {
+        serde_json::Value::Object(m) => m.keys().cloned().collect(),
+        _ => Vec::new(),
+    };
+
+    let mut all_symbols: Vec<Symbol> = Vec::new();
+    for qn in qnames {
+        if let Ok(Some(sym)) = index.get_symbol_by_qname(&ref_name, &qn) {
+            all_symbols.push(sym);
+        }
+    }
+
+    // Group by package — the directory of the file. For each package,
+    // pick a "front-door" symbol (the one with the shortest qname).
+    let mut package_front_doors: BTreeMap<String, Symbol> = BTreeMap::new();
+    for sym in &all_symbols {
+        if !is_package_member(&sym.file) {
+            continue;
+        }
+        let pkg = package_dir(&sym.file);
+        package_front_doors
+            .entry(pkg)
+            .and_modify(|existing| {
+                if sym.qname.len() < existing.qname.len() {
+                    *existing = sym.clone();
+                }
+            })
+            .or_insert_with(|| sym.clone());
+    }
+
+    // Classify test files (one symbol per file is enough for the role tag).
+    let mut test_file_roles: BTreeMap<String, (Symbol, RoleTag)> = BTreeMap::new();
+    for sym in &all_symbols {
+        let role = test_file_role(&sym.file);
+        if let Some(role) = role {
+            test_file_roles
+                .entry(sym.file.clone())
+                .and_modify(|(s, _)| {
+                    if sym.qname.len() < s.qname.len() {
+                        *s = sym.clone();
+                    }
+                })
+                .or_insert_with(|| (sym.clone(), role));
+        }
+    }
+
+    // Build the summary payload + write entries (unless dry-run).
+    let mut written_pkg = 0usize;
+    let mut written_test = 0usize;
+    let mut packages_out: Vec<serde_json::Value> = Vec::new();
+    let mut test_files_out: Vec<serde_json::Value> = Vec::new();
+    let mut author = Author {
+        kind: AuthorKind::Agent,
+        id: "asd-map".into(),
+    };
+    author.id = cfg.agent_id.clone();
+    author.kind = AuthorKind::Agent;
+
+    for (pkg, sym) in &package_front_doors {
+        packages_out.push(json!({
+            "package": pkg,
+            "front_door_qname": sym.qname,
+            "file": sym.file,
+            "role": RoleTag::PackageBoundary.as_str(),
+        }));
+        if !args.dry_run {
+            write_map_entry(
+                &ledger,
+                &ref_name,
+                sym,
+                RoleTag::PackageBoundary,
+                &format!("package boundary: {pkg}"),
+                &author,
+            )?;
+            written_pkg += 1;
+        }
+    }
+
+    for (file, (sym, role)) in &test_file_roles {
+        test_files_out.push(json!({
+            "file": file,
+            "qname": sym.qname,
+            "role": role.as_str(),
+        }));
+        if !args.dry_run {
+            let summary = match role {
+                RoleTag::FastTest => format!("fast test: {file}"),
+                RoleTag::DiagnosticTest => format!("diagnostic test (env-gate before CI): {file}"),
+                _ => format!("test: {file}"),
+            };
+            write_map_entry(&ledger, &ref_name, sym, *role, &summary, &author)?;
+            written_test += 1;
+        }
+    }
+
+    // Collected package set for the summary (deduped).
+    let pkg_set: BTreeSet<&String> = package_front_doors.keys().collect();
+
+    let payload = json!({
+        "intent": "asd-map",
+        "dry_run": args.dry_run,
+        "indexed_symbols": all_symbols.len(),
+        "packages": packages_out,
+        "test_files": test_files_out,
+        "summary": {
+            "package_count": pkg_set.len(),
+            "test_file_count": test_file_roles.len(),
+            "entries_written": written_pkg + written_test,
+        },
+    });
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+fn write_map_entry(
+    ledger: &AsgLedgerStore,
+    ref_name: &str,
+    sym: &Symbol,
+    role: RoleTag,
+    summary: &str,
+    author: &Author,
+) -> Result<()> {
+    let mut entry = LedgerEntry::new(&sym.symbol_id, LedgerKind::Ownership, summary, author.clone());
+    // Deterministic entry id so re-running `asd map` overwrites instead
+    // of appending duplicates.
+    entry.entry_id = deterministic_entry_id(&sym.symbol_id, role.as_str());
+    entry.role = Some(role.as_str().to_string());
+    entry.tags.push("plan-c:asd-map".to_string());
+    ledger.append_entry(ref_name, &entry, &author.id)?;
+    Ok(())
+}
+
+fn deterministic_entry_id(sym_id: &str, role: &str) -> String {
+    let key = format!("asd-map:{sym_id}:{role}");
+    let h = blake3::hash(key.as_bytes()).to_hex();
+    let short: String = h.chars().take(24).collect();
+    format!("led_map_{short}")
+}
+
+/// True when this file lives inside a recognizable language package
+/// (Python, Rust, JS, etc.). Used to scope which files seed a
+/// package-boundary tag.
+fn is_package_member(file: &str) -> bool {
+    // Conservative: any file under a directory tree counts; we still
+    // need at least one path separator so root files are skipped.
+    file.contains('/')
+}
+
+/// Directory portion of `file`, used as the package key. We deliberately
+/// keep the leaf directory (not the package's NAME) because that's the
+/// identifier that round-trips back to file globs.
+fn package_dir(file: &str) -> String {
+    match file.rsplit_once('/') {
+        Some((d, _)) => d.to_string(),
+        None => String::new(),
+    }
+}
+
+/// Classify a file as a test file and return its role tag, or None if
+/// the file isn't a test. Filename heuristics only — body heuristics
+/// (FileManager.fileExists, renderFullSong, durationSeconds, etc.) can
+/// land as a follow-up Plan C+ task.
+fn test_file_role(file: &str) -> Option<RoleTag> {
+    let lower = file.to_lowercase();
+    let is_test = lower.contains("/test")
+        || lower.contains("_test.")
+        || lower.contains(".test.")
+        || lower.contains("/spec/")
+        || lower.ends_with("_spec.rb");
+    if !is_test {
+        return None;
+    }
+    // Diagnostic markers in the filename — extend with body sniff in a follow-up.
+    let diagnostic = lower.contains("diagnostic")
+        || lower.contains("integration")
+        || lower.contains("e2e")
+        || lower.contains("real_file")
+        || lower.contains("slow");
+    Some(if diagnostic {
+        RoleTag::DiagnosticTest
+    } else {
+        RoleTag::FastTest
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_file_role_classifies_filenames() {
+        assert_eq!(
+            test_file_role("tests/fast_test.py"),
+            Some(RoleTag::FastTest)
+        );
+        assert_eq!(
+            test_file_role("tests/diagnostic_real_file_test.py"),
+            Some(RoleTag::DiagnosticTest)
+        );
+        assert_eq!(
+            test_file_role("tests/integration_test.py"),
+            Some(RoleTag::DiagnosticTest)
+        );
+        assert_eq!(test_file_role("src/pkg/module.py"), None);
+    }
+
+    #[test]
+    fn deterministic_entry_id_is_stable() {
+        let a = deterministic_entry_id("sym_x", "fast-test");
+        let b = deterministic_entry_id("sym_x", "fast-test");
+        assert_eq!(a, b);
+        assert!(a.starts_with("led_map_"));
+    }
+
+    #[test]
+    fn deterministic_entry_id_changes_with_role() {
+        let a = deterministic_entry_id("sym_x", "fast-test");
+        let b = deterministic_entry_id("sym_x", "diagnostic-test");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn package_dir_returns_parent_directory() {
+        assert_eq!(package_dir("src/pkg/mod.py"), "src/pkg");
+        assert_eq!(package_dir("root.py"), "");
+    }
+}

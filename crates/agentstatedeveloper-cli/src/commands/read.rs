@@ -51,12 +51,36 @@ pub fn run(cfg: &Config, args: ReadArgs) -> Result<()> {
             .collect()
     };
 
+    let callers = resolve(caller_ids);
+    let callees = resolve(callee_ids);
+    let effects_json = effects
+        .as_ref()
+        .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null));
+
+    let qid = crate::commands::brief::query_id("read", &[&args.qname]);
+
+    if cfg.brief {
+        let mut out = crate::commands::brief::brief_read(
+            &symbol,
+            &callers,
+            &callees,
+            effects_json.as_ref(),
+            ledger.len(),
+        );
+        if let serde_json::Value::Object(ref mut m) = out {
+            m.insert("query_id".into(), serde_json::Value::String(qid));
+        }
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
     let out = json!({
         "symbol": symbol,
-        "callers": resolve(caller_ids),
-        "callees": resolve(callee_ids),
+        "callers": callers,
+        "callees": callees,
         "effects": effects,
         "ledger": ledger,
+        "query_id": qid,
     });
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())

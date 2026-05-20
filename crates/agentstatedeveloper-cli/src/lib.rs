@@ -65,6 +65,13 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub audit_log: Option<PathBuf>,
 
+    /// Plan D t-001: emit compact output projecting each command down to
+    /// load-bearing fields (qname, file:line, signature, first doc line).
+    /// 60-80% token reduction vs default. Also honors `ASD_FORMAT=brief`.
+    /// `--json` (default) keeps the structured payload.
+    #[arg(long, global = true)]
+    pub brief: bool,
+
     #[command(subcommand)]
     pub cmd: Command,
 }
@@ -81,6 +88,8 @@ pub enum Command {
     Index(commands::index::IndexArgs),
 
     /// Read a symbol, its effects, and recent ledger entries.
+    /// Plan D t-003: also accepts `code_read` (MCP-era alias).
+    #[command(alias = "code_read")]
     Read(commands::read::ReadArgs),
 
     /// Ledger operations.
@@ -119,9 +128,13 @@ pub enum Command {
     List(commands::list::ListArgs),
 
     /// Show symbols that call the given symbol (direct or transitive).
+    /// Plan D t-003: also accepts `callers_of` (MCP-era alias).
+    #[command(alias = "callers_of")]
     Callers(commands::graph::CallersArgs),
 
     /// Show symbols called by the given symbol (direct or transitive).
+    /// Plan D t-003: also accepts `callees_of` (MCP-era alias).
+    #[command(alias = "callees_of")]
     Callees(commands::graph::CalleesArgs),
 
     /// Assemble agent query context for one or more symbols.
@@ -140,7 +153,41 @@ pub enum Command {
     Scratch(commands::scratch::ScratchCmd),
 
     /// Ranked concept search over indexed symbols.
+    /// Plan D t-003: also accepts `code_search` and `code_query` (MCP-era aliases).
+    #[command(aliases = ["code_search", "code_query"])]
     Search(commands::search::SearchArgs),
+
+    /// Exact-symbol references via literal text scan + index definition lookup.
+    /// Use this when you want rg-style completeness on a concrete identifier
+    /// (no tokenization, no BM25). Requires `rg` on PATH.
+    References(commands::references::ReferencesArgs),
+
+    /// List named scope aliases defined in `.asd/scopes.toml`. Discoverability
+    /// for the `--scope` and `--paths` flags supported by search and friends.
+    #[command(subcommand)]
+    Scopes(commands::scopes::ScopesCmd),
+
+    /// View ledger entries bucketed by the six Plan B conclusion classes
+    /// (decisions, classifications, mappings, hazards, recipes, followups).
+    #[command(subcommand)]
+    Conclusions(commands::conclusions::ConclusionsCmd),
+
+    /// Plan C t-004: structured change-intent recipes. Returns per-file
+    /// action plans (Delete / Gate / Run / KeepAsCovered / Review) for
+    /// known task families.
+    #[command(subcommand)]
+    Recipe(commands::recipe::RecipeCmd),
+
+    /// Plan C t-007: initial-read project summary. Walks the indexed
+    /// project, identifies package boundaries, and tags test files
+    /// (fast-test / diagnostic-test). Writes Ownership ledger entries
+    /// with role tags so the next session inherits the mental model.
+    Map(commands::map::MapArgs),
+
+    /// Sidecar utilities. `migrate` flips a repo from the legacy `.asd/v1/`
+    /// layout (Plan A) to the compact `.asd/conclusions/` layout (Plan B).
+    #[command(subcommand)]
+    Sidecar(commands::sidecar::SidecarCmd),
 
     /// Broad feature archaeology: search → expand call chains, invariants,
     /// hazards, and effects for the top matching entry points in one pass.
@@ -208,7 +255,12 @@ pub enum Command {
 
 /// Resolve [`Config`] from the parsed CLI flags.
 pub fn config_from_cli(cli: &Cli) -> Config {
-    Config::resolve(cli.db.clone(), cli.policy.clone(), cli.audit_log.clone())
+    Config::resolve_with_brief(
+        cli.db.clone(),
+        cli.policy.clone(),
+        cli.audit_log.clone(),
+        cli.brief,
+    )
 }
 
 /// Dispatch the OSS command set. `asd-pro` can call this for any
@@ -242,6 +294,12 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Repair(args) => repair::run(cfg, args),
         Command::Scratch(cmd) => scratch::run(cfg, cmd),
         Command::Search(args) => search::run(cfg, args),
+        Command::References(args) => references::run(cfg, args),
+        Command::Scopes(cmd) => scopes::run(cfg, cmd),
+        Command::Conclusions(cmd) => conclusions::run(cfg, cmd),
+        Command::Recipe(cmd) => recipe::run(cfg, cmd),
+        Command::Map(args) => map::run(cfg, args),
+        Command::Sidecar(cmd) => sidecar::run(cfg, cmd),
         Command::Investigate(args) => investigate::run(cfg, args),
         Command::Status(args) => status::run(cfg, args),
         Command::Impact(args) => impact::run(cfg, args),
