@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 
 use agentstatedeveloper_adapters::default_adapters;
 use agentstatedeveloper_core::{
-    conclusions_export, load_scope_aliases, stale_warning, ConclusionClass,
+    conclusions_export, load_scope_aliases, recipes, stale_warning, ConclusionClass,
     ASD_PATH_PREFIX, AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore,
     AsgScratchStore, AuditEvent, Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory,
     EffectDecl, EffectStore, Engine, FeedbackEntry, FeedbackStore, FeedbackVerdict, FtsFilters,
@@ -131,6 +131,17 @@ pub struct ConclusionsImportParams {
     #[serde(rename = "in")]
     pub in_dir: Option<String>,
 }
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RecipeClassifyTestMigrationParams {
+    /// Search query — finds candidate test symbols.
+    pub query: String,
+    /// Max candidates to classify (default: 50).
+    #[serde(default = "default_recipe_limit")]
+    pub limit: u32,
+}
+
+fn default_recipe_limit() -> u32 { 50 }
 
 #[derive(Deserialize, JsonSchema)]
 pub struct InvestigateParams {
@@ -1275,6 +1286,42 @@ impl AsdMcpServer {
             }
             Err(e) => err_json(&format!("conclusions import failed: {e}")),
         }
+    }
+
+    #[tool(
+        description = "Plan C t-004: classify test-tier symbols matching a query into migration actions (Delete / Gate / Run / KeepAsCovered / Review) based on their role-tagged ledger entries. Replaces a raw symbol list with a structured action plan. (CLI: `asd recipe classify-test-migration`.)"
+    )]
+    async fn recipe_classify_test_migration(
+        &self,
+        params: Parameters<RecipeClassifyTestMigrationParams>,
+    ) -> String {
+        let p = params.0;
+        let db_path = self.db_path.clone();
+        let engine = self.engine.lock().await;
+        let index = AsgIndexStore::from_engine(&engine);
+
+        // Resolve candidate test-tier symbols via FTS.
+        let fts = SearchFtsDb::open(&db_path).ok();
+        let candidate_qnames: Vec<String> = if let Some(fts) = fts {
+            let filters = FtsFilters {
+                kind: None,
+                language: None,
+                include_tests: true,
+                tests_only: true,
+                exclude_terms: vec![],
+                paths_filter: vec![],
+            };
+            fts.search(&p.query, &filters, p.limit as usize)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|h| h.qname)
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let recipe = recipes::classify_test_migration(&engine, &index, &candidate_qnames, &p.query);
+        serde_json::to_string(&recipe).unwrap_or_else(|_| "{}".to_string())
     }
 
     #[tool(
@@ -5634,6 +5681,15 @@ mod tool_name_regression {
         assert!(
             AsdMcpServer::tool_router().has_route("conclusions_import"),
             "expected `conclusions_import` MCP tool to be registered"
+        );
+    }
+
+    #[test]
+    fn recipe_classify_test_migration_tool_is_registered() {
+        // Plan C t-004: first concrete recipe.
+        assert!(
+            AsdMcpServer::tool_router().has_route("recipe_classify_test_migration"),
+            "expected `recipe_classify_test_migration` MCP tool to be registered"
         );
     }
 

@@ -172,6 +172,12 @@ pub enum Command {
     #[command(subcommand)]
     Conclusions(commands::conclusions::ConclusionsCmd),
 
+    /// Plan C t-004: structured change-intent recipes. Returns per-file
+    /// action plans (Delete / Gate / Run / KeepAsCovered / Review) for
+    /// known task families.
+    #[command(subcommand)]
+    Recipe(commands::recipe::RecipeCmd),
+
     /// Sidecar utilities. `migrate` flips a repo from the legacy `.asd/v1/`
     /// layout (Plan A) to the compact `.asd/conclusions/` layout (Plan B).
     #[command(subcommand)]
@@ -285,6 +291,7 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::References(args) => references::run(cfg, args),
         Command::Scopes(cmd) => scopes::run(cfg, cmd),
         Command::Conclusions(cmd) => conclusions::run(cfg, cmd),
+        Command::Recipe(cmd) => recipe::run(cfg, cmd),
         Command::Sidecar(cmd) => sidecar::run(cfg, cmd),
         Command::Investigate(args) => investigate::run(cfg, args),
         Command::Status(args) => status::run(cfg, args),

@@ -22,6 +22,7 @@ pub mod list;
 pub mod mcp;
 pub mod policy;
 pub mod read;
+pub mod recipe;
 pub mod references;
 pub mod scopes;
 pub mod sidecar;
