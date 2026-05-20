@@ -663,6 +663,22 @@ fn append(cfg: &Config, args: AppendArgs) -> Result<()> {
         entry.body = Some(text);
     }
     entry.matched_policy = decision.matched_policy();
+    // Plan C t-002: validate role against the canonical RoleTag set;
+    // emit a stderr warning on unknown so unknown tags don't break old
+    // data but the user notices the typo.
+    if let Some(ref r) = args.role {
+        if agentstatedeveloper_core::RoleTag::from_str(r).is_none() {
+            let valid: Vec<&str> = agentstatedeveloper_core::RoleTag::all()
+                .iter()
+                .map(|t| t.as_str())
+                .collect();
+            eprintln!(
+                "asd: warning: role={:?} is not a canonical RoleTag. Valid: {}",
+                r,
+                valid.join(", ")
+            );
+        }
+    }
     entry.role = args.role;
     entry.command = args.command;
 

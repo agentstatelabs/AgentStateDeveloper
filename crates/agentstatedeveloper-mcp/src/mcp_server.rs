@@ -1884,6 +1884,22 @@ impl AsdMcpServer {
             entry.tags = tags;
         }
         entry.matched_policy = decision.matched_policy();
+        // Plan C t-002: warn on unknown role (stderr — visible to the
+        // MCP host's logs). Unknown tags are still stored; CLI/MCP just
+        // signal the typo.
+        if let Some(ref r) = p.role {
+            if agentstatedeveloper_core::RoleTag::from_str(r).is_none() {
+                let valid: Vec<&str> = agentstatedeveloper_core::RoleTag::all()
+                    .iter()
+                    .map(|t| t.as_str())
+                    .collect();
+                eprintln!(
+                    "asd-mcp: warning: role={:?} is not a canonical RoleTag. Valid: {}",
+                    r,
+                    valid.join(", ")
+                );
+            }
+        }
         entry.role = p.role;
         entry.command = p.command;
 

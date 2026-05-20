@@ -139,6 +139,93 @@ pub enum ConclusionClass {
     FollowUps,
 }
 
+/// Plan C t-002: first-class role-tag vocabulary. The optional
+/// `LedgerEntry.role` field is free-form `String` (so unknown tags don't
+/// break old data), but CLI / MCP / API layers validate against this enum
+/// at write time and warn on unknown values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RoleTag {
+    /// Lightweight test, safe in tight feedback loops.
+    FastTest,
+    /// Debug / instrumentation test; not part of main CI.
+    DiagnosticTest,
+    /// Shared test fixture; multiple tests depend on it.
+    FixturePath,
+    /// Deprecated interface; migration tracked.
+    StaleApi,
+    /// Cross-package facade; changes need coordination.
+    PackageBoundary,
+    /// Legacy coverage handled by newer code (paired with Mapping kind).
+    ReplacementCoverage,
+    /// Hot path; changes need perf measurement.
+    PerformanceCritical,
+    /// Not yet reviewed; pending validation.
+    AuditPending,
+}
+
+impl RoleTag {
+    /// Canonical wire string (kebab-case for human readability).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FastTest => "fast-test",
+            Self::DiagnosticTest => "diagnostic-test",
+            Self::FixturePath => "fixture-path",
+            Self::StaleApi => "stale-api",
+            Self::PackageBoundary => "package-boundary",
+            Self::ReplacementCoverage => "replacement-coverage",
+            Self::PerformanceCritical => "performance-critical",
+            Self::AuditPending => "audit-pending",
+        }
+    }
+
+    /// Parse a wire string. Accepts both kebab-case canonical form and
+    /// snake_case for forgiveness. Returns None on unknown input — callers
+    /// that need validation handle the warning themselves.
+    pub fn from_str(s: &str) -> Option<Self> {
+        let norm = s.trim().to_ascii_lowercase().replace('_', "-");
+        match norm.as_str() {
+            "fast-test" => Some(Self::FastTest),
+            "diagnostic-test" => Some(Self::DiagnosticTest),
+            "fixture-path" => Some(Self::FixturePath),
+            "stale-api" => Some(Self::StaleApi),
+            "package-boundary" => Some(Self::PackageBoundary),
+            "replacement-coverage" => Some(Self::ReplacementCoverage),
+            "performance-critical" => Some(Self::PerformanceCritical),
+            "audit-pending" => Some(Self::AuditPending),
+            _ => None,
+        }
+    }
+
+    /// All canonical tags in stable order — useful for CLI value-enum lists
+    /// and probe assertions.
+    pub fn all() -> &'static [RoleTag] {
+        &[
+            Self::FastTest,
+            Self::DiagnosticTest,
+            Self::FixturePath,
+            Self::StaleApi,
+            Self::PackageBoundary,
+            Self::ReplacementCoverage,
+            Self::PerformanceCritical,
+            Self::AuditPending,
+        ]
+    }
+
+    /// Plan C t-003: tags that act as ranking PENALTIES when a
+    /// Constraint/Decision entry carries them. Used by the decisions-as-
+    /// constraints pipeline to synthesize WrongLayer-like verdicts.
+    pub fn is_penalty_role(self) -> bool {
+        matches!(self, Self::StaleApi | Self::AuditPending)
+    }
+
+    /// Plan C t-003: tags that act as ranking BOOSTS to peer symbols in
+    /// the same package/file (e.g. package-boundary surfaces the inside
+    /// alternatives).
+    pub fn is_boost_role(self) -> bool {
+        matches!(self, Self::PackageBoundary | Self::PerformanceCritical)
+    }
+}
+
 impl ConclusionClass {
     /// Filename stem under `.asd/conclusions/` (e.g. `decisions` → `decisions.jsonl`).
     pub fn filename_stem(self) -> &'static str {
@@ -685,5 +772,61 @@ mod plan_b_schema_tests {
         assert_eq!(ConclusionClass::Recipes.filename_stem(), "recipes");
         assert_eq!(ConclusionClass::FollowUps.filename_stem(), "followups");
         assert_eq!(ConclusionClass::all().len(), 6);
+    }
+
+    // -- Plan C t-002: RoleTag vocabulary lock-down -------------------------
+
+    #[test]
+    fn role_tag_wire_strings_match_design() {
+        // Locks the canonical wire format to the t-001 design table.
+        // Changing any of these is a migration.
+        assert_eq!(RoleTag::FastTest.as_str(), "fast-test");
+        assert_eq!(RoleTag::DiagnosticTest.as_str(), "diagnostic-test");
+        assert_eq!(RoleTag::FixturePath.as_str(), "fixture-path");
+        assert_eq!(RoleTag::StaleApi.as_str(), "stale-api");
+        assert_eq!(RoleTag::PackageBoundary.as_str(), "package-boundary");
+        assert_eq!(RoleTag::ReplacementCoverage.as_str(), "replacement-coverage");
+        assert_eq!(RoleTag::PerformanceCritical.as_str(), "performance-critical");
+        assert_eq!(RoleTag::AuditPending.as_str(), "audit-pending");
+        assert_eq!(RoleTag::all().len(), 8);
+    }
+
+    #[test]
+    fn role_tag_round_trips_via_from_str() {
+        for tag in RoleTag::all() {
+            assert_eq!(RoleTag::from_str(tag.as_str()), Some(*tag));
+        }
+    }
+
+    #[test]
+    fn role_tag_from_str_accepts_snake_case_and_whitespace() {
+        assert_eq!(RoleTag::from_str("fast_test"), Some(RoleTag::FastTest));
+        assert_eq!(RoleTag::from_str("  Stale-API  "), Some(RoleTag::StaleApi));
+        assert_eq!(RoleTag::from_str("audit_pending"), Some(RoleTag::AuditPending));
+    }
+
+    #[test]
+    fn role_tag_from_str_returns_none_on_unknown() {
+        assert_eq!(RoleTag::from_str("not-a-real-tag"), None);
+        assert_eq!(RoleTag::from_str(""), None);
+    }
+
+    #[test]
+    fn penalty_and_boost_roles_match_t003_design() {
+        // Plan C t-003 expects exactly these two penalty roles.
+        let penalties: Vec<&str> = RoleTag::all()
+            .iter()
+            .filter(|t| t.is_penalty_role())
+            .map(|t| t.as_str())
+            .collect();
+        assert_eq!(penalties, vec!["stale-api", "audit-pending"]);
+
+        // And exactly these two boost-peers roles.
+        let boosts: Vec<&str> = RoleTag::all()
+            .iter()
+            .filter(|t| t.is_boost_role())
+            .map(|t| t.as_str())
+            .collect();
+        assert_eq!(boosts, vec!["package-boundary", "performance-critical"]);
     }
 }
