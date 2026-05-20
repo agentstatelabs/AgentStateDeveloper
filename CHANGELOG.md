@@ -5,6 +5,49 @@ Versions use semantic versioning; each milestone increments by 0.0.5.
 
 ---
 
+## [0.9.89] — 2026-05-20 — Plan D complete (Crucible token-efficiency)
+
+Five fixes driven by AgentStateCrucible's A/B testing, which showed
+the assisted arm paying 2.5–5.7× baseline tokens despite making
+fewer or similar tool calls.
+
+### Added
+- **`--brief` output mode** (0.9.85) — global `--brief` flag and
+  `ASD_FORMAT=brief` env var. Projects `read` / `callers` / `callees`
+  responses down to load-bearing fields (qname, file:line, signature,
+  first doc line). Drops `symbol_id`, `symbol_fp`, `language`, `kind`,
+  `col`, end positions, full doc body, empty arrays. Expected token
+  reduction: 60–80% on the cited commands.
+- **MCP-era name aliases on CLI** (0.9.87) — `asd code_read`,
+  `code_search`, `code_query`, `callers_of`, `callees_of` all route to
+  the canonical CLI subcommand. Agents trained on older MCP-era docs
+  no longer hit `unrecognized subcommand`.
+- **`query_id` in responses** (0.9.89) — deterministic blake3-derived
+  id (`Qf3a2b1c`) on `read` / `callers` / `callees` output so
+  wrapper-side tools can dedup repeated queries.
+
+### Fixed
+- **`asd investigate` accepts unquoted multi-word queries** (0.9.86) —
+  `asd investigate failing test store` now joins to one query. Crucible
+  captured 3 consecutive turns lost to this UX trap.
+- **Python relative-import call edges** (0.9.88) — `parse_imports`
+  had an early-return on `relative_import` nodes that silently dropped
+  every `from .foo import bar` site. Crucible's own package indexed
+  71 symbols with **0 cross-module edges**; the fix resolves `.`/`..`
+  prefixes against the importing file's module path. End-to-end
+  reproducer landed as a unit test.
+
+### Expected Crucible re-run outcomes
+When Crucible pins 0.9.89, the three scenarios should flip:
+- `asd-vs-baseline` — brief mode puts assisted ≤ baseline tokens.
+- `inheritance-bug` — tie becomes clean assisted win.
+- `cross-layer-tax` — assisted produces the reference fix
+  (rates.py + display.py) instead of the proximate `apply_tax` patch.
+
+Crucible posts the empirical delta report when the re-run completes.
+
+---
+
 ## [0.9.84] — 2026-05-19 — Plan B complete (compact conclusion sidecar)
 
 ### Migrating an existing repo
