@@ -19,6 +19,7 @@ pub mod investigate;
 pub mod init;
 pub mod ledger;
 pub mod list;
+pub mod map;
 pub mod mcp;
 pub mod policy;
 pub mod read;
