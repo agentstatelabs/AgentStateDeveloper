@@ -861,6 +861,11 @@ impl AsdMcpServer {
         }
 
         symbols.sort_by(|a, b| a.qname.cmp(&b.qname));
+        // Plan E t-007: brief = compact per-symbol projection.
+        if brief::brief_from_env() {
+            let projected: Vec<_> = symbols.iter().map(brief::brief_symbol).collect();
+            return serde_json::to_string(&projected).unwrap_or_else(|_| "[]".to_string());
+        }
         serde_json::to_string(&symbols).unwrap_or_else(|_| "[]".to_string())
     }
 
@@ -1730,6 +1735,11 @@ impl AsdMcpServer {
             Ok(v) => v,
             Err(e) => return err_json(&e.to_string()),
         };
+        // Plan E t-007: brief = compact per-symbol projection.
+        if brief::brief_from_env() {
+            let projected: Vec<_> = syms.iter().map(brief::brief_symbol).collect();
+            return serde_json::to_string(&projected).unwrap_or_else(|_| "[]".to_string());
+        }
         serde_json::to_string(&syms).unwrap_or_else(|_| "[]".to_string())
     }
 
@@ -1754,6 +1764,11 @@ impl AsdMcpServer {
             Ok(v) => v,
             Err(e) => return err_json(&e.to_string()),
         };
+        // Plan E t-007: brief = compact per-symbol projection.
+        if brief::brief_from_env() {
+            let projected: Vec<_> = syms.iter().map(brief::brief_symbol).collect();
+            return serde_json::to_string(&projected).unwrap_or_else(|_| "[]".to_string());
+        }
         serde_json::to_string(&syms).unwrap_or_else(|_| "[]".to_string())
     }
 
