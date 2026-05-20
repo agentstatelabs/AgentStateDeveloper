@@ -62,6 +62,24 @@ git add .asd/v1/
 git commit -m "chore: sync ASD sidecar"
 ```
 
+### Brief output mode for agents
+
+`asd` defaults to a verbose JSON shape that's helpful for humans and
+structured-parsing pipelines but spends tokens an agent rarely needs.
+Set `ASD_FORMAT=brief` (or pass `--brief` per-invocation) to project
+`read` / `callers` / `callees` responses down to load-bearing fields
+only (qname, file:line, signature, first doc line). Typical reduction:
+60–80% on those commands.
+
+Recommended once at process start for any agent that drives `asd`:
+
+```bash
+export ASD_FORMAT=brief
+```
+
+Currently CLI-only. MCP tools still emit the full payload — see Plan D
+t-007 for parity work.
+
 ## MCP server setup
 
 `asd-mcp` is the stdio MCP server that coding agents use to query ASD.
