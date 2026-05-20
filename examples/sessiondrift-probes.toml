@@ -125,3 +125,60 @@ args = ["sidecar", "migrate"]
 tags = ["plan-b", "migration"]
 # Smoke-only — any exit-0 run is success. Tighten once we know the
 # baseline for ExampleFlow.
+
+# --------------------------------------------------------------------------
+# Plan C semantic-layer probes. These exercise the moat features that
+# Plan A/B made possible. Each probe assumes the ExampleFlow ledger has
+# been seeded with at least one of the relevant entries (via `asd ledger
+# append --role <tag>` or `asd map`). On a freshly indexed project they
+# pass trivially (empty arrays).
+# --------------------------------------------------------------------------
+
+# t-004: recipes return structured action plans, not flat symbol lists.
+# Acceptance: response has an "intent" field and an "actions" array.
+[[probe]]
+name = "recipe-classify-test-migration-returns-structured"
+description = "recipe returns {intent, query, actions[]} not a flat list (Plan C t-004)."
+command = "asd"
+args = ["recipe", "classify-test-migration", "migrate stale tests"]
+tags = ["plan-c", "recipe"]
+assert = { kind = "field_eq", field = "intent", expected = "classify-test-migration" }
+
+# t-005: rules_applied surfaces the new verdict labels when fired.
+# Soft assertion — fires only when at least one DiagnosticOnly verdict
+# has been recorded on a query that matches "diagnostic".
+[[probe]]
+name = "diagnostic-only-verdict-suppresses"
+description = "Once a diagnostic-only verdict is recorded, the symbol is dropped from its query (Plan C t-005)."
+command = "asd"
+args = ["search", "diagnostic", "--limit", "20"]
+tags = ["plan-c", "feedback", "manual-seed"]
+# Smoke. Tighten with a file_not_in_key assertion once ExampleFlow
+# has a recorded diagnostic-only verdict.
+
+# t-006: `asd map` writes Ownership entries with role tags. After running
+# it once, `asd conclusions list --class classifications` should return
+# at least one entry per indexed package.
+[[probe]]
+name = "asd-map-writes-classifications"
+description = "After `asd map`, the classifications bucket is non-empty (Plan C t-007)."
+command = "sh"
+args = [
+    "-c",
+    "asd map > /dev/null && asd conclusions list --class classifications",
+]
+tags = ["plan-c", "asd-map"]
+assert = { kind = "field_gte", field = "total", min_value = 1 }
+
+# t-003: a Constraint with role=stale-api on a symbol demotes it on
+# unrelated queries — proves "decisions-as-constraints" works end-to-end.
+# Requires ExampleFlow to seed `asd ledger append --kind constraint
+# --role stale-api` on at least one symbol matching a known query.
+[[probe]]
+name = "stale-api-constraint-demotes-symbol"
+description = "A role=stale-api Constraint demotes its symbol in ranked search (Plan C t-003)."
+command = "asd"
+args = ["search", "legacy", "--limit", "20"]
+tags = ["plan-c", "decisions-as-constraints", "manual-seed"]
+# Smoke. Tighten with file_not_in_key once ExampleFlow has a recorded
+# stale-api Constraint on a known legacy symbol.

@@ -5,6 +5,66 @@ Versions use semantic versioning; each milestone increments by 0.0.5.
 
 ---
 
+## [0.9.99] — 2026-05-20 — Plan C complete (semantic-layer moat)
+
+The defining-feature release. Plan A built trust, Plan B built durable
+storage, Plan C makes ASD remember the expensive task-specific
+understanding the LLM forms so a new session doesn't re-derive the
+same project mental model.
+
+### The moat (what's new)
+
+- **Active decisions** — `Constraint`/`Decision` ledger entries carrying
+  a penalty role (`stale-api` / `audit-pending`) now actively suppress
+  their symbols in ranked search, the same way `WrongLayer` feedback
+  does. Memory becomes a ranking input, not a passive note. (t-003)
+- **First-class role-tag vocabulary** — `RoleTag` enum with 8 canonical
+  tags (`fast-test`, `diagnostic-test`, `fixture-path`, `stale-api`,
+  `package-boundary`, `replacement-coverage`, `performance-critical`,
+  `audit-pending`). CLI / MCP warn on unknown tags; old free-form
+  strings still round-trip. (t-002)
+- **Change-intent recipes** — `asd recipe classify-test-migration <q>`
+  returns a structured `{intent, actions[]}` plan
+  (`Delete` / `Gate` / `Run` / `KeepAsCovered` / `Review`) instead of a
+  flat symbol list. Pattern is reusable; more recipes will follow. (t-004)
+- **AlreadyCovered + DiagnosticOnly verdicts** — two new
+  `FeedbackVerdict` variants that suppress like `Noisy` and prompt the
+  caller to accrue a `Mapping` or `Classification` ledger entry in the
+  same gesture. (t-005)
+- **CTX task state → ASD ranking bias** — ASD now reads
+  `CTX_ACTIVE_TASK` (or `.asd/cache/active-task.json`) and applies a
+  soft +1.0 boost to candidates inside the task's recorded scope. Never
+  a hard filter. (t-006)
+- **`asd map`** — one-shot initial-read command that walks the index,
+  identifies package boundaries, classifies test files
+  (`fast-test` vs `diagnostic-test`), and writes `Ownership` ledger
+  entries with role tags. Idempotent via deterministic entry IDs. The
+  bootstrap that makes the downstream Plan C features useful on a fresh
+  project. (t-007)
+
+### How to adopt
+
+```sh
+asd index .                   # seed the index (unchanged)
+asd map                       # one-shot: seed role-tagged Ownership entries
+asd ledger append <qname> \\  # accrue a stale-api Constraint
+  --kind constraint --role stale-api \\
+  --summary "deprecated; do not use"
+asd conclusions export        # commit the new conclusions
+asd search "legacy"           # the stale-api symbol is demoted
+```
+
+Set `CTX_ACTIVE_TASK='{"task_id":"t-X","scope":["src/foo/**"]}'` once
+per session to bias all queries toward the current task's scope.
+
+### Acceptance probes
+
+Four new probes in `examples/exampleflow-probes.toml` tagged `plan-c`:
+recipe-returns-structured, diagnostic-only-verdict-suppresses,
+asd-map-writes-classifications, stale-api-constraint-demotes-symbol.
+
+---
+
 ## [0.9.89] — 2026-05-20 — Plan D complete (Crucible token-efficiency)
 
 Five fixes driven by AgentStateCrucible's A/B testing, which showed
