@@ -36,10 +36,15 @@ pub struct RecipeAction {
     pub role: Option<String>,
 }
 
+/// Action kinds emitted by recipes. Each value corresponds to a branch
+/// in some recipe's `pick_action`-style decision tree. Variants are added
+/// only when at least one decision tree emits them — Plan E t-003 dropped
+/// the unused `Move` variant; a future `migrate-stale-tests` recipe
+/// (Plan F t-002) will re-add it with the body field needed to specify
+/// the destination path.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionKind {
-    Move,
     Delete,
     Run,
     Gate,
@@ -168,11 +173,10 @@ fn pick_action(
 fn action_sort_key(kind: ActionKind) -> u8 {
     match kind {
         ActionKind::Delete => 0,
-        ActionKind::Move => 1,
-        ActionKind::Gate => 2,
-        ActionKind::Run => 3,
-        ActionKind::KeepAsCovered => 4,
-        ActionKind::Review => 5,
+        ActionKind::Gate => 1,
+        ActionKind::Run => 2,
+        ActionKind::KeepAsCovered => 3,
+        ActionKind::Review => 4,
     }
 }
 

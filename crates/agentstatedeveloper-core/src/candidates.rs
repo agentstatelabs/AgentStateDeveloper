@@ -1128,11 +1128,22 @@ pub struct FeedbackMetrics {
 /// Returns None when no task state is found or the scope is empty. The
 /// caller treats a None return as "no bias to apply".
 pub fn read_active_task_scope(db_path_parent: Option<&std::path::Path>) -> Option<Vec<String>> {
-    let raw_json: Option<String> = std::env::var("CTX_ACTIVE_TASK").ok().or_else(|| {
+    let env_raw = std::env::var("CTX_ACTIVE_TASK").ok();
+    read_active_task_scope_from(env_raw.as_deref(), db_path_parent)
+}
+
+/// Plan E t-002: parallel-safe variant. Takes the raw env string
+/// explicitly so unit tests can exercise the parser without mutating
+/// process env (which is racy under `cargo test`'s default parallel
+/// runner). Production code path stays simple via the wrapper above.
+pub fn read_active_task_scope_from(
+    env_raw: Option<&str>,
+    db_path_parent: Option<&std::path::Path>,
+) -> Option<Vec<String>> {
+    let raw: String = env_raw.map(|s| s.to_string()).or_else(|| {
         let p = db_path_parent?.join(".asd").join("cache").join("active-task.json");
         std::fs::read_to_string(p).ok()
-    });
-    let raw = raw_json?;
+    })?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let arr = v.get("scope")?.as_array()?;
     let scope: Vec<String> = arr
@@ -1158,21 +1169,62 @@ pub fn apply_task_bias(
     if scope.is_empty() {
         return 0;
     }
+
+    // Plan E t-005: bulk qname→file lookup via the FTS cache when
+    // available — one SQL roundtrip instead of N. Falls back to the
+    // per-candidate index lookup when fts is None (in-memory engines,
+    // mid-rebuild).
+    let qnames_owned: Vec<String> = scored
+        .iter()
+        .filter(|(s, _)| s.is_finite())
+        .map(|(_, q)| q.clone())
+        .collect();
+    let file_by_qname: std::collections::HashMap<String, String> = if let Some(fts) =
+        engine.fts.as_ref()
+    {
+        let qnames_ref: Vec<&str> = qnames_owned.iter().map(|s| s.as_str()).collect();
+        fts.files_for_qnames(&qnames_ref, &engine.ref_name)
+    } else {
+        std::collections::HashMap::new()
+    };
+
     let mut boosted = 0;
     for (score, qname) in scored.iter_mut() {
         if !score.is_finite() {
             continue;
         }
-        let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
-            Ok(Some(s)) => s,
-            _ => continue,
+        // Bulk-cache hit avoids the index lookup.
+        let file = if let Some(f) = file_by_qname.get(qname) {
+            f.clone()
+        } else {
+            match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+                Ok(Some(s)) => s.file,
+                _ => continue,
+            }
         };
-        if scope.iter().any(|g| glob_match(g, &sym.file)) {
+        if scope.iter().any(|g| glob_match(g, &file)) {
             *score += boost;
             boosted += 1;
         }
     }
     boosted
+}
+
+/// Plan E t-008: parse the optional `scope: ["glob"]` array out of a
+/// constraint entry's body. The body may itself be a JSON-encoded
+/// string OR null. Returns None when no scope is present (penalty
+/// applies globally) or when parsing fails — same fallback as the
+/// SQL-side helper.
+fn constraint_scope_from_body(body: Option<&str>) -> Option<Vec<String>> {
+    let raw = body?;
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let arr = v.get("scope")?.as_array()?;
+    let globs: Vec<String> = arr
+        .iter()
+        .filter_map(|g| g.as_str().map(String::from))
+        .filter(|g| !g.is_empty())
+        .collect();
+    if globs.is_empty() { None } else { Some(globs) }
 }
 
 /// Plan C t-003: synthesize WrongLayer-like suppression from
@@ -1190,6 +1242,52 @@ pub fn apply_constraint_penalties(
     index_store: &AsgIndexStore,
     scored: &mut Vec<(f64, String)>,
 ) -> usize {
+    // Plan E t-004: prefer one-shot SQL over per-candidate ledger walk.
+    // Plan E t-008: each penalty entry MAY carry a `scope: [glob]` list in
+    // its body JSON — if present, suppression only fires when the
+    // candidate's file matches at least one glob. Entries without scope
+    // apply globally (preserves the original Plan C t-003 semantics).
+    if let Some(fts) = engine.fts.as_ref() {
+        if let Ok(pairs) = fts.symbols_with_constraint_penalties_scoped(&engine.ref_name) {
+            if !pairs.is_empty() {
+                // Build sym_id → Vec<Option<Vec<String>>> so the same
+                // symbol may have several penalty entries (e.g. one global
+                // + one scoped). The candidate is suppressed when AT
+                // LEAST ONE entry would suppress it.
+                use std::collections::HashMap;
+                let mut by_sym: HashMap<String, Vec<Option<Vec<String>>>> = HashMap::new();
+                for (sid, scope) in pairs {
+                    by_sym.entry(sid).or_default().push(scope);
+                }
+                let mut suppressed = 0;
+                for (score, qname) in scored.iter_mut() {
+                    if *score == f64::NEG_INFINITY {
+                        continue;
+                    }
+                    let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+                        Ok(Some(s)) => s,
+                        _ => continue,
+                    };
+                    if let Some(entries) = by_sym.get(&sym.symbol_id) {
+                        let hit = entries.iter().any(|scope_opt| match scope_opt {
+                            None => true, // global — always suppresses
+                            Some(globs) => globs.iter().any(|g| glob_match(g, &sym.file)),
+                        });
+                        if hit {
+                            *score = f64::NEG_INFINITY;
+                            suppressed += 1;
+                        }
+                    }
+                }
+                return suppressed;
+            }
+            // No penalty entries in the cache — nothing to suppress.
+            return 0;
+        }
+    }
+
+    // Fallback: per-candidate ledger walk when the FTS cache isn't
+    // available. Same semantics as the original implementation.
     let ledger_store = crate::ledger::AsgLedgerStore::from_engine(engine);
     let mut suppressed = 0;
     for (score, qname) in scored.iter_mut() {
@@ -1212,12 +1310,21 @@ pub fn apply_constraint_penalties(
             if !kind_matches {
                 return false;
             }
-            entry
+            let role_is_penalty = entry
                 .role
                 .as_deref()
                 .and_then(crate::schema::RoleTag::from_str)
                 .map(|r| r.is_penalty_role())
-                .unwrap_or(false)
+                .unwrap_or(false);
+            if !role_is_penalty {
+                return false;
+            }
+            // Plan E t-008: honor scope[] in body JSON if present.
+            // Symmetric with the fast path.
+            match constraint_scope_from_body(entry.body.as_deref()) {
+                None => true, // global penalty
+                Some(globs) => globs.iter().any(|g| glob_match(g, &sym.file)),
+            }
         });
         if hit {
             *score = f64::NEG_INFINITY;
@@ -2482,43 +2589,124 @@ mod plan_c_t003_tests {
         assert_eq!(scored[0].0, f64::NEG_INFINITY);
     }
 
+    // Plan E t-002: these tests now use read_active_task_scope_from()
+    // and pass the env string explicitly. No process-env mutation, so
+    // they're parallel-safe (the wrapper `read_active_task_scope` is a
+    // thin std::env::var call covered by integration / smoke testing).
+
     #[test]
-    fn read_active_task_scope_parses_env_var_json() {
-        let prev = std::env::var("CTX_ACTIVE_TASK").ok();
-        // SAFETY: tests within the same process share env; serial-test
-        // isn't pulled in here, so this is best-effort. The assertion
-        // is on the parsed Vec, not on side effects.
-        unsafe {
-            std::env::set_var(
-                "CTX_ACTIVE_TASK",
-                r#"{"task_id":"t-006","scope":["src/pkg/**","tests/pkg/**"]}"#,
-            );
-        }
-        let scope = super::read_active_task_scope(None);
+    fn read_active_task_scope_parses_json() {
+        let raw = r#"{"task_id":"t-006","scope":["src/pkg/**","tests/pkg/**"]}"#;
+        let scope = super::read_active_task_scope_from(Some(raw), None);
         assert_eq!(
             scope,
             Some(vec!["src/pkg/**".to_string(), "tests/pkg/**".to_string()])
         );
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("CTX_ACTIVE_TASK", v),
-                None => std::env::remove_var("CTX_ACTIVE_TASK"),
-            }
-        }
     }
 
     #[test]
     fn read_active_task_scope_returns_none_when_unset() {
-        let prev = std::env::var("CTX_ACTIVE_TASK").ok();
-        unsafe {
-            std::env::remove_var("CTX_ACTIVE_TASK");
-        }
-        let scope = super::read_active_task_scope(None);
+        let scope = super::read_active_task_scope_from(None, None);
         assert_eq!(scope, None);
-        if let Some(v) = prev {
-            unsafe {
-                std::env::set_var("CTX_ACTIVE_TASK", v);
-            }
+    }
+
+    #[test]
+    fn read_active_task_scope_returns_none_on_empty_scope_array() {
+        let raw = r#"{"task_id":"t-006","scope":[]}"#;
+        assert_eq!(super::read_active_task_scope_from(Some(raw), None), None);
+    }
+
+    #[test]
+    fn read_active_task_scope_returns_none_on_malformed_json() {
+        assert_eq!(super::read_active_task_scope_from(Some("not json"), None), None);
+        assert_eq!(super::read_active_task_scope_from(Some("{}"), None), None);
+    }
+
+    // -- Plan E t-008: scoped constraint penalties --------------------------
+
+    #[test]
+    fn constraint_scope_from_body_parses_json_scope_array() {
+        let body = r#"{"scope":["src/legacy/**","tests/legacy/**"]}"#;
+        assert_eq!(
+            super::constraint_scope_from_body(Some(body)),
+            Some(vec!["src/legacy/**".to_string(), "tests/legacy/**".to_string()])
+        );
+    }
+
+    #[test]
+    fn constraint_scope_from_body_returns_none_when_unset() {
+        assert_eq!(super::constraint_scope_from_body(None), None);
+        assert_eq!(super::constraint_scope_from_body(Some("plain text body")), None);
+        assert_eq!(super::constraint_scope_from_body(Some(r#"{"other":"field"}"#)), None);
+        assert_eq!(super::constraint_scope_from_body(Some(r#"{"scope":[]}"#)), None);
+    }
+
+    fn seed_engine_with_two_symbols() -> (Engine, String, String) {
+        let engine = Engine::open_in_memory().unwrap();
+        let index = AsgIndexStore::from_engine(&engine);
+        for (qn, file) in [
+            ("app.legacy.api", "src/legacy/api.py"),
+            ("app.modern.api", "src/modern/api.py"),
+        ] {
+            let sym = Symbol {
+                symbol_id: format!("sym_{qn}"),
+                symbol_fp: "fp".into(),
+                qname: qn.into(),
+                language: "python".into(),
+                kind: SymbolKind::Function,
+                file: file.into(),
+                start: Position { line: 1, col: 0 },
+                end: Position { line: 2, col: 0 },
+                signature: None,
+                doc: None,
+            };
+            index.put_symbol(&engine.ref_name, &sym, "test").unwrap();
         }
+        (engine, "sym_app.legacy.api".into(), "sym_app.modern.api".into())
+    }
+
+    fn append_scoped_constraint(engine: &Engine, sym_id: &str, scope_json: &str) {
+        let ledger = AsgLedgerStore::from_engine(engine);
+        let mut entry = LedgerEntry::new(
+            sym_id,
+            LedgerKind::Constraint,
+            "legacy api may not be used in new code",
+            Author { kind: AuthorKind::Agent, id: "t".into() },
+        );
+        entry.role = Some("stale-api".into());
+        entry.body = Some(scope_json.to_string());
+        ledger.append_entry(&engine.ref_name, &entry, "test").unwrap();
+    }
+
+    #[test]
+    fn scoped_constraint_suppresses_only_in_scope_symbols() {
+        // Constraint scoped to src/legacy/** should suppress
+        // app.legacy.api but NOT app.modern.api.
+        let (engine, legacy_id, _modern_id) = seed_engine_with_two_symbols();
+        append_scoped_constraint(&engine, &legacy_id, r#"{"scope":["src/legacy/**"]}"#);
+        let index = AsgIndexStore::from_engine(&engine);
+        let mut scored = vec![
+            (10.0_f64, "app.legacy.api".into()),
+            (10.0_f64, "app.modern.api".into()),
+        ];
+        let n = super::apply_constraint_penalties(&engine, &index, &mut scored);
+        assert_eq!(n, 1, "only legacy should be suppressed");
+        let legacy = scored.iter().find(|(_, q)| q == "app.legacy.api").unwrap();
+        let modern = scored.iter().find(|(_, q)| q == "app.modern.api").unwrap();
+        assert_eq!(legacy.0, f64::NEG_INFINITY);
+        assert_eq!(modern.0, 10.0);
+    }
+
+    #[test]
+    fn unscoped_constraint_still_suppresses_globally() {
+        // No body / no scope means global penalty — preserves Plan C t-003
+        // behavior.
+        let (engine, legacy_id, _modern_id) = seed_engine_with_two_symbols();
+        append_constraint(&engine, &legacy_id, Some("stale-api")); // no body
+        let index = AsgIndexStore::from_engine(&engine);
+        let mut scored = vec![(10.0_f64, "app.legacy.api".into())];
+        let n = super::apply_constraint_penalties(&engine, &index, &mut scored);
+        assert_eq!(n, 1);
+        assert_eq!(scored[0].0, f64::NEG_INFINITY);
     }
 }

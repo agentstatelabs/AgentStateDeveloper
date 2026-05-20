@@ -606,6 +606,45 @@ impl SearchFtsDb {
         map
     }
 
+    /// Plan E t-005: bulk qname → file lookup. Returns a HashMap with one
+    /// entry per qname found in the symbol cache (qnames not in the cache
+    /// are simply absent from the result). Callers use this to avoid
+    /// per-candidate SQL roundtrips when they only need the file path,
+    /// not the full Symbol JSON.
+    ///
+    /// Note: asd_symbols_meta is single-ref by design (rebuilt fresh per
+    /// `asd index .`), so the `ref_name` parameter is currently unused
+    /// but reserved for the future multi-ref world.
+    pub fn files_for_qnames(
+        &self,
+        qnames: &[&str],
+        _ref_name: &str,
+    ) -> std::collections::HashMap<String, String> {
+        let mut out = std::collections::HashMap::with_capacity(qnames.len());
+        if qnames.is_empty() {
+            return out;
+        }
+        let placeholders: Vec<&str> = (0..qnames.len()).map(|_| "?").collect();
+        let sql = format!(
+            "SELECT qname, file FROM asd_symbols_meta WHERE qname IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = match self.conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(_) => return out,
+        };
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(qnames.iter().map(|q| q as &dyn rusqlite::ToSql)),
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        );
+        if let Ok(rows) = rows {
+            for r in rows.flatten() {
+                out.insert(r.0, r.1);
+            }
+        }
+        out
+    }
+
     /// Look up a single Symbol by qname from the cache.
     pub fn get_symbol_by_qname_cached(
         &self,
@@ -1072,6 +1111,75 @@ impl SearchFtsDb {
     // -----------------------------------------------------------------------
     // Ledger write-through cache helpers
     // -----------------------------------------------------------------------
+
+    /// Plan E t-004: one-shot SQL scan that returns every `symbol_id`
+    /// whose ledger contains a Constraint or Decision entry carrying a
+    /// penalty role (`stale-api` / `audit-pending`). Used by
+    /// `apply_constraint_penalties` to avoid an N-walk over the ledger
+    /// per query.
+    ///
+    /// Returns an empty vec when the cache is empty (caller falls back
+    /// to the per-candidate ledger walk).
+    pub fn symbols_with_constraint_penalties(
+        &self,
+        ref_name: &str,
+    ) -> rusqlite::Result<Vec<String>> {
+        let pairs = self.symbols_with_constraint_penalties_scoped(ref_name)?;
+        Ok(pairs.into_iter().map(|(sid, _)| sid).collect())
+    }
+
+    /// Plan E t-008: like `symbols_with_constraint_penalties` but also
+    /// returns the optional scope-glob list parsed from each entry's
+    /// `body` JSON. Schema: `body` MAY be a JSON object containing
+    /// `{"scope": ["glob1", "glob2", ...]}`. When present, the penalty
+    /// applies only to symbols whose file matches at least one glob;
+    /// when absent or unparseable, the penalty applies globally
+    /// (preserves the Plan E t-004 contract).
+    ///
+    /// The same symbol_id may appear multiple times in the result when
+    /// it has multiple penalty entries (e.g. one global + one scoped).
+    /// The caller suppresses on ANY match (most permissive scope wins).
+    pub fn symbols_with_constraint_penalties_scoped(
+        &self,
+        ref_name: &str,
+    ) -> rusqlite::Result<Vec<(String, Option<Vec<String>>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT symbol_id, body FROM asd_ledger_cache
+             WHERE ref_name = ?1
+               AND json_extract(body, '$.kind') IN ('decision', 'constraint')
+               AND json_extract(body, '$.role') IN ('stale-api', 'audit-pending')",
+        )?;
+        let rows = stmt
+            .query_map(params![ref_name], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .filter_map(|r| r.ok())
+            .map(|(sid, body)| {
+                let scope = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("body").and_then(|b| {
+                            // body field itself may be a JSON string or null
+                            b.as_str()
+                                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                                .or_else(|| Some(b.clone()))
+                        })
+                    })
+                    .and_then(|inner| {
+                        inner.get("scope").and_then(|s| s.as_array().cloned())
+                    })
+                    .map(|arr| {
+                        arr.into_iter()
+                            .filter_map(|g| g.as_str().map(String::from))
+                            .filter(|g| !g.is_empty())
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|v| !v.is_empty());
+                (sid, scope)
+            })
+            .collect::<Vec<_>>();
+        Ok(rows)
+    }
 
     /// Number of ledger rows cached for this (symbol_id, ref_name) pair.
     /// Returns 0 when the symbol hasn't been cached yet — triggers git fallback.
@@ -3467,5 +3575,54 @@ mod tests {
                 assert!(days >= 0.0);
             }
         }
+    }
+
+    // -- Plan E t-004: bulk-fetch fast path for constraint penalties -------
+
+    #[test]
+    fn symbols_with_constraint_penalties_via_sql_returns_matching_ids() {
+        use crate::schema::{Author, AuthorKind, LedgerEntry, LedgerKind};
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let fts = SearchFtsDb::open(&db_path).unwrap();
+
+        // Populate the ledger cache with three entries:
+        //   sym_a: Constraint with role=stale-api      → SHOULD match
+        //   sym_b: Decision with role=audit-pending    → SHOULD match
+        //   sym_c: Hazard with role=stale-api          → must NOT match (wrong kind)
+        //   sym_d: Constraint with role=fast-test      → must NOT match (non-penalty role)
+        //   sym_e: Constraint with no role             → must NOT match (no role)
+        let make = |sym_id: &str, kind: LedgerKind, role: Option<&str>| {
+            let mut e = LedgerEntry::new(
+                sym_id,
+                kind,
+                "test entry",
+                Author { kind: AuthorKind::Agent, id: "t".into() },
+            );
+            e.role = role.map(str::to_string);
+            e
+        };
+        for (sym_id, kind, role) in [
+            ("sym_a", LedgerKind::Constraint, Some("stale-api")),
+            ("sym_b", LedgerKind::Decision, Some("audit-pending")),
+            ("sym_c", LedgerKind::Hazard, Some("stale-api")),
+            ("sym_d", LedgerKind::Constraint, Some("fast-test")),
+            ("sym_e", LedgerKind::Constraint, None),
+        ] {
+            fts.upsert_ledger_entry(&make(sym_id, kind, role), "main").unwrap();
+        }
+
+        let mut ids = fts.symbols_with_constraint_penalties("main").unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["sym_a".to_string(), "sym_b".to_string()]);
+    }
+
+    #[test]
+    fn symbols_with_constraint_penalties_returns_empty_when_cache_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let fts = SearchFtsDb::open(&db_path).unwrap();
+        let ids = fts.symbols_with_constraint_penalties("main").unwrap();
+        assert!(ids.is_empty());
     }
 }

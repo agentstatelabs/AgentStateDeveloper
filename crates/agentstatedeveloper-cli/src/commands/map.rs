@@ -101,6 +101,11 @@ pub fn run(cfg: &Config, args: MapArgs) -> Result<()> {
     author.id = cfg.agent_id.clone();
     author.kind = AuthorKind::Agent;
 
+    // Plan E t-011: pick up the active CTX task id once, pass to every
+    // write_map_entry call so the provenance tag lands consistently.
+    let db_parent = cfg.db_path.parent().map(|p| p.to_path_buf());
+    let ctx_task_id = read_active_ctx_task_id(db_parent.as_deref());
+
     for (pkg, sym) in &package_front_doors {
         packages_out.push(json!({
             "package": pkg,
@@ -116,6 +121,7 @@ pub fn run(cfg: &Config, args: MapArgs) -> Result<()> {
                 RoleTag::PackageBoundary,
                 &format!("package boundary: {pkg}"),
                 &author,
+                ctx_task_id.as_deref(),
             )?;
             written_pkg += 1;
         }
@@ -133,7 +139,15 @@ pub fn run(cfg: &Config, args: MapArgs) -> Result<()> {
                 RoleTag::DiagnosticTest => format!("diagnostic test (env-gate before CI): {file}"),
                 _ => format!("test: {file}"),
             };
-            write_map_entry(&ledger, &ref_name, sym, *role, &summary, &author)?;
+            write_map_entry(
+                &ledger,
+                &ref_name,
+                sym,
+                *role,
+                &summary,
+                &author,
+                ctx_task_id.as_deref(),
+            )?;
             written_test += 1;
         }
     }
@@ -164,6 +178,7 @@ fn write_map_entry(
     role: RoleTag,
     summary: &str,
     author: &Author,
+    ctx_task_id: Option<&str>,
 ) -> Result<()> {
     let mut entry = LedgerEntry::new(&sym.symbol_id, LedgerKind::Ownership, summary, author.clone());
     // Deterministic entry id so re-running `asd map` overwrites instead
@@ -171,8 +186,30 @@ fn write_map_entry(
     entry.entry_id = deterministic_entry_id(&sym.symbol_id, role.as_str());
     entry.role = Some(role.as_str().to_string());
     entry.tags.push("plan-c:asd-map".to_string());
+    // Plan E t-011: auto-tag with the active CTX task id so future
+    // scope-by-task filtering / audits can attribute the entries to
+    // the gesture that wrote them.
+    if let Some(id) = ctx_task_id {
+        let tag = format!("ctx:task:{id}");
+        if !entry.tags.iter().any(|t| t == &tag) {
+            entry.tags.push(tag);
+        }
+    }
     ledger.append_entry(ref_name, &entry, &author.id)?;
     Ok(())
+}
+
+/// Plan E t-011: read the active CTX task id from `CTX_ACTIVE_TASK`
+/// env var (JSON: `{"task_id": "..."}`) with a fallback to the
+/// `.asd/cache/active-task.json` file. Mirrors `candidates::
+/// read_active_task_scope` but extracts `task_id` instead of `scope[]`.
+fn read_active_ctx_task_id(db_parent: Option<&std::path::Path>) -> Option<String> {
+    let raw = std::env::var("CTX_ACTIVE_TASK").ok().or_else(|| {
+        let p = db_parent?.join(".asd").join("cache").join("active-task.json");
+        std::fs::read_to_string(p).ok()
+    })?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v.get("task_id")?.as_str().map(String::from)
 }
 
 fn deterministic_entry_id(sym_id: &str, role: &str) -> String {
@@ -201,10 +238,49 @@ fn package_dir(file: &str) -> String {
     }
 }
 
+/// Body markers that flip a test file from `fast-test` → `diagnostic-test`
+/// when present in the file content. Surfaced from Plan A M22 ExampleFlow
+/// field feedback: tests that touch the real filesystem, render full
+/// songs, batch-run, or take long are diagnostic by nature.
+const DIAGNOSTIC_BODY_MARKERS: &[&str] = &[
+    "FileManager.default.fileExists",
+    "FileManager.fileExists",
+    "renderFullSong",
+    ".trace(",
+    "batchRender",
+    "durationSeconds",
+    "/Users/",       // hard-coded paths to user dirs
+    "tmp_path",      // pytest real-fs fixtures
+    "tempfile.NamedTemporaryFile",
+    "subprocess.run",
+];
+
+/// Plan E t-010: read the file's first ~64 KiB and check whether any
+/// diagnostic-body marker appears. Returns true on match. Errors and
+/// missing files return false (defensive — body-sniff is an opt-in
+/// refinement, never a hard requirement).
+fn body_looks_diagnostic(file: &str) -> bool {
+    let path = std::path::Path::new(file);
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    // Cap the scan window so a huge file doesn't dominate `asd map`'s
+    // runtime. 64 KiB easily holds any reasonable test file's imports
+    // + setup section where these markers tend to live.
+    let limit = bytes.len().min(64 * 1024);
+    let head = match std::str::from_utf8(&bytes[..limit]) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    DIAGNOSTIC_BODY_MARKERS
+        .iter()
+        .any(|m| head.contains(m))
+}
+
 /// Classify a file as a test file and return its role tag, or None if
-/// the file isn't a test. Filename heuristics only — body heuristics
-/// (FileManager.fileExists, renderFullSong, durationSeconds, etc.) can
-/// land as a follow-up Plan C+ task.
+/// the file isn't a test. Combines filename heuristics with optional
+/// body-sniff via [`body_looks_diagnostic`] (Plan E t-010).
 fn test_file_role(file: &str) -> Option<RoleTag> {
     let lower = file.to_lowercase();
     let is_test = lower.contains("/test")
@@ -215,12 +291,15 @@ fn test_file_role(file: &str) -> Option<RoleTag> {
     if !is_test {
         return None;
     }
-    // Diagnostic markers in the filename — extend with body sniff in a follow-up.
-    let diagnostic = lower.contains("diagnostic")
+    // Diagnostic markers in the filename.
+    let diagnostic_by_name = lower.contains("diagnostic")
         || lower.contains("integration")
         || lower.contains("e2e")
         || lower.contains("real_file")
         || lower.contains("slow");
+    // Plan E t-010: body-sniff overrides a default fast-test verdict
+    // when the file content matches a ExampleFlow-flagged marker.
+    let diagnostic = diagnostic_by_name || body_looks_diagnostic(file);
     Some(if diagnostic {
         RoleTag::DiagnosticTest
     } else {
@@ -247,6 +326,77 @@ mod tests {
             Some(RoleTag::DiagnosticTest)
         );
         assert_eq!(test_file_role("src/pkg/module.py"), None);
+    }
+
+    // -- Plan E t-010: body-sniff regression --------------------------------
+
+    #[test]
+    fn body_looks_diagnostic_matches_session_drift_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("foo_test.py");
+        std::fs::write(
+            &path,
+            "import subprocess\nsubprocess.run(['swift', 'test'])\n",
+        )
+        .unwrap();
+        assert!(body_looks_diagnostic(path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn body_looks_diagnostic_false_for_clean_unit_test() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("foo_test.py");
+        std::fs::write(
+            &path,
+            "def test_addition():\n    assert 1 + 1 == 2\n",
+        )
+        .unwrap();
+        assert!(!body_looks_diagnostic(path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn body_looks_diagnostic_false_for_missing_file() {
+        // Defensive — body-sniff is opt-in refinement, never a hard req.
+        assert!(!body_looks_diagnostic("/nonexistent/path/that/cannot/exist.py"));
+    }
+
+    // -- Plan E t-011: CTX task provenance --------------------------------
+
+    #[test]
+    fn read_active_ctx_task_id_extracts_from_env() {
+        // Use a private temp file as the fallback source so we don't
+        // mutate process env (parallel-safe — same pattern as t-002).
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().join(".asd/cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(
+            cache_dir.join("active-task.json"),
+            r#"{"task_id":"t-007","scope":["x/**"]}"#,
+        )
+        .unwrap();
+        let id = read_active_ctx_task_id(Some(tmp.path()));
+        assert_eq!(id.as_deref(), Some("t-007"));
+    }
+
+    #[test]
+    fn read_active_ctx_task_id_returns_none_when_no_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(read_active_ctx_task_id(Some(tmp.path())), None);
+    }
+
+    #[test]
+    fn test_file_role_promotes_clean_test_to_diagnostic_on_body_marker() {
+        // End-to-end: file name is `fast_test.py` (would default to
+        // FastTest), but body contains `subprocess.run` → DiagnosticTest.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("fast_test.py");
+        std::fs::write(
+            &path,
+            "import subprocess\ndef test_ok():\n    subprocess.run(['ls'])\n",
+        )
+        .unwrap();
+        let role = test_file_role(path.to_str().unwrap());
+        assert_eq!(role, Some(RoleTag::DiagnosticTest));
     }
 
     #[test]

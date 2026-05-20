@@ -62,6 +62,16 @@ git add .asd/v1/
 git commit -m "chore: sync ASD sidecar"
 ```
 
+### MCP ↔ CLI naming reference
+
+ASD has two surfaces with two naming conventions: MCP uses a flat
+namespace (`ledger_append`, `code_search`) so tools don't collide with
+other MCP servers; the CLI nests (`asd ledger append`, `asd search`).
+The canonical mapping lives in [docs/mcp-cli-mapping.md](docs/mcp-cli-mapping.md).
+Both forms work on the CLI — agents trained on older MCP-era docs can
+type either `asd ledger append` or (via clap aliases from Plan D t-003)
+the equivalent `asd code_search` / `asd callers_of` etc.
+
 ### Brief output mode for agents
 
 `asd` defaults to a verbose JSON shape that's helpful for humans and

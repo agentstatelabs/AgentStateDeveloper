@@ -217,6 +217,12 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // Plan A t-009: capturing the contributing symbol + match reasons so each
     // suggested file carries a "why this file" hook. Files whose score is below
     // the precision floor (25% of top) are dropped to reduce broad-query noise.
+    //
+    // Plan E t-006: shared helpers now live in
+    // `agentstatedeveloper_core::prepare_change` (FileScoreEntry,
+    // file_score_floor(), push_file_score()). The orchestration loop here is
+    // still duplicated with the MCP handler; Plan F will lift the full
+    // walk. Until then, prefer the core helpers when editing scoring logic.
     let mut file_scores: Vec<(f64, String, String, Option<f64>, bool, String, String)> =
         Vec::new();
     let mut seen_files: HashSet<String> = HashSet::new();
