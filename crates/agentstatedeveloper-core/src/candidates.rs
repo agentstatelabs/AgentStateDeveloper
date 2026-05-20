@@ -1095,9 +1095,14 @@ pub struct FeedbackMetrics {
     /// decisions apart from feedback-time verdicts.
     #[serde(default)]
     pub constraint_penalties_applied: usize,
+    /// Plan C t-006: candidates boosted by +1.0 because they fall inside
+    /// the active CTX task's recorded scope. Soft bias only.
+    #[serde(default)]
+    pub task_bias_boosted: usize,
     /// Unique rule names that fired, in first-encounter order.
     /// Values: "exact_noisy", "same_file_sibling_suppression", "useful_boost",
-    /// "recurring_fp", "constraint_penalty" (Plan C t-003).
+    /// "recurring_fp", "constraint_penalty" (Plan C t-003), "task_bias"
+    /// (Plan C t-006), "already_covered" / "diagnostic_only" (Plan C t-005).
     pub rules_applied: Vec<String>,
 }
 
@@ -1114,6 +1119,62 @@ pub struct FeedbackMetrics {
 ///   query token are suppressed for any query that overlaps those tokens.
 ///
 /// Called at CLI/MCP call sites after `find_candidates`.
+/// Plan C t-006: read the active CTX task scope (file globs) and return
+/// it for bias scoring. Source preference: `CTX_ACTIVE_TASK` env var
+/// (JSON object), else `.asd/cache/active-task.json` relative to the
+/// db's parent dir, else None. Schema: `{"task_id": "...", "scope":
+/// ["src/foo/**", ...]}` — only the `scope` array is consumed.
+///
+/// Returns None when no task state is found or the scope is empty. The
+/// caller treats a None return as "no bias to apply".
+pub fn read_active_task_scope(db_path_parent: Option<&std::path::Path>) -> Option<Vec<String>> {
+    let raw_json: Option<String> = std::env::var("CTX_ACTIVE_TASK").ok().or_else(|| {
+        let p = db_path_parent?.join(".asd").join("cache").join("active-task.json");
+        std::fs::read_to_string(p).ok()
+    });
+    let raw = raw_json?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let arr = v.get("scope")?.as_array()?;
+    let scope: Vec<String> = arr
+        .iter()
+        .filter_map(|s| s.as_str().map(|s| s.to_string()))
+        .filter(|s| !s.is_empty())
+        .collect();
+    if scope.is_empty() { None } else { Some(scope) }
+}
+
+/// Plan C t-006: apply a soft `boost` (default 1.0) to candidates whose
+/// file matches any glob in the active task's scope. Soft = additive,
+/// never a hard filter — so a wrong scope guess at most demotes the
+/// agent's intended targets relative to in-scope ones, never hides
+/// them. Returns the boosted count.
+pub fn apply_task_bias(
+    engine: &Engine,
+    index_store: &AsgIndexStore,
+    scored: &mut Vec<(f64, String)>,
+    scope: &[String],
+    boost: f64,
+) -> usize {
+    if scope.is_empty() {
+        return 0;
+    }
+    let mut boosted = 0;
+    for (score, qname) in scored.iter_mut() {
+        if !score.is_finite() {
+            continue;
+        }
+        let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+            Ok(Some(s)) => s,
+            _ => continue,
+        };
+        if scope.iter().any(|g| glob_match(g, &sym.file)) {
+            *score += boost;
+            boosted += 1;
+        }
+    }
+    boosted
+}
+
 /// Plan C t-003: synthesize WrongLayer-like suppression from
 /// Constraint/Decision ledger entries that carry a penalty `role`
 /// (currently `stale-api` and `audit-pending`). Walks each candidate's
@@ -1173,6 +1234,23 @@ pub fn apply_feedback_adjustments(
     scored: &mut Vec<(f64, String)>,
     feedback_entries: &[(String, String, crate::schema::FeedbackVerdict)],
 ) -> FeedbackMetrics {
+    // Plan C t-006: bias toward the active CTX task's scope first, so
+    // in-scope candidates start with a small head-start before
+    // suppression/boost rules run.
+    let task_bias_boosted = {
+        let parent = engine
+            .db_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf());
+        let scope = read_active_task_scope(parent.as_deref()).unwrap_or_default();
+        if scope.is_empty() {
+            0
+        } else {
+            apply_task_bias(engine, index_store, scored, &scope, 1.0)
+        }
+    };
+
     // Plan C t-003: apply constraint penalties FIRST so feedback rules
     // don't have to special-case symbols already suppressed.
     let constraint_penalties_applied = apply_constraint_penalties(engine, index_store, scored);
@@ -1180,8 +1258,12 @@ pub fn apply_feedback_adjustments(
     if feedback_entries.is_empty() {
         let mut m = FeedbackMetrics::default();
         m.constraint_penalties_applied = constraint_penalties_applied;
+        m.task_bias_boosted = task_bias_boosted;
         if constraint_penalties_applied > 0 {
             m.rules_applied.push("constraint_penalty".to_string());
+        }
+        if task_bias_boosted > 0 {
+            m.rules_applied.push("task_bias".to_string());
         }
         return m;
     }
@@ -1395,6 +1477,9 @@ pub fn apply_feedback_adjustments(
     if constraint_penalties_applied > 0 && !rules_applied.iter().any(|r| r == "constraint_penalty") {
         rules_applied.push("constraint_penalty".to_string());
     }
+    if task_bias_boosted > 0 && !rules_applied.iter().any(|r| r == "task_bias") {
+        rules_applied.push("task_bias".to_string());
+    }
     FeedbackMetrics {
         entries_applied,
         suppressed,
@@ -1402,6 +1487,7 @@ pub fn apply_feedback_adjustments(
         boosted,
         recurring_fp_suppressed,
         constraint_penalties_applied,
+        task_bias_boosted,
         rules_applied,
     }
 }
@@ -2317,5 +2403,122 @@ mod plan_c_t003_tests {
         assert!(WrongLayer.is_suppression());
         assert!(AlreadyCovered.is_suppression());
         assert!(DiagnosticOnly.is_suppression());
+    }
+
+    // -- Plan C t-006: CTX task bias ----------------------------------------
+
+    #[test]
+    fn apply_task_bias_boosts_in_scope_files_only() {
+        let engine = Engine::open_in_memory().unwrap();
+        let index = AsgIndexStore::from_engine(&engine);
+        for (qn, file) in [
+            ("pkg.in_scope.fn", "src/pkg/in_scope.py"),
+            ("pkg.out_of_scope.fn", "src/other/file.py"),
+        ] {
+            let sym = Symbol {
+                symbol_id: format!("sym_{qn}"),
+                symbol_fp: "fp".into(),
+                qname: qn.into(),
+                language: "python".into(),
+                kind: SymbolKind::Function,
+                file: file.into(),
+                start: Position { line: 1, col: 0 },
+                end: Position { line: 2, col: 0 },
+                signature: None,
+                doc: None,
+            };
+            index.put_symbol(&engine.ref_name, &sym, "test").unwrap();
+        }
+        let mut scored = vec![
+            (5.0_f64, "pkg.in_scope.fn".to_string()),
+            (5.0_f64, "pkg.out_of_scope.fn".to_string()),
+        ];
+        let scope = vec!["src/pkg/**".to_string()];
+        let n = super::apply_task_bias(&engine, &index, &mut scored, &scope, 1.0);
+        assert_eq!(n, 1);
+        // In-scope was boosted, out-of-scope was not.
+        let in_scope = scored.iter().find(|(_, q)| q == "pkg.in_scope.fn").unwrap();
+        let out_scope = scored.iter().find(|(_, q)| q == "pkg.out_of_scope.fn").unwrap();
+        assert_eq!(in_scope.0, 6.0);
+        assert_eq!(out_scope.0, 5.0);
+    }
+
+    #[test]
+    fn apply_task_bias_with_empty_scope_is_a_noop() {
+        let engine = Engine::open_in_memory().unwrap();
+        let index = AsgIndexStore::from_engine(&engine);
+        let mut scored = vec![(5.0_f64, "anything".to_string())];
+        let n = super::apply_task_bias(&engine, &index, &mut scored, &[], 1.0);
+        assert_eq!(n, 0);
+        assert_eq!(scored[0].0, 5.0);
+    }
+
+    #[test]
+    fn apply_task_bias_skips_already_suppressed_candidates() {
+        let engine = Engine::open_in_memory().unwrap();
+        let index = AsgIndexStore::from_engine(&engine);
+        let sym = Symbol {
+            symbol_id: "sym_z".into(),
+            symbol_fp: "fp".into(),
+            qname: "z.in_scope.fn".into(),
+            language: "python".into(),
+            kind: SymbolKind::Function,
+            file: "src/pkg/z.py".into(),
+            start: Position { line: 1, col: 0 },
+            end: Position { line: 2, col: 0 },
+            signature: None,
+            doc: None,
+        };
+        index.put_symbol(&engine.ref_name, &sym, "test").unwrap();
+        let mut scored = vec![(f64::NEG_INFINITY, "z.in_scope.fn".to_string())];
+        let n = super::apply_task_bias(
+            &engine,
+            &index,
+            &mut scored,
+            &["src/pkg/**".to_string()],
+            1.0,
+        );
+        assert_eq!(n, 0, "NEG_INFINITY candidates must not be revived by bias");
+        assert_eq!(scored[0].0, f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn read_active_task_scope_parses_env_var_json() {
+        let prev = std::env::var("CTX_ACTIVE_TASK").ok();
+        // SAFETY: tests within the same process share env; serial-test
+        // isn't pulled in here, so this is best-effort. The assertion
+        // is on the parsed Vec, not on side effects.
+        unsafe {
+            std::env::set_var(
+                "CTX_ACTIVE_TASK",
+                r#"{"task_id":"t-006","scope":["src/pkg/**","tests/pkg/**"]}"#,
+            );
+        }
+        let scope = super::read_active_task_scope(None);
+        assert_eq!(
+            scope,
+            Some(vec!["src/pkg/**".to_string(), "tests/pkg/**".to_string()])
+        );
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("CTX_ACTIVE_TASK", v),
+                None => std::env::remove_var("CTX_ACTIVE_TASK"),
+            }
+        }
+    }
+
+    #[test]
+    fn read_active_task_scope_returns_none_when_unset() {
+        let prev = std::env::var("CTX_ACTIVE_TASK").ok();
+        unsafe {
+            std::env::remove_var("CTX_ACTIVE_TASK");
+        }
+        let scope = super::read_active_task_scope(None);
+        assert_eq!(scope, None);
+        if let Some(v) = prev {
+            unsafe {
+                std::env::set_var("CTX_ACTIVE_TASK", v);
+            }
+        }
     }
 }
