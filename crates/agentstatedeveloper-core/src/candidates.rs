@@ -1089,8 +1089,15 @@ pub struct FeedbackMetrics {
     pub boosted: usize,
     /// Symbols suppressed by the recurring false-positive rule (≥2 noisy verdicts).
     pub recurring_fp_suppressed: usize,
+    /// Plan C t-003: symbols suppressed by an active Constraint/Decision
+    /// ledger entry carrying a penalty role (stale-api / audit-pending).
+    /// Independent of `suppressed` so callers can tell ranking-time
+    /// decisions apart from feedback-time verdicts.
+    #[serde(default)]
+    pub constraint_penalties_applied: usize,
     /// Unique rule names that fired, in first-encounter order.
-    /// Values: "exact_noisy", "same_file_sibling_suppression", "useful_boost", "recurring_fp".
+    /// Values: "exact_noisy", "same_file_sibling_suppression", "useful_boost",
+    /// "recurring_fp", "constraint_penalty" (Plan C t-003).
     pub rules_applied: Vec<String>,
 }
 
@@ -1107,6 +1114,58 @@ pub struct FeedbackMetrics {
 ///   query token are suppressed for any query that overlaps those tokens.
 ///
 /// Called at CLI/MCP call sites after `find_candidates`.
+/// Plan C t-003: synthesize WrongLayer-like suppression from
+/// Constraint/Decision ledger entries that carry a penalty `role`
+/// (currently `stale-api` and `audit-pending`). Walks each candidate's
+/// ledger entries via the existing AsgLedgerStore; matches go to
+/// `NEG_INFINITY` just like the existing Noisy/WrongLayer path.
+///
+/// Returns the count of candidates suppressed. Cheap on small candidate
+/// sets (one ledger walk per symbol via the SQLite cache); large
+/// candidate sets can be optimized later via index-time denormalization
+/// if needed.
+pub fn apply_constraint_penalties(
+    engine: &Engine,
+    index_store: &AsgIndexStore,
+    scored: &mut Vec<(f64, String)>,
+) -> usize {
+    let ledger_store = crate::ledger::AsgLedgerStore::from_engine(engine);
+    let mut suppressed = 0;
+    for (score, qname) in scored.iter_mut() {
+        if *score == f64::NEG_INFINITY {
+            continue;
+        }
+        let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+            Ok(Some(s)) => s,
+            _ => continue,
+        };
+        let entries = match ledger_store.list_entries(&engine.ref_name, &sym.symbol_id) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let hit = entries.iter().any(|entry| {
+            let kind_matches = matches!(
+                entry.kind,
+                crate::schema::LedgerKind::Constraint | crate::schema::LedgerKind::Decision
+            );
+            if !kind_matches {
+                return false;
+            }
+            entry
+                .role
+                .as_deref()
+                .and_then(crate::schema::RoleTag::from_str)
+                .map(|r| r.is_penalty_role())
+                .unwrap_or(false)
+        });
+        if hit {
+            *score = f64::NEG_INFINITY;
+            suppressed += 1;
+        }
+    }
+    suppressed
+}
+
 pub fn apply_feedback_adjustments(
     engine: &Engine,
     index_store: &AsgIndexStore,
@@ -1114,7 +1173,18 @@ pub fn apply_feedback_adjustments(
     scored: &mut Vec<(f64, String)>,
     feedback_entries: &[(String, String, crate::schema::FeedbackVerdict)],
 ) -> FeedbackMetrics {
-    if feedback_entries.is_empty() { return FeedbackMetrics::default(); }
+    // Plan C t-003: apply constraint penalties FIRST so feedback rules
+    // don't have to special-case symbols already suppressed.
+    let constraint_penalties_applied = apply_constraint_penalties(engine, index_store, scored);
+
+    if feedback_entries.is_empty() {
+        let mut m = FeedbackMetrics::default();
+        m.constraint_penalties_applied = constraint_penalties_applied;
+        if constraint_penalties_applied > 0 {
+            m.rules_applied.push("constraint_penalty".to_string());
+        }
+        return m;
+    }
     let query_norm = query.to_lowercase();
     let current_tokens: std::collections::HashSet<String> = fb_query_tokens(&query_norm);
     let current_tokens_vec: Vec<&str> = current_tokens.iter().map(|s| s.as_str()).collect();
@@ -1308,7 +1378,18 @@ pub fn apply_feedback_adjustments(
     let before = scored.len();
     scored.retain(|(s, _)| s.is_finite());
     let suppressed = before - scored.len();
-    FeedbackMetrics { entries_applied, suppressed, preserved_useful_siblings, boosted, recurring_fp_suppressed, rules_applied }
+    if constraint_penalties_applied > 0 && !rules_applied.iter().any(|r| r == "constraint_penalty") {
+        rules_applied.push("constraint_penalty".to_string());
+    }
+    FeedbackMetrics {
+        entries_applied,
+        suppressed,
+        preserved_useful_siblings,
+        boosted,
+        recurring_fp_suppressed,
+        constraint_penalties_applied,
+        rules_applied,
+    }
 }
 
 /// Per-result explanation of which feedback verdict affected a search hit.
@@ -2035,4 +2116,113 @@ pub fn build_feedback_state(
     let fb_store = AsgFeedbackStore::from_engine(engine);
     let all = fb_store.list_all(ref_name).unwrap_or_default();
     build_feedback_state_from_entries(&all, query, entries_applied)
+}
+
+#[cfg(test)]
+mod plan_c_t003_tests {
+    //! Decisions-as-constraints regression. A Constraint or Decision
+    //! ledger entry carrying a penalty `role` (stale-api / audit-pending)
+    //! must suppress its symbol in ranked results just like an explicit
+    //! `WrongLayer` feedback verdict would.
+
+    use crate::engine::Engine;
+    use crate::index::{AsgIndexStore, IndexStore};
+    use crate::ledger::{AsgLedgerStore, LedgerStore};
+    use crate::schema::{
+        Author, AuthorKind, LedgerEntry, LedgerKind, Position, Symbol, SymbolKind,
+    };
+
+    fn seed_engine_with_symbol() -> (Engine, String) {
+        let engine = Engine::open_in_memory().unwrap();
+        let index = AsgIndexStore::from_engine(&engine);
+        let sym = Symbol {
+            symbol_id: "sym_stale".into(),
+            symbol_fp: "fp_stale".into(),
+            qname: "store.legacy.api".into(),
+            language: "python".into(),
+            kind: SymbolKind::Function,
+            file: "store/legacy.py".into(),
+            start: Position { line: 1, col: 0 },
+            end: Position { line: 5, col: 0 },
+            signature: None,
+            doc: None,
+        };
+        index.put_symbol(&engine.ref_name, &sym, "test").unwrap();
+        (engine, sym.symbol_id)
+    }
+
+    fn append_constraint(engine: &Engine, sym_id: &str, role: Option<&str>) {
+        let ledger = AsgLedgerStore::from_engine(engine);
+        let mut entry = LedgerEntry::new(
+            sym_id,
+            LedgerKind::Constraint,
+            "legacy api should not be used in new code",
+            Author { kind: AuthorKind::Agent, id: "test".into() },
+        );
+        entry.role = role.map(str::to_string);
+        ledger.append_entry(&engine.ref_name, &entry, "test").unwrap();
+    }
+
+    #[test]
+    fn constraint_with_stale_api_role_suppresses_symbol() {
+        let (engine, sym_id) = seed_engine_with_symbol();
+        append_constraint(&engine, &sym_id, Some("stale-api"));
+        let index = AsgIndexStore::from_engine(&engine);
+
+        let mut scored = vec![(10.0_f64, "store.legacy.api".to_string())];
+        let suppressed = super::apply_constraint_penalties(&engine, &index, &mut scored);
+
+        assert_eq!(suppressed, 1);
+        assert_eq!(scored[0].0, f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn constraint_with_audit_pending_role_suppresses_symbol() {
+        let (engine, sym_id) = seed_engine_with_symbol();
+        append_constraint(&engine, &sym_id, Some("audit-pending"));
+        let index = AsgIndexStore::from_engine(&engine);
+        let mut scored = vec![(10.0_f64, "store.legacy.api".to_string())];
+        let suppressed = super::apply_constraint_penalties(&engine, &index, &mut scored);
+        assert_eq!(suppressed, 1);
+        assert_eq!(scored[0].0, f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn constraint_without_role_does_not_suppress() {
+        // A bare Constraint with no role is still a passive note —
+        // backward-compatible with the pre-Plan-C ledger model.
+        let (engine, sym_id) = seed_engine_with_symbol();
+        append_constraint(&engine, &sym_id, None);
+        let index = AsgIndexStore::from_engine(&engine);
+        let mut scored = vec![(10.0_f64, "store.legacy.api".to_string())];
+        let suppressed = super::apply_constraint_penalties(&engine, &index, &mut scored);
+        assert_eq!(suppressed, 0);
+        assert_eq!(scored[0].0, 10.0);
+    }
+
+    #[test]
+    fn non_penalty_role_does_not_suppress() {
+        // package-boundary is a BOOST role, not a penalty role — should
+        // not trigger NEG_INFINITY.
+        let (engine, sym_id) = seed_engine_with_symbol();
+        append_constraint(&engine, &sym_id, Some("package-boundary"));
+        let index = AsgIndexStore::from_engine(&engine);
+        let mut scored = vec![(10.0_f64, "store.legacy.api".to_string())];
+        let suppressed = super::apply_constraint_penalties(&engine, &index, &mut scored);
+        assert_eq!(suppressed, 0);
+    }
+
+    #[test]
+    fn apply_feedback_adjustments_reports_constraint_penalty_in_metrics() {
+        let (engine, sym_id) = seed_engine_with_symbol();
+        append_constraint(&engine, &sym_id, Some("stale-api"));
+        let index = AsgIndexStore::from_engine(&engine);
+        let mut scored = vec![(10.0_f64, "store.legacy.api".to_string())];
+        // Empty feedback set — exercises the early-return branch.
+        let metrics =
+            super::apply_feedback_adjustments(&engine, &index, "legacy", &mut scored, &[]);
+        assert_eq!(metrics.constraint_penalties_applied, 1);
+        assert!(metrics.rules_applied.iter().any(|r| r == "constraint_penalty"));
+        assert_eq!(scored[0].0, f64::NEG_INFINITY);
+    }
 }
