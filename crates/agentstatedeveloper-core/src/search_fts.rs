@@ -1073,6 +1073,34 @@ impl SearchFtsDb {
     // Ledger write-through cache helpers
     // -----------------------------------------------------------------------
 
+    /// Plan E t-004: one-shot SQL scan that returns every `symbol_id`
+    /// whose ledger contains a Constraint or Decision entry carrying a
+    /// penalty role (`stale-api` / `audit-pending`). Used by
+    /// `apply_constraint_penalties` to avoid an N-walk over the ledger
+    /// per query.
+    ///
+    /// Returns an empty vec when the cache is empty (caller falls back
+    /// to the per-candidate ledger walk).
+    pub fn symbols_with_constraint_penalties(
+        &self,
+        ref_name: &str,
+    ) -> rusqlite::Result<Vec<String>> {
+        // json_extract is built in to the bundled SQLite this workspace
+        // uses (rusqlite "bundled" feature). The WHERE clause is a
+        // single index-aided scan over (ref_name, kind, role).
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT symbol_id FROM asd_ledger_cache
+             WHERE ref_name = ?1
+               AND json_extract(body, '$.kind') IN ('decision', 'constraint')
+               AND json_extract(body, '$.role') IN ('stale-api', 'audit-pending')",
+        )?;
+        let rows = stmt
+            .query_map(params![ref_name], |r| r.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>();
+        Ok(rows)
+    }
+
     /// Number of ledger rows cached for this (symbol_id, ref_name) pair.
     /// Returns 0 when the symbol hasn't been cached yet — triggers git fallback.
     pub fn ledger_entry_count_for(&self, symbol_id: &str, ref_name: &str) -> usize {
@@ -3467,5 +3495,54 @@ mod tests {
                 assert!(days >= 0.0);
             }
         }
+    }
+
+    // -- Plan E t-004: bulk-fetch fast path for constraint penalties -------
+
+    #[test]
+    fn symbols_with_constraint_penalties_via_sql_returns_matching_ids() {
+        use crate::schema::{Author, AuthorKind, LedgerEntry, LedgerKind};
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let fts = SearchFtsDb::open(&db_path).unwrap();
+
+        // Populate the ledger cache with three entries:
+        //   sym_a: Constraint with role=stale-api      → SHOULD match
+        //   sym_b: Decision with role=audit-pending    → SHOULD match
+        //   sym_c: Hazard with role=stale-api          → must NOT match (wrong kind)
+        //   sym_d: Constraint with role=fast-test      → must NOT match (non-penalty role)
+        //   sym_e: Constraint with no role             → must NOT match (no role)
+        let make = |sym_id: &str, kind: LedgerKind, role: Option<&str>| {
+            let mut e = LedgerEntry::new(
+                sym_id,
+                kind,
+                "test entry",
+                Author { kind: AuthorKind::Agent, id: "t".into() },
+            );
+            e.role = role.map(str::to_string);
+            e
+        };
+        for (sym_id, kind, role) in [
+            ("sym_a", LedgerKind::Constraint, Some("stale-api")),
+            ("sym_b", LedgerKind::Decision, Some("audit-pending")),
+            ("sym_c", LedgerKind::Hazard, Some("stale-api")),
+            ("sym_d", LedgerKind::Constraint, Some("fast-test")),
+            ("sym_e", LedgerKind::Constraint, None),
+        ] {
+            fts.upsert_ledger_entry(&make(sym_id, kind, role), "main").unwrap();
+        }
+
+        let mut ids = fts.symbols_with_constraint_penalties("main").unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["sym_a".to_string(), "sym_b".to_string()]);
+    }
+
+    #[test]
+    fn symbols_with_constraint_penalties_returns_empty_when_cache_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let fts = SearchFtsDb::open(&db_path).unwrap();
+        let ids = fts.symbols_with_constraint_penalties("main").unwrap();
+        assert!(ids.is_empty());
     }
 }

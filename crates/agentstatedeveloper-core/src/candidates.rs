@@ -1201,6 +1201,40 @@ pub fn apply_constraint_penalties(
     index_store: &AsgIndexStore,
     scored: &mut Vec<(f64, String)>,
 ) -> usize {
+    // Plan E t-004: prefer one-shot SQL over per-candidate ledger walk.
+    // Goes from O(N candidates × ledger walk) to O(1 SQL + N HashSet
+    // lookups). Falls back to the per-candidate path when the FTS cache
+    // is unavailable (fresh DB, mid-rebuild, etc.) — preserves the
+    // original semantics on the slow path.
+    if let Some(fts) = engine.fts.as_ref() {
+        if let Ok(suppressed_ids) = fts.symbols_with_constraint_penalties(&engine.ref_name) {
+            if !suppressed_ids.is_empty() {
+                let suppressed_set: std::collections::HashSet<String> =
+                    suppressed_ids.into_iter().collect();
+                let mut suppressed = 0;
+                for (score, qname) in scored.iter_mut() {
+                    if *score == f64::NEG_INFINITY {
+                        continue;
+                    }
+                    let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+                        Ok(Some(s)) => s,
+                        _ => continue,
+                    };
+                    if suppressed_set.contains(&sym.symbol_id) {
+                        *score = f64::NEG_INFINITY;
+                        suppressed += 1;
+                    }
+                }
+                return suppressed;
+            }
+            // No penalty entries in the cache — nothing to suppress.
+            // Skip the fallback walk entirely.
+            return 0;
+        }
+    }
+
+    // Fallback: per-candidate ledger walk when the FTS cache isn't
+    // available. Same semantics as the original implementation.
     let ledger_store = crate::ledger::AsgLedgerStore::from_engine(engine);
     let mut suppressed = 0;
     for (score, qname) in scored.iter_mut() {
