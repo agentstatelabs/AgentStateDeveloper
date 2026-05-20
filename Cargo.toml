@@ -20,7 +20,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.9.99"
+version = "1.0.0"
 edition = "2024"
 authors = ["Craig Brown"]
 license = "BSL-1.1"

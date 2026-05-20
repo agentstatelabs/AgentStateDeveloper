@@ -77,8 +77,10 @@ Recommended once at process start for any agent that drives `asd`:
 export ASD_FORMAT=brief
 ```
 
-Currently CLI-only. MCP tools still emit the full payload — see Plan D
-t-007 for parity work.
+Applies to CLI and MCP. The spawned `asd-mcp` server inherits
+`ASD_FORMAT=brief` from its parent process at startup and projects the
+three highest-volume read tools (`code_read`, `code_search`,
+`references`) through the same compact shape.
 
 ## MCP server setup
 

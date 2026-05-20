@@ -6,6 +6,7 @@
 
 pub mod adapter;
 pub mod audit;
+pub mod brief;
 pub mod candidates;
 pub mod conclusions_export;
 pub mod recipes;

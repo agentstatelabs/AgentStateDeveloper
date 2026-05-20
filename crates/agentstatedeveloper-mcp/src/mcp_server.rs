@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 
 use agentstatedeveloper_adapters::default_adapters;
 use agentstatedeveloper_core::{
-    conclusions_export, load_scope_aliases, recipes, stale_warning, ConclusionClass,
+    brief, conclusions_export, load_scope_aliases, recipes, stale_warning, ConclusionClass,
     ASD_PATH_PREFIX, AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore,
     AsgScratchStore, AuditEvent, Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory,
     EffectDecl, EffectStore, Engine, FeedbackEntry, FeedbackStore, FeedbackVerdict, FtsFilters,
@@ -1002,6 +1002,19 @@ impl AsdMcpServer {
                 }))
                 .collect();
             let stale = stale_warning(&db_path, 3600);
+            // Plan D t-007: brief mode projects each FTS hit down to
+            // {qname, file:line, signature, doc, score} and drops the
+            // ambiguous_terms / possible_misses / confidence / document_hits
+            // arrays that don't add per-hit information.
+            if brief::brief_from_env() {
+                let out = serde_json::json!({
+                    "query": p.query,
+                    "results": brief::brief_search_results(&results),
+                    "stale": stale,
+                    "query_id": brief::query_id("code_search", &[&p.query]),
+                });
+                return serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string());
+            }
             let out = serde_json::json!({
                 "query": p.query,
                 "ambiguous_terms": ambiguous_terms,
@@ -1380,6 +1393,22 @@ impl AsdMcpServer {
         };
 
         let stale = stale_warning(&self.db_path, 3600);
+        // Plan D t-007: brief mode drops the confidence + scan metadata
+        // and projects definitions through brief_symbol so each is the
+        // compact 4-field shape.
+        if brief::brief_from_env() {
+            let brief_defs: Vec<serde_json::Value> =
+                definitions.iter().map(brief::brief_symbol).collect();
+            let payload = serde_json::json!({
+                "name": p.name,
+                "definitions": brief_defs,
+                "occurrences": occurrences,
+                "occurrence_count": occurrences.len(),
+                "stale": stale,
+                "query_id": brief::query_id("references", &[&p.name]),
+            });
+            return serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+        }
         let payload = serde_json::json!({
             "name": p.name,
             "search_root": root.display().to_string(),
@@ -1625,6 +1654,27 @@ impl AsdMcpServer {
             Ok(e) => e,
             Err(e) => return err_json(&e.to_string()),
         };
+
+        // Plan D t-007: honor ASD_FORMAT=brief at the per-call site.
+        if brief::brief_from_env() {
+            let effects_json = effects
+                .as_ref()
+                .and_then(|e| serde_json::to_value(e).ok());
+            let mut out = brief::brief_read(
+                &symbol,
+                &[], // code_read doesn't compute callers/callees inline
+                &[],
+                effects_json.as_ref(),
+                ledger.len(),
+            );
+            if let serde_json::Value::Object(ref mut m) = out {
+                m.insert(
+                    "query_id".into(),
+                    serde_json::Value::String(brief::query_id("code_read", &[&p.qname])),
+                );
+            }
+            return serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string());
+        }
 
         let payload = serde_json::json!({
             "symbol": symbol,
