@@ -201,10 +201,49 @@ fn package_dir(file: &str) -> String {
     }
 }
 
+/// Body markers that flip a test file from `fast-test` → `diagnostic-test`
+/// when present in the file content. Surfaced from Plan A M22 ExampleFlow
+/// field feedback: tests that touch the real filesystem, render full
+/// songs, batch-run, or take long are diagnostic by nature.
+const DIAGNOSTIC_BODY_MARKERS: &[&str] = &[
+    "FileManager.default.fileExists",
+    "FileManager.fileExists",
+    "renderFullSong",
+    ".trace(",
+    "batchRender",
+    "durationSeconds",
+    "/Users/",       // hard-coded paths to user dirs
+    "tmp_path",      // pytest real-fs fixtures
+    "tempfile.NamedTemporaryFile",
+    "subprocess.run",
+];
+
+/// Plan E t-010: read the file's first ~64 KiB and check whether any
+/// diagnostic-body marker appears. Returns true on match. Errors and
+/// missing files return false (defensive — body-sniff is an opt-in
+/// refinement, never a hard requirement).
+fn body_looks_diagnostic(file: &str) -> bool {
+    let path = std::path::Path::new(file);
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    // Cap the scan window so a huge file doesn't dominate `asd map`'s
+    // runtime. 64 KiB easily holds any reasonable test file's imports
+    // + setup section where these markers tend to live.
+    let limit = bytes.len().min(64 * 1024);
+    let head = match std::str::from_utf8(&bytes[..limit]) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    DIAGNOSTIC_BODY_MARKERS
+        .iter()
+        .any(|m| head.contains(m))
+}
+
 /// Classify a file as a test file and return its role tag, or None if
-/// the file isn't a test. Filename heuristics only — body heuristics
-/// (FileManager.fileExists, renderFullSong, durationSeconds, etc.) can
-/// land as a follow-up Plan C+ task.
+/// the file isn't a test. Combines filename heuristics with optional
+/// body-sniff via [`body_looks_diagnostic`] (Plan E t-010).
 fn test_file_role(file: &str) -> Option<RoleTag> {
     let lower = file.to_lowercase();
     let is_test = lower.contains("/test")
@@ -215,12 +254,15 @@ fn test_file_role(file: &str) -> Option<RoleTag> {
     if !is_test {
         return None;
     }
-    // Diagnostic markers in the filename — extend with body sniff in a follow-up.
-    let diagnostic = lower.contains("diagnostic")
+    // Diagnostic markers in the filename.
+    let diagnostic_by_name = lower.contains("diagnostic")
         || lower.contains("integration")
         || lower.contains("e2e")
         || lower.contains("real_file")
         || lower.contains("slow");
+    // Plan E t-010: body-sniff overrides a default fast-test verdict
+    // when the file content matches a ExampleFlow-flagged marker.
+    let diagnostic = diagnostic_by_name || body_looks_diagnostic(file);
     Some(if diagnostic {
         RoleTag::DiagnosticTest
     } else {
@@ -247,6 +289,53 @@ mod tests {
             Some(RoleTag::DiagnosticTest)
         );
         assert_eq!(test_file_role("src/pkg/module.py"), None);
+    }
+
+    // -- Plan E t-010: body-sniff regression --------------------------------
+
+    #[test]
+    fn body_looks_diagnostic_matches_session_drift_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("foo_test.py");
+        std::fs::write(
+            &path,
+            "import subprocess\nsubprocess.run(['swift', 'test'])\n",
+        )
+        .unwrap();
+        assert!(body_looks_diagnostic(path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn body_looks_diagnostic_false_for_clean_unit_test() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("foo_test.py");
+        std::fs::write(
+            &path,
+            "def test_addition():\n    assert 1 + 1 == 2\n",
+        )
+        .unwrap();
+        assert!(!body_looks_diagnostic(path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn body_looks_diagnostic_false_for_missing_file() {
+        // Defensive — body-sniff is opt-in refinement, never a hard req.
+        assert!(!body_looks_diagnostic("/nonexistent/path/that/cannot/exist.py"));
+    }
+
+    #[test]
+    fn test_file_role_promotes_clean_test_to_diagnostic_on_body_marker() {
+        // End-to-end: file name is `fast_test.py` (would default to
+        // FastTest), but body contains `subprocess.run` → DiagnosticTest.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("fast_test.py");
+        std::fs::write(
+            &path,
+            "import subprocess\ndef test_ok():\n    subprocess.run(['ls'])\n",
+        )
+        .unwrap();
+        let role = test_file_role(path.to_str().unwrap());
+        assert_eq!(role, Some(RoleTag::DiagnosticTest));
     }
 
     #[test]
