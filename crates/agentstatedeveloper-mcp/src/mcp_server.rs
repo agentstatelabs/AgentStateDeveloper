@@ -3175,6 +3175,12 @@ impl AsdMcpServer {
         // Plan A t-009: file_scores carries (score, file, layer, days, hot,
         // top_symbol, why) so each suggested file can answer "why this file?".
         // Files below 25% of top score are dropped to reduce broad-query noise.
+        //
+        // Plan E t-006: shared helpers live in
+        // `agentstatedeveloper_core::prepare_change` (FileScoreEntry,
+        // file_score_floor(), push_file_score()). The orchestration loop
+        // below is still duplicated with the CLI handler; Plan F lifts the
+        // full walk. Prefer the core helpers when editing scoring logic.
         let mut file_scores: Vec<(f64, String, String, Option<f64>, bool, String, String)> =
             Vec::new();
         let mut seen_files: HashSet<String> = HashSet::new();

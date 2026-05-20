@@ -9,6 +9,7 @@ pub mod audit;
 pub mod brief;
 pub mod candidates;
 pub mod conclusions_export;
+pub mod prepare_change;
 pub mod recipes;
 pub mod doc_adapters;
 pub mod effects;
