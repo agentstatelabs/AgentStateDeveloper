@@ -1169,16 +1169,40 @@ pub fn apply_task_bias(
     if scope.is_empty() {
         return 0;
     }
+
+    // Plan E t-005: bulk qname→file lookup via the FTS cache when
+    // available — one SQL roundtrip instead of N. Falls back to the
+    // per-candidate index lookup when fts is None (in-memory engines,
+    // mid-rebuild).
+    let qnames_owned: Vec<String> = scored
+        .iter()
+        .filter(|(s, _)| s.is_finite())
+        .map(|(_, q)| q.clone())
+        .collect();
+    let file_by_qname: std::collections::HashMap<String, String> = if let Some(fts) =
+        engine.fts.as_ref()
+    {
+        let qnames_ref: Vec<&str> = qnames_owned.iter().map(|s| s.as_str()).collect();
+        fts.files_for_qnames(&qnames_ref, &engine.ref_name)
+    } else {
+        std::collections::HashMap::new()
+    };
+
     let mut boosted = 0;
     for (score, qname) in scored.iter_mut() {
         if !score.is_finite() {
             continue;
         }
-        let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
-            Ok(Some(s)) => s,
-            _ => continue,
+        // Bulk-cache hit avoids the index lookup.
+        let file = if let Some(f) = file_by_qname.get(qname) {
+            f.clone()
+        } else {
+            match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+                Ok(Some(s)) => s.file,
+                _ => continue,
+            }
         };
-        if scope.iter().any(|g| glob_match(g, &sym.file)) {
+        if scope.iter().any(|g| glob_match(g, &file)) {
             *score += boost;
             boosted += 1;
         }

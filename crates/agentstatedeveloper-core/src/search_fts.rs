@@ -606,6 +606,45 @@ impl SearchFtsDb {
         map
     }
 
+    /// Plan E t-005: bulk qname → file lookup. Returns a HashMap with one
+    /// entry per qname found in the symbol cache (qnames not in the cache
+    /// are simply absent from the result). Callers use this to avoid
+    /// per-candidate SQL roundtrips when they only need the file path,
+    /// not the full Symbol JSON.
+    ///
+    /// Note: asd_symbols_meta is single-ref by design (rebuilt fresh per
+    /// `asd index .`), so the `ref_name` parameter is currently unused
+    /// but reserved for the future multi-ref world.
+    pub fn files_for_qnames(
+        &self,
+        qnames: &[&str],
+        _ref_name: &str,
+    ) -> std::collections::HashMap<String, String> {
+        let mut out = std::collections::HashMap::with_capacity(qnames.len());
+        if qnames.is_empty() {
+            return out;
+        }
+        let placeholders: Vec<&str> = (0..qnames.len()).map(|_| "?").collect();
+        let sql = format!(
+            "SELECT qname, file FROM asd_symbols_meta WHERE qname IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = match self.conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(_) => return out,
+        };
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(qnames.iter().map(|q| q as &dyn rusqlite::ToSql)),
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        );
+        if let Ok(rows) = rows {
+            for r in rows.flatten() {
+                out.insert(r.0, r.1);
+            }
+        }
+        out
+    }
+
     /// Look up a single Symbol by qname from the cache.
     pub fn get_symbol_by_qname_cached(
         &self,
