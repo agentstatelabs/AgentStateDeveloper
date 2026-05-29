@@ -928,9 +928,10 @@ mod tests {
 
     #[test]
     fn module_prefix_strips_rs_and_leading_dot_slash() {
-        // src/ anchor — stable regardless of index root
+        // src/ anchor — stable regardless of index root. Path segments before
+        // a nested `src/` (e.g. the crate dir) are retained as qname prefix.
         assert_eq!(module_qname_prefix("src/engine.rs"), "engine");
-        assert_eq!(module_qname_prefix("crates/mylib/src/lib.rs"), "lib");
+        assert_eq!(module_qname_prefix("crates/mylib/src/lib.rs"), "mylib.lib");
         assert_eq!(module_qname_prefix("src/payments/charge.rs"), "payments.charge");
         // no src segment — full relative path (fallback)
         assert_eq!(module_qname_prefix("./foo/bar.rs"), "foo.bar");
