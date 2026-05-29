@@ -1,0 +1,41 @@
+# CI for AgentStateDeveloper (Rust Cargo workspace)
+stages:
+  - check
+  - test
+
+default:
+  image: rust:1-bookworm
+  cache:
+    key:
+      files:
+        - Cargo.lock
+    paths:
+      - .cargo/
+      - target/
+  before_script:
+    - export CARGO_HOME="$CI_PROJECT_DIR/.cargo"
+    - rustc --version && cargo --version
+
+fmt:
+  stage: check
+  script:
+    - rustup component add rustfmt
+    - cargo fmt --all -- --check
+  allow_failure: true
+
+clippy:
+  stage: check
+  script:
+    - rustup component add clippy
+    - cargo clippy --workspace --all-targets -- -D warnings
+  allow_failure: true
+
+build:
+  stage: check
+  script:
+    - cargo build --workspace --locked
+
+test:
+  stage: test
+  script:
+    - cargo test --workspace --locked
