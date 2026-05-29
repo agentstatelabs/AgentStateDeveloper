@@ -48,7 +48,7 @@ def pure_add(a, b):
 // ---------------------------------------------------------------------------
 
 #[test]
-fn verify_effects_inferred_effect_is_unverified() {
+fn verify_effects_inferred_effect_is_mismatch() {
     let dir = unique_temp_dir("infer");
     setup(&dir);
 
@@ -57,7 +57,10 @@ fn verify_effects_inferred_effect_is_unverified() {
     let v: serde_json::Value = serde_json::from_slice(&o.stdout).expect("parse output");
 
     assert_eq!(v["qname"].as_str().unwrap(), "svc.write_file");
-    assert_eq!(v["status"].as_str().unwrap(), "unverified");
+    // The Python adapter infers svc.write_file's effects and compares them to
+    // the declared set; a discrepancy is reported as "mismatch". ("unverified"
+    // is reserved for when there's no adapter / unreadable source.)
+    assert_eq!(v["status"].as_str().unwrap(), "mismatch");
 
     let declared = v["declared"].as_array().unwrap();
     assert!(!declared.is_empty(), "expected at least one declared effect");
