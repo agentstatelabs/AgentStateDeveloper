@@ -127,8 +127,8 @@ fn init_installs_hook_scripts() {
     assert!(stdout.contains("pre-commit"), "init output missing pre-commit");
     assert!(stdout.contains("post-merge"), "init output missing post-merge");
     assert!(stdout.contains("post-checkout"), "init output missing post-checkout");
-    assert!(stdout.contains("asd sync --prune"), "init output missing sync command");
-    assert!(stdout.contains("asd hydrate"), "init output missing hydrate command");
+    assert!(stdout.contains("asd conclusions import"), "init output missing conclusions import command");
+    assert!(stdout.contains("asd index ."), "init output missing index command");
     assert!(stdout.contains("--no-hooks"), "init output missing opt-out hint");
 }
 

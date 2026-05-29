@@ -176,6 +176,18 @@ fn update_gitignore(root: &Path) -> Result<()> {
     let mut lines: Vec<String> = existing.lines().map(|l| l.to_string()).collect();
     let mut changed = false;
 
+    // A blanket `.asd/` (or `.asd`) ignore would also hide `.asd/conclusions/`,
+    // which is committed under Plan B. Strip it; the specific derived-state
+    // entries below keep only the regenerable caches ignored.
+    let before = lines.len();
+    lines.retain(|l| {
+        let t = l.trim();
+        t != ".asd/" && t != ".asd"
+    });
+    if lines.len() != before {
+        changed = true;
+    }
+
     // Ensure the SQLite db is ignored.
     if !lines.iter().any(|l| l.trim() == ".asd-state.db") {
         lines.push(".asd-state.db".to_string());
