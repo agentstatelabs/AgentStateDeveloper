@@ -37,7 +37,7 @@ fn put_simple_effect_decl(
     symbol_id: &str,
     declared: Vec<EffectCategory>,
 ) {
-    let store = AsgEffectStore { repo: &engine.repo };
+    let store = AsgEffectStore::new(&engine.repo);
     let decl = EffectDecl {
         symbol_id: symbol_id.to_string(),
         declared: declared
@@ -63,7 +63,7 @@ fn put_simple_effect_decl(
 fn propagates_transitive_effects_with_via_chains() {
     let engine = Engine::open_in_memory().expect("open engine");
     let index_store = AsgIndexStore::new(&engine.repo);
-    let effect_store = AsgEffectStore { repo: &engine.repo };
+    let effect_store = AsgEffectStore::new(&engine.repo);
 
     // A declares io.fs.read; B declares io.net.out; C declares nothing.
     put_simple_effect_decl(&engine, "A", vec![EffectCategory::IoFsRead]);
@@ -165,7 +165,7 @@ fn propagates_transitive_effects_with_via_chains() {
 fn handles_cycles_without_infinite_loop() {
     let engine = Engine::open_in_memory().expect("open engine");
     let index_store = AsgIndexStore::new(&engine.repo);
-    let effect_store = AsgEffectStore { repo: &engine.repo };
+    let effect_store = AsgEffectStore::new(&engine.repo);
 
     put_simple_effect_decl(&engine, "A", vec![EffectCategory::IoFsRead]);
     put_simple_effect_decl(&engine, "B", vec![EffectCategory::IoNetOut]);

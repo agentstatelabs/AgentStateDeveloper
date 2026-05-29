@@ -8,7 +8,6 @@ __pycache__/
 dist/
 build/
 target/
-Cargo.lock
 examples/sample-py-repo/.asd-state.db
 .asd-state.db
 # Plan A t-003: the .asd/v1/ sidecar is a derived cache (tens of MB on real

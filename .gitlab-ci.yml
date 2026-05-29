@@ -36,9 +36,9 @@ clippy:
 build:
   stage: check
   script:
-    - cargo build --workspace
+    - cargo build --workspace --locked
 
 test:
   stage: test
   script:
-    - cargo test --workspace
+    - cargo test --workspace --locked

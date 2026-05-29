@@ -60,7 +60,7 @@ fn seed_engine(e: &Engine) -> (Symbol, EffectDecl, LedgerEntry) {
         confidence: Some(0.9),
         matched_policy: None,
     };
-    let effects = AsgEffectStore { repo: &e.repo };
+    let effects = AsgEffectStore::new(&e.repo);
     effects
         .put_effects(&e.ref_name, &symbol.symbol_id, &decl, "test-agent")
         .expect("put effects");
@@ -140,7 +140,7 @@ fn hydrate_into_fresh_engine_reproduces_state() {
     assert_eq!(got_sym.symbol_id, symbol.symbol_id);
     assert_eq!(got_sym.signature, symbol.signature);
 
-    let effects = AsgEffectStore { repo: &dst.repo };
+    let effects = AsgEffectStore::new(&dst.repo);
     let got_decl = effects
         .get_effects(&dst.ref_name, &symbol.symbol_id)
         .expect("get_effects")

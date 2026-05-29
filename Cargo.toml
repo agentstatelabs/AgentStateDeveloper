@@ -25,14 +25,14 @@ edition = "2024"
 authors = ["Craig Brown"]
 license = "BSL-1.1"
 description = "AgentStateDeveloper — code-level context and audit overlay for agent-authored code"
-repository = "https://github.com/agentstatelabs/AgentStateDeveloper"
+repository = "https://github.com/agentstatelabs/agentstatedeveloper"
 
 [workspace.dependencies]
-# ASG family — git deps pinned to ASG main (Cargo.lock records exact commit)
-agentstategraph = { git = "https://github.com/agentstatelabs/agentstategraph.git", branch = "main" }
-agentstategraph-core = { git = "https://github.com/agentstatelabs/agentstategraph.git", branch = "main" }
-agentstategraph-storage = { git = "https://github.com/agentstatelabs/agentstategraph.git", branch = "main" }
-agentstategraph-policy = { git = "https://github.com/agentstatelabs/agentstategraph.git", branch = "main" }
+# ASG family — git deps pinned to an ASG release tag (canonical: bump tag deliberately)
+agentstategraph = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v0.9.2" }
+agentstategraph-core = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v0.9.2" }
+agentstategraph-storage = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v0.9.2" }
+agentstategraph-policy = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v0.9.2" }
 
 # Common
 rusqlite = { version = "0.33", features = ["bundled"] }
