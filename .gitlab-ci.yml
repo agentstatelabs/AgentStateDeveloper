@@ -14,6 +14,9 @@ default:
       - target/
   before_script:
     - export CARGO_HOME="$CI_PROJECT_DIR/.cargo"
+    # Let Cargo fetch the private ASG git dependency using the CI job token
+    - export CARGO_NET_GIT_FETCH_WITH_CLI=true
+    - git config --global url."https://gitlab-ci-token:${CI_JOB_TOKEN}@github.com/".insteadOf "https://github.com/"
     - rustc --version && cargo --version
 
 fmt:
@@ -33,9 +36,9 @@ clippy:
 build:
   stage: check
   script:
-    - cargo build --workspace --locked
+    - cargo build --workspace
 
 test:
   stage: test
   script:
-    - cargo test --workspace --locked
+    - cargo test --workspace

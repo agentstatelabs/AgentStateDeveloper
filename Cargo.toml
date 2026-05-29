@@ -28,11 +28,11 @@ description = "AgentStateDeveloper — code-level context and audit overlay for 
 repository = "https://github.com/agentstatelabs/AgentStateDeveloper"
 
 [workspace.dependencies]
-# ASG family — path deps until artifacts ship
-agentstategraph = { path = "../stategraph/crates/agentstategraph" }
-agentstategraph-core = { path = "../stategraph/crates/agentstategraph-core" }
-agentstategraph-storage = { path = "../stategraph/crates/agentstategraph-storage" }
-agentstategraph-policy = { path = "../stategraph/crates/agentstategraph-policy" }
+# ASG family — git deps pinned to ASG main (Cargo.lock records exact commit)
+agentstategraph = { git = "https://github.com/agentstatelabs/agentstategraph.git", branch = "main" }
+agentstategraph-core = { git = "https://github.com/agentstatelabs/agentstategraph.git", branch = "main" }
+agentstategraph-storage = { git = "https://github.com/agentstatelabs/agentstategraph.git", branch = "main" }
+agentstategraph-policy = { git = "https://github.com/agentstatelabs/agentstategraph.git", branch = "main" }
 
 # Common
 rusqlite = { version = "0.33", features = ["bundled"] }
