@@ -154,7 +154,13 @@ fn join_qname(prefix: &str, name: &str) -> String {
     }
 }
 
-fn make_symbol(node: Node<'_>, src: &[u8], qname: String, kind: SymbolKind, signature: Option<String>) -> ParsedSymbol {
+fn make_symbol(
+    node: Node<'_>,
+    src: &[u8],
+    qname: String,
+    kind: SymbolKind,
+    signature: Option<String>,
+) -> ParsedSymbol {
     ParsedSymbol {
         qname,
         kind,
@@ -245,7 +251,13 @@ fn walk(node: Node<'_>, src: &[u8], scope: &str, out: &mut Vec<ParsedSymbol>) {
             let qname = join_qname(scope, name);
             // Skip extension re-declarations to avoid duplicating the type symbol.
             if decl_kind != "extension" {
-                out.push(make_symbol(node, src, qname.clone(), SymbolKind::Class, None));
+                out.push(make_symbol(
+                    node,
+                    src,
+                    qname.clone(),
+                    SymbolKind::Class,
+                    None,
+                ));
             }
             // Walk body
             if let Some(body) = child_by_field(node, "body")
@@ -265,9 +277,15 @@ fn walk(node: Node<'_>, src: &[u8], scope: &str, out: &mut Vec<ParsedSymbol>) {
                 return;
             }
             let qname = join_qname(scope, name);
-            out.push(make_symbol(node, src, qname.clone(), SymbolKind::Class, None));
-            if let Some(body) = child_by_field(node, "body")
-                .or_else(|| find_child_by_kind(node, "protocol_body"))
+            out.push(make_symbol(
+                node,
+                src,
+                qname.clone(),
+                SymbolKind::Class,
+                None,
+            ));
+            if let Some(body) =
+                child_by_field(node, "body").or_else(|| find_child_by_kind(node, "protocol_body"))
             {
                 for i in 0..body.child_count() {
                     walk(body.child(i).unwrap(), src, &qname, out);
@@ -629,7 +647,12 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     }
 
     // Throw
-    let throw_needles = ["throw ", "fatalError(", "preconditionFailure(", "assertionFailure("];
+    let throw_needles = [
+        "throw ",
+        "fatalError(",
+        "preconditionFailure(",
+        "assertionFailure(",
+    ];
     if let Some(note) = first_match_note(body, &throw_needles) {
         effects.push(Effect {
             effect: EffectCategory::Throw,
@@ -657,7 +680,9 @@ fn strip_property_prefixes(s: &str) -> &str {
             let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
             let after_attr = rest[end..].trim_start();
             if after_attr.starts_with('(') {
-                let close = after_attr.find(')').unwrap_or(after_attr.len().saturating_sub(1));
+                let close = after_attr
+                    .find(')')
+                    .unwrap_or(after_attr.len().saturating_sub(1));
                 rest = after_attr[close + 1..].trim_start();
             } else {
                 rest = after_attr;
@@ -665,11 +690,24 @@ fn strip_property_prefixes(s: &str) -> &str {
             continue;
         }
         for prefix in &[
-            "private(set) ", "public(set) ", "internal(set) ",
-            "private ", "public ", "internal ", "fileprivate ", "open ",
-            "weak ", "unowned(safe) ", "unowned(unsafe) ", "unowned ",
-            "lazy ", "static ", "override ", "final ",
-            "nonisolated ", "isolated ",
+            "private(set) ",
+            "public(set) ",
+            "internal(set) ",
+            "private ",
+            "public ",
+            "internal ",
+            "fileprivate ",
+            "open ",
+            "weak ",
+            "unowned(safe) ",
+            "unowned(unsafe) ",
+            "unowned ",
+            "lazy ",
+            "static ",
+            "override ",
+            "final ",
+            "nonisolated ",
+            "isolated ",
         ] {
             if let Some(after) = rest.strip_prefix(prefix) {
                 rest = after.trim_start();
@@ -857,9 +895,7 @@ fn enclosing_type_qname(
     if !parent.contains('.') {
         return None;
     }
-    workspace
-        .find_by_suffix(class_name)
-        .map(|s| s.to_string())
+    workspace.find_by_suffix(class_name).map(|s| s.to_string())
 }
 
 /// Try to find a callee qname for `type_name.method` in the workspace.
@@ -927,8 +963,11 @@ fn collect_calls(
                         if known.contains(q.as_str()) {
                             Some(q)
                         } else {
-                            by_simple.get(method).cloned()
-                                .or_else(|| workspace.find_by_suffix(&format!("{}.{}", et, method)).map(|s| s.to_string()))
+                            by_simple.get(method).cloned().or_else(|| {
+                                workspace
+                                    .find_by_suffix(&format!("{}.{}", et, method))
+                                    .map(|s| s.to_string())
+                            })
                         }
                     } else {
                         by_simple.get(method).cloned()
@@ -952,7 +991,8 @@ fn collect_calls(
                             if known.contains(q2.as_str()) {
                                 Some(q2)
                             } else {
-                                workspace.find_by_suffix(&format!("{}.{}", et, method))
+                                workspace
+                                    .find_by_suffix(&format!("{}.{}", et, method))
                                     .map(|s| s.to_string())
                             }
                         } else {
@@ -967,7 +1007,8 @@ fn collect_calls(
                         let et_simple = sym.qname.split('.').rev().nth(1).unwrap_or("");
                         if !et_simple.is_empty() && simple_recv == et_simple {
                             if let Some(et) = enclosing_type {
-                                workspace.find_by_suffix(&format!("{}.{}", et, method))
+                                workspace
+                                    .find_by_suffix(&format!("{}.{}", et, method))
                                     .map(|s| s.to_string())
                             } else {
                                 None
@@ -994,11 +1035,9 @@ fn collect_calls(
                             // ("Scheduler.Scheduler.method") to handle SPM packages
                             // where the module dir and class share a name and a single
                             // suffix lookup would be ambiguous.
-                            let via_prop_map = prop_map
-                                .get(&prop_key)
-                                .and_then(|actual_type| {
-                                    resolve_instance_method(actual_type, method, workspace)
-                                });
+                            let via_prop_map = prop_map.get(&prop_key).and_then(|actual_type| {
+                                resolve_instance_method(actual_type, method, workspace)
+                            });
 
                             if via_prop_map.is_some() {
                                 via_prop_map
@@ -1156,10 +1195,18 @@ enum Currency {
     case usd, eur, gbp
 }
 "#;
-        let syms = adapter().parse_symbols("Sources/Payments/PaymentService.swift", src).unwrap();
+        let syms = adapter()
+            .parse_symbols("Sources/Payments/PaymentService.swift", src)
+            .unwrap();
         let qnames: Vec<&str> = syms.iter().map(|s| s.qname.as_str()).collect();
-        assert!(qnames.iter().any(|q| q.ends_with("PaymentService")), "{qnames:?}");
-        assert!(qnames.iter().any(|q| q.ends_with("PaymentService.charge")), "{qnames:?}");
+        assert!(
+            qnames.iter().any(|q| q.ends_with("PaymentService")),
+            "{qnames:?}"
+        );
+        assert!(
+            qnames.iter().any(|q| q.ends_with("PaymentService.charge")),
+            "{qnames:?}"
+        );
         assert!(qnames.iter().any(|q| q.ends_with("Receipt")), "{qnames:?}");
         assert!(qnames.iter().any(|q| q.ends_with("Gateway")), "{qnames:?}");
         assert!(qnames.iter().any(|q| q.ends_with("Currency")), "{qnames:?}");
@@ -1183,9 +1230,15 @@ enum Currency {
             "ExampleFlow.ExampleFlowViewModel"
         );
         // Flat file with no Sources segment — unchanged
-        assert_eq!(file_qname_prefix("Engine/DriftCompiler.swift"), "Engine.DriftCompiler");
+        assert_eq!(
+            file_qname_prefix("Engine/DriftCompiler.swift"),
+            "Engine.DriftCompiler"
+        );
         // Legacy ./prefix stripped, no Sources segment
-        assert_eq!(file_qname_prefix("./App/Models/User.swift"), "App.Models.User");
+        assert_eq!(
+            file_qname_prefix("./App/Models/User.swift"),
+            "App.Models.User"
+        );
         // Top-level file
         assert_eq!(file_qname_prefix("main.swift"), "main");
     }
@@ -1198,13 +1251,22 @@ enum Currency {
             "Engine/Foo"
         );
         // Source (singular)
-        assert_eq!(strip_sources_prefix("MyApp/Source/Models/Bar"), "Models/Bar");
+        assert_eq!(
+            strip_sources_prefix("MyApp/Source/Models/Bar"),
+            "Models/Bar"
+        );
         // src (lowercase)
-        assert_eq!(strip_sources_prefix("web/src/utils/helpers"), "utils/helpers");
+        assert_eq!(
+            strip_sources_prefix("web/src/utils/helpers"),
+            "utils/helpers"
+        );
         // Already at Sources (no prefix to strip)
         assert_eq!(strip_sources_prefix("Sources/Engine/Foo"), "Engine/Foo");
         // No Sources segment → unchanged
-        assert_eq!(strip_sources_prefix("Engine/DriftCompiler"), "Engine/DriftCompiler");
+        assert_eq!(
+            strip_sources_prefix("Engine/DriftCompiler"),
+            "Engine/DriftCompiler"
+        );
         // Sources at the end with no tail → unchanged (edge case)
         assert_eq!(strip_sources_prefix("Pkg/Sources"), "Pkg/Sources");
     }
@@ -1230,10 +1292,28 @@ struct DriftCompiler {
             .unwrap();
         // All four methods should be parsed
         let qnames: Vec<&str> = syms.iter().map(|s| s.qname.as_str()).collect();
-        assert!(qnames.iter().any(|q| q.ends_with("DriftCompiler.compile")), "{qnames:?}");
-        assert!(qnames.iter().any(|q| q.ends_with("DriftCompiler.filterByMuteSolo")), "{qnames:?}");
-        assert!(qnames.iter().any(|q| q.ends_with("DriftCompiler.expandClip")), "{qnames:?}");
-        assert!(qnames.iter().any(|q| q.ends_with("DriftCompiler.postProcess")), "{qnames:?}");
+        assert!(
+            qnames.iter().any(|q| q.ends_with("DriftCompiler.compile")),
+            "{qnames:?}"
+        );
+        assert!(
+            qnames
+                .iter()
+                .any(|q| q.ends_with("DriftCompiler.filterByMuteSolo")),
+            "{qnames:?}"
+        );
+        assert!(
+            qnames
+                .iter()
+                .any(|q| q.ends_with("DriftCompiler.expandClip")),
+            "{qnames:?}"
+        );
+        assert!(
+            qnames
+                .iter()
+                .any(|q| q.ends_with("DriftCompiler.postProcess")),
+            "{qnames:?}"
+        );
 
         // Build workspace seeded from these symbols (simulates what index_pipeline does)
         let mut ws = WorkspaceSymbols::default();
@@ -1243,12 +1323,8 @@ struct DriftCompiler {
         }
         ws.build_suffix_index();
 
-        let edges = adapter.extract_call_edges(
-            "Sources/Engine/DriftCompiler.swift",
-            src,
-            &syms,
-            &ws,
-        );
+        let edges =
+            adapter.extract_call_edges("Sources/Engine/DriftCompiler.swift", src, &syms, &ws);
 
         let caller: Vec<&str> = edges
             .iter()
@@ -1258,17 +1334,23 @@ struct DriftCompiler {
 
         // Bare call: filterByMuteSolo(...)
         assert!(
-            caller.iter().any(|q| q.ends_with("DriftCompiler.filterByMuteSolo")),
+            caller
+                .iter()
+                .any(|q| q.ends_with("DriftCompiler.filterByMuteSolo")),
             "missing bare intra-type call; edges from compile: {caller:?}"
         );
         // Self.expandClip(...)
         assert!(
-            caller.iter().any(|q| q.ends_with("DriftCompiler.expandClip")),
+            caller
+                .iter()
+                .any(|q| q.ends_with("DriftCompiler.expandClip")),
             "missing Self.method() call; edges from compile: {caller:?}"
         );
         // DriftCompiler.postProcess(...)
         assert!(
-            caller.iter().any(|q| q.ends_with("DriftCompiler.postProcess")),
+            caller
+                .iter()
+                .any(|q| q.ends_with("DriftCompiler.postProcess")),
             "missing TypeName.method() call; edges from compile: {caller:?}"
         );
     }
@@ -1286,7 +1368,9 @@ class Scheduler {
 }
 "#;
         let adapter = adapter();
-        let syms = adapter.parse_symbols("Sources/Core/Scheduler.swift", src).unwrap();
+        let syms = adapter
+            .parse_symbols("Sources/Core/Scheduler.swift", src)
+            .unwrap();
         let mut ws = WorkspaceSymbols::default();
         for s in &syms {
             ws.qnames.insert(s.qname.clone());
@@ -1401,7 +1485,8 @@ class DriftSynthPool {
 }
 "#;
         let mut ws = WorkspaceSymbols::default();
-        ws.qnames.insert("Sources.Models.DriftSynthPool.resolve".to_string());
+        ws.qnames
+            .insert("Sources.Models.DriftSynthPool.resolve".to_string());
         ws.build_suffix_index();
 
         let syms = adapter()
@@ -1428,7 +1513,10 @@ class DriftSynthPool {
             Some(("compiler".into(), "DriftCompiler".into()))
         );
         // Array/dictionary types start with `[`, not uppercase → not tracked
-        assert_eq!(parse_property_line("    @Published var items: [Item]"), None);
+        assert_eq!(
+            parse_property_line("    @Published var items: [Item]"),
+            None
+        );
         assert_eq!(
             parse_property_line("    private weak var delegate: SomeDelegate?"),
             Some(("delegate".into(), "SomeDelegate".into()))
@@ -1511,12 +1599,8 @@ class SessionViewModel {
         let syms = adapter()
             .parse_symbols("Sources/Session/SessionViewModel.swift", src)
             .unwrap();
-        let edges = adapter().extract_call_edges(
-            "Sources/Session/SessionViewModel.swift",
-            src,
-            &syms,
-            &ws,
-        );
+        let edges =
+            adapter().extract_call_edges("Sources/Session/SessionViewModel.swift", src, &syms, &ws);
         let found = edges.iter().any(|e| {
             e.caller_qname.ends_with("handlePad")
                 && e.callee_qname == "Engine.Scheduler.Scheduler.restartLane"
@@ -1609,9 +1693,7 @@ extension ExampleFlowViewModel {
             ws.properties
         );
         assert!(
-            callees
-                .iter()
-                .any(|q| q.ends_with("Scheduler.restartLane")),
+            callees.iter().any(|q| q.ends_with("Scheduler.restartLane")),
             "restartLane not resolved; callees from driftPadMethod: {callees:?}\n\
              All edges: {edges:?}"
         );
@@ -1666,7 +1748,9 @@ extension AudioEngine {
             "self.stop() not resolved in extension; edges: {from_restart:?}"
         );
         assert!(
-            from_restart.iter().any(|q| q.ends_with("AudioEngine.start")),
+            from_restart
+                .iter()
+                .any(|q| q.ends_with("AudioEngine.start")),
             "self.start() not resolved in extension; edges: {from_restart:?}"
         );
     }

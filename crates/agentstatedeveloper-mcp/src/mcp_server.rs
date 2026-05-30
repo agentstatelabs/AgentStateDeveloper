@@ -17,23 +17,24 @@ use tokio::sync::Mutex;
 
 use agentstatedeveloper_adapters::default_adapters;
 use agentstatedeveloper_core::{
-    brief, conclusions_export, load_scope_aliases, recipes, stale_warning, ConclusionClass,
     ASD_PATH_PREFIX, AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore,
-    AsgScratchStore, AuditEvent, Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory,
-    EffectDecl, EffectStore, Engine, FeedbackEntry, FeedbackStore, FeedbackVerdict, FtsFilters,
-    IndexStore, LedgerEntry, LedgerKind, LedgerStore, Mismatch, ParsedSymbol, Rebind, ScratchEntry,
-    ScratchFilter, ScratchStatus, ScratchStore, SearchDocsDb, SearchFtsDb, SidecarState, Situation,
-    Symbol, Verification, VerificationSource, VerificationStatus, WorkflowSummary,
-    actions, apply_feedback_adjustments, apply_file_scope_feedback, append_workflow_session,
-    build_feedback_state_from_entries, classify_layer_sym, compute_trust_score, compute_uncertainty,
-    confidence_reason, confidence_scores, derive_cold_hints, detect_ambiguous_tokens,
-    detect_confidence_warnings, detect_possible_misses, detect_workflow, discover_symbol_ownership,
-    effect_detail_reason, emit_audit, estimate_tokens, event_types, explain_feedback_impacts,
-    explain_match, extract_summary, find_candidates, find_covering_tests, gather_recency,
-    git_dirty_files, glob_match, hybrid_boost, intent_focus, intent_layer_order, kind_str,
-    load_layer_overrides, parse_intent, parse_query, paths, propose_test_path, resolve_scope,
-    result_bucket, score_evidence_quality, sidecar_lifecycle_state,
-    suggest_better_queries, suggest_scoped_queries, symbol_tier, trim_for_agent,
+    AsgScratchStore, AuditEvent, Author, AuthorKind, CleanFilter, ConclusionClass, Decision,
+    Effect, EffectCategory, EffectDecl, EffectStore, Engine, FeedbackEntry, FeedbackStore,
+    FeedbackVerdict, FtsFilters, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Mismatch,
+    ParsedSymbol, Rebind, ScratchEntry, ScratchFilter, ScratchStatus, ScratchStore, SearchDocsDb,
+    SearchFtsDb, SidecarState, Situation, Symbol, Verification, VerificationSource,
+    VerificationStatus, WorkflowSummary, actions, append_workflow_session,
+    apply_feedback_adjustments, apply_file_scope_feedback, brief,
+    build_feedback_state_from_entries, classify_layer_sym, compute_trust_score,
+    compute_uncertainty, conclusions_export, confidence_reason, confidence_scores,
+    derive_cold_hints, detect_ambiguous_tokens, detect_confidence_warnings, detect_possible_misses,
+    detect_workflow, discover_symbol_ownership, effect_detail_reason, emit_audit, estimate_tokens,
+    event_types, explain_feedback_impacts, explain_match, extract_summary, find_candidates,
+    find_covering_tests, gather_recency, git_dirty_files, glob_match, hybrid_boost, intent_focus,
+    intent_layer_order, kind_str, load_layer_overrides, load_scope_aliases, parse_intent,
+    parse_query, paths, propose_test_path, recipes, resolve_scope, result_bucket,
+    score_evidence_quality, sidecar_lifecycle_state, stale_warning, suggest_better_queries,
+    suggest_scoped_queries, symbol_tier, trim_for_agent,
 };
 
 /// The AgentStateDeveloper MCP server.
@@ -88,7 +89,9 @@ pub struct CodeSearchParams {
     pub scope: Option<String>,
 }
 
-fn default_search_limit() -> u32 { 20 }
+fn default_search_limit() -> u32 {
+    20
+}
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ReferencesParams {
@@ -106,7 +109,9 @@ pub struct ReferencesParams {
     pub globs: Option<String>,
 }
 
-fn default_references_limit() -> u32 { 500 }
+fn default_references_limit() -> u32 {
+    500
+}
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ConclusionsListParams {
@@ -141,7 +146,9 @@ pub struct RecipeClassifyTestMigrationParams {
     pub limit: u32,
 }
 
-fn default_recipe_limit() -> u32 { 50 }
+fn default_recipe_limit() -> u32 {
+    50
+}
 
 #[derive(Deserialize, JsonSchema)]
 pub struct InvestigateParams {
@@ -169,13 +176,27 @@ pub struct InvestigateParams {
     pub scope: Option<String>,
 }
 
-fn default_investigate_depth() -> u32 { 10 }
-fn default_impact_depth() -> u32 { 3 }
-fn default_git_depth() -> u32 { 20 }
-fn default_checklist_depth() -> u32 { 10 }
-fn default_test_depth() -> u32 { 2 }
-fn default_prepare_depth() -> u32 { 10 }
-fn default_prepare_git_depth() -> u32 { 10 }
+fn default_investigate_depth() -> u32 {
+    10
+}
+fn default_impact_depth() -> u32 {
+    3
+}
+fn default_git_depth() -> u32 {
+    20
+}
+fn default_checklist_depth() -> u32 {
+    10
+}
+fn default_test_depth() -> u32 {
+    2
+}
+fn default_prepare_depth() -> u32 {
+    10
+}
+fn default_prepare_git_depth() -> u32 {
+    10
+}
 
 #[derive(Deserialize, JsonSchema)]
 pub struct PrepareChangeParams {
@@ -266,7 +287,9 @@ pub struct SinceParams {
     pub git_depth: u32,
 }
 
-fn default_since_git_depth() -> u32 { 10 }
+fn default_since_git_depth() -> u32 {
+    10
+}
 
 #[derive(Deserialize, JsonSchema)]
 pub struct InvariantAddParams {
@@ -649,7 +672,9 @@ pub struct SearchParams {
     pub agent_budget: u32,
 }
 
-fn default_agent_budget() -> u32 { 8000 }
+fn default_agent_budget() -> u32 {
+    8000
+}
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ContextForParams {
@@ -684,7 +709,9 @@ pub struct TaskCloseParams {
     pub author: String,
 }
 
-fn default_task_close_author() -> String { "asd-task-close".to_string() }
+fn default_task_close_author() -> String {
+    "asd-task-close".to_string()
+}
 
 #[derive(Deserialize, JsonSchema)]
 pub struct VerifyEffectsParams {
@@ -715,7 +742,9 @@ pub struct ScorecardParams {
     pub limit: u32,
 }
 
-fn default_scorecard_limit() -> u32 { 10 }
+fn default_scorecard_limit() -> u32 {
+    10
+}
 
 #[derive(Deserialize, JsonSchema)]
 pub struct AnnotateCommitParams {
@@ -790,13 +819,18 @@ impl AsdMcpServer {
         let orphan_count = match engine.repo.get_tree(&ref_name, &ledger_prefix) {
             Ok(serde_json::Value::Object(by_symbol)) => {
                 let indexed_prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-                let indexed: std::collections::HashSet<String> = match engine.repo.get_tree(&ref_name, &indexed_prefix) {
-                    Ok(serde_json::Value::Object(m)) => m.values()
-                        .filter_map(|v| v.get("symbol_id")?.as_str().map(|s| s.to_string()))
-                        .collect(),
-                    _ => std::collections::HashSet::new(),
-                };
-                by_symbol.keys().filter(|sym_id| !indexed.contains(*sym_id)).count()
+                let indexed: std::collections::HashSet<String> =
+                    match engine.repo.get_tree(&ref_name, &indexed_prefix) {
+                        Ok(serde_json::Value::Object(m)) => m
+                            .values()
+                            .filter_map(|v| v.get("symbol_id")?.as_str().map(|s| s.to_string()))
+                            .collect(),
+                        _ => std::collections::HashSet::new(),
+                    };
+                by_symbol
+                    .keys()
+                    .filter(|sym_id| !indexed.contains(*sym_id))
+                    .count()
             }
             _ => 0,
         };
@@ -886,7 +920,11 @@ impl AsdMcpServer {
 
         let (tokens, mut exclusions) = parse_query(&p.query);
         if let Some(ref excl) = p.exclude {
-            for term in excl.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()) {
+            for term in excl
+                .split(',')
+                .map(|t| t.trim().to_lowercase())
+                .filter(|t| !t.is_empty())
+            {
                 exclusions.push(term);
             }
         }
@@ -901,7 +939,12 @@ impl AsdMcpServer {
             paths_filter.extend(resolve_scope(scope, &db_path));
         }
         if let Some(ref paths) = p.paths {
-            paths_filter.extend(paths.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+            paths_filter.extend(
+                paths
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+            );
         }
         let filters = FtsFilters {
             kind: p.kind.as_deref().map(|k| k.to_lowercase()),
@@ -927,24 +970,36 @@ impl AsdMcpServer {
                     let entries = ledger_store
                         .list_entries(&ref_name, &hit.symbol_id)
                         .unwrap_or_default();
-                    let text = entries.iter().map(|e| e.summary.to_lowercase())
-                        .collect::<Vec<_>>().join(" ");
-                    let ledger_boost = if text.is_empty() { 0.0 } else {
+                    let text = entries
+                        .iter()
+                        .map(|e| e.summary.to_lowercase())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let ledger_boost = if text.is_empty() {
+                        0.0
+                    } else {
                         tokens.iter().filter(|t| text.contains(t.as_str())).count() as f64
                     };
                     (hit.bm25_score + boost + ledger_boost, hit)
                 })
                 .collect();
-            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.1.qname.cmp(&b.1.qname)));
+            scored.sort_by(|a, b| {
+                b.0.partial_cmp(&a.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.1.qname.cmp(&b.1.qname))
+            });
             if !exclusions.is_empty() {
                 scored.retain(|(_, hit)| {
                     let qn = hit.qname.to_lowercase();
                     let fl = hit.file.to_lowercase();
                     let doc = hit.doc.as_deref().unwrap_or("").to_lowercase();
                     let sig = hit.signature.as_deref().unwrap_or("").to_lowercase();
-                    !exclusions.iter().any(|e| qn.contains(e.as_str()) || fl.contains(e.as_str())
-                        || doc.contains(e.as_str()) || sig.contains(e.as_str()))
+                    !exclusions.iter().any(|e| {
+                        qn.contains(e.as_str())
+                            || fl.contains(e.as_str())
+                            || doc.contains(e.as_str())
+                            || sig.contains(e.as_str())
+                    })
                 });
             }
             scored.truncate(limit);
@@ -953,44 +1008,51 @@ impl AsdMcpServer {
             let index_store = AsgIndexStore::from_engine(&engine);
             let raw_scores: Vec<f64> = scored.iter().map(|(s, _)| *s).collect();
             let confidences = confidence_scores(&raw_scores);
-            let mut layers_present: std::collections::HashSet<String> = std::collections::HashSet::new();
-            let results: Vec<serde_json::Value> = scored.iter().zip(confidences.iter()).map(|((score, hit), conf)| {
-                let tier = hit.tier;
-                let layer = classify_layer_sym(&hit.file, &hit.qname, tier, &layer_overrides);
-                layers_present.insert(layer.to_string());
-                let summary = extract_summary(hit.doc.as_deref(), hit.signature.as_deref());
-                let rec = recency.get(&hit.file);
-                let is_hot = rec.map(|r| r.hot).unwrap_or(false);
-                let entries = ledger_store
-                    .list_entries(&ref_name, &hit.symbol_id)
-                    .unwrap_or_default();
-                let has_ledger = !entries.is_empty();
-                let match_reasons = index_store
-                    .get_symbol_by_qname(&ref_name, &hit.qname)
-                    .ok().flatten()
-                    .map(|sym| explain_match(&sym, &tokens, &entries, is_hot))
-                    .unwrap_or_default();
-                let bucket = result_bucket(&hit.file, &match_reasons, has_ledger, is_hot);
-                serde_json::json!({
-                    "score": score,
-                    "confidence": conf,
-                    "bucket": bucket,
-                    "qname": hit.qname,
-                    "kind": hit.kind,
-                    "language": hit.language,
-                    "file": hit.file,
-                    "line": hit.line,
-                    "tier": tier,
-                    "layer": layer,
-                    "summary": summary,
-                    "signature": hit.signature,
-                    "doc": hit.doc,
-                    "last_touched_days": rec.and_then(|r| r.last_touched_days),
-                    "hot": is_hot,
-                    "match_reasons": match_reasons,
+            let mut layers_present: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let results: Vec<serde_json::Value> = scored
+                .iter()
+                .zip(confidences.iter())
+                .map(|((score, hit), conf)| {
+                    let tier = hit.tier;
+                    let layer = classify_layer_sym(&hit.file, &hit.qname, tier, &layer_overrides);
+                    layers_present.insert(layer.to_string());
+                    let summary = extract_summary(hit.doc.as_deref(), hit.signature.as_deref());
+                    let rec = recency.get(&hit.file);
+                    let is_hot = rec.map(|r| r.hot).unwrap_or(false);
+                    let entries = ledger_store
+                        .list_entries(&ref_name, &hit.symbol_id)
+                        .unwrap_or_default();
+                    let has_ledger = !entries.is_empty();
+                    let match_reasons = index_store
+                        .get_symbol_by_qname(&ref_name, &hit.qname)
+                        .ok()
+                        .flatten()
+                        .map(|sym| explain_match(&sym, &tokens, &entries, is_hot))
+                        .unwrap_or_default();
+                    let bucket = result_bucket(&hit.file, &match_reasons, has_ledger, is_hot);
+                    serde_json::json!({
+                        "score": score,
+                        "confidence": conf,
+                        "bucket": bucket,
+                        "qname": hit.qname,
+                        "kind": hit.kind,
+                        "language": hit.language,
+                        "file": hit.file,
+                        "line": hit.line,
+                        "tier": tier,
+                        "layer": layer,
+                        "summary": summary,
+                        "signature": hit.signature,
+                        "doc": hit.doc,
+                        "last_touched_days": rec.and_then(|r| r.last_touched_days),
+                        "hot": is_hot,
+                        "match_reasons": match_reasons,
+                    })
                 })
-            }).collect();
-            let layers_ref: std::collections::HashSet<&str> = layers_present.iter().map(|s| s.as_str()).collect();
+                .collect();
+            let layers_ref: std::collections::HashSet<&str> =
+                layers_present.iter().map(|s| s.as_str()).collect();
             let ambiguous_terms = detect_ambiguous_tokens(&tokens, engine.fts.as_ref(), &filters);
             let possible_misses = detect_possible_misses(&p.query, &layers_ref, results.len());
             // Document hits from the broad corpus (markdown, config, manifests, etc.)
@@ -1000,16 +1062,18 @@ impl AsdMcpServer {
                 .and_then(|db| db.search(&tokens, limit, None).ok())
                 .unwrap_or_default()
                 .into_iter()
-                .map(|h| serde_json::json!({
-                    "source": "document",
-                    "score": h.bm25_score,
-                    "kind": h.kind,
-                    "path": h.path,
-                    "line": h.span_start,
-                    "title": h.title,
-                    "preview": h.preview,
-                    "owner_symbol_id": h.owner_symbol_id,
-                }))
+                .map(|h| {
+                    serde_json::json!({
+                        "source": "document",
+                        "score": h.bm25_score,
+                        "kind": h.kind,
+                        "path": h.path,
+                        "line": h.span_start,
+                        "title": h.title,
+                        "preview": h.preview,
+                        "owner_symbol_id": h.owner_symbol_id,
+                    })
+                })
                 .collect();
             let stale = stale_warning(&db_path, 3600);
             // Plan D t-007: brief mode projects each FTS hit down to
@@ -1057,49 +1121,76 @@ impl AsdMcpServer {
                 _ => continue,
             };
             let sk = format!("{:?}", sym.kind).to_lowercase();
-            if let Some(ref k) = kind_filter { if &sk != k { continue; } }
-            if let Some(ref lang) = lang_filter { if &sym.language != lang { continue; } }
+            if let Some(ref k) = kind_filter {
+                if &sk != k {
+                    continue;
+                }
+            }
+            if let Some(ref lang) = lang_filter {
+                if &sym.language != lang {
+                    continue;
+                }
+            }
             let qn = sym.qname.to_lowercase();
             let sig = sym.signature.as_deref().unwrap_or("").to_lowercase();
             let doc = sym.doc.as_deref().unwrap_or("").to_lowercase();
             let file = sym.file.to_lowercase();
-            let ledger_text: String = ledger_store.list_entries(&ref_name, &sym.symbol_id)
-                .unwrap_or_default().iter().map(|e| e.summary.to_lowercase())
-                .collect::<Vec<_>>().join(" ");
+            let ledger_text: String = ledger_store
+                .list_entries(&ref_name, &sym.symbol_id)
+                .unwrap_or_default()
+                .iter()
+                .map(|e| e.summary.to_lowercase())
+                .collect::<Vec<_>>()
+                .join(" ");
             let mut score: u32 = 0;
             for token in &tokens {
-                if qn.contains(token.as_str()) { score += 4; }
-                if !sig.is_empty() && sig.contains(token.as_str()) { score += 3; }
-                if !doc.is_empty() && doc.contains(token.as_str()) { score += 3; }
-                if !ledger_text.is_empty() && ledger_text.contains(token.as_str()) { score += 2; }
-                if file.contains(token.as_str()) { score += 1; }
+                if qn.contains(token.as_str()) {
+                    score += 4;
+                }
+                if !sig.is_empty() && sig.contains(token.as_str()) {
+                    score += 3;
+                }
+                if !doc.is_empty() && doc.contains(token.as_str()) {
+                    score += 3;
+                }
+                if !ledger_text.is_empty() && ledger_text.contains(token.as_str()) {
+                    score += 2;
+                }
+                if file.contains(token.as_str()) {
+                    score += 1;
+                }
             }
-            if score > 0 { scored.push((score, sym)); }
+            if score > 0 {
+                scored.push((score, sym));
+            }
         }
         scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.qname.cmp(&b.1.qname)));
         scored.truncate(limit);
         let recency = gather_recency(200, 14.0);
-        let results: Vec<serde_json::Value> = scored.iter().map(|(score, sym)| {
-            let tier = symbol_tier(&sym.file);
-            let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
-            let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
-            let rec = recency.get(&sym.file);
-            serde_json::json!({
-                "score": score,
-                "qname": sym.qname,
-                "kind": format!("{:?}", sym.kind).to_lowercase(),
-                "language": sym.language,
-                "file": sym.file,
-                "line": sym.start.line,
-                "tier": tier,
-                "layer": layer,
-                "summary": summary,
-                "signature": sym.signature,
-                "doc": sym.doc,
-                "last_touched_days": rec.and_then(|r| r.last_touched_days),
-                "hot": rec.map(|r| r.hot).unwrap_or(false),
+        let results: Vec<serde_json::Value> = scored
+            .iter()
+            .map(|(score, sym)| {
+                let tier = symbol_tier(&sym.file);
+                let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
+                let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
+                let rec = recency.get(&sym.file);
+                serde_json::json!({
+                    "score": score,
+                    "qname": sym.qname,
+                    "kind": format!("{:?}", sym.kind).to_lowercase(),
+                    "language": sym.language,
+                    "file": sym.file,
+                    "line": sym.start.line,
+                    "tier": tier,
+                    "layer": layer,
+                    "summary": summary,
+                    "signature": sym.signature,
+                    "doc": sym.doc,
+                    "last_touched_days": rec.and_then(|r| r.last_touched_days),
+                    "hot": rec.map(|r| r.hot).unwrap_or(false),
+                })
             })
-        }).collect();
+            .collect();
         serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string())
     }
 
@@ -1142,16 +1233,14 @@ impl AsdMcpServer {
         let ledger = AsgLedgerStore::from_engine(&engine);
 
         // Parse optional class filter.
-        let target_class: Option<ConclusionClass> = p.class.as_deref().and_then(|s| {
-            match s {
-                "decisions" => Some(ConclusionClass::Decisions),
-                "classifications" => Some(ConclusionClass::Classifications),
-                "mappings" => Some(ConclusionClass::Mappings),
-                "hazards" => Some(ConclusionClass::Hazards),
-                "recipes" => Some(ConclusionClass::Recipes),
-                "followups" => Some(ConclusionClass::FollowUps),
-                _ => None,
-            }
+        let target_class: Option<ConclusionClass> = p.class.as_deref().and_then(|s| match s {
+            "decisions" => Some(ConclusionClass::Decisions),
+            "classifications" => Some(ConclusionClass::Classifications),
+            "mappings" => Some(ConclusionClass::Mappings),
+            "hazards" => Some(ConclusionClass::Hazards),
+            "recipes" => Some(ConclusionClass::Recipes),
+            "followups" => Some(ConclusionClass::FollowUps),
+            _ => None,
         });
         if p.class.is_some() && target_class.is_none() {
             return err_json(&format!(
@@ -1236,10 +1325,8 @@ impl AsdMcpServer {
         let db_path = self.db_path.clone();
         let engine = self.engine.lock().await;
 
-        let out_dir: std::path::PathBuf = p
-            .out
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| {
+        let out_dir: std::path::PathBuf =
+            p.out.map(std::path::PathBuf::from).unwrap_or_else(|| {
                 db_path
                     .parent()
                     .unwrap_or(std::path::Path::new("."))
@@ -1276,10 +1363,8 @@ impl AsdMcpServer {
         let db_path = self.db_path.clone();
         let engine = self.engine.lock().await;
 
-        let in_dir: std::path::PathBuf = p
-            .in_dir
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| {
+        let in_dir: std::path::PathBuf =
+            p.in_dir.map(std::path::PathBuf::from).unwrap_or_else(|| {
                 db_path
                     .parent()
                     .unwrap_or(std::path::Path::new("."))
@@ -1393,7 +1478,12 @@ impl AsdMcpServer {
         let globs: Vec<String> = p
             .globs
             .as_deref()
-            .map(|s| s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect())
+            .map(|s| {
+                s.split(',')
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .collect()
+            })
             .unwrap_or_default();
         let limit = p.limit as usize;
 
@@ -1449,7 +1539,11 @@ impl AsdMcpServer {
 
         let (tokens, mut exclusions) = parse_query(&p.query);
         if let Some(ref excl) = p.exclude {
-            for term in excl.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()) {
+            for term in excl
+                .split(',')
+                .map(|t| t.trim().to_lowercase())
+                .filter(|t| !t.is_empty())
+            {
                 exclusions.push(term);
             }
         }
@@ -1464,7 +1558,12 @@ impl AsdMcpServer {
             paths_filter.extend(resolve_scope(scope, &db_path));
         }
         if let Some(ref paths) = p.paths {
-            paths_filter.extend(paths.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+            paths_filter.extend(
+                paths
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+            );
         }
         let filters = FtsFilters {
             kind: p.kind.as_deref().map(|k| k.to_lowercase()),
@@ -1480,13 +1579,18 @@ impl AsdMcpServer {
         let effect_store = AsgEffectStore::from_engine(&engine);
 
         let mut top_qnames = find_candidates(
-            &engine, &p.query, &tokens, &filters,
-            &ledger_store, &index, depth,
+            &engine,
+            &p.query,
+            &tokens,
+            &filters,
+            &ledger_store,
+            &index,
+            depth,
         );
 
         // Apply durable feedback adjustments.
         {
-            use agentstatedeveloper_core::{apply_feedback_adjustments, FeedbackStore};
+            use agentstatedeveloper_core::{FeedbackStore, apply_feedback_adjustments};
             let fb_store = AsgFeedbackStore::from_engine(&engine);
             let fb = fb_store.flat_verdicts(&ref_name).unwrap_or_default();
             apply_feedback_adjustments(&engine, &index, &p.query, &mut top_qnames, &fb);
@@ -1524,10 +1628,18 @@ impl AsdMcpServer {
                 Ok(Some(s)) => s,
                 _ => continue,
             };
-            let callee_ids = index.get_callees(&ref_name, &sym.symbol_id).unwrap_or_default();
-            let caller_ids = index.get_callers(&ref_name, &sym.symbol_id).unwrap_or_default();
-            let effects = effect_store.get_effects(&ref_name, &sym.symbol_id).unwrap_or(None);
-            let ledger = ledger_store.list_entries(&ref_name, &sym.symbol_id).unwrap_or_default();
+            let callee_ids = index
+                .get_callees(&ref_name, &sym.symbol_id)
+                .unwrap_or_default();
+            let caller_ids = index
+                .get_callers(&ref_name, &sym.symbol_id)
+                .unwrap_or_default();
+            let effects = effect_store
+                .get_effects(&ref_name, &sym.symbol_id)
+                .unwrap_or(None);
+            let ledger = ledger_store
+                .list_entries(&ref_name, &sym.symbol_id)
+                .unwrap_or_default();
 
             let mut invariants: Vec<serde_json::Value> = Vec::new();
             let mut hazards: Vec<serde_json::Value> = Vec::new();
@@ -1586,11 +1698,18 @@ impl AsdMcpServer {
             let qname = ep.get("qname").and_then(|v| v.as_str()).unwrap_or("");
             if let Some(invs) = ep.get("invariants").and_then(|v| v.as_array()) {
                 for inv in invs {
-                    let key = inv.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let key = inv
+                        .get("summary")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     if !key.is_empty() && seen.insert(key) {
                         let mut v = inv.clone();
                         if let Some(obj) = v.as_object_mut() {
-                            obj.insert("source_qname".to_string(), serde_json::Value::String(qname.to_string()));
+                            obj.insert(
+                                "source_qname".to_string(),
+                                serde_json::Value::String(qname.to_string()),
+                            );
                         }
                         all_invariants.push(v);
                     }
@@ -1600,7 +1719,10 @@ impl AsdMcpServer {
                 for hz in hzs {
                     let mut v = hz.clone();
                     if let Some(obj) = v.as_object_mut() {
-                        obj.insert("source_qname".to_string(), serde_json::Value::String(qname.to_string()));
+                        obj.insert(
+                            "source_qname".to_string(),
+                            serde_json::Value::String(qname.to_string()),
+                        );
                     }
                     all_hazards.push(v);
                 }
@@ -1611,16 +1733,21 @@ impl AsdMcpServer {
         let layer_order = intent_layer_order(intent);
         let mut by_layer = serde_json::Map::new();
         for lk in layer_order {
-            let members: Vec<&serde_json::Value> = entry_points.iter()
+            let members: Vec<&serde_json::Value> = entry_points
+                .iter()
                 .filter(|ep| ep.get("layer").and_then(|v| v.as_str()) == Some(*lk))
                 .collect();
             if !members.is_empty() {
-                by_layer.insert(lk.to_string(), serde_json::Value::Array(members.into_iter().cloned().collect()));
+                by_layer.insert(
+                    lk.to_string(),
+                    serde_json::Value::Array(members.into_iter().cloned().collect()),
+                );
             }
         }
 
         let focus = intent_focus(intent);
-        let layers_present: std::collections::HashSet<&str> = entry_points.iter()
+        let layers_present: std::collections::HashSet<&str> = entry_points
+            .iter()
             .filter_map(|ep| ep.get("layer").and_then(serde_json::Value::as_str))
             .collect();
         let ambiguous_terms = detect_ambiguous_tokens(&tokens, engine.fts.as_ref(), &filters);
@@ -1667,9 +1794,7 @@ impl AsdMcpServer {
 
         // Plan D t-007: honor ASD_FORMAT=brief at the per-call site.
         if brief::brief_from_env() {
-            let effects_json = effects
-                .as_ref()
-                .and_then(|e| serde_json::to_value(e).ok());
+            let effects_json = effects.as_ref().and_then(|e| serde_json::to_value(e).ok());
             let mut out = brief::brief_read(
                 &symbol,
                 &[], // code_read doesn't compute callers/callees inline
@@ -1694,9 +1819,7 @@ impl AsdMcpServer {
         serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())
     }
 
-    #[tool(
-        description = "Return declared + transitive effects for a symbol (resolved via qname)."
-    )]
+    #[tool(description = "Return declared + transitive effects for a symbol (resolved via qname).")]
     async fn effects(&self, params: Parameters<EffectsOfParams>) -> String {
         let p = params.0;
         let engine = self.engine.lock().await;
@@ -1711,9 +1834,7 @@ impl AsdMcpServer {
 
         let effects_store = AsgEffectStore::from_engine(&engine);
         match effects_store.get_effects(&ref_name, &symbol.symbol_id) {
-            Ok(Some(decl)) => {
-                serde_json::to_string(&decl).unwrap_or_else(|_| "null".to_string())
-            }
+            Ok(Some(decl)) => serde_json::to_string(&decl).unwrap_or_else(|_| "null".to_string()),
             Ok(None) => "null".to_string(),
             Err(e) => err_json(&e.to_string()),
         }
@@ -2099,8 +2220,12 @@ impl AsdMcpServer {
             description: format!("ledger.approve {}", p.entry_id),
             qualifiers: serde_json::json!({ "entry_id": &p.entry_id }),
         };
-        if let Ok(Decision::Deny { matched_policy, reason }) =
-            engine.policy.evaluate(&situation, actions::LEDGER_APPROVE, &p.approver)
+        if let Ok(Decision::Deny {
+            matched_policy,
+            reason,
+        }) = engine
+            .policy
+            .evaluate(&situation, actions::LEDGER_APPROVE, &p.approver)
         {
             return err_json(&format!(
                 "policy denied: {} (matched {})",
@@ -2166,8 +2291,12 @@ impl AsdMcpServer {
             description: format!("ledger.reject {}", p.entry_id),
             qualifiers: serde_json::json!({ "entry_id": &p.entry_id }),
         };
-        if let Ok(Decision::Deny { matched_policy, reason }) =
-            engine.policy.evaluate(&situation, actions::LEDGER_REJECT, &p.reviewer)
+        if let Ok(Decision::Deny {
+            matched_policy,
+            reason,
+        }) = engine
+            .policy
+            .evaluate(&situation, actions::LEDGER_REJECT, &p.reviewer)
         {
             return err_json(&format!(
                 "policy denied: {} (matched {})",
@@ -2234,8 +2363,12 @@ impl AsdMcpServer {
             description: format!("ledger.withdraw {}", p.entry_id),
             qualifiers: serde_json::json!({ "entry_id": &p.entry_id }),
         };
-        if let Ok(Decision::Deny { matched_policy, reason }) =
-            engine.policy.evaluate(&situation, actions::LEDGER_WITHDRAW, &p.author_id)
+        if let Ok(Decision::Deny {
+            matched_policy,
+            reason,
+        }) = engine
+            .policy
+            .evaluate(&situation, actions::LEDGER_WITHDRAW, &p.author_id)
         {
             return err_json(&format!(
                 "policy denied: {} (matched {})",
@@ -2250,15 +2383,11 @@ impl AsdMcpServer {
                 } else {
                     "withdrawn"
                 };
-                let event = AuditEvent::new(
-                    event_types::LEDGER_WITHDRAW,
-                    &p.author_id,
-                    "agent",
-                    status,
-                )
-                .with_subject(&outcome.entry.entry_id)
-                .with_secondary(&outcome.entry.symbol_id)
-                .with_payload(serde_json::json!({ "tags": outcome.entry.tags }));
+                let event =
+                    AuditEvent::new(event_types::LEDGER_WITHDRAW, &p.author_id, "agent", status)
+                        .with_subject(&outcome.entry.entry_id)
+                        .with_secondary(&outcome.entry.symbol_id)
+                        .with_payload(serde_json::json!({ "tags": outcome.entry.tags }));
                 emit_audit(engine.audit.as_ref(), event);
 
                 serde_json::to_string(&serde_json::json!({
@@ -2268,14 +2397,10 @@ impl AsdMcpServer {
                 .unwrap_or_else(|_| "{}".to_string())
             }
             Err(e) => {
-                let event = AuditEvent::new(
-                    event_types::LEDGER_WITHDRAW,
-                    &p.author_id,
-                    "agent",
-                    "error",
-                )
-                .with_subject(&p.entry_id)
-                .with_reason(e.to_string());
+                let event =
+                    AuditEvent::new(event_types::LEDGER_WITHDRAW, &p.author_id, "agent", "error")
+                        .with_subject(&p.entry_id)
+                        .with_reason(e.to_string());
                 emit_audit(engine.audit.as_ref(), event);
                 err_json(&e.to_string())
             }
@@ -2343,8 +2468,12 @@ impl AsdMcpServer {
                 "language": &symbol.language,
             }),
         };
-        if let Ok(Decision::Deny { matched_policy, reason }) =
-            engine.policy.evaluate(&situation, actions::LEDGER_SUPERSEDE, &p.author_id)
+        if let Ok(Decision::Deny {
+            matched_policy,
+            reason,
+        }) = engine
+            .policy
+            .evaluate(&situation, actions::LEDGER_SUPERSEDE, &p.author_id)
         {
             return err_json(&format!(
                 "policy denied: {} (matched {})",
@@ -2427,26 +2556,18 @@ impl AsdMcpServer {
         let symbol = match index.get_symbol_by_qname(&ref_name, &p.qname) {
             Ok(Some(s)) => s,
             Ok(None) => {
-                let event = AuditEvent::new(
-                    event_types::EFFECT_DECLARE,
-                    &p.author_id,
-                    "agent",
-                    "error",
-                )
-                .with_reason(format!("symbol not found: {}", p.qname))
-                .with_payload(serde_json::json!({ "qname": &p.qname }));
+                let event =
+                    AuditEvent::new(event_types::EFFECT_DECLARE, &p.author_id, "agent", "error")
+                        .with_reason(format!("symbol not found: {}", p.qname))
+                        .with_payload(serde_json::json!({ "qname": &p.qname }));
                 emit_audit(engine.audit.as_ref(), event);
                 return err_json(&format!("symbol not found: {}", p.qname));
             }
             Err(e) => {
-                let event = AuditEvent::new(
-                    event_types::EFFECT_DECLARE,
-                    &p.author_id,
-                    "agent",
-                    "error",
-                )
-                .with_reason(e.to_string())
-                .with_payload(serde_json::json!({ "qname": &p.qname }));
+                let event =
+                    AuditEvent::new(event_types::EFFECT_DECLARE, &p.author_id, "agent", "error")
+                        .with_reason(e.to_string())
+                        .with_payload(serde_json::json!({ "qname": &p.qname }));
                 emit_audit(engine.audit.as_ref(), event);
                 return err_json(&e.to_string());
             }
@@ -2456,15 +2577,11 @@ impl AsdMcpServer {
         let existing = match effects_store.get_effects(&ref_name, &symbol.symbol_id) {
             Ok(e) => e,
             Err(e) => {
-                let event = AuditEvent::new(
-                    event_types::EFFECT_DECLARE,
-                    &p.author_id,
-                    "agent",
-                    "error",
-                )
-                .with_subject(&symbol.symbol_id)
-                .with_reason(e.to_string())
-                .with_payload(serde_json::json!({ "qname": &p.qname }));
+                let event =
+                    AuditEvent::new(event_types::EFFECT_DECLARE, &p.author_id, "agent", "error")
+                        .with_subject(&symbol.symbol_id)
+                        .with_reason(e.to_string())
+                        .with_payload(serde_json::json!({ "qname": &p.qname }));
                 emit_audit(engine.audit.as_ref(), event);
                 return err_json(&e.to_string());
             }
@@ -2476,8 +2593,10 @@ impl AsdMcpServer {
             .as_ref()
             .map(|d| d.declared.iter().map(|e| e.effect.clone()).collect())
             .unwrap_or_default();
-        let new_categories: Vec<String> =
-            declared.iter().map(|e| e.effect.as_str().to_string()).collect();
+        let new_categories: Vec<String> = declared
+            .iter()
+            .map(|e| e.effect.as_str().to_string())
+            .collect();
         let broadens = declared.iter().any(|e| !existing_set.contains(&e.effect));
         let action = if broadens {
             actions::EFFECT_DECLARE_BROADENS
@@ -2499,20 +2618,16 @@ impl AsdMcpServer {
         let decision = match engine.policy.evaluate(&situation, action, &p.author_id) {
             Ok(d) => d,
             Err(e) => {
-                let event = AuditEvent::new(
-                    event_types::EFFECT_DECLARE,
-                    &p.author_id,
-                    "agent",
-                    "error",
-                )
-                .with_subject(&symbol.symbol_id)
-                .with_reason(format!("policy evaluation failed: {}", e))
-                .with_payload(serde_json::json!({
-                    "qname": &p.qname,
-                    "declared": &new_categories,
-                    "broadens": broadens,
-                    "action": action,
-                }));
+                let event =
+                    AuditEvent::new(event_types::EFFECT_DECLARE, &p.author_id, "agent", "error")
+                        .with_subject(&symbol.symbol_id)
+                        .with_reason(format!("policy evaluation failed: {}", e))
+                        .with_payload(serde_json::json!({
+                            "qname": &p.qname,
+                            "declared": &new_categories,
+                            "broadens": broadens,
+                            "action": action,
+                        }));
                 emit_audit(engine.audit.as_ref(), event);
                 return err_json(&format!("policy evaluation failed: {}", e));
             }
@@ -2523,21 +2638,17 @@ impl AsdMcpServer {
             reason,
         } = &decision
         {
-            let event = AuditEvent::new(
-                event_types::EFFECT_DECLARE,
-                &p.author_id,
-                "agent",
-                "denied",
-            )
-            .with_subject(&symbol.symbol_id)
-            .with_matched_policy(Some(matched_policy.clone()))
-            .with_reason(reason.clone())
-            .with_payload(serde_json::json!({
-                "qname": &p.qname,
-                "declared": &new_categories,
-                "broadens": broadens,
-                "action": action,
-            }));
+            let event =
+                AuditEvent::new(event_types::EFFECT_DECLARE, &p.author_id, "agent", "denied")
+                    .with_subject(&symbol.symbol_id)
+                    .with_matched_policy(Some(matched_policy.clone()))
+                    .with_reason(reason.clone())
+                    .with_payload(serde_json::json!({
+                        "qname": &p.qname,
+                        "declared": &new_categories,
+                        "broadens": broadens,
+                        "action": action,
+                    }));
             emit_audit(engine.audit.as_ref(), event);
             return err_json(&format!(
                 "policy denied: {} (matched {})",
@@ -2550,7 +2661,10 @@ impl AsdMcpServer {
         let updated = EffectDecl {
             symbol_id: symbol.symbol_id.clone(),
             declared,
-            transitive: existing.as_ref().map(|d| d.transitive.clone()).unwrap_or_default(),
+            transitive: existing
+                .as_ref()
+                .map(|d| d.transitive.clone())
+                .unwrap_or_default(),
             verification: existing.as_ref().and_then(|d| d.verification.clone()),
             confidence: existing.as_ref().and_then(|d| d.confidence),
             matched_policy: matched_policy.clone(),
@@ -2559,21 +2673,17 @@ impl AsdMcpServer {
         if let Err(e) =
             effects_store.put_effects(&ref_name, &symbol.symbol_id, &updated, &p.author_id)
         {
-            let event = AuditEvent::new(
-                event_types::EFFECT_DECLARE,
-                &p.author_id,
-                "agent",
-                "error",
-            )
-            .with_subject(&symbol.symbol_id)
-            .with_matched_policy(matched_policy.clone())
-            .with_reason(e.to_string())
-            .with_payload(serde_json::json!({
-                "qname": &p.qname,
-                "declared": &new_categories,
-                "broadens": broadens,
-                "action": action,
-            }));
+            let event =
+                AuditEvent::new(event_types::EFFECT_DECLARE, &p.author_id, "agent", "error")
+                    .with_subject(&symbol.symbol_id)
+                    .with_matched_policy(matched_policy.clone())
+                    .with_reason(e.to_string())
+                    .with_payload(serde_json::json!({
+                        "qname": &p.qname,
+                        "declared": &new_categories,
+                        "broadens": broadens,
+                        "action": action,
+                    }));
             emit_audit(engine.audit.as_ref(), event);
             return err_json(&e.to_string());
         }
@@ -2585,20 +2695,15 @@ impl AsdMcpServer {
             Decision::NoPolicyMatch => "no-policy-match",
         };
 
-        let event = AuditEvent::new(
-            event_types::EFFECT_DECLARE,
-            &p.author_id,
-            "agent",
-            status,
-        )
-        .with_subject(&symbol.symbol_id)
-        .with_matched_policy(matched_policy.clone())
-        .with_payload(serde_json::json!({
-            "qname": &p.qname,
-            "declared": &new_categories,
-            "broadens": broadens,
-            "action": action,
-        }));
+        let event = AuditEvent::new(event_types::EFFECT_DECLARE, &p.author_id, "agent", status)
+            .with_subject(&symbol.symbol_id)
+            .with_matched_policy(matched_policy.clone())
+            .with_payload(serde_json::json!({
+                "qname": &p.qname,
+                "declared": &new_categories,
+                "broadens": broadens,
+                "action": action,
+            }));
         emit_audit(engine.audit.as_ref(), event);
 
         serde_json::to_string(&serde_json::json!({
@@ -2698,8 +2803,14 @@ impl AsdMcpServer {
         let situation = Situation::new("rebind symbol")
             .with_qualifier("from_symbol_id", &p.from_symbol_id)
             .with_qualifier("to_qname", &p.to_qname);
-        match engine.policy.evaluate(&situation, actions::LEDGER_REBIND, &p.agent_id) {
-            Ok(Decision::Deny { matched_policy, reason }) => {
+        match engine
+            .policy
+            .evaluate(&situation, actions::LEDGER_REBIND, &p.agent_id)
+        {
+            Ok(Decision::Deny {
+                matched_policy,
+                reason,
+            }) => {
                 return serde_json::json!({
                     "policy_denied": true,
                     "matched_policy": matched_policy,
@@ -2764,35 +2875,44 @@ impl AsdMcpServer {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            if engine.repo.set_json(
-                ref_name,
-                &new_path,
-                &val,
-                CommitOptions::new(
-                    &p.agent_id,
-                    IntentCategory::Refine,
-                    format!("reparent ledger entry {} after rebind", entry.entry_id),
-                ),
-            ).is_ok() {
+            if engine
+                .repo
+                .set_json(
+                    ref_name,
+                    &new_path,
+                    &val,
+                    CommitOptions::new(
+                        &p.agent_id,
+                        IntentCategory::Refine,
+                        format!("reparent ledger entry {} after rebind", entry.entry_id),
+                    ),
+                )
+                .is_ok()
+            {
                 let old_path = paths::ledger_entry_path(&p.from_symbol_id, &entry.entry_id);
-                let _ = engine.repo.delete(ref_name, &old_path, CommitOptions::new(
-                    &p.agent_id,
-                    IntentCategory::Refine,
-                    format!("remove old ledger entry {} after rebind", entry.entry_id),
-                ));
+                let _ = engine.repo.delete(
+                    ref_name,
+                    &old_path,
+                    CommitOptions::new(
+                        &p.agent_id,
+                        IntentCategory::Refine,
+                        format!("remove old ledger entry {} after rebind", entry.entry_id),
+                    ),
+                );
                 reparented += 1;
             }
         }
 
-        let audit_event = AuditEvent::new(event_types::LEDGER_REBIND, &p.agent_id, "agent", "allow")
-            .with_subject(p.from_symbol_id.clone())
-            .with_secondary(new_symbol.symbol_id.clone())
-            .with_payload(serde_json::json!({
-                "from_symbol_id": p.from_symbol_id,
-                "to_symbol_id": new_symbol.symbol_id,
-                "to_qname": new_symbol.qname,
-                "entries_reparented": reparented,
-            }));
+        let audit_event =
+            AuditEvent::new(event_types::LEDGER_REBIND, &p.agent_id, "agent", "allow")
+                .with_subject(p.from_symbol_id.clone())
+                .with_secondary(new_symbol.symbol_id.clone())
+                .with_payload(serde_json::json!({
+                    "from_symbol_id": p.from_symbol_id,
+                    "to_symbol_id": new_symbol.symbol_id,
+                    "to_qname": new_symbol.qname,
+                    "entries_reparented": reparented,
+                }));
         emit_audit(engine.audit.as_ref(), audit_event);
 
         serde_json::json!({
@@ -2900,7 +3020,9 @@ impl AsdMcpServer {
         if let Some(ref qname) = p.symbol {
             let index = AsgIndexStore::from_engine(&engine);
             match index.get_symbol_by_qname(&ref_name, qname) {
-                Ok(Some(sym)) => { entry.symbol_id = Some(sym.symbol_id); }
+                Ok(Some(sym)) => {
+                    entry.symbol_id = Some(sym.symbol_id);
+                }
                 Ok(None) => return err_json(&format!("symbol not found: {qname}")),
                 Err(e) => return err_json(&e.to_string()),
             }
@@ -2943,7 +3065,9 @@ impl AsdMcpServer {
         if let Some(ref qname) = p.symbol {
             let index = AsgIndexStore::from_engine(&engine);
             match index.get_symbol_by_qname(&ref_name, qname) {
-                Ok(Some(sym)) => { filter.symbol_id = Some(sym.symbol_id); }
+                Ok(Some(sym)) => {
+                    filter.symbol_id = Some(sym.symbol_id);
+                }
                 Ok(None) => return err_json(&format!("symbol not found: {qname}")),
                 Err(e) => return err_json(&e.to_string()),
             }
@@ -3032,9 +3156,7 @@ impl AsdMcpServer {
         } else if let Some(ref sid) = entry.symbol_id {
             sid.clone()
         } else {
-            return err_json(
-                "no symbol attached to scratch entry and qname was not provided",
-            );
+            return err_json("no symbol attached to scratch entry and qname was not provided");
         };
 
         // 3. Parse ledger kind.
@@ -3045,7 +3167,8 @@ impl AsdMcpServer {
 
         // 4. Build summary.
         let summary = p.summary.unwrap_or_else(|| {
-            entry.content
+            entry
+                .content
                 .lines()
                 .find(|l| !l.trim().is_empty())
                 .unwrap_or(&entry.content)
@@ -3055,7 +3178,10 @@ impl AsdMcpServer {
         });
 
         // 5. Create LedgerEntry.
-        let author = Author { kind: AuthorKind::Agent, id: "asd-mcp".to_string() };
+        let author = Author {
+            kind: AuthorKind::Agent,
+            id: "asd-mcp".to_string(),
+        };
         let mut ledger_entry = LedgerEntry::new(&symbol_id, kind, &summary, author);
         ledger_entry.body = Some(entry.content.clone());
 
@@ -3064,7 +3190,12 @@ impl AsdMcpServer {
         }
 
         // 6. Mark scratch promoted.
-        match scratch_store.mark_promoted(&ref_name, &entry.scratch_id, &ledger_entry.entry_id, "asd-mcp") {
+        match scratch_store.mark_promoted(
+            &ref_name,
+            &entry.scratch_id,
+            &ledger_entry.entry_id,
+            "asd-mcp",
+        ) {
             Ok(promoted) => serde_json::to_string(&serde_json::json!({
                 "scratch_id": promoted.scratch_id,
                 "promoted_to": ledger_entry.entry_id,
@@ -3084,7 +3215,8 @@ impl AsdMcpServer {
         let ref_name = engine.ref_name.clone();
         let store = AsgScratchStore { repo: &engine.repo };
 
-        let statuses: Vec<ScratchStatus> = p.statuses
+        let statuses: Vec<ScratchStatus> = p
+            .statuses
             .split(',')
             .filter_map(|t| match t.trim() {
                 "draft" => Some(ScratchStatus::Draft),
@@ -3100,8 +3232,10 @@ impl AsdMcpServer {
         };
 
         match store.clean_entries(&ref_name, &filter, p.dry_run) {
-            Ok(count) => serde_json::to_string(&serde_json::json!({ "deleted": count, "dry_run": p.dry_run }))
-                .unwrap_or_else(|_| "{}".to_string()),
+            Ok(count) => serde_json::to_string(
+                &serde_json::json!({ "deleted": count, "dry_run": p.dry_run }),
+            )
+            .unwrap_or_else(|_| "{}".to_string()),
             Err(e) => err_json(&e.to_string()),
         }
     }
@@ -3119,7 +3253,11 @@ impl AsdMcpServer {
 
         let (mut tokens, mut exclusions) = parse_query(&p.description);
         if let Some(ref excl) = p.exclude {
-            for term in excl.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()) {
+            for term in excl
+                .split(',')
+                .map(|t| t.trim().to_lowercase())
+                .filter(|t| !t.is_empty())
+            {
                 exclusions.push(term);
             }
         }
@@ -3133,7 +3271,8 @@ impl AsdMcpServer {
         }
 
         if tokens.is_empty() {
-            return serde_json::json!({ "description": p.description, "entry_points": {} }).to_string();
+            return serde_json::json!({ "description": p.description, "entry_points": {} })
+                .to_string();
         }
 
         let depth = p.depth.max(1) as usize;
@@ -3144,7 +3283,12 @@ impl AsdMcpServer {
             paths_filter.extend(resolve_scope(scope, &db_path));
         }
         if let Some(ref paths) = p.paths {
-            paths_filter.extend(paths.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+            paths_filter.extend(
+                paths
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+            );
         }
         let filters = FtsFilters {
             kind: p.kind.as_deref().map(|k| k.to_lowercase()),
@@ -3173,13 +3317,18 @@ impl AsdMcpServer {
         }
 
         let mut candidates = find_candidates(
-            &engine, &p.description, &tokens, &filters,
-            &ledger_store, &index, depth,
+            &engine,
+            &p.description,
+            &tokens,
+            &filters,
+            &ledger_store,
+            &index,
+            depth,
         );
 
         // Apply durable feedback adjustments.
         {
-            use agentstatedeveloper_core::{apply_feedback_adjustments, FeedbackStore};
+            use agentstatedeveloper_core::{FeedbackStore, apply_feedback_adjustments};
             let fb_store = AsgFeedbackStore::from_engine(&engine);
             let fb = fb_store.flat_verdicts(&ref_name).unwrap_or_default();
             apply_feedback_adjustments(&engine, &index, &p.description, &mut candidates, &fb);
@@ -3212,15 +3361,22 @@ impl AsdMcpServer {
         let file_score_floor = effect_score_floor;
 
         for (score, qname) in &candidates {
-            let sym = match index.get_symbol_by_qname(&ref_name, qname) { Ok(Some(s)) => s, _ => continue };
+            let sym = match index.get_symbol_by_qname(&ref_name, qname) {
+                Ok(Some(s)) => s,
+                _ => continue,
+            };
             let tier = symbol_tier(&sym.file);
             let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
             let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
             let rec = recency.get(&sym.file);
             let ltd = rec.and_then(|r| r.last_touched_days);
             let hot = rec.map(|r| r.hot).unwrap_or(false);
-            if top_sym_id.is_none() { top_sym_id = Some(sym.symbol_id.clone()); }
-            let entries = ledger_store.list_entries(&ref_name, &sym.symbol_id).unwrap_or_default();
+            if top_sym_id.is_none() {
+                top_sym_id = Some(sym.symbol_id.clone());
+            }
+            let entries = ledger_store
+                .list_entries(&ref_name, &sym.symbol_id)
+                .unwrap_or_default();
             if seen_files.insert(sym.file.clone()) && *score >= file_score_floor {
                 let reasons = explain_match(&sym, &tokens, &entries, hot);
                 let why = reasons
@@ -3245,7 +3401,9 @@ impl AsdMcpServer {
                         }
                     }
                     LedgerKind::Hazard => {
-                        known_hazards.push(serde_json::json!({ "summary": entry.summary, "source": sym.qname }));
+                        known_hazards.push(
+                            serde_json::json!({ "summary": entry.summary, "source": sym.qname }),
+                        );
                     }
                     LedgerKind::ValidationScenario => {
                         if seen_vs.insert(entry.summary.clone()) {
@@ -3259,11 +3417,14 @@ impl AsdMcpServer {
                 if let Ok(Some(decl)) = effect_store.get_effects(&ref_name, &sym.symbol_id) {
                     let has_high_signal = decl.declared.iter().any(|e| !e.effect.is_low_signal());
                     for eff in &decl.declared {
-                        if has_high_signal && eff.effect.is_low_signal() { continue; }
+                        if has_high_signal && eff.effect.is_low_signal() {
+                            continue;
+                        }
                         let cat = eff.effect.as_str().to_string();
                         let key = format!("{}:{}", cat, sym.qname);
                         if seen_effect.insert(key) {
-                            effects_summary.push(serde_json::json!({ "category": cat, "source": sym.qname }));
+                            effects_summary
+                                .push(serde_json::json!({ "category": cat, "source": sym.qname }));
                         }
                     }
                 }
@@ -3273,33 +3434,56 @@ impl AsdMcpServer {
                 "line": sym.start.line, "layer": layer, "summary": summary,
                 "last_touched_days": ltd, "hot": hot,
             });
-            by_layer.entry(layer.to_string())
+            by_layer
+                .entry(layer.to_string())
                 .or_insert_with(|| serde_json::Value::Array(vec![]))
-                .as_array_mut().unwrap().push(ep);
+                .as_array_mut()
+                .unwrap()
+                .push(ep);
         }
 
         // Reorder by_layer.
         let mut ordered: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
         for lk in layer_order {
-            if let Some(v) = by_layer.remove(*lk) { ordered.insert(lk.to_string(), v); }
+            if let Some(v) = by_layer.remove(*lk) {
+                ordered.insert(lk.to_string(), v);
+            }
         }
 
-        file_scores.sort_by(|a, b| b.4.cmp(&a.4).then_with(|| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)));
+        file_scores.sort_by(|a, b| {
+            b.4.cmp(&a.4)
+                .then_with(|| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal))
+        });
         let dirty_files_pc = git_dirty_files();
-        let likely_edit_files: Vec<serde_json::Value> = file_scores.iter().map(|(score, file, layer, days, hot, top_symbol, why)| {
-            let fl = file.to_lowercase();
-            let file_role = if fl.contains("/example") || fl.contains("/sample") || fl.contains("/demo") { "example" }
-                else if fl.contains("/test") || fl.contains("/spec") || fl.contains("_test.") || fl.contains("spec.") { "test" }
-                else if fl.contains("/reference") || fl.contains("/doc") || fl.ends_with(".md") { "reference" }
-                else { "impl" };
-            let conflict_risk = dirty_files_pc.contains(file.as_str());
-            serde_json::json!({
-                "file": file, "layer": layer, "score": score,
-                "last_touched_days": days, "hot": hot,
-                "file_role": file_role, "conflict_risk": conflict_risk,
-                "top_symbol": top_symbol, "why": why,
+        let likely_edit_files: Vec<serde_json::Value> = file_scores
+            .iter()
+            .map(|(score, file, layer, days, hot, top_symbol, why)| {
+                let fl = file.to_lowercase();
+                let file_role = if fl.contains("/example")
+                    || fl.contains("/sample")
+                    || fl.contains("/demo")
+                {
+                    "example"
+                } else if fl.contains("/test")
+                    || fl.contains("/spec")
+                    || fl.contains("_test.")
+                    || fl.contains("spec.")
+                {
+                    "test"
+                } else if fl.contains("/reference") || fl.contains("/doc") || fl.ends_with(".md") {
+                    "reference"
+                } else {
+                    "impl"
+                };
+                let conflict_risk = dirty_files_pc.contains(file.as_str());
+                serde_json::json!({
+                    "file": file, "layer": layer, "score": score,
+                    "last_touched_days": days, "hot": hot,
+                    "file_role": file_role, "conflict_risk": conflict_risk,
+                    "top_symbol": top_symbol, "why": why,
+                })
             })
-        }).collect();
+            .collect();
 
         // Affected tests via BFS from top entry point.
         let mut affected_tests: Vec<serde_json::Value> = Vec::new();
@@ -3310,29 +3494,41 @@ impl AsdMcpServer {
             visited.insert(start_id.clone());
             queue.push_back((start_id, 0));
             while let Some((sid, depth)) = queue.pop_front() {
-                if depth >= test_depth { continue; }
+                if depth >= test_depth {
+                    continue;
+                }
                 let callers = index.get_callers(&ref_name, &sid).unwrap_or_default();
                 for cid in callers {
-                    if visited.contains(&cid) { continue; }
+                    if visited.contains(&cid) {
+                        continue;
+                    }
                     visited.insert(cid.clone());
                     if let Some(s) = id_map.get(&cid) {
                         if symbol_tier(&s.file) == 2 && seen_tnames.insert(s.qname.clone()) {
-                            let qname_words: Vec<String> = s.qname
+                            let qname_words: Vec<String> = s
+                                .qname
                                 .split(|c: char| !c.is_alphabetic())
                                 .filter(|t: &&str| t.len() > 2)
                                 .map(|t| t.to_lowercase())
                                 .collect();
-                            let doc_words: Vec<String> = s.doc.as_deref().unwrap_or("")
+                            let doc_words: Vec<String> = s
+                                .doc
+                                .as_deref()
+                                .unwrap_or("")
                                 .split(|c: char| !c.is_alphabetic())
                                 .filter(|t: &&str| t.len() > 2)
                                 .map(|t| t.to_lowercase())
                                 .collect();
-                            let test_tokens: Vec<&str> = qname_words.iter()
+                            let test_tokens: Vec<&str> = qname_words
+                                .iter()
                                 .chain(doc_words.iter())
                                 .map(|s| s.as_str())
                                 .collect();
-                            let covers: Vec<&str> = design_invariants.iter()
-                                .filter_map(|inv| inv.get("summary").and_then(serde_json::Value::as_str))
+                            let covers: Vec<&str> = design_invariants
+                                .iter()
+                                .filter_map(|inv| {
+                                    inv.get("summary").and_then(serde_json::Value::as_str)
+                                })
                                 .filter(|sum| {
                                     let sl = sum.to_lowercase();
                                     test_tokens.iter().any(|t| sl.contains(*t))
@@ -3343,48 +3539,82 @@ impl AsdMcpServer {
                                 "covers_invariants": covers,
                             }));
                         }
-                        if depth + 1 < test_depth { queue.push_back((cid, depth + 1)); }
+                        if depth + 1 < test_depth {
+                            queue.push_back((cid, depth + 1));
+                        }
                     }
                 }
             }
         }
 
         // Recent git touches on top 3 files.
-        let top_files: Vec<(String, usize)> = file_scores.iter().take(3).map(|(_, f, _, _, _, _, _)| (f.clone(), 0)).collect();
+        let top_files: Vec<(String, usize)> = file_scores
+            .iter()
+            .take(3)
+            .map(|(_, f, _, _, _, _, _)| (f.clone(), 0))
+            .collect();
         let recently_touched = mcp_git_recent_touches(&top_files, git_depth);
 
         let test_gap = affected_tests.is_empty();
-        let proposed_test_path = test_gap.then(|| {
-            file_scores.first().map(|(_, f, _, _, _, _, _)| propose_test_path(f))
-        }).flatten();
+        let proposed_test_path = test_gap
+            .then(|| {
+                file_scores
+                    .first()
+                    .map(|(_, f, _, _, _, _, _)| propose_test_path(f))
+            })
+            .flatten();
         let suggested_test_coverage: Vec<String> = if test_gap {
-            let mut hints: Vec<String> = design_invariants.iter()
+            let mut hints: Vec<String> = design_invariants
+                .iter()
                 .filter_map(|inv| inv.get("summary").and_then(serde_json::Value::as_str))
                 .map(|s| s.to_string())
                 .collect();
             for eff in &effects_summary {
                 if let Some(cat) = eff.get("category").and_then(serde_json::Value::as_str) {
                     let hint = format!("verify {} after change", cat.to_lowercase());
-                    if !hints.contains(&hint) { hints.push(hint); }
+                    if !hints.contains(&hint) {
+                        hints.push(hint);
+                    }
                 }
             }
             if design_invariants.is_empty() {
                 if let Some((_, qname)) = candidates.first() {
                     if let Ok(Some(sym)) = index.get_symbol_by_qname(&ref_name, qname) {
-                        for h in derive_cold_hints(&sym.qname, sym.signature.as_deref(), sym.doc.as_deref()) {
-                            if !hints.contains(&h) { hints.push(h); }
+                        for h in derive_cold_hints(
+                            &sym.qname,
+                            sym.signature.as_deref(),
+                            sym.doc.as_deref(),
+                        ) {
+                            if !hints.contains(&h) {
+                                hints.push(h);
+                            }
                         }
                     }
                 }
             }
             hints
-        } else { vec![] };
+        } else {
+            vec![]
+        };
 
         const CONSTRAINT_WORDS: &[&str] = &[
-            "must", "never", "shall", "always", "only", "cannot", "no ", "not ",
-            "require", "ensure", "prevent", "guarantee", "invariant", "forbidden",
+            "must",
+            "never",
+            "shall",
+            "always",
+            "only",
+            "cannot",
+            "no ",
+            "not ",
+            "require",
+            "ensure",
+            "prevent",
+            "guarantee",
+            "invariant",
+            "forbidden",
         ];
-        let scenario_tests: Vec<&str> = design_invariants.iter()
+        let scenario_tests: Vec<&str> = design_invariants
+            .iter()
             .filter_map(|inv| inv.get("summary").and_then(serde_json::Value::as_str))
             .filter(|s| {
                 let sl = s.to_lowercase();
@@ -3403,21 +3633,30 @@ impl AsdMcpServer {
             .map(|inv| serde_json::json!({ "constraint": inv["summary"], "source": inv["source"], "kind": "invariant" }))
             .chain(known_hazards.iter().map(|h| serde_json::json!({ "constraint": h["summary"], "source": h["source"], "kind": "hazard" })))
             .collect();
-        let recipe_edit: Vec<serde_json::Value> = likely_edit_files.iter()
+        let recipe_edit: Vec<serde_json::Value> = likely_edit_files
+            .iter()
             .filter(|f| f["file_role"].as_str() == Some("impl"))
             .cloned()
-            .chain(likely_edit_files.iter().filter(|f| f["file_role"].as_str() != Some("impl")).cloned())
+            .chain(
+                likely_edit_files
+                    .iter()
+                    .filter(|f| f["file_role"].as_str() != Some("impl"))
+                    .cloned(),
+            )
             .collect();
         let recipe_run: Vec<serde_json::Value> = affected_tests.iter()
             .map(|t| serde_json::json!({ "qname": t["qname"], "file": t["file"], "covers_invariants": t["covers_invariants"] }))
             .collect();
-        let mut recipe_manually_validate: Vec<serde_json::Value> = validation_scenarios_ledger.clone();
+        let mut recipe_manually_validate: Vec<serde_json::Value> =
+            validation_scenarios_ledger.clone();
         for s in &scenario_tests {
             recipe_manually_validate.push(serde_json::json!({ "scenario": s, "source": "invariant", "kind": "constraint_check" }));
         }
         for eff in &effects_summary {
-            let desc = format!("verify {} side-effect still correct after change",
-                eff["category"].as_str().unwrap_or("").to_lowercase());
+            let desc = format!(
+                "verify {} side-effect still correct after change",
+                eff["category"].as_str().unwrap_or("").to_lowercase()
+            );
             recipe_manually_validate.push(serde_json::json!({ "scenario": desc, "source": eff["source"], "kind": "effect_check" }));
         }
         let safe_change_recipe = serde_json::json!({
@@ -3429,11 +3668,13 @@ impl AsdMcpServer {
         });
 
         let focus = intent_focus(intent);
-        let layers_present_pc: std::collections::HashSet<&str> = file_scores.iter()
+        let layers_present_pc: std::collections::HashSet<&str> = file_scores
+            .iter()
             .map(|(_, _, layer, _, _, _, _)| layer.as_str())
             .collect();
         let ambiguous_terms = detect_ambiguous_tokens(&tokens, engine.fts.as_ref(), &filters);
-        let possible_misses = detect_possible_misses(&p.description, &layers_present_pc, file_scores.len());
+        let possible_misses =
+            detect_possible_misses(&p.description, &layers_present_pc, file_scores.len());
         serde_json::to_string(&serde_json::json!({
             "description": p.description,
             "task_context": p.task_context,
@@ -3475,7 +3716,11 @@ impl AsdMcpServer {
 
         let (tokens, mut exclusions) = parse_query(&p.query);
         if let Some(ref excl) = p.exclude {
-            for term in excl.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()) {
+            for term in excl
+                .split(',')
+                .map(|t| t.trim().to_lowercase())
+                .filter(|t| !t.is_empty())
+            {
                 exclusions.push(term);
             }
         }
@@ -3491,7 +3736,12 @@ impl AsdMcpServer {
             paths_filter.extend(resolve_scope(scope, &db_path));
         }
         if let Some(ref paths) = p.paths {
-            paths_filter.extend(paths.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+            paths_filter.extend(
+                paths
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+            );
         }
         let filters = FtsFilters {
             kind: p.kind.as_deref().map(|k| k.to_lowercase()),
@@ -3521,13 +3771,18 @@ impl AsdMcpServer {
         }
 
         let mut candidates = find_candidates(
-            &engine, &p.query, &tokens, &filters,
-            &ledger_store, &index, depth,
+            &engine,
+            &p.query,
+            &tokens,
+            &filters,
+            &ledger_store,
+            &index,
+            depth,
         );
 
         // Apply durable feedback adjustments.
         {
-            use agentstatedeveloper_core::{apply_feedback_adjustments, FeedbackStore};
+            use agentstatedeveloper_core::{FeedbackStore, apply_feedback_adjustments};
             let fb_store = AsgFeedbackStore::from_engine(&engine);
             let fb = fb_store.flat_verdicts(&ref_name).unwrap_or_default();
             apply_feedback_adjustments(&engine, &index, &p.query, &mut candidates, &fb);
@@ -3543,7 +3798,10 @@ impl AsdMcpServer {
         let mut seen_tests: HashSet<String> = HashSet::new();
 
         for (_score, qname) in &candidates {
-            let sym = match index.get_symbol_by_qname(&ref_name, qname) { Ok(Some(s)) => s, _ => continue };
+            let sym = match index.get_symbol_by_qname(&ref_name, qname) {
+                Ok(Some(s)) => s,
+                _ => continue,
+            };
             let tier = symbol_tier(&sym.file);
             let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
 
@@ -3553,7 +3811,9 @@ impl AsdMcpServer {
                 }));
             }
 
-            let entries = ledger_store.list_entries(&ref_name, &sym.symbol_id).unwrap_or_default();
+            let entries = ledger_store
+                .list_entries(&ref_name, &sym.symbol_id)
+                .unwrap_or_default();
             for entry in &entries {
                 match entry.kind {
                     LedgerKind::Invariant => {
@@ -3595,10 +3855,14 @@ impl AsdMcpServer {
             visited.insert(sym.symbol_id.clone());
             queue.push_back((sym.symbol_id.clone(), 0));
             while let Some((sid, depth)) = queue.pop_front() {
-                if depth >= test_depth { continue; }
+                if depth >= test_depth {
+                    continue;
+                }
                 let callers = index.get_callers(&ref_name, &sid).unwrap_or_default();
                 for cid in callers {
-                    if visited.contains(&cid) { continue; }
+                    if visited.contains(&cid) {
+                        continue;
+                    }
                     visited.insert(cid.clone());
                     if let Some(s) = id_map.get(&cid) {
                         if symbol_tier(&s.file) == 2 && seen_tests.insert(s.qname.clone()) {
@@ -3606,46 +3870,75 @@ impl AsdMcpServer {
                                 "qname": s.qname, "file": s.file, "line": s.start.line,
                             }));
                         }
-                        if depth + 1 < test_depth { queue.push_back((cid, depth + 1)); }
+                        if depth + 1 < test_depth {
+                            queue.push_back((cid, depth + 1));
+                        }
                     }
                 }
             }
         }
 
         let test_gap = test_rows.is_empty();
-        let proposed_test_path = test_gap.then(|| {
-            files_to_inspect.first()
-                .and_then(|v| v.get("file").and_then(serde_json::Value::as_str))
-                .map(propose_test_path)
-        }).flatten();
+        let proposed_test_path = test_gap
+            .then(|| {
+                files_to_inspect
+                    .first()
+                    .and_then(|v| v.get("file").and_then(serde_json::Value::as_str))
+                    .map(propose_test_path)
+            })
+            .flatten();
         let suggested_test_coverage: Vec<String> = if test_gap {
-            let mut hints: Vec<String> = invariants.iter()
+            let mut hints: Vec<String> = invariants
+                .iter()
                 .filter_map(|inv| inv.get("summary").and_then(serde_json::Value::as_str))
                 .map(|s| s.to_string())
                 .collect();
             for eff in &effects_list {
                 if let Some(cat) = eff.get("category").and_then(serde_json::Value::as_str) {
                     let hint = format!("verify {} after change", cat.to_lowercase());
-                    if !hints.contains(&hint) { hints.push(hint); }
+                    if !hints.contains(&hint) {
+                        hints.push(hint);
+                    }
                 }
             }
             if invariants.is_empty() {
                 if let Some((_, qname)) = candidates.first() {
                     if let Ok(Some(sym)) = index.get_symbol_by_qname(&ref_name, qname) {
-                        for h in derive_cold_hints(&sym.qname, sym.signature.as_deref(), sym.doc.as_deref()) {
-                            if !hints.contains(&h) { hints.push(h); }
+                        for h in derive_cold_hints(
+                            &sym.qname,
+                            sym.signature.as_deref(),
+                            sym.doc.as_deref(),
+                        ) {
+                            if !hints.contains(&h) {
+                                hints.push(h);
+                            }
                         }
                     }
                 }
             }
             hints
-        } else { vec![] };
+        } else {
+            vec![]
+        };
 
         const CONSTRAINT_WORDS_CL: &[&str] = &[
-            "must", "never", "shall", "always", "only", "cannot", "no ", "not ",
-            "require", "ensure", "prevent", "guarantee", "invariant", "forbidden",
+            "must",
+            "never",
+            "shall",
+            "always",
+            "only",
+            "cannot",
+            "no ",
+            "not ",
+            "require",
+            "ensure",
+            "prevent",
+            "guarantee",
+            "invariant",
+            "forbidden",
         ];
-        let scenario_tests: Vec<&str> = invariants.iter()
+        let scenario_tests: Vec<&str> = invariants
+            .iter()
             .filter_map(|inv| inv.get("summary").and_then(serde_json::Value::as_str))
             .filter(|s| {
                 let sl = s.to_lowercase();
@@ -3657,8 +3950,14 @@ impl AsdMcpServer {
         let task_close_suggestions: Vec<serde_json::Value> = {
             let mut suggestions = Vec::new();
             for inv in invariants.iter().take(4) {
-                let source = inv.get("source").and_then(serde_json::Value::as_str).unwrap_or("");
-                let summary = inv.get("summary").and_then(serde_json::Value::as_str).unwrap_or("");
+                let source = inv
+                    .get("source")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let summary = inv
+                    .get("summary")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
                 if !source.is_empty() && !summary.is_empty() {
                     suggestions.push(serde_json::json!({
                         "action": "ledger_append", "kind": "proof", "symbol": source,
@@ -3667,8 +3966,14 @@ impl AsdMcpServer {
                 }
             }
             for h in hazards.iter().take(2) {
-                let source = h.get("source").and_then(serde_json::Value::as_str).unwrap_or("");
-                let summary = h.get("summary").and_then(serde_json::Value::as_str).unwrap_or("");
+                let source = h
+                    .get("source")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let summary = h
+                    .get("summary")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
                 if !source.is_empty() && !summary.is_empty() {
                     suggestions.push(serde_json::json!({
                         "action": "ledger_append", "kind": "validation_scenario", "symbol": source,
@@ -3677,8 +3982,14 @@ impl AsdMcpServer {
                 }
             }
             for eff in effects_list.iter().take(2) {
-                let source = eff.get("source").and_then(serde_json::Value::as_str).unwrap_or("");
-                let cat = eff.get("category").and_then(serde_json::Value::as_str).unwrap_or("");
+                let source = eff
+                    .get("source")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let cat = eff
+                    .get("category")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
                 if !source.is_empty() && !cat.is_empty() {
                     suggestions.push(serde_json::json!({
                         "action": "ledger_append", "kind": "proof", "symbol": source,
@@ -3690,11 +4001,13 @@ impl AsdMcpServer {
         };
 
         let focus = intent_focus(intent);
-        let layers_present_cl: std::collections::HashSet<&str> = files_to_inspect.iter()
+        let layers_present_cl: std::collections::HashSet<&str> = files_to_inspect
+            .iter()
             .filter_map(|f| f.get("layer").and_then(serde_json::Value::as_str))
             .collect();
         let ambiguous_terms_cl = detect_ambiguous_tokens(&tokens, engine.fts.as_ref(), &filters);
-        let possible_misses_cl = detect_possible_misses(&p.query, &layers_present_cl, files_to_inspect.len());
+        let possible_misses_cl =
+            detect_possible_misses(&p.query, &layers_present_cl, files_to_inspect.len());
         serde_json::to_string(&serde_json::json!({
             "query": p.query,
             "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
@@ -3763,10 +4076,14 @@ impl AsdMcpServer {
         let mut touched_files: Vec<(String, usize)> = vec![(symbol.file.clone(), 0)];
 
         while let Some((sym_id, depth)) = queue.pop_front() {
-            if depth >= max_depth { continue; }
+            if depth >= max_depth {
+                continue;
+            }
             let neighbors = index.get_callers(&ref_name, &sym_id).unwrap_or_default();
             for nbr_id in neighbors {
-                if visited.contains(&nbr_id) { continue; }
+                if visited.contains(&nbr_id) {
+                    continue;
+                }
                 visited.insert(nbr_id.clone());
                 if let Some(s) = id_map.get(&nbr_id) {
                     let t = symbol_tier(&s.file);
@@ -3801,7 +4118,9 @@ impl AsdMcpServer {
         let mut all_hazards: Vec<serde_json::Value> = Vec::new();
         let mut seen_inv: HashSet<String> = HashSet::new();
         for sym_id in &all_sym_ids {
-            let entries = ledger_store.list_entries(&ref_name, sym_id).unwrap_or_default();
+            let entries = ledger_store
+                .list_entries(&ref_name, sym_id)
+                .unwrap_or_default();
             for entry in entries {
                 let key = entry.summary.clone();
                 match entry.kind {
@@ -3809,7 +4128,10 @@ impl AsdMcpServer {
                         if seen_inv.insert(key) {
                             let mut v = serde_json::to_value(&entry).unwrap_or_default();
                             if let Some(obj) = v.as_object_mut() {
-                                obj.insert("source_symbol_id".to_string(), serde_json::json!(sym_id));
+                                obj.insert(
+                                    "source_symbol_id".to_string(),
+                                    serde_json::json!(sym_id),
+                                );
                             }
                             all_invariants.push(v);
                         }
@@ -3827,14 +4149,18 @@ impl AsdMcpServer {
         }
 
         // Effects for the target symbol.
-        let effects = effect_store.get_effects(&ref_name, &symbol.symbol_id).unwrap_or(None);
+        let effects = effect_store
+            .get_effects(&ref_name, &symbol.symbol_id)
+            .unwrap_or(None);
 
         // Recent git touches.
         let git_depth = p.git_depth.max(1) as usize;
         let recently_touched = mcp_git_recent_touches(&touched_files, git_depth);
 
         let mut sym_val = serde_json::to_value(&symbol).unwrap_or_default();
-        if let Some(obj) = sym_val.as_object_mut() { obj.remove("body"); }
+        if let Some(obj) = sym_val.as_object_mut() {
+            obj.remove("body");
+        }
 
         serde_json::to_string(&serde_json::json!({
             "symbol": sym_val,
@@ -3847,12 +4173,15 @@ impl AsdMcpServer {
             "callers": caller_rows,
             "affected_tests": affected_test_rows,
             "recently_touched": recently_touched,
-        })).unwrap_or_else(|_| "{}".to_string())
+        }))
+        .unwrap_or_else(|_| "{}".to_string())
     }
 
     /// Symbols in files changed since a commit + combined blast radius.
     /// PR-review workflow: pass the base SHA to get full impact without knowing any symbol names.
-    #[tool(description = "Symbols in files changed since a commit and their combined blast radius. Pass the base SHA of a branch/PR to discover all symbols touched by the diff, their transitive callers, affected tests, invariants, hazards, and effects — without needing to know any symbol names upfront.")]
+    #[tool(
+        description = "Symbols in files changed since a commit and their combined blast radius. Pass the base SHA of a branch/PR to discover all symbols touched by the diff, their transitive callers, affected tests, invariants, hazards, and effects — without needing to know any symbol names upfront."
+    )]
     async fn since(&self, params: Parameters<SinceParams>) -> String {
         let p = params.0;
         let db_path = self.db_path.clone();
@@ -3884,10 +4213,11 @@ impl AsdMcpServer {
                 .args(["diff", "--name-only", &format!("{}..HEAD", p.sha)])
                 .output();
             match out {
-                Ok(o) if o.status.success() => {
-                    String::from_utf8_lossy(&o.stdout).lines()
-                        .filter(|l| !l.is_empty()).map(|l| l.to_string()).collect()
-                }
+                Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(|l| l.to_string())
+                    .collect(),
                 _ => vec![],
             }
         };
@@ -3896,43 +4226,55 @@ impl AsdMcpServer {
             return serde_json::to_string(&serde_json::json!({
                 "sha": p.sha, "changed_files": [], "touched_symbols": {},
                 "callers": [], "affected_tests": [], "invariants": [], "hazards": [], "effects": [],
-            })).unwrap_or_else(|_| "{}".to_string());
+            }))
+            .unwrap_or_else(|_| "{}".to_string());
         }
 
         let changed_set: HashSet<&str> = changed_files.iter().map(String::as_str).collect();
 
         // Seeds: all symbols in changed files.
-        let seed_ids: Vec<String> = id_map.values()
+        let seed_ids: Vec<String> = id_map
+            .values()
             .filter(|s| changed_set.contains(s.file.as_str()))
             .map(|s| s.symbol_id.clone())
             .collect();
 
         // Group touched symbols by layer.
-        let mut by_layer: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
+        let mut by_layer: std::collections::HashMap<String, Vec<serde_json::Value>> =
+            std::collections::HashMap::new();
         for sid in &seed_ids {
             if let Some(s) = id_map.get(sid) {
                 let tier = symbol_tier(&s.file);
                 let layer = classify_layer_sym(&s.file, &s.qname, tier, &layer_overrides);
-                by_layer.entry(layer.to_string()).or_default().push(serde_json::json!({
-                    "qname": s.qname, "file": s.file, "line": s.start.line, "layer": layer,
-                }));
+                by_layer
+                    .entry(layer.to_string())
+                    .or_default()
+                    .push(serde_json::json!({
+                        "qname": s.qname, "file": s.file, "line": s.start.line, "layer": layer,
+                    }));
             }
         }
 
         // BFS blast radius.
         let max_depth = p.depth.max(1) as usize;
         let mut visited: HashSet<String> = seed_ids.iter().cloned().collect();
-        let mut queue: VecDeque<(String, usize)> = seed_ids.iter().map(|id| (id.clone(), 0)).collect();
+        let mut queue: VecDeque<(String, usize)> =
+            seed_ids.iter().map(|id| (id.clone(), 0)).collect();
         let mut caller_rows: Vec<serde_json::Value> = Vec::new();
         let mut affected_test_rows: Vec<serde_json::Value> = Vec::new();
-        let mut touched_files: Vec<(String, usize)> = changed_files.iter().map(|f| (f.clone(), 0)).collect();
+        let mut touched_files: Vec<(String, usize)> =
+            changed_files.iter().map(|f| (f.clone(), 0)).collect();
         let mut seen_files: HashSet<String> = changed_files.iter().cloned().collect();
 
         while let Some((sym_id, depth)) = queue.pop_front() {
-            if depth >= max_depth { continue; }
+            if depth >= max_depth {
+                continue;
+            }
             let neighbors = index.get_callers(&ref_name, &sym_id).unwrap_or_default();
             for nbr_id in neighbors {
-                if visited.contains(&nbr_id) { continue; }
+                if visited.contains(&nbr_id) {
+                    continue;
+                }
                 visited.insert(nbr_id.clone());
                 if let Some(s) = id_map.get(&nbr_id) {
                     let t = symbol_tier(&s.file);
@@ -3941,11 +4283,17 @@ impl AsdMcpServer {
                         "qname": s.qname, "file": s.file, "line": s.start.line,
                         "depth": depth + 1, "layer": l,
                     });
-                    if t == 2 { affected_test_rows.push(row); } else { caller_rows.push(row); }
+                    if t == 2 {
+                        affected_test_rows.push(row);
+                    } else {
+                        caller_rows.push(row);
+                    }
                     if seen_files.insert(s.file.clone()) {
                         touched_files.push((s.file.clone(), depth + 1));
                     }
-                    if depth + 1 < max_depth { queue.push_back((nbr_id, depth + 1)); }
+                    if depth + 1 < max_depth {
+                        queue.push_back((nbr_id, depth + 1));
+                    }
                 }
             }
         }
@@ -3956,7 +4304,9 @@ impl AsdMcpServer {
         let mut all_effects: Vec<serde_json::Value> = Vec::new();
         let mut seen_inv: HashSet<String> = HashSet::new();
         for sym_id in &seed_ids {
-            let entries = ledger_store.list_entries(&ref_name, sym_id).unwrap_or_default();
+            let entries = ledger_store
+                .list_entries(&ref_name, sym_id)
+                .unwrap_or_default();
             let sym_qname = id_map.get(sym_id).map(|s| s.qname.as_str()).unwrap_or("");
             for entry in entries {
                 let key = entry.summary.clone();
@@ -3967,13 +4317,18 @@ impl AsdMcpServer {
                         }
                     }
                     LedgerKind::Hazard => {
-                        all_hazards.push(serde_json::json!({ "summary": entry.summary, "source": sym_qname }));
+                        all_hazards.push(
+                            serde_json::json!({ "summary": entry.summary, "source": sym_qname }),
+                        );
                     }
                     _ => {}
                 }
             }
             if let Ok(Some(decl)) = effect_store.get_effects(&ref_name, sym_id) {
-                let qn = id_map.get(sym_id).map(|s| s.qname.clone()).unwrap_or_default();
+                let qn = id_map
+                    .get(sym_id)
+                    .map(|s| s.qname.clone())
+                    .unwrap_or_default();
                 for eff in &decl.declared {
                     all_effects.push(serde_json::json!({ "category": format!("{:?}", eff.effect), "source": qn }));
                 }
@@ -3981,7 +4336,8 @@ impl AsdMcpServer {
         }
 
         let git_depth = p.git_depth.max(1) as usize;
-        let recently_touched = mcp_git_recent_touches(&touched_files[..touched_files.len().min(5)], git_depth);
+        let recently_touched =
+            mcp_git_recent_touches(&touched_files[..touched_files.len().min(5)], git_depth);
 
         serde_json::to_string(&serde_json::json!({
             "sha": p.sha,
@@ -3995,7 +4351,8 @@ impl AsdMcpServer {
             "hazards": all_hazards,
             "effects": all_effects,
             "recently_touched": recently_touched,
-        })).unwrap_or_else(|_| "{}".to_string())
+        }))
+        .unwrap_or_else(|_| "{}".to_string())
     }
 
     #[tool(
@@ -4010,7 +4367,10 @@ impl AsdMcpServer {
         let Ok(Some(symbol)) = index_store.get_symbol_by_qname(&engine.ref_name, &p.qname) else {
             return err_json(&format!("symbol not found: {}", p.qname));
         };
-        let author = Author { kind: AuthorKind::Agent, id: p.author_id.clone() };
+        let author = Author {
+            kind: AuthorKind::Agent,
+            id: p.author_id.clone(),
+        };
         let entry = LedgerEntry::new(
             &symbol.symbol_id,
             LedgerKind::Invariant,
@@ -4025,7 +4385,8 @@ impl AsdMcpServer {
                 "symbol_id": entry.symbol_id,
                 "qname": p.qname,
                 "summary": p.summary,
-            })).unwrap_or_else(|_| "{}".to_string()),
+            }))
+            .unwrap_or_else(|_| "{}".to_string()),
             Err(e) => err_json(&e.to_string()),
         }
     }
@@ -4043,29 +4404,31 @@ impl AsdMcpServer {
         let rows: Vec<serde_json::Value> = if let Some(qname) = p.qname {
             let index_store = AsgIndexStore::from_engine(&engine);
             match index_store.get_symbol_by_qname(&engine.ref_name, &qname) {
-                Ok(Some(symbol)) => {
-                    ledger_store
-                        .list_entries(&engine.ref_name, &symbol.symbol_id)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|e| e.kind == LedgerKind::Invariant)
-                        .map(|e| serde_json::json!({
+                Ok(Some(symbol)) => ledger_store
+                    .list_entries(&engine.ref_name, &symbol.symbol_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|e| e.kind == LedgerKind::Invariant)
+                    .map(|e| {
+                        serde_json::json!({
                             "entry_id": e.entry_id,
                             "qname": qname,
                             "summary": e.summary,
                             "created_at": e.created_at,
                             "tags": e.tags,
-                        }))
-                        .collect()
-                }
+                        })
+                    })
+                    .collect(),
                 _ => return err_json(&format!("symbol not found: {}", qname)),
             }
         } else {
             let ref_name = &engine.ref_name;
             let tree = match engine.repo.get_tree(ref_name, "/asd/v1/ledger") {
                 Ok(v) => v,
-                _ => return serde_json::to_string(&serde_json::json!({ "invariants": [] }))
-                    .unwrap_or_else(|_| "{}".to_string()),
+                _ => {
+                    return serde_json::to_string(&serde_json::json!({ "invariants": [] }))
+                        .unwrap_or_else(|_| "{}".to_string());
+                }
             };
             let index_store_all = AsgIndexStore::from_engine(&engine);
             let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
@@ -4085,9 +4448,11 @@ impl AsdMcpServer {
                 for per_symbol in sym_map.values() {
                     if let Some(entry_map) = per_symbol.as_object() {
                         for entry_val in entry_map.values() {
-                            if let Ok(e) = serde_json::from_value::<LedgerEntry>(entry_val.clone()) {
+                            if let Ok(e) = serde_json::from_value::<LedgerEntry>(entry_val.clone())
+                            {
                                 if e.kind == LedgerKind::Invariant {
-                                    let qname = id_map.get(&e.symbol_id)
+                                    let qname = id_map
+                                        .get(&e.symbol_id)
                                         .map(|s| s.qname.as_str())
                                         .unwrap_or("");
                                     rows.push(serde_json::json!({
@@ -4104,7 +4469,8 @@ impl AsdMcpServer {
                 }
             }
             rows.sort_by(|a, b| {
-                a.get("qname").and_then(serde_json::Value::as_str)
+                a.get("qname")
+                    .and_then(serde_json::Value::as_str)
                     .cmp(&b.get("qname").and_then(serde_json::Value::as_str))
             });
             rows
@@ -4167,9 +4533,7 @@ impl AsdMcpServer {
         if matches!(verdict, FeedbackVerdict::AlreadyCovered) {
             let cover = match p.covered_by.as_deref() {
                 Some(c) if !c.is_empty() => c,
-                _ => return err_json(
-                    "covered_by is required when verdict=already_covered",
-                ),
+                _ => return err_json("covered_by is required when verdict=already_covered"),
             };
             let body = serde_json::json!({
                 "from_qname": &p.qname,
@@ -4210,7 +4574,8 @@ impl AsdMcpServer {
             "verdict": p.verdict,
             "qname": p.qname,
             "paired_ledger": paired_kind,
-        })).unwrap_or_else(|_| "{}".to_string())
+        }))
+        .unwrap_or_else(|_| "{}".to_string())
     }
 
     #[tool(
@@ -4226,12 +4591,19 @@ impl AsdMcpServer {
             Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
             Err(e) => return err_json(&e.to_string()),
         };
-        let author_kind = if p.author_id.contains("human") { AuthorKind::Human } else { AuthorKind::Agent };
+        let author_kind = if p.author_id.contains("human") {
+            AuthorKind::Human
+        } else {
+            AuthorKind::Agent
+        };
         let mut entry = LedgerEntry::new(
             &symbol.symbol_id,
             LedgerKind::Ownership,
             &p.concept,
-            Author { kind: author_kind, id: p.author_id.clone() },
+            Author {
+                kind: author_kind,
+                id: p.author_id.clone(),
+            },
         );
         entry.tags = vec!["promote-as-truth".to_string()];
         let ledger_store = AsgLedgerStore::from_engine(&engine);
@@ -4242,7 +4614,8 @@ impl AsdMcpServer {
                 "qname": p.qname,
                 "concept": p.concept,
                 "kind": "ownership",
-            })).unwrap_or_else(|_| "{}".to_string()),
+            }))
+            .unwrap_or_else(|_| "{}".to_string()),
             Err(e) => err_json(&e.to_string()),
         }
     }
@@ -4306,13 +4679,18 @@ impl AsdMcpServer {
 
         let (tokens, mut inline_exclusions) = parse_query(&p.query);
         if let Some(ref excl) = p.exclude {
-            for term in excl.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()) {
+            for term in excl
+                .split(',')
+                .map(|t| t.trim().to_lowercase())
+                .filter(|t| !t.is_empty())
+            {
                 inline_exclusions.push(term);
             }
         }
 
         if tokens.is_empty() {
-            return serde_json::json!({"query": p.query, "results": [], "document_hits": []}).to_string();
+            return serde_json::json!({"query": p.query, "results": [], "document_hits": []})
+                .to_string();
         }
 
         let limit = p.limit.max(1) as usize;
@@ -4321,7 +4699,12 @@ impl AsdMcpServer {
             paths_filter.extend(resolve_scope(scope, &db_path));
         }
         if let Some(ref paths_str) = p.paths {
-            paths_filter.extend(paths_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+            paths_filter.extend(
+                paths_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+            );
         }
         let filters = FtsFilters {
             kind: p.kind.as_deref().map(|k| k.to_lowercase()),
@@ -4339,22 +4722,26 @@ impl AsdMcpServer {
                 .and_then(|db| db.search(&tokens, limit, None).ok())
                 .unwrap_or_default()
                 .into_iter()
-                .map(|h| serde_json::json!({
-                    "source": "document",
-                    "score": h.bm25_score,
-                    "kind": h.kind,
-                    "path": h.path,
-                    "line": h.span_start,
-                    "title": h.title,
-                    "preview": h.preview,
-                    "owner_symbol_id": h.owner_symbol_id,
-                }))
+                .map(|h| {
+                    serde_json::json!({
+                        "source": "document",
+                        "score": h.bm25_score,
+                        "kind": h.kind,
+                        "path": h.path,
+                        "line": h.span_start,
+                        "title": h.title,
+                        "preview": h.preview,
+                        "owner_symbol_id": h.owner_symbol_id,
+                    })
+                })
                 .collect()
         } else {
             vec![]
         };
 
-        let fts_result = engine.fts.as_ref()
+        let fts_result = engine
+            .fts
+            .as_ref()
             .filter(|fts| fts.has_data())
             .and_then(|fts| fts.search(&p.query, &filters, limit * 2).ok());
 
@@ -4363,37 +4750,80 @@ impl AsdMcpServer {
             let effect_store = AsgEffectStore::from_engine(&engine);
             let index_store = AsgIndexStore::from_engine(&engine);
 
-            let mut has_ledger_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut has_ledger_ids: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             const GENERIC_BOOST_SKIP: &[&str] = &[
-                "state", "update", "position", "value", "cursor", "progress",
-                "indicator", "status", "mode", "flag", "current", "local",
-                "playhead", "tick", "item", "data", "info", "manager",
+                "state",
+                "update",
+                "position",
+                "value",
+                "cursor",
+                "progress",
+                "indicator",
+                "status",
+                "mode",
+                "flag",
+                "current",
+                "local",
+                "playhead",
+                "tick",
+                "item",
+                "data",
+                "info",
+                "manager",
             ];
             let mut scored: Vec<(f64, _)> = {
                 let mut tmp = Vec::with_capacity(hits.len());
                 for hit in hits {
                     let hybrid = hybrid_boost(&hit, &tokens);
-                    let ledger_boost = if hit.ledger_text.is_empty() { 0.0 } else {
-                        tokens.iter().filter(|t| hit.ledger_text.contains(t.as_str())).count() as f64
+                    let ledger_boost = if hit.ledger_text.is_empty() {
+                        0.0
+                    } else {
+                        tokens
+                            .iter()
+                            .filter(|t| hit.ledger_text.contains(t.as_str()))
+                            .count() as f64
                     };
-                    let haystack = format!("{} {}", hit.qname.to_lowercase(), hit.file.to_lowercase());
-                    let domain_overlap = tokens.iter()
+                    let haystack =
+                        format!("{} {}", hit.qname.to_lowercase(), hit.file.to_lowercase());
+                    let domain_overlap = tokens
+                        .iter()
                         .filter(|t| !GENERIC_BOOST_SKIP.contains(&t.as_str()))
                         .filter(|t| haystack.contains(t.as_str()))
                         .count();
                     let has_ownership = hit.has_ownership();
                     let has_invariant = hit.has_invariant();
-                    if hit.has_ledger() { has_ledger_ids.insert(hit.symbol_id.clone()); }
-                    let is_state_holder = matches!(hit.kind.as_str(), "class" | "struct" | "type" | "enum")
-                        && !has_ownership && !has_invariant
-                        && !tokens.iter().any(|t| matches!(t.as_str(),
-                            "state" | "model" | "type" | "class" | "struct" | "enum" | "schema"));
+                    if hit.has_ledger() {
+                        has_ledger_ids.insert(hit.symbol_id.clone());
+                    }
+                    let is_state_holder =
+                        matches!(hit.kind.as_str(), "class" | "struct" | "type" | "enum")
+                            && !has_ownership
+                            && !has_invariant
+                            && !tokens.iter().any(|t| {
+                                matches!(
+                                    t.as_str(),
+                                    "state"
+                                        | "model"
+                                        | "type"
+                                        | "class"
+                                        | "struct"
+                                        | "enum"
+                                        | "schema"
+                                )
+                            });
                     let state_penalty = if is_state_holder { -0.8 } else { 0.0 };
-                    let sot_boost = if has_ownership && domain_overlap >= 2 { 5.0 }
-                        else if has_ownership && domain_overlap >= 1 { 3.5 }
-                        else if has_ownership { 2.0 }
-                        else if has_invariant && domain_overlap >= 1 { 1.5 }
-                        else { 0.0 };
+                    let sot_boost = if has_ownership && domain_overlap >= 2 {
+                        5.0
+                    } else if has_ownership && domain_overlap >= 1 {
+                        3.5
+                    } else if has_ownership {
+                        2.0
+                    } else if has_invariant && domain_overlap >= 1 {
+                        1.5
+                    } else {
+                        0.0
+                    };
                     let total = hit.bm25_score + hybrid + ledger_boost + sot_boost + state_penalty;
                     tmp.push((total, hit));
                 }
@@ -4404,26 +4834,51 @@ impl AsdMcpServer {
             let mut feedback_metrics = agentstatedeveloper_core::FeedbackMetrics::default();
             {
                 if !all_feedback.is_empty() {
-                    let fb_tuples: Vec<_> = all_feedback.iter()
+                    let fb_tuples: Vec<_> = all_feedback
+                        .iter()
                         .filter(|e| e.file_scope.is_none())
                         .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict))
                         .collect();
-                    let fs_tuples: Vec<_> = all_feedback.iter()
-                        .filter_map(|e| e.file_scope.as_ref().map(|g| (g.clone(), e.verdict, e.query.clone())))
+                    let fs_tuples: Vec<_> = all_feedback
+                        .iter()
+                        .filter_map(|e| {
+                            e.file_scope
+                                .as_ref()
+                                .map(|g| (g.clone(), e.verdict, e.query.clone()))
+                        })
                         .collect();
-                    let mut adj: Vec<(f64, String)> = scored.iter().map(|(s, h)| (*s, h.qname.clone())).collect();
-                    feedback_metrics = apply_feedback_adjustments(&engine, &index_store, &p.query, &mut adj, &fb_tuples);
-                    apply_file_scope_feedback(&engine, &index_store, &p.query, &mut adj, &fs_tuples);
-                    let adj_map: std::collections::HashMap<String, f64> = adj.into_iter().map(|(s, q)| (q, s)).collect();
+                    let mut adj: Vec<(f64, String)> =
+                        scored.iter().map(|(s, h)| (*s, h.qname.clone())).collect();
+                    feedback_metrics = apply_feedback_adjustments(
+                        &engine,
+                        &index_store,
+                        &p.query,
+                        &mut adj,
+                        &fb_tuples,
+                    );
+                    apply_file_scope_feedback(
+                        &engine,
+                        &index_store,
+                        &p.query,
+                        &mut adj,
+                        &fs_tuples,
+                    );
+                    let adj_map: std::collections::HashMap<String, f64> =
+                        adj.into_iter().map(|(s, q)| (q, s)).collect();
                     scored.retain(|(_, h)| adj_map.contains_key(&h.qname));
                     for (score, h) in scored.iter_mut() {
-                        if let Some(&new_s) = adj_map.get(&h.qname) { *score = new_s; }
+                        if let Some(&new_s) = adj_map.get(&h.qname) {
+                            *score = new_s;
+                        }
                     }
                 }
             }
 
-            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.1.qname.cmp(&b.1.qname)));
+            scored.sort_by(|a, b| {
+                b.0.partial_cmp(&a.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.1.qname.cmp(&b.1.qname))
+            });
             scored.truncate(limit);
 
             let recency = gather_recency(200, 14.0);
@@ -4431,13 +4886,20 @@ impl AsdMcpServer {
             let confidences = confidence_scores(&raw_scores);
             let ambiguous_terms = detect_ambiguous_tokens(&tokens, engine.fts.as_ref(), &filters);
 
-            let all_result_qnames: Vec<String> = scored.iter().map(|(_, h)| h.qname.clone()).collect();
+            let all_result_qnames: Vec<String> =
+                scored.iter().map(|(_, h)| h.qname.clone()).collect();
             let all_feedback_impacts = explain_feedback_impacts(
-                &engine, &index_store, &p.query, &all_result_qnames, &all_feedback,
+                &engine,
+                &index_store,
+                &p.query,
+                &all_result_qnames,
+                &all_feedback,
             );
 
-            let mut layers_present: std::collections::HashSet<String> = std::collections::HashSet::new();
-            let mut ledger_cache: std::collections::HashMap<String, Vec<LedgerEntry>> = std::collections::HashMap::new();
+            let mut layers_present: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let mut ledger_cache: std::collections::HashMap<String, Vec<LedgerEntry>> =
+                std::collections::HashMap::new();
             let results: Vec<serde_json::Value> = scored.iter().zip(confidences.iter()).map(|((score, hit), conf)| {
                 let rec = recency.get(&hit.file);
                 let is_hot = rec.map(|r| r.hot).unwrap_or(false);
@@ -4485,29 +4947,49 @@ impl AsdMcpServer {
                 })
             }).collect();
 
-            let scope_narrowed = !filters.paths_filter.is_empty() || !filters.exclude_terms.is_empty();
-            let layers_ref: std::collections::HashSet<&str> = layers_present.iter().map(|s| s.as_str()).collect();
-            let possible_misses = if scope_narrowed { vec![] } else {
+            let scope_narrowed =
+                !filters.paths_filter.is_empty() || !filters.exclude_terms.is_empty();
+            let layers_ref: std::collections::HashSet<&str> =
+                layers_present.iter().map(|s| s.as_str()).collect();
+            let possible_misses = if scope_narrowed {
+                vec![]
+            } else {
                 detect_possible_misses(&p.query, &layers_ref, results.len())
             };
             let confidence_warnings = detect_confidence_warnings(
-                &tokens, results.len(), &ambiguous_terms, engine.fts.as_ref(),
+                &tokens,
+                results.len(),
+                &ambiguous_terms,
+                engine.fts.as_ref(),
             );
-            let query_suggestions = if scope_narrowed { vec![] } else {
+            let query_suggestions = if scope_narrowed {
+                vec![]
+            } else {
                 suggest_better_queries(&tokens, &p.query)
             };
-            let top_qnames: Vec<String> = results.iter().take(5)
-                .filter_map(|r| r["qname"].as_str().map(|s| s.to_string())).collect();
-            let scoped_suggestions = if scope_narrowed || ambiguous_terms.is_empty() { vec![] } else {
+            let top_qnames: Vec<String> = results
+                .iter()
+                .take(5)
+                .filter_map(|r| r["qname"].as_str().map(|s| s.to_string()))
+                .collect();
+            let scoped_suggestions = if scope_narrowed || ambiguous_terms.is_empty() {
+                vec![]
+            } else {
                 suggest_scoped_queries(&tokens, &ambiguous_terms, &top_qnames)
             };
             let uncertainty = compute_uncertainty(
-                &tokens, &ambiguous_terms, &possible_misses,
-                results.len(), &scoped_suggestions, engine.fts.as_ref(),
+                &tokens,
+                &ambiguous_terms,
+                &possible_misses,
+                results.len(),
+                &scoped_suggestions,
+                engine.fts.as_ref(),
                 Some(dq_state_str.as_str()),
             );
             let feedback_state = build_feedback_state_from_entries(
-                &all_feedback, &p.query, feedback_metrics.entries_applied,
+                &all_feedback,
+                &p.query,
+                feedback_metrics.entries_applied,
             );
             let raw = serde_json::json!({
                 "query": p.query,
@@ -4548,43 +5030,72 @@ impl AsdMcpServer {
                 Ok(Some(s)) => s,
                 _ => continue,
             };
-            if let Some(ref k) = filters.kind { let sk = format!("{:?}", sym.kind).to_lowercase(); if &sk != k { continue; } }
-            if let Some(ref lang) = filters.language { if &sym.language != lang { continue; } }
+            if let Some(ref k) = filters.kind {
+                let sk = format!("{:?}", sym.kind).to_lowercase();
+                if &sk != k {
+                    continue;
+                }
+            }
+            if let Some(ref lang) = filters.language {
+                if &sym.language != lang {
+                    continue;
+                }
+            }
             let qn = sym.qname.to_lowercase();
             let sig = sym.signature.as_deref().unwrap_or("").to_lowercase();
             let doc = sym.doc.as_deref().unwrap_or("").to_lowercase();
             let file = sym.file.to_lowercase();
-            let ledger_text: String = ledger_store.list_entries(&ref_name, &sym.symbol_id)
-                .unwrap_or_default().iter().map(|e| e.summary.to_lowercase())
-                .collect::<Vec<_>>().join(" ");
+            let ledger_text: String = ledger_store
+                .list_entries(&ref_name, &sym.symbol_id)
+                .unwrap_or_default()
+                .iter()
+                .map(|e| e.summary.to_lowercase())
+                .collect::<Vec<_>>()
+                .join(" ");
             let mut score: u32 = 0;
             for token in &tokens {
-                if qn.contains(token.as_str()) { score += 4; }
-                if !sig.is_empty() && sig.contains(token.as_str()) { score += 3; }
-                if !doc.is_empty() && doc.contains(token.as_str()) { score += 3; }
-                if !ledger_text.is_empty() && ledger_text.contains(token.as_str()) { score += 2; }
-                if file.contains(token.as_str()) { score += 1; }
+                if qn.contains(token.as_str()) {
+                    score += 4;
+                }
+                if !sig.is_empty() && sig.contains(token.as_str()) {
+                    score += 3;
+                }
+                if !doc.is_empty() && doc.contains(token.as_str()) {
+                    score += 3;
+                }
+                if !ledger_text.is_empty() && ledger_text.contains(token.as_str()) {
+                    score += 2;
+                }
+                if file.contains(token.as_str()) {
+                    score += 1;
+                }
             }
-            if score > 0 { scored.push((score, sym)); }
+            if score > 0 {
+                scored.push((score, sym));
+            }
         }
         scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.qname.cmp(&b.1.qname)));
         scored.truncate(limit);
         let recency = gather_recency(200, 14.0);
-        let results: Vec<serde_json::Value> = scored.iter().map(|(score, sym)| {
-            let tier = symbol_tier(&sym.file);
-            let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
-            let rec = recency.get(&sym.file);
-            serde_json::json!({
-                "score": score, "qname": sym.qname,
-                "kind": format!("{:?}", sym.kind).to_lowercase(),
-                "file": sym.file, "line": sym.start.line,
-                "tier": tier, "layer": layer,
-                "summary": extract_summary(sym.doc.as_deref(), sym.signature.as_deref()),
-                "last_touched_days": rec.and_then(|r| r.last_touched_days),
-                "hot": rec.map(|r| r.hot).unwrap_or(false),
+        let results: Vec<serde_json::Value> = scored
+            .iter()
+            .map(|(score, sym)| {
+                let tier = symbol_tier(&sym.file);
+                let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
+                let rec = recency.get(&sym.file);
+                serde_json::json!({
+                    "score": score, "qname": sym.qname,
+                    "kind": format!("{:?}", sym.kind).to_lowercase(),
+                    "file": sym.file, "line": sym.start.line,
+                    "tier": tier, "layer": layer,
+                    "summary": extract_summary(sym.doc.as_deref(), sym.signature.as_deref()),
+                    "last_touched_days": rec.and_then(|r| r.last_touched_days),
+                    "hot": rec.map(|r| r.hot).unwrap_or(false),
+                })
             })
-        }).collect();
-        let raw = serde_json::json!({"query": p.query, "results": results, "document_hits": doc_hits});
+            .collect();
+        let raw =
+            serde_json::json!({"query": p.query, "results": results, "document_hits": doc_hits});
         serde_json::to_string(&raw).unwrap_or_else(|_| "{}".to_string())
     }
 
@@ -4604,7 +5115,12 @@ impl AsdMcpServer {
         let ledger_store = AsgLedgerStore::from_engine(&engine);
         let id_map = index_store.build_id_map(&engine);
 
-        let qnames: Vec<&str> = p.qnames.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let qnames: Vec<&str> = p
+            .qnames
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
         let budget_chars = p.budget_tokens.map(|t| t as usize * 4);
         let include_body = p.include_body;
 
@@ -4613,7 +5129,8 @@ impl AsdMcpServer {
             let symbol = match index_store.get_symbol_by_qname(&ref_name, qname) {
                 Ok(Some(s)) => s,
                 Ok(None) => {
-                    symbols_out.push(serde_json::json!({ "qname": qname, "error": "symbol not found" }));
+                    symbols_out
+                        .push(serde_json::json!({ "qname": qname, "error": "symbol not found" }));
                     continue;
                 }
                 Err(e) => {
@@ -4623,8 +5140,12 @@ impl AsdMcpServer {
             };
 
             // Callers/callees
-            let callee_ids = index_store.get_callees(&ref_name, &symbol.symbol_id).unwrap_or_default();
-            let caller_ids = index_store.get_callers(&ref_name, &symbol.symbol_id).unwrap_or_default();
+            let callee_ids = index_store
+                .get_callees(&ref_name, &symbol.symbol_id)
+                .unwrap_or_default();
+            let caller_ids = index_store
+                .get_callers(&ref_name, &symbol.symbol_id)
+                .unwrap_or_default();
             let resolve = |ids: &[String]| -> Vec<serde_json::Value> {
                 ids.iter().map(|id| {
                     if let Some(s) = id_map.get(id) {
@@ -4636,10 +5157,14 @@ impl AsdMcpServer {
             };
 
             // Effects
-            let effects = effect_store.get_effects(&ref_name, &symbol.symbol_id).unwrap_or(None);
+            let effects = effect_store
+                .get_effects(&ref_name, &symbol.symbol_id)
+                .unwrap_or(None);
 
             // Ledger — grouped by kind
-            let ledger = ledger_store.list_entries(&ref_name, &symbol.symbol_id).unwrap_or_default();
+            let ledger = ledger_store
+                .list_entries(&ref_name, &symbol.symbol_id)
+                .unwrap_or_default();
             let mut invariants: Vec<serde_json::Value> = Vec::new();
             let mut hazards: Vec<serde_json::Value> = Vec::new();
             let mut ownership: Vec<serde_json::Value> = Vec::new();
@@ -4665,14 +5190,20 @@ impl AsdMcpServer {
             // Symbol value (without body if !include_body)
             let mut sym_val = serde_json::to_value(&symbol).unwrap_or_default();
             if !include_body {
-                if let Some(obj) = sym_val.as_object_mut() { obj.remove("body"); }
+                if let Some(obj) = sym_val.as_object_mut() {
+                    obj.remove("body");
+                }
             }
 
             // Ownership discovery
             let ownership_signal = discover_symbol_ownership(
-                &symbol.file, symbol.start.line, symbol.end.line, symbol.doc.as_deref(),
+                &symbol.file,
+                symbol.start.line,
+                symbol.end.line,
+                symbol.doc.as_deref(),
             );
-            let mut discovered_ownership: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+            let mut discovered_ownership: serde_json::Map<String, serde_json::Value> =
+                serde_json::Map::new();
             if let Some(ref author) = ownership_signal.primary_author {
                 discovered_ownership.insert("primary_author".into(), serde_json::json!(author));
             }
@@ -4680,7 +5211,10 @@ impl AsdMcpServer {
                 discovered_ownership.insert("doc_owner".into(), serde_json::json!(doc_owner));
             }
             if !ownership_signal.recent_committers.is_empty() {
-                discovered_ownership.insert("recent_committers".into(), serde_json::json!(ownership_signal.recent_committers));
+                discovered_ownership.insert(
+                    "recent_committers".into(),
+                    serde_json::json!(ownership_signal.recent_committers),
+                );
             }
             if !ownership_signal.annotated.is_empty() {
                 let annotated_val: Vec<serde_json::Value> = ownership_signal.annotated.iter().map(|a| {
@@ -4697,28 +5231,53 @@ impl AsdMcpServer {
 
             // Effects detail
             let effects_detail: Vec<serde_json::Value> = if let Some(ref decl) = effects {
-                let mismatch_effects: std::collections::HashSet<String> = decl.verification.as_ref()
-                    .map(|v| v.mismatches.iter().map(|m| m.effect.as_str().to_string()).collect())
+                let mismatch_effects: std::collections::HashSet<String> = decl
+                    .verification
+                    .as_ref()
+                    .map(|v| {
+                        v.mismatches
+                            .iter()
+                            .map(|m| m.effect.as_str().to_string())
+                            .collect()
+                    })
                     .unwrap_or_default();
-                let overall_ok = decl.verification.as_ref()
+                let overall_ok = decl
+                    .verification
+                    .as_ref()
                     .map(|v| matches!(v.status, VerificationStatus::Ok))
                     .unwrap_or(false);
-                decl.declared.iter().map(|e| {
-                    let effect_str = e.effect.as_str();
-                    let is_mismatched = mismatch_effects.contains(effect_str);
-                    let status = if decl.verification.is_none() { "unverified" }
-                        else if is_mismatched { "mismatch" }
-                        else if overall_ok { "ok" }
-                        else { "ok" };
-                    let mut obj = serde_json::Map::new();
-                    obj.insert("effect".into(), serde_json::json!(effect_str));
-                    obj.insert("status".into(), serde_json::json!(status));
-                    if let Some(ref adapter) = e.adapter { obj.insert("adapter".into(), serde_json::json!(adapter)); }
-                    if let Some(ref pattern) = e.source_pattern { obj.insert("source_pattern".into(), serde_json::json!(pattern)); }
-                    if let Some(note) = &e.note { obj.insert("note".into(), serde_json::json!(note)); }
-                    serde_json::Value::Object(obj)
-                }).collect()
-            } else { Vec::new() };
+                decl.declared
+                    .iter()
+                    .map(|e| {
+                        let effect_str = e.effect.as_str();
+                        let is_mismatched = mismatch_effects.contains(effect_str);
+                        let status = if decl.verification.is_none() {
+                            "unverified"
+                        } else if is_mismatched {
+                            "mismatch"
+                        } else if overall_ok {
+                            "ok"
+                        } else {
+                            "ok"
+                        };
+                        let mut obj = serde_json::Map::new();
+                        obj.insert("effect".into(), serde_json::json!(effect_str));
+                        obj.insert("status".into(), serde_json::json!(status));
+                        if let Some(ref adapter) = e.adapter {
+                            obj.insert("adapter".into(), serde_json::json!(adapter));
+                        }
+                        if let Some(ref pattern) = e.source_pattern {
+                            obj.insert("source_pattern".into(), serde_json::json!(pattern));
+                        }
+                        if let Some(note) = &e.note {
+                            obj.insert("note".into(), serde_json::json!(note));
+                        }
+                        serde_json::Value::Object(obj)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
             let sym_ctx = serde_json::json!({
                 "symbol": sym_val,
@@ -4751,7 +5310,12 @@ impl AsdMcpServer {
             if output.len() > max_chars {
                 let mut v = out.clone();
                 if let Some(obj) = v.as_object_mut() {
-                    obj.insert("_budget_warning".into(), serde_json::json!("output exceeds budget; pass fewer qnames or increase budget_tokens"));
+                    obj.insert(
+                        "_budget_warning".into(),
+                        serde_json::json!(
+                            "output exceeds budget; pass fewer qnames or increase budget_tokens"
+                        ),
+                    );
                 }
                 output = serde_json::to_string(&v).unwrap_or_else(|_| "{}".to_string());
             }
@@ -4778,12 +5342,17 @@ impl AsdMcpServer {
         let task_id = p.task.clone().unwrap_or_default();
 
         let mut ctx_tags: Vec<String> = Vec::new();
-        if !plan_id.is_empty() { ctx_tags.push(format!("ctx:plan:{}", plan_id)); }
-        if !task_id.is_empty() { ctx_tags.push(format!("ctx:task:{}", task_id)); }
+        if !plan_id.is_empty() {
+            ctx_tags.push(format!("ctx:plan:{}", plan_id));
+        }
+        if !task_id.is_empty() {
+            ctx_tags.push(format!("ctx:task:{}", task_id));
+        }
 
         // Resolve symbols
         let target_symbols: Vec<Symbol> = if let Some(ref sym_list) = p.symbols {
-            sym_list.split(',')
+            sym_list
+                .split(',')
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
                 .filter_map(|q| index_store.get_symbol_by_qname(&ref_name, q).ok().flatten())
@@ -4798,15 +5367,26 @@ impl AsdMcpServer {
                     stderr: vec![],
                 });
             let changed: Vec<String> = String::from_utf8_lossy(&out.stdout)
-                .lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
-            let tree = engine.repo
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            let tree = engine
+                .repo
                 .get_tree(&ref_name, "/asd/v1/index/by-qname")
                 .unwrap_or(serde_json::Value::Object(Default::default()));
-            let mut syms: Vec<Symbol> = tree.as_object()
-                .map(|m| m.values()
-                    .filter_map(|v| serde_json::from_value::<Symbol>(v.clone()).ok())
-                    .filter(|s| changed.iter().any(|f| s.file.ends_with(f.as_str()) || s.file == *f))
-                    .collect())
+            let mut syms: Vec<Symbol> = tree
+                .as_object()
+                .map(|m| {
+                    m.values()
+                        .filter_map(|v| serde_json::from_value::<Symbol>(v.clone()).ok())
+                        .filter(|s| {
+                            changed
+                                .iter()
+                                .any(|f| s.file.ends_with(f.as_str()) || s.file == *f)
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
             syms.truncate(20);
             syms
@@ -4817,36 +5397,53 @@ impl AsdMcpServer {
                 "written": [],
                 "note": "no symbols resolved — pass symbols or ensure HEAD has changed files",
                 "ctx": {"plan": plan_id, "task": task_id},
-            })).unwrap_or_else(|_| "{}".to_string());
+            }))
+            .unwrap_or_else(|_| "{}".to_string());
         }
 
-        let proof_base = p.proof.clone().unwrap_or_else(|| "task completed".to_string());
+        let proof_base = p
+            .proof
+            .clone()
+            .unwrap_or_else(|| "task completed".to_string());
         let proof_text = if let Some(ref ev) = p.evidence {
             format!("{} [evidence: {}]", proof_base, ev)
         } else {
             proof_base.clone()
         };
 
-        let author = Author { kind: AuthorKind::Human, id: p.author.clone() };
+        let author = Author {
+            kind: AuthorKind::Human,
+            id: p.author.clone(),
+        };
         let mut written: Vec<serde_json::Value> = Vec::new();
         let closed_at = chrono::Utc::now().to_rfc3339();
 
         for sym in &target_symbols {
             let mut proof_entry = LedgerEntry::new(
-                &sym.symbol_id, LedgerKind::Proof, &proof_text, author.clone(),
+                &sym.symbol_id,
+                LedgerKind::Proof,
+                &proof_text,
+                author.clone(),
             );
             proof_entry.tags.extend(ctx_tags.iter().cloned());
-            if let Some(ref ev) = p.evidence { proof_entry.tags.push(format!("evidence:{}", ev)); }
+            if let Some(ref ev) = p.evidence {
+                proof_entry.tags.push(format!("evidence:{}", ev));
+            }
             match ledger_store.append_entry(&ref_name, &proof_entry, &p.author) {
                 Ok(_) => written.push(serde_json::json!({"symbol": sym.qname, "kind": "proof", "summary": proof_text})),
                 Err(e) => return err_json(&format!("ledger write failed for {}: {}", sym.qname, e)),
             }
 
             if p.validated {
-                let validation_text = p.validation_note.clone()
+                let validation_text = p
+                    .validation_note
+                    .clone()
                     .unwrap_or_else(|| format!("validated: {}", proof_base));
                 let mut vs_entry = LedgerEntry::new(
-                    &sym.symbol_id, LedgerKind::ValidationScenario, &validation_text, author.clone(),
+                    &sym.symbol_id,
+                    LedgerKind::ValidationScenario,
+                    &validation_text,
+                    author.clone(),
                 );
                 vs_entry.tags.extend(ctx_tags.iter().cloned());
                 if let Ok(_) = ledger_store.append_entry(&ref_name, &vs_entry, &p.author) {
@@ -4856,20 +5453,32 @@ impl AsdMcpServer {
         }
 
         // Workflow integration
-        let pre_existing: Vec<LedgerEntry> = target_symbols.iter()
-            .flat_map(|sym| ledger_store.list_entries(&ref_name, &sym.symbol_id).unwrap_or_default())
-            .filter(|e| !written.iter().any(|w| {
-                w.get("summary").and_then(|s| s.as_str()) == Some(e.summary.as_str())
-            }))
+        let pre_existing: Vec<LedgerEntry> = target_symbols
+            .iter()
+            .flat_map(|sym| {
+                ledger_store
+                    .list_entries(&ref_name, &sym.symbol_id)
+                    .unwrap_or_default()
+            })
+            .filter(|e| {
+                !written
+                    .iter()
+                    .any(|w| w.get("summary").and_then(|s| s.as_str()) == Some(e.summary.as_str()))
+            })
             .collect();
 
         let proof_was_explicit = p.proof.is_some();
         let eq = score_evidence_quality(
-            &pre_existing, p.validated, p.evidence.as_deref(),
-            proof_was_explicit, target_symbols.len(), written.len(),
+            &pre_existing,
+            p.validated,
+            p.evidence.as_deref(),
+            proof_was_explicit,
+            target_symbols.len(),
+            written.len(),
         );
         let has_invariants = pre_existing.iter().any(|e| e.kind == LedgerKind::Invariant);
-        let (wf_type, steps_detected, missing_steps) = detect_workflow(&pre_existing, &eq, has_invariants);
+        let (wf_type, steps_detected, missing_steps) =
+            detect_workflow(&pre_existing, &eq, has_invariants);
         let trust = compute_trust_score(&db_path);
         let db_state = trust.data_quality.state.clone();
         let db_state_note = match db_state.as_str() {
@@ -4932,7 +5541,8 @@ impl AsdMcpServer {
             Err(e) => return err_json(&e.to_string()),
         };
 
-        let mut effect_decl = effect_store.get_effects(&ref_name, &symbol.symbol_id)
+        let mut effect_decl = effect_store
+            .get_effects(&ref_name, &symbol.symbol_id)
             .unwrap_or(None)
             .unwrap_or_else(|| EffectDecl {
                 symbol_id: symbol.symbol_id.clone(),
@@ -4943,7 +5553,9 @@ impl AsdMcpServer {
                 matched_policy: None,
             });
 
-        let adapter = adapters.iter().find(|a| a.language() == symbol.language.as_str());
+        let adapter = adapters
+            .iter()
+            .find(|a| a.language() == symbol.language.as_str());
 
         let (status, mismatches, inferred_strs) = if let Some(adapter) = adapter {
             match std::fs::read_to_string(&symbol.file) {
@@ -4959,10 +5571,16 @@ impl AsdMcpServer {
                         signature: symbol.signature.clone(),
                         doc: symbol.doc.clone(),
                     };
-                    let inferred: Vec<EffectCategory> = adapter.infer_effects(&source, &stub)
-                        .into_iter().map(|e| e.effect).collect();
-                    let declared_cats: Vec<EffectCategory> = effect_decl.declared.iter()
-                        .map(|e| e.effect.clone()).collect();
+                    let inferred: Vec<EffectCategory> = adapter
+                        .infer_effects(&source, &stub)
+                        .into_iter()
+                        .map(|e| e.effect)
+                        .collect();
+                    let declared_cats: Vec<EffectCategory> = effect_decl
+                        .declared
+                        .iter()
+                        .map(|e| e.effect.clone())
+                        .collect();
                     let mut mismatches: Vec<Mismatch> = Vec::new();
                     for cat in &declared_cats {
                         if !inferred.contains(cat) {
@@ -4980,12 +5598,20 @@ impl AsdMcpServer {
                                 kind: "inferred_not_declared".to_string(),
                                 effect: cat.clone(),
                                 detected_in: Some(symbol.file.clone()),
-                                note: Some("found by static checker but not in declared effects".to_string()),
+                                note: Some(
+                                    "found by static checker but not in declared effects"
+                                        .to_string(),
+                                ),
                             });
                         }
                     }
-                    let status = if mismatches.is_empty() { VerificationStatus::Ok } else { VerificationStatus::Mismatch };
-                    let inferred_strs: Vec<String> = inferred.iter().map(|e| e.as_str().to_string()).collect();
+                    let status = if mismatches.is_empty() {
+                        VerificationStatus::Ok
+                    } else {
+                        VerificationStatus::Mismatch
+                    };
+                    let inferred_strs: Vec<String> =
+                        inferred.iter().map(|e| e.as_str().to_string()).collect();
                     (status, mismatches, inferred_strs)
                 }
                 Err(_) => (VerificationStatus::Unverified, Vec::new(), Vec::new()),
@@ -5002,7 +5628,12 @@ impl AsdMcpServer {
                 mismatches: mismatches.clone(),
             };
             effect_decl.verification = Some(verification);
-            if let Err(e) = effect_store.put_effects(&ref_name, &effect_decl.symbol_id, &effect_decl, "asd-mcp-verify") {
+            if let Err(e) = effect_store.put_effects(
+                &ref_name,
+                &effect_decl.symbol_id,
+                &effect_decl,
+                "asd-mcp-verify",
+            ) {
                 return err_json(&format!("failed to write verification: {}", e));
             }
         }
@@ -5046,15 +5677,15 @@ impl AsdMcpServer {
         let project_root = db_path.parent().unwrap_or(std::path::Path::new("."));
         let sidecar_state = sidecar_lifecycle_state(project_root);
         let sidecar_key = match sidecar_state {
-            SidecarState::Missing    => "missing",
-            SidecarState::Present    => "present",
-            SidecarState::Hydrated   => "hydrated",
+            SidecarState::Missing => "missing",
+            SidecarState::Present => "present",
+            SidecarState::Hydrated => "hydrated",
             SidecarState::FreshReset => "fresh-reset",
         };
         let sidecar_action = match sidecar_state {
-            SidecarState::Missing    => "run 'asd sync' to create sidecar",
-            SidecarState::Present    => "run 'asd hydrate' to load sidecar into ASG",
-            SidecarState::Hydrated   => "sidecar is current",
+            SidecarState::Missing => "run 'asd sync' to create sidecar",
+            SidecarState::Present => "run 'asd hydrate' to load sidecar into ASG",
+            SidecarState::Hydrated => "sidecar is current",
             SidecarState::FreshReset => "re-run 'asd index' then 'asd sync'",
         };
 
@@ -5063,7 +5694,8 @@ impl AsdMcpServer {
                 "state": "empty",
                 "note": "run 'asd index <dir>' to build",
                 "sidecar": sidecar_key,
-            })).unwrap_or_else(|_| "{}".to_string());
+            }))
+            .unwrap_or_else(|_| "{}".to_string());
         }
 
         let count = fts.symbol_count();
@@ -5074,7 +5706,13 @@ impl AsdMcpServer {
         let (indexed_at, age_hours, index_state) = match fts.last_indexed_at() {
             Some(ts) => {
                 let age_h = (now - ts).max(0) / 3600;
-                let state = if age_h == 0 { "fresh" } else if age_h >= 1 { "stale" } else { "ok" };
+                let state = if age_h == 0 {
+                    "fresh"
+                } else if age_h >= 1 {
+                    "stale"
+                } else {
+                    "ok"
+                };
                 (Some(ts), Some(age_h), state)
             }
             None => (None, None, "unknown"),
@@ -5087,34 +5725,48 @@ impl AsdMcpServer {
                 .output()
             {
                 Ok(o) if o.status.success() => {
-                    let source_exts = [".swift", ".py", ".ts", ".tsx", ".js", ".rs", ".go", ".kt", ".java", ".rb", ".cs"];
-                    String::from_utf8_lossy(&o.stdout).lines()
+                    let source_exts = [
+                        ".swift", ".py", ".ts", ".tsx", ".js", ".rs", ".go", ".kt", ".java", ".rb",
+                        ".cs",
+                    ];
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
                         .filter(|l| source_exts.iter().any(|ext| l.ends_with(ext)))
                         .map(|l| l.trim().to_string())
                         .collect()
                 }
                 _ => vec![],
             }
-        } else { vec![] };
+        } else {
+            vec![]
+        };
 
         // Concept gaps
         let concept_gaps: Vec<serde_json::Value> = {
             let ledger_store = AsgLedgerStore::from_engine(&engine);
-            let tree = engine.repo
+            let tree = engine
+                .repo
                 .get_tree(&ref_name, "/asd/v1/index/by-qname")
                 .unwrap_or(serde_json::Value::Object(Default::default()));
             tree.as_object()
-                .map(|m| m.values()
-                    .filter_map(|v| serde_json::from_value::<Symbol>(v.clone()).ok())
-                    .filter_map(|sym| {
-                        let entries = ledger_store.list_entries(&ref_name, &sym.symbol_id).unwrap_or_default();
-                        let has_ownership = entries.iter().any(|e| e.kind == LedgerKind::Ownership);
-                        let has_concept = entries.iter().any(|e| e.kind == LedgerKind::Concept);
-                        if has_ownership && !has_concept {
-                            Some(serde_json::json!({"qname": sym.qname, "file": sym.file}))
-                        } else { None }
-                    })
-                    .collect())
+                .map(|m| {
+                    m.values()
+                        .filter_map(|v| serde_json::from_value::<Symbol>(v.clone()).ok())
+                        .filter_map(|sym| {
+                            let entries = ledger_store
+                                .list_entries(&ref_name, &sym.symbol_id)
+                                .unwrap_or_default();
+                            let has_ownership =
+                                entries.iter().any(|e| e.kind == LedgerKind::Ownership);
+                            let has_concept = entries.iter().any(|e| e.kind == LedgerKind::Concept);
+                            if has_ownership && !has_concept {
+                                Some(serde_json::json!({"qname": sym.qname, "file": sym.file}))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                })
                 .unwrap_or_default()
         };
 
@@ -5151,30 +5803,49 @@ impl AsdMcpServer {
         let feedback_store = AsgFeedbackStore::from_engine(&engine);
 
         let mut paths_filter: Vec<String> = Vec::new();
-        if let Some(ref s) = p.scope { paths_filter.extend(resolve_scope(s, &db_path)); }
+        if let Some(ref s) = p.scope {
+            paths_filter.extend(resolve_scope(s, &db_path));
+        }
         if let Some(ref paths_str) = p.paths {
-            paths_filter.extend(paths_str.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()));
+            paths_filter.extend(
+                paths_str
+                    .split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty()),
+            );
         }
         let scoped = !paths_filter.is_empty();
 
         let all_syms: Vec<Symbol> = {
-            let tree = engine.repo
+            let tree = engine
+                .repo
                 .get_tree(&ref_name, "/asd/v1/index/by-qname")
                 .unwrap_or(serde_json::Value::Object(Default::default()));
             tree.as_object()
-                .map(|m| m.values()
-                    .filter_map(|v| serde_json::from_value::<Symbol>(v.clone()).ok())
-                    .collect())
+                .map(|m| {
+                    m.values()
+                        .filter_map(|v| serde_json::from_value::<Symbol>(v.clone()).ok())
+                        .collect()
+                })
                 .unwrap_or_default()
         };
 
         let scored_syms: Vec<&Symbol> = if scoped {
-            all_syms.iter().filter(|s| paths_filter.iter().any(|pat| glob_match(pat, &s.file))).collect()
-        } else { all_syms.iter().collect() };
+            all_syms
+                .iter()
+                .filter(|s| paths_filter.iter().any(|pat| glob_match(pat, &s.file)))
+                .collect()
+        } else {
+            all_syms.iter().collect()
+        };
         let total_symbols = scored_syms.len();
 
         if total_symbols == 0 {
-            let note = if scoped { "no symbols matched the path filter" } else { "no symbols indexed — run `asd index` first" };
+            let note = if scoped {
+                "no symbols matched the path filter"
+            } else {
+                "no symbols indexed — run `asd index` first"
+            };
             return serde_json::to_string(&serde_json::json!({
                 "note": note,
                 "scores": {"truth": 0, "feedback": 0, "change": 0, "uncertainty": 0, "workflow": 0, "overall": 0}
@@ -5183,19 +5854,24 @@ impl AsdMcpServer {
 
         // Bulk load ledger
         let ledger_by_sym: std::collections::HashMap<String, Vec<LedgerEntry>> = {
-            let tree = engine.repo
+            let tree = engine
+                .repo
                 .get_tree(&ref_name, "/asd/v1/ledger")
                 .unwrap_or(serde_json::Value::Object(Default::default()));
-            let mut map: std::collections::HashMap<String, Vec<LedgerEntry>> = std::collections::HashMap::new();
+            let mut map: std::collections::HashMap<String, Vec<LedgerEntry>> =
+                std::collections::HashMap::new();
             if let serde_json::Value::Object(by_symbol) = tree {
                 for (sym_id, per_symbol) in by_symbol {
                     if let serde_json::Value::Object(entries_map) = per_symbol {
-                        let mut entries: Vec<LedgerEntry> = entries_map.values()
+                        let mut entries: Vec<LedgerEntry> = entries_map
+                            .values()
                             .filter_map(|v| serde_json::from_value::<LedgerEntry>(v.clone()).ok())
                             .collect();
                         entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-                        let superseded: std::collections::HashSet<String> = entries.iter()
-                            .flat_map(|e| e.supersedes.iter().cloned()).collect();
+                        let superseded: std::collections::HashSet<String> = entries
+                            .iter()
+                            .flat_map(|e| e.supersedes.iter().cloned())
+                            .collect();
                         entries.retain(|e| !superseded.contains(&e.entry_id));
                         map.insert(sym_id, entries);
                     }
@@ -5216,12 +5892,23 @@ impl AsdMcpServer {
         let mut ctx_tagged_entries = 0usize;
 
         for sym in &scored_syms {
-            let has_verified = if let Ok(Some(decl)) = effect_store.get_effects(&ref_name, &sym.symbol_id) {
-                decl.verification.as_ref().map(|v| matches!(v.status, VerificationStatus::Ok)).unwrap_or(false)
-            } else { false };
-            if has_verified { verified_count += 1; }
+            let has_verified =
+                if let Ok(Some(decl)) = effect_store.get_effects(&ref_name, &sym.symbol_id) {
+                    decl.verification
+                        .as_ref()
+                        .map(|v| matches!(v.status, VerificationStatus::Ok))
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+            if has_verified {
+                verified_count += 1;
+            }
 
-            let entries = ledger_by_sym.get(&sym.symbol_id).cloned().unwrap_or_default();
+            let entries = ledger_by_sym
+                .get(&sym.symbol_id)
+                .cloned()
+                .unwrap_or_default();
             total_ledger_entries += entries.len();
 
             let mut sym_owned = false;
@@ -5240,9 +5927,15 @@ impl AsdMcpServer {
                     ctx_tagged_entries += 1;
                 }
             }
-            if sym_owned { owned_count += 1; }
-            if sym_inv { has_invariant_count += 1; }
-            if sym_vs { has_validation_count += 1; }
+            if sym_owned {
+                owned_count += 1;
+            }
+            if sym_inv {
+                has_invariant_count += 1;
+            }
+            if sym_vs {
+                has_validation_count += 1;
+            }
 
             if need_drill {
                 let include = match drill.as_str() {
@@ -5267,24 +5960,46 @@ impl AsdMcpServer {
             }
         }
 
-        let feedback_count = feedback_store.list_all(&ref_name).map(|v| v.len()).unwrap_or(0);
+        let feedback_count = feedback_store
+            .list_all(&ref_name)
+            .map(|v| v.len())
+            .unwrap_or(0);
 
         // Compute scores
-        let truth = if total_symbols == 0 { 0.0 } else {
-            ((verified_count as f64 / total_symbols as f64 + owned_count as f64 / total_symbols as f64) / 2.0 * 100.0).min(100.0)
+        let truth = if total_symbols == 0 {
+            0.0
+        } else {
+            ((verified_count as f64 / total_symbols as f64
+                + owned_count as f64 / total_symbols as f64)
+                / 2.0
+                * 100.0)
+                .min(100.0)
         };
         let feedback_score = (feedback_count as f64 / 50.0 * 100.0).min(100.0);
-        let change = if total_symbols == 0 { 0.0 } else {
-            ((has_invariant_count as f64 / total_symbols as f64 + has_validation_count as f64 / total_symbols as f64) / 2.0 * 100.0).min(100.0)
+        let change = if total_symbols == 0 {
+            0.0
+        } else {
+            ((has_invariant_count as f64 / total_symbols as f64
+                + has_validation_count as f64 / total_symbols as f64)
+                / 2.0
+                * 100.0)
+                .min(100.0)
         };
         let uncertainty = {
-            let effect_rate = if total_symbols == 0 { 0.0 } else { verified_count as f64 / total_symbols as f64 };
+            let effect_rate = if total_symbols == 0 {
+                0.0
+            } else {
+                verified_count as f64 / total_symbols as f64
+            };
             let volume_score = (total_symbols as f64 / 500.0).min(1.0);
             ((effect_rate + volume_score) / 2.0 * 100.0).min(100.0)
         };
         let workflow = {
-            let density = (total_ledger_entries as f64 / total_symbols.max(1) as f64 / 2.0).min(1.0);
-            let ctx_adoption = if total_ledger_entries == 0 { 0.0 } else {
+            let density =
+                (total_ledger_entries as f64 / total_symbols.max(1) as f64 / 2.0).min(1.0);
+            let ctx_adoption = if total_ledger_entries == 0 {
+                0.0
+            } else {
                 (ctx_tagged_entries as f64 / total_ledger_entries as f64).min(1.0)
             };
             ((density * 0.6 + ctx_adoption * 0.4) * 100.0).min(100.0)
@@ -5326,13 +6041,16 @@ impl AsdMcpServer {
             let total_gaps = drill_rows.len();
             let shown: Vec<_> = drill_rows.into_iter().take(limit).collect();
             let omitted = total_gaps.saturating_sub(shown.len());
-            out.as_object_mut().unwrap().insert("drill_down".into(), serde_json::json!({
-                "dimension": drill,
-                "total_gaps": total_gaps,
-                "shown": shown.len(),
-                "omitted": omitted,
-                "gap_symbols": shown,
-            }));
+            out.as_object_mut().unwrap().insert(
+                "drill_down".into(),
+                serde_json::json!({
+                    "dimension": drill,
+                    "total_gaps": total_gaps,
+                    "shown": shown.len(),
+                    "omitted": omitted,
+                    "gap_symbols": shown,
+                }),
+            );
         }
 
         serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
@@ -5370,24 +6088,36 @@ impl AsdMcpServer {
 
         let full_body = if let Some(ref td) = p.task_description {
             format!("{body}\n{td}")
-        } else { body };
+        } else {
+            body
+        };
 
         // Changed files
         let diff_out = match Proc::new("git")
-            .args(["diff-tree", "--no-commit-id", "-r", "--name-only", &commit_hash])
+            .args([
+                "diff-tree",
+                "--no-commit-id",
+                "-r",
+                "--name-only",
+                &commit_hash,
+            ])
             .output()
         {
             Ok(o) => o,
             Err(e) => return err_json(&format!("git diff-tree failed: {}", e)),
         };
         let changed_files: Vec<String> = String::from_utf8_lossy(&diff_out.stdout)
-            .lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
 
         if changed_files.is_empty() {
             return serde_json::to_string(&serde_json::json!({
                 "commit": commit_hash, "subject": subject,
                 "note": "no changed files detected", "suggested_entries": []
-            })).unwrap_or_else(|_| "{}".to_string());
+            }))
+            .unwrap_or_else(|_| "{}".to_string());
         }
 
         let engine = self.engine.lock().await;
@@ -5399,7 +6129,10 @@ impl AsdMcpServer {
         let mut touched_symbols: Vec<Symbol> = Vec::new();
         let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         for sym in &all_syms {
-            if changed_files.iter().any(|f| sym.file.ends_with(f.as_str()) || sym.file == *f) {
+            if changed_files
+                .iter()
+                .any(|f| sym.file.ends_with(f.as_str()) || sym.file == *f)
+            {
                 if seen_ids.insert(sym.symbol_id.clone()) {
                     touched_symbols.push(sym.clone());
                 }
@@ -5409,27 +6142,57 @@ impl AsdMcpServer {
 
         // Docs-only path
         let all_docs = !changed_files.is_empty()
-            && changed_files.iter().all(|f| agentstatedeveloper_core::is_doc_file(std::path::Path::new(f)));
+            && changed_files
+                .iter()
+                .all(|f| agentstatedeveloper_core::is_doc_file(std::path::Path::new(f)));
 
         if all_docs && touched_symbols.is_empty() {
-            let candidate_syms: Vec<&Symbol> = all_syms.iter()
+            let candidate_syms: Vec<&Symbol> = all_syms
+                .iter()
                 .filter(|s| !agentstatedeveloper_core::is_doc_file(std::path::Path::new(&s.file)))
                 .collect();
             for doc_file in &changed_files {
                 let stem = std::path::Path::new(doc_file)
-                    .file_stem().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-                let file_terms: Vec<String> = stem.replace(['-', '_', '.'], " ")
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let file_terms: Vec<String> = stem
+                    .replace(['-', '_', '.'], " ")
                     .split_whitespace()
-                    .filter(|w| w.len() >= 3 && !matches!(*w,
-                        "the" | "and" | "for" | "doc" | "docs" | "readme"
-                        | "design" | "notes" | "plan" | "spec" | "guide" | "api"))
+                    .filter(|w| {
+                        w.len() >= 3
+                            && !matches!(
+                                *w,
+                                "the"
+                                    | "and"
+                                    | "for"
+                                    | "doc"
+                                    | "docs"
+                                    | "readme"
+                                    | "design"
+                                    | "notes"
+                                    | "plan"
+                                    | "spec"
+                                    | "guide"
+                                    | "api"
+                            )
+                    })
                     .map(|w| w.to_string())
                     .collect();
-                if file_terms.is_empty() { continue; }
-                let best = candidate_syms.iter().copied()
+                if file_terms.is_empty() {
+                    continue;
+                }
+                let best = candidate_syms
+                    .iter()
+                    .copied()
                     .map(|s| {
-                        let haystack = format!("{} {}", s.qname.to_lowercase(), s.file.to_lowercase());
-                        let ts = file_terms.iter().filter(|t| haystack.contains(t.as_str())).count();
+                        let haystack =
+                            format!("{} {}", s.qname.to_lowercase(), s.file.to_lowercase());
+                        let ts = file_terms
+                            .iter()
+                            .filter(|t| haystack.contains(t.as_str()))
+                            .count();
                         let kb: isize = match kind_str(&s.kind) {
                             "module" | "class" | "struct" | "enum" | "trait" | "type"
                             | "interface" | "protocol" | "namespace" => 2,
@@ -5448,15 +6211,27 @@ impl AsdMcpServer {
         }
 
         // Parse commit body for annotations
-        struct Annotation { kind: LedgerKind, summary: String }
+        struct Annotation {
+            kind: LedgerKind,
+            summary: String,
+        }
         let mut annotations: Vec<Annotation> = Vec::new();
         if !subject.is_empty() {
-            let subject_kind = if all_docs { LedgerKind::Concept } else { LedgerKind::Decision };
-            annotations.push(Annotation { kind: subject_kind, summary: subject.clone() });
+            let subject_kind = if all_docs {
+                LedgerKind::Concept
+            } else {
+                LedgerKind::Decision
+            };
+            annotations.push(Annotation {
+                kind: subject_kind,
+                summary: subject.clone(),
+            });
         }
         for line in full_body.lines() {
             let line = line.trim();
-            if line.is_empty() { continue; }
+            if line.is_empty() {
+                continue;
+            }
             let (kind, text) = if let Some(rest) = line.strip_prefix("invariant:") {
                 (LedgerKind::Invariant, rest.trim())
             } else if let Some(rest) = line.strip_prefix("hazard:") {
@@ -5471,35 +6246,61 @@ impl AsdMcpServer {
                 (LedgerKind::Concept, rest.trim())
             } else if let Some(rest) = line.strip_prefix("decision:") {
                 (LedgerKind::Decision, rest.trim())
-            } else { continue; };
-            if !text.is_empty() { annotations.push(Annotation { kind, summary: text.to_string() }); }
+            } else {
+                continue;
+            };
+            if !text.is_empty() {
+                annotations.push(Annotation {
+                    kind,
+                    summary: text.to_string(),
+                });
+            }
         }
 
         // CTX provenance tags
         let ctx_plan = p.ctx_plan.clone().unwrap_or_default();
         let ctx_task_id = p.ctx_task.clone().unwrap_or_default();
         let mut ctx_tags: Vec<String> = Vec::new();
-        if !ctx_plan.is_empty() { ctx_tags.push(format!("ctx:plan:{}", ctx_plan)); }
-        if !ctx_task_id.is_empty() { ctx_tags.push(format!("ctx:task:{}", ctx_task_id)); }
-        ctx_tags.push(format!("commit:{}", &commit_hash[..8.min(commit_hash.len())]));
+        if !ctx_plan.is_empty() {
+            ctx_tags.push(format!("ctx:plan:{}", ctx_plan));
+        }
+        if !ctx_task_id.is_empty() {
+            ctx_tags.push(format!("ctx:task:{}", ctx_task_id));
+        }
+        ctx_tags.push(format!(
+            "commit:{}",
+            &commit_hash[..8.min(commit_hash.len())]
+        ));
 
         let author_id = p.author.clone().unwrap_or_else(|| {
-            Proc::new("git").args(["config", "user.name"]).output().ok()
+            Proc::new("git")
+                .args(["config", "user.name"])
+                .output()
+                .ok()
                 .and_then(|o| String::from_utf8(o.stdout).ok())
-                .unwrap_or_default().trim().to_string()
+                .unwrap_or_default()
+                .trim()
+                .to_string()
         });
-        let author = Author { kind: AuthorKind::Human, id: author_id };
+        let author = Author {
+            kind: AuthorKind::Human,
+            id: author_id,
+        };
 
         let mut suggested: Vec<serde_json::Value> = Vec::new();
         let mut written: Vec<serde_json::Value> = Vec::new();
 
         for sym in &touched_symbols {
             for ann in &annotations {
-                let existing = ledger_store.list_entries(&ref_name, &sym.symbol_id).unwrap_or_default();
+                let existing = ledger_store
+                    .list_entries(&ref_name, &sym.symbol_id)
+                    .unwrap_or_default();
                 let already_exists = existing.iter().any(|e| {
                     e.kind == ann.kind && e.summary.to_lowercase() == ann.summary.to_lowercase()
                 });
-                if already_exists { continue; }
+                if already_exists {
+                    continue;
+                }
 
                 let entry_val = serde_json::json!({
                     "symbol": sym.qname,
@@ -5557,23 +6358,32 @@ fn mcp_git_recent_touches(files: &[(String, usize)], git_depth: usize) -> serde_
     sorted.sort_by_key(|(_, d)| *d);
     for (file, _) in &sorted {
         let output = Proc::new("git")
-            .args(["log", "--follow", &format!("-n{git_depth}"),
-                   "--pretty=format:%H\x1f%an\x1f%ad\x1f%s", "--date=short", "--", file])
+            .args([
+                "log",
+                "--follow",
+                &format!("-n{git_depth}"),
+                "--pretty=format:%H\x1f%an\x1f%ad\x1f%s",
+                "--date=short",
+                "--",
+                file,
+            ])
             .output();
         let commits: Vec<serde_json::Value> = match output {
-            Ok(out) if out.status.success() => {
-                String::from_utf8_lossy(&out.stdout).lines()
-                    .filter(|l| !l.is_empty())
-                    .filter_map(|line| {
-                        let p: Vec<&str> = line.splitn(4, '\x1f').collect();
-                        if p.len() == 4 {
-                            Some(serde_json::json!({
-                                "sha": &p[0][..8.min(p[0].len())],
-                                "author": p[1], "date": p[2], "message": p[3],
-                            }))
-                        } else { None }
-                    }).collect()
-            }
+            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .filter_map(|line| {
+                    let p: Vec<&str> = line.splitn(4, '\x1f').collect();
+                    if p.len() == 4 {
+                        Some(serde_json::json!({
+                            "sha": &p[0][..8.min(p[0].len())],
+                            "author": p[1], "date": p[2], "message": p[3],
+                        }))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
             _ => vec![],
         };
         if !commits.is_empty() {
@@ -5587,8 +6397,6 @@ fn err_json(msg: &str) -> String {
     serde_json::to_string(&serde_json::json!({ "error": msg }))
         .unwrap_or_else(|_| "{\"error\":\"unknown\"}".to_string())
 }
-
-
 
 fn parse_ledger_kind(s: &str) -> Result<LedgerKind, String> {
     match s.to_lowercase().as_str() {
@@ -5627,7 +6435,10 @@ fn resolve_symbols_by_ids(
     ids: &[String],
 ) -> agentstatedeveloper_core::Result<Vec<agentstatedeveloper_core::Symbol>> {
     let ref_name = &engine.ref_name;
-    let prefix = format!("{}/index/by-qname", agentstatedeveloper_core::ASD_PATH_PREFIX);
+    let prefix = format!(
+        "{}/index/by-qname",
+        agentstatedeveloper_core::ASD_PATH_PREFIX
+    );
     let tree = match engine.repo.get_tree(ref_name, &prefix) {
         Ok(t) => t,
         Err(_) => return Ok(Vec::new()),
@@ -5692,7 +6503,10 @@ fn rg_scan(
             .and_then(|p| p.get("text"))
             .and_then(|t| t.as_str())
             .unwrap_or("");
-        let line_no = data.get("line_number").and_then(|n| n.as_u64()).unwrap_or(0);
+        let line_no = data
+            .get("line_number")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0);
         let text = data
             .get("lines")
             .and_then(|l| l.get("text"))
@@ -5835,4 +6649,3 @@ mod tool_name_regression {
         }
     }
 }
-

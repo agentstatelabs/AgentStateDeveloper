@@ -11,10 +11,10 @@
 use std::path::PathBuf;
 
 use agentstatedeveloper_core::{
-    candidates::{apply_constraint_penalties, apply_task_bias},
-    recipes::{classify_test_migration, ActionKind},
     AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, IndexStore, LedgerEntry, LedgerKind,
     LedgerStore, Position, Symbol, SymbolKind,
+    candidates::{apply_constraint_penalties, apply_task_bias},
+    recipes::{ActionKind, classify_test_migration},
 };
 
 fn fresh_engine() -> (tempfile::TempDir, PathBuf, Engine) {
@@ -56,7 +56,10 @@ fn append_role_entry(
         sym_id,
         kind,
         "integration-seed",
-        Author { kind: AuthorKind::Agent, id: "test".into() },
+        Author {
+            kind: AuthorKind::Agent,
+            id: "test".into(),
+        },
     );
     entry.role = role.map(str::to_string);
     entry.body = body.map(str::to_string);
@@ -76,7 +79,13 @@ fn stale_api_constraint_actually_demotes_in_real_engine() {
     let legacy_id = put_sym(&engine, "app.legacy.api", "src/legacy.py");
     let _modern_id = put_sym(&engine, "app.modern.api", "src/modern.py");
 
-    append_role_entry(&engine, &legacy_id, LedgerKind::Constraint, Some("stale-api"), None);
+    append_role_entry(
+        &engine,
+        &legacy_id,
+        LedgerKind::Constraint,
+        Some("stale-api"),
+        None,
+    );
 
     let index = AsgIndexStore::from_engine(&engine);
     let mut scored = vec![
@@ -85,7 +94,10 @@ fn stale_api_constraint_actually_demotes_in_real_engine() {
     ];
     let suppressed = apply_constraint_penalties(&engine, &index, &mut scored);
 
-    assert_eq!(suppressed, 1, "stale-api Constraint must demote exactly one symbol");
+    assert_eq!(
+        suppressed, 1,
+        "stale-api Constraint must demote exactly one symbol"
+    );
     let legacy = scored.iter().find(|(_, q)| q == "app.legacy.api").unwrap();
     let modern = scored.iter().find(|(_, q)| q == "app.modern.api").unwrap();
     assert_eq!(legacy.0, f64::NEG_INFINITY);
@@ -121,7 +133,11 @@ fn scoped_constraint_only_demotes_in_scope_files_end_to_end() {
 
     let legacy = scored.iter().find(|(_, q)| q == "app.legacy.api").unwrap();
     let modern = scored.iter().find(|(_, q)| q == "app.modern.api").unwrap();
-    assert_eq!(legacy.0, f64::NEG_INFINITY, "in-scope symbol must be suppressed");
+    assert_eq!(
+        legacy.0,
+        f64::NEG_INFINITY,
+        "in-scope symbol must be suppressed"
+    );
     assert_eq!(modern.0, 10.0, "out-of-scope symbol must be untouched");
 }
 
@@ -138,7 +154,13 @@ fn classify_test_migration_recipe_routes_by_ledger_evidence() {
     append_role_entry(&engine, &covered_id, LedgerKind::Mapping, None, None);
 
     let stale_id = put_sym(&engine, "pkg.tests.stale", "tests/stale_test.py");
-    append_role_entry(&engine, &stale_id, LedgerKind::Constraint, Some("stale-api"), None);
+    append_role_entry(
+        &engine,
+        &stale_id,
+        LedgerKind::Constraint,
+        Some("stale-api"),
+        None,
+    );
 
     let _bare_id = put_sym(&engine, "pkg.tests.bare", "tests/bare_test.py");
 
@@ -155,9 +177,18 @@ fn classify_test_migration_recipe_routes_by_ledger_evidence() {
     );
 
     assert_eq!(recipe.intent, "classify-test-migration");
-    assert_eq!(recipe.actions.len(), 3, "all three test symbols should land in the plan");
+    assert_eq!(
+        recipe.actions.len(),
+        3,
+        "all three test symbols should land in the plan"
+    );
     let action_for = |qn: &str| {
-        recipe.actions.iter().find(|a| a.qname == qn).expect("action for qname").kind
+        recipe
+            .actions
+            .iter()
+            .find(|a| a.qname == qn)
+            .expect("action for qname")
+            .kind
     };
     assert_eq!(action_for("pkg.tests.covered"), ActionKind::KeepAsCovered);
     assert_eq!(action_for("pkg.tests.stale"), ActionKind::Delete);
@@ -172,7 +203,11 @@ fn classify_test_migration_recipe_routes_by_ledger_evidence() {
 #[test]
 fn task_bias_boosts_in_scope_candidates_end_to_end() {
     let (_tmp, _db, engine) = fresh_engine();
-    put_sym(&engine, "app.audio.engine", "Packages/AudioEngine/src/lib.py");
+    put_sym(
+        &engine,
+        "app.audio.engine",
+        "Packages/AudioEngine/src/lib.py",
+    );
     put_sym(&engine, "app.ui.button", "Packages/UI/src/button.py");
 
     let index = AsgIndexStore::from_engine(&engine);
@@ -189,7 +224,10 @@ fn task_bias_boosts_in_scope_candidates_end_to_end() {
     );
 
     assert_eq!(n, 1);
-    let audio = scored.iter().find(|(_, q)| q == "app.audio.engine").unwrap();
+    let audio = scored
+        .iter()
+        .find(|(_, q)| q == "app.audio.engine")
+        .unwrap();
     let ui = scored.iter().find(|(_, q)| q == "app.ui.button").unwrap();
     assert_eq!(audio.0, 6.0, "in-scope audio engine should be boosted +1");
     assert_eq!(ui.0, 5.0, "out-of-scope UI symbol should be unchanged");
@@ -217,7 +255,9 @@ fn conclusions_export_import_round_trips_through_real_engine() {
     let out_dir = tmp1.path().join("conclusions");
     let exports = export_all(&engine1, &out_dir).expect("export");
     assert!(
-        exports.iter().any(|(stem, n, _)| *stem == "mappings" && *n == 1),
+        exports
+            .iter()
+            .any(|(stem, n, _)| *stem == "mappings" && *n == 1),
         "expected exactly one mapping in exports; got {exports:?}"
     );
 

@@ -30,13 +30,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::Utc;
 use agentstategraph::CommitOptions;
 use agentstategraph_core::IntentCategory;
+use chrono::Utc;
 use serde_json::Value;
 
 use crate::adapter::{CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols};
 use crate::audit::{AuditEvent, AuditSink, event_types};
+use crate::doc_adapters::{adapt_document, is_doc_file};
 use crate::error::{AsdError, Result};
 use crate::ledger::detect_orphaned_entries;
 use crate::paths;
@@ -44,7 +45,6 @@ use crate::schema::{
     EffectCategory, EffectDecl, Position, Symbol, TransitiveEffect, Verification,
     VerificationSource, VerificationStatus,
 };
-use crate::doc_adapters::{adapt_document, is_doc_file};
 use crate::search_fts::{SearchDocsDb, SearchFtsDb};
 use crate::symbol::{canonical_symbol_id, symbol_fingerprint};
 
@@ -138,9 +138,10 @@ pub fn run_index(
             .ok()
             .and_then(|v| v.as_object().cloned())
             .unwrap_or_default();
-        existing.into_iter().filter_map(|(lang, subtree)| {
-            subtree.as_object().cloned().map(|m| (lang, m))
-        }).collect()
+        existing
+            .into_iter()
+            .filter_map(|(lang, subtree)| subtree.as_object().cloned().map(|m| (lang, m)))
+            .collect()
     };
 
     let mut symbol_count = 0usize;
@@ -157,7 +158,8 @@ pub fn run_index(
     let mut qname_to_sym_id: HashMap<String, String> = by_qname
         .iter()
         .filter_map(|(qname, sym_val)| {
-            sym_val.get("symbol_id")
+            sym_val
+                .get("symbol_id")
                 .and_then(|v| v.as_str())
                 .map(|id| (qname.clone(), id.to_string()))
         })
@@ -194,14 +196,19 @@ pub fn run_index(
                 language: adapter.language().to_string(),
                 kind: p.kind,
                 file: file_str.clone(),
-                start: Position { line: p.start_line, col: p.start_col },
-                end: Position { line: p.end_line, col: p.end_col },
+                start: Position {
+                    line: p.start_line,
+                    col: p.start_col,
+                },
+                end: Position {
+                    line: p.end_line,
+                    col: p.end_col,
+                },
                 signature: p.signature.clone(),
                 doc: p.doc.clone(),
             };
 
-            let sym_val = serde_json::to_value(&sym)
-                .map_err(|e| AsdError::Other(e.to_string()))?;
+            let sym_val = serde_json::to_value(&sym).map_err(|e| AsdError::Other(e.to_string()))?;
 
             // Accumulate into in-memory maps — no repo writes yet.
             // Detect collisions: same qname parsed from two different files.
@@ -241,11 +248,7 @@ pub fn run_index(
                 .map_err(|e| AsdError::Other(e.to_string()))?,
             );
 
-            let code_key = format!(
-                "{}/{}",
-                paths::clean(&file_str),
-                symbol_fp
-            );
+            let code_key = format!("{}/{}", paths::clean(&file_str), symbol_fp);
             by_code
                 .entry(sym.language.clone())
                 .or_default()
@@ -256,7 +259,12 @@ pub fn run_index(
             indexed_symbols.push(sym);
         }
 
-        file_ctxs.push(FileCtx { file_str, source, parsed, adapter: Arc::clone(adapter) });
+        file_ctxs.push(FileCtx {
+            file_str,
+            source,
+            parsed,
+            adapter: Arc::clone(adapter),
+        });
     }
 
     let unique_symbol_count = by_qname.len();
@@ -272,12 +280,18 @@ pub fn run_index(
             eprintln!("    cross-file collision: {qname:?}  {f1}  ↔  {f2}");
         }
         if collision_log.len() > 5 {
-            eprintln!("    … and {} more cross-file collisions", collision_log.len() - 5);
+            eprintln!(
+                "    … and {} more cross-file collisions",
+                collision_log.len() - 5
+            );
         }
     }
 
     if let Some(f) = on_phase {
-        f(&format!("  {} files parsed — committing symbols + effects…", symbol_count));
+        f(&format!(
+            "  {} files parsed — committing symbols + effects…",
+            symbol_count
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -340,7 +354,11 @@ pub fn run_index(
     let opts1 = CommitOptions::new(
         agent_id,
         IntentCategory::Checkpoint,
-        format!("asd index: {} symbols across {} files", unique_symbol_count, files.len()),
+        format!(
+            "asd index: {} symbols across {} files",
+            unique_symbol_count,
+            files.len()
+        ),
     );
     repo.commit_speculation(spec1, opts1)
         .map_err(|e| AsdError::Other(e.to_string()))?;
@@ -356,16 +374,20 @@ pub fn run_index(
     // by_qname slot).
     let all_symbol_ids: Vec<String> = {
         let mut seen: HashSet<String> = HashSet::new();
-        qname_to_sym_id.values().filter(|id| seen.insert((*id).clone())).cloned().collect()
+        qname_to_sym_id
+            .values()
+            .filter(|id| seen.insert((*id).clone()))
+            .cloned()
+            .collect()
     };
 
     if let Some(f) = on_phase {
         f("  building call graph…");
     }
     for ctx in &file_ctxs {
-        let edges = ctx.adapter.extract_call_edges(
-            &ctx.file_str, &ctx.source, &ctx.parsed, &workspace,
-        );
+        let edges =
+            ctx.adapter
+                .extract_call_edges(&ctx.file_str, &ctx.source, &ctx.parsed, &workspace);
         all_edges.extend(edges);
     }
 
@@ -375,12 +397,20 @@ pub fn run_index(
     let mut cross_module_edges = 0usize;
 
     for edge in &all_edges {
-        let Some(caller_sym) = qname_to_sym_id.get(&edge.caller_qname) else { continue; };
-        let Some(callee_sym) = qname_to_sym_id.get(&edge.callee_qname) else { continue; };
+        let Some(caller_sym) = qname_to_sym_id.get(&edge.caller_qname) else {
+            continue;
+        };
+        let Some(callee_sym) = qname_to_sym_id.get(&edge.callee_qname) else {
+            continue;
+        };
         let cs = callees_of.entry(caller_sym.clone()).or_default();
-        if !cs.contains(callee_sym) { cs.push(callee_sym.clone()); }
+        if !cs.contains(callee_sym) {
+            cs.push(callee_sym.clone());
+        }
         let rs = callers_of.entry(callee_sym.clone()).or_default();
-        if !rs.contains(caller_sym) { rs.push(caller_sym.clone()); }
+        if !rs.contains(caller_sym) {
+            rs.push(caller_sym.clone());
+        }
         resolved_edge_count += 1;
         if !same_module(&edge.caller_qname, &edge.callee_qname) {
             cross_module_edges += 1;
@@ -388,8 +418,12 @@ pub fn run_index(
     }
     let intra_module_edges = resolved_edge_count.saturating_sub(cross_module_edges);
 
-    for v in callees_of.values_mut() { v.sort(); }
-    for v in callers_of.values_mut() { v.sort(); }
+    for v in callees_of.values_mut() {
+        v.sort();
+    }
+    for v in callers_of.values_mut() {
+        v.sort();
+    }
 
     // Assemble complete callees / callers subtrees in memory.
     let callees_tree: serde_json::Map<String, Value> = callees_of
@@ -424,15 +458,13 @@ pub fn run_index(
     // Transitive effect propagation — fully in-memory, then one bulk write.
     // -----------------------------------------------------------------------
     if let Some(f) = on_phase {
-        f(&format!("  propagating transitive effects ({} edges)…", resolved_edge_count));
+        f(&format!(
+            "  propagating transitive effects ({} edges)…",
+            resolved_edge_count
+        ));
     }
-    let transitive_updates = propagate_transitive_batched(
-        repo,
-        ref_name,
-        &all_symbol_ids,
-        &callees_of,
-        agent_id,
-    )?;
+    let transitive_updates =
+        propagate_transitive_batched(repo, ref_name, &all_symbol_ids, &callees_of, agent_id)?;
 
     let orphaned_tagged = detect_orphaned_entries(repo, ref_name, agent_id)?;
 
@@ -483,10 +515,18 @@ pub fn run_index(
                                         texts.push(entry.summary.to_lowercase());
                                     }
                                     match entry.kind {
-                                        LedgerKind::Ownership => { flags.insert("ownership"); }
-                                        LedgerKind::Invariant  => { flags.insert("invariant"); }
-                                        LedgerKind::Hazard     => { flags.insert("hazard"); }
-                                        LedgerKind::Decision   => { flags.insert("decision"); }
+                                        LedgerKind::Ownership => {
+                                            flags.insert("ownership");
+                                        }
+                                        LedgerKind::Invariant => {
+                                            flags.insert("invariant");
+                                        }
+                                        LedgerKind::Hazard => {
+                                            flags.insert("hazard");
+                                        }
+                                        LedgerKind::Decision => {
+                                            flags.insert("decision");
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -494,7 +534,10 @@ pub fn run_index(
                             if !texts.is_empty() || !flags.is_empty() {
                                 map.insert(
                                     sym_id,
-                                    (texts.join(" "), flags.into_iter().collect::<Vec<_>>().join(",")),
+                                    (
+                                        texts.join(" "),
+                                        flags.into_iter().collect::<Vec<_>>().join(","),
+                                    ),
                                 );
                             }
                         }
@@ -513,7 +556,8 @@ pub fn run_index(
                 for (i, sym) in indexed_symbols.iter().enumerate() {
                     seen.insert(sym.qname.as_str(), i);
                 }
-                let mut deduped: Vec<&Symbol> = seen.values().map(|&i| &indexed_symbols[i]).collect();
+                let mut deduped: Vec<&Symbol> =
+                    seen.values().map(|&i| &indexed_symbols[i]).collect();
                 deduped.sort_by(|a, b| a.qname.cmp(&b.qname));
                 if let Err(e) = fts.rebuild_refs(&deduped, &ledger_data) {
                     eprintln!("asd: FTS rebuild warning: {e}");
@@ -597,18 +641,37 @@ pub fn run_index(
 
 /// Walk a directory recursively, collect doc chunks from all recognised document files.
 /// Skips hidden dirs, .git, target/, node_modules/, and binary-looking files.
-fn collect_doc_files_recursive(root: &Path, out: &mut Vec<crate::search_fts::SearchDoc>, file_count: &mut usize) {
-    let skip_dirs = ["target", "node_modules", ".git", ".build", "DerivedData", "dist", ".cache"];
+fn collect_doc_files_recursive(
+    root: &Path,
+    out: &mut Vec<crate::search_fts::SearchDoc>,
+    file_count: &mut usize,
+) {
+    let skip_dirs = [
+        "target",
+        "node_modules",
+        ".git",
+        ".build",
+        "DerivedData",
+        "dist",
+        ".cache",
+    ];
     let dir = match std::fs::read_dir(root) {
         Ok(d) => d,
         Err(_) => return,
     };
     for entry in dir.filter_map(|e| e.ok()) {
         let path = entry.path();
-        let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
-        if name.starts_with('.') { continue; }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if name.starts_with('.') {
+            continue;
+        }
         if path.is_dir() {
-            if skip_dirs.contains(&name.as_str()) { continue; }
+            if skip_dirs.contains(&name.as_str()) {
+                continue;
+            }
             collect_doc_files_recursive(&path, out, file_count);
         } else if is_doc_file(&path) {
             *file_count += 1;
@@ -663,7 +726,9 @@ fn propagate_transitive_batched(
     let mut effects_cache: HashMap<String, EffectDecl> = effects_tree
         .iter()
         .filter_map(|(k, v)| {
-            serde_json::from_value::<EffectDecl>(v.clone()).ok().map(|d| (k.clone(), d))
+            serde_json::from_value::<EffectDecl>(v.clone())
+                .ok()
+                .map(|d| (k.clone(), d))
         })
         .collect();
 
@@ -675,7 +740,9 @@ fn propagate_transitive_batched(
         let computed =
             compute_transitive_mem(callees_of, &effects_cache, sym, &mut memo, &mut stack);
 
-        let Some(decl) = effects_cache.get(sym) else { continue; };
+        let Some(decl) = effects_cache.get(sym) else {
+            continue;
+        };
 
         let declared_cats: HashSet<EffectCategory> =
             decl.declared.iter().map(|e| e.effect.clone()).collect();
@@ -691,7 +758,10 @@ fn propagate_transitive_batched(
             .collect();
 
         new_transitive.sort_by(|a, b| {
-            a.effect.as_str().cmp(b.effect.as_str()).then_with(|| a.via.cmp(&b.via))
+            a.effect
+                .as_str()
+                .cmp(b.effect.as_str())
+                .then_with(|| a.via.cmp(&b.via))
         });
 
         if !transitive_eq(&decl.transitive, &new_transitive) {
@@ -713,9 +783,7 @@ fn propagate_transitive_batched(
 
     let effects_map: serde_json::Map<String, Value> = effects_cache
         .iter()
-        .filter_map(|(k, v)| {
-            serde_json::to_value(v).ok().map(|val| (k.clone(), val))
-        })
+        .filter_map(|(k, v)| serde_json::to_value(v).ok().map(|val| (k.clone(), val)))
         .collect();
 
     let spec = repo
@@ -757,7 +825,9 @@ fn compute_transitive_mem(
     for callee in callees {
         if let Some(decl) = effects.get(callee) {
             for e in &decl.declared {
-                acc.entry(e.effect.clone()).or_default().insert(callee.clone());
+                acc.entry(e.effect.clone())
+                    .or_default()
+                    .insert(callee.clone());
             }
         }
         let callee_trans = compute_transitive_mem(callees_of, effects, callee, memo, stack);
@@ -772,7 +842,9 @@ fn compute_transitive_mem(
 }
 
 fn transitive_eq(a: &[TransitiveEffect], b: &[TransitiveEffect]) -> bool {
-    if a.len() != b.len() { return false; }
+    if a.len() != b.len() {
+        return false;
+    }
     let to_key = |t: &TransitiveEffect| {
         let mut via = t.via.clone();
         via.sort();
@@ -805,11 +877,23 @@ pub fn collect_source_files(
         } else {
             skipped.push(root.to_path_buf());
         }
-        return Ok(CollectResult { recognized, skipped });
+        return Ok(CollectResult {
+            recognized,
+            skipped,
+        });
     }
     let extra_excludes = load_asdignore(root);
-    walk(root, adapters, &mut recognized, &mut skipped, &extra_excludes)?;
-    Ok(CollectResult { recognized, skipped })
+    walk(
+        root,
+        adapters,
+        &mut recognized,
+        &mut skipped,
+        &extra_excludes,
+    )?;
+    Ok(CollectResult {
+        recognized,
+        skipped,
+    })
 }
 
 /// Read `.asdignore` from `root` and return non-empty, non-comment lines.
@@ -828,7 +912,10 @@ fn adapter_for_path(
     adapters: &[Arc<dyn LanguageAdapter>],
 ) -> Option<Arc<dyn LanguageAdapter>> {
     let ext = p.extension().and_then(|s| s.to_str())?;
-    adapters.iter().find(|a| a.file_extensions().contains(&ext)).cloned()
+    adapters
+        .iter()
+        .find(|a| a.file_extensions().contains(&ext))
+        .cloned()
 }
 
 /// Built-in directory names that are always excluded from indexing.
@@ -866,7 +953,9 @@ fn walk(
     for entry in rd {
         let entry = entry.map_err(|e| AsdError::Other(e.to_string()))?;
         let path = entry.path();
-        let ft = entry.file_type().map_err(|e| AsdError::Other(e.to_string()))?;
+        let ft = entry
+            .file_type()
+            .map_err(|e| AsdError::Other(e.to_string()))?;
         if ft.is_dir() {
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
             if is_builtin_excluded(name) {

@@ -7,7 +7,7 @@
 //! duplication-memory lesson.
 
 use crate::schema::Symbol;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Plan D t-007: whether the spawned process should default to brief
 /// output. Reads `ASD_FORMAT=brief` (case-insensitive). Hosts can also
@@ -169,9 +169,23 @@ mod tests {
         let s = sample_symbol();
         let v = brief_symbol(&s);
         let obj = v.as_object().unwrap();
-        assert_eq!(obj.get("qname").and_then(Value::as_str), Some("store.pricing.get_rate"));
-        assert_eq!(obj.get("file").and_then(Value::as_str), Some("store/pricing.py:14"));
-        for noise in ["symbol_id", "symbol_fp", "language", "kind", "col", "end", "start"] {
+        assert_eq!(
+            obj.get("qname").and_then(Value::as_str),
+            Some("store.pricing.get_rate")
+        );
+        assert_eq!(
+            obj.get("file").and_then(Value::as_str),
+            Some("store/pricing.py:14")
+        );
+        for noise in [
+            "symbol_id",
+            "symbol_fp",
+            "language",
+            "kind",
+            "col",
+            "end",
+            "start",
+        ] {
             assert!(obj.get(noise).is_none(), "brief symbol must drop `{noise}`");
         }
     }
@@ -231,16 +245,26 @@ mod tests {
     #[test]
     fn brief_from_env_reads_env_var() {
         let prev = std::env::var("ASD_FORMAT").ok();
-        unsafe { std::env::set_var("ASD_FORMAT", "brief"); }
+        unsafe {
+            std::env::set_var("ASD_FORMAT", "brief");
+        }
         assert!(brief_from_env());
-        unsafe { std::env::set_var("ASD_FORMAT", "BRIEF"); }
+        unsafe {
+            std::env::set_var("ASD_FORMAT", "BRIEF");
+        }
         assert!(brief_from_env());
-        unsafe { std::env::set_var("ASD_FORMAT", "json"); }
+        unsafe {
+            std::env::set_var("ASD_FORMAT", "json");
+        }
         assert!(!brief_from_env());
-        unsafe { std::env::remove_var("ASD_FORMAT"); }
+        unsafe {
+            std::env::remove_var("ASD_FORMAT");
+        }
         assert!(!brief_from_env());
         if let Some(v) = prev {
-            unsafe { std::env::set_var("ASD_FORMAT", v); }
+            unsafe {
+                std::env::set_var("ASD_FORMAT", v);
+            }
         }
     }
 }

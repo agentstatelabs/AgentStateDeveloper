@@ -55,9 +55,7 @@ pub struct EvaluateArgs {
 
 pub fn run(cfg: &Config, cmd: PolicyCmd) -> Result<()> {
     let path = cfg.policy_path.as_ref().ok_or_else(|| {
-        anyhow!(
-            "no policy file configured — pass --policy <path> or set ASD_POLICY"
-        )
+        anyhow!("no policy file configured — pass --policy <path> or set ASD_POLICY")
     })?;
 
     match cmd {
@@ -68,16 +66,12 @@ pub fn run(cfg: &Config, cmd: PolicyCmd) -> Result<()> {
 }
 
 fn list(path: &std::path::Path, args: ListArgs) -> Result<()> {
-    let file = PolicyFile::load(path)
-        .with_context(|| format!("load policy file {}", path.display()))?;
+    let file =
+        PolicyFile::load(path).with_context(|| format!("load policy file {}", path.display()))?;
     let filtered: Vec<_> = file
         .policies
         .iter()
-        .filter(|r| {
-            args.prefix
-                .as_deref()
-                .is_none_or(|p| r.path.starts_with(p))
-        })
+        .filter(|r| args.prefix.as_deref().is_none_or(|p| r.path.starts_with(p)))
         .collect();
 
     let out = json!({

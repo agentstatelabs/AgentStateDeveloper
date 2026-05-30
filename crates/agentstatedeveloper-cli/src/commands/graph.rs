@@ -86,10 +86,7 @@ pub fn run_callers(cfg: &Config, args: CallersArgs) -> Result<()> {
     );
     t.phase("traverse");
 
-    let qid = crate::commands::brief::query_id(
-        "callers",
-        &[&args.qname, &args.depth.to_string()],
-    );
+    let qid = crate::commands::brief::query_id("callers", &[&args.qname, &args.depth.to_string()]);
     if cfg.brief {
         let lines = crate::commands::brief::brief_call_list(&results);
         println!(
@@ -156,10 +153,7 @@ pub fn run_callees(cfg: &Config, args: CalleesArgs) -> Result<()> {
     );
     t.phase("traverse");
 
-    let qid = crate::commands::brief::query_id(
-        "callees",
-        &[&args.qname, &args.depth.to_string()],
-    );
+    let qid = crate::commands::brief::query_id("callees", &[&args.qname, &args.depth.to_string()]);
     if cfg.brief {
         let lines = crate::commands::brief::brief_call_list(&results);
         println!(
@@ -196,7 +190,11 @@ pub(crate) struct AsdTimer {
 impl AsdTimer {
     pub(crate) fn new(enabled: bool) -> Self {
         let now = Instant::now();
-        Self { start: now, last: now, enabled }
+        Self {
+            start: now,
+            last: now,
+            enabled,
+        }
     }
     pub(crate) fn phase(&mut self, name: &str) {
         if self.enabled {

@@ -16,8 +16,8 @@ use agentstatedeveloper_core::{
     AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine,
     FeedbackStore, FtsFilters, IndexStore, LedgerKind, LedgerStore, apply_feedback_adjustments,
     classify_layer_sym, derive_cold_hints, estimate_tokens, find_candidates, git_dirty_files,
-    intent_focus, load_layer_overrides, parse_intent, parse_query, propose_test_path, resolve_scope,
-    stale_warning, symbol_tier, trim_for_agent,
+    intent_focus, load_layer_overrides, parse_intent, parse_query, propose_test_path,
+    resolve_scope, stale_warning, symbol_tier, trim_for_agent,
 };
 
 use crate::commands::graph::build_id_map;
@@ -104,7 +104,11 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
 
     let (mut tokens, mut exclusions) = parse_query(&args.query);
     if let Some(ref excl) = args.exclude {
-        for term in excl.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()) {
+        for term in excl
+            .split(',')
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+        {
             exclusions.push(term);
         }
     }
@@ -113,20 +117,31 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
     let auto_ctx_task = std::env::var("CTXONE_TASK").ok().filter(|s| !s.is_empty());
     let ctx_text = args.task_context.clone().or_else(|| {
         let parts: Vec<&str> = [auto_ctx_plan.as_deref(), auto_ctx_task.as_deref()]
-            .iter().filter_map(|x| *x).collect();
-        if parts.is_empty() { None } else { Some(parts.join(" ")) }
+            .iter()
+            .filter_map(|x| *x)
+            .collect();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" "))
+        }
     });
     if let Some(ref ctx) = ctx_text {
         let (ctx_tokens, _) = parse_query(ctx);
         for t in ctx_tokens {
-            if !tokens.contains(&t) { tokens.push(t); }
+            if !tokens.contains(&t) {
+                tokens.push(t);
+            }
         }
     }
     if tokens.is_empty() {
         if args.json {
             println!("{}", json!({"query": args.query, "items": {}}));
         } else {
-            println!("# Pre-edit checklist: {}\n\nNo matching symbols.", args.query);
+            println!(
+                "# Pre-edit checklist: {}\n\nNo matching symbols.",
+                args.query
+            );
         }
         return Ok(());
     }
@@ -136,7 +151,12 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
         paths_filter.extend(resolve_scope(scope, &cfg.db_path));
     }
     if let Some(ref paths) = args.paths {
-        paths_filter.extend(paths.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()));
+        paths_filter.extend(
+            paths
+                .split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty()),
+        );
     }
     let filters = FtsFilters {
         kind: args.kind.as_deref().map(|k| k.to_lowercase()),
@@ -159,8 +179,16 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
 
     // Apply durable feedback adjustments (Useful/Noisy/WrongLayer verdicts).
     let feedback_store = AsgFeedbackStore::from_engine(&engine);
-    let feedback_verdicts = feedback_store.flat_verdicts(&engine.ref_name).unwrap_or_default();
-    apply_feedback_adjustments(&engine, &index_store, &args.query, &mut candidates, &feedback_verdicts);
+    let feedback_verdicts = feedback_store
+        .flat_verdicts(&engine.ref_name)
+        .unwrap_or_default();
+    apply_feedback_adjustments(
+        &engine,
+        &index_store,
+        &args.query,
+        &mut candidates,
+        &feedback_verdicts,
+    );
 
     // --- Files to inspect -------------------------------------------------
     let mut files_to_inspect: Vec<Value> = Vec::new();
@@ -238,12 +266,16 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
         visited.insert(sym.symbol_id.clone());
         queue.push_back((sym.symbol_id.clone(), 0));
         while let Some((sid, depth)) = queue.pop_front() {
-            if depth >= args.test_depth { continue; }
+            if depth >= args.test_depth {
+                continue;
+            }
             let callers = index_store
                 .get_callers(&engine.ref_name, &sid)
                 .unwrap_or_default();
             for caller_id in callers {
-                if visited.contains(&caller_id) { continue; }
+                if visited.contains(&caller_id) {
+                    continue;
+                }
                 visited.insert(caller_id.clone());
                 if let Some(s) = id_map.get(&caller_id) {
                     if symbol_tier(&s.file) == 2 && seen_tests.insert(s.qname.clone()) {
@@ -277,13 +309,17 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
         .filter(|f| dirty.contains(*f))
         .collect();
     let test_gap = test_rows.is_empty();
-    let proposed_test_path = test_gap.then(|| {
-        files_to_inspect.first()
-            .and_then(|v| v.get("file").and_then(Value::as_str))
-            .map(propose_test_path)
-    }).flatten();
+    let proposed_test_path = test_gap
+        .then(|| {
+            files_to_inspect
+                .first()
+                .and_then(|v| v.get("file").and_then(Value::as_str))
+                .map(propose_test_path)
+        })
+        .flatten();
     let suggested_test_coverage: Vec<String> = if test_gap {
-        let mut hints: Vec<String> = invariants.iter()
+        let mut hints: Vec<String> = invariants
+            .iter()
             .filter_map(|inv| inv.get("summary").and_then(Value::as_str))
             .map(|s| s.to_string())
             .collect();
@@ -300,7 +336,9 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
         if invariants.is_empty() {
             if let Some((_, qname)) = candidates.first() {
                 if let Ok(Some(sym)) = index_store.get_symbol_by_qname(&engine.ref_name, qname) {
-                    for h in derive_cold_hints(&sym.qname, sym.signature.as_deref(), sym.doc.as_deref()) {
+                    for h in
+                        derive_cold_hints(&sym.qname, sym.signature.as_deref(), sym.doc.as_deref())
+                    {
                         if !hints.contains(&h) {
                             hints.push(h);
                         }
@@ -316,10 +354,23 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
     // Scenario tests: invariants with constraint language are directly actionable
     // test scenarios and are emitted regardless of test_gap.
     const CONSTRAINT_WORDS: &[&str] = &[
-        "must", "never", "shall", "always", "only", "cannot", "no ", "not ",
-        "require", "ensure", "prevent", "guarantee", "invariant", "forbidden",
+        "must",
+        "never",
+        "shall",
+        "always",
+        "only",
+        "cannot",
+        "no ",
+        "not ",
+        "require",
+        "ensure",
+        "prevent",
+        "guarantee",
+        "invariant",
+        "forbidden",
     ];
-    let scenario_tests: Vec<String> = invariants.iter()
+    let scenario_tests: Vec<String> = invariants
+        .iter()
         .filter_map(|inv| inv.get("summary").and_then(Value::as_str))
         .filter(|s| {
             let sl = s.to_lowercase();
@@ -506,7 +557,9 @@ fn print_markdown(
 
     if !stale_symbols.is_empty() {
         println!("\n## Staleness warning");
-        println!("_The following files are modified since the last index — symbol ranges may be stale:_");
+        println!(
+            "_The following files are modified since the last index — symbol ranges may be stale:_"
+        );
         for f in stale_symbols {
             println!("- `{f}`");
         }
@@ -540,7 +593,10 @@ fn print_markdown(
         for s in task_close_suggestions {
             let kind = s.get("kind").and_then(Value::as_str).unwrap_or("");
             let symbol = s.get("symbol").and_then(Value::as_str).unwrap_or("");
-            let summary = s.get("suggested_summary").and_then(Value::as_str).unwrap_or("");
+            let summary = s
+                .get("suggested_summary")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             println!("- [ ] [{kind}] `{symbol}` — {summary}");
         }
     }

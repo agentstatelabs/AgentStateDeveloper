@@ -10,7 +10,10 @@ fn make_entry(symbol_id: &str, author_id: &str, tags: &[&str]) -> LedgerEntry {
         symbol_id,
         LedgerKind::Hazard,
         "test entry body",
-        Author { kind: AuthorKind::Human, id: author_id.to_string() },
+        Author {
+            kind: AuthorKind::Human,
+            id: author_id.to_string(),
+        },
     );
     for t in tags {
         e.tags.push(t.to_string());
@@ -20,7 +23,9 @@ fn make_entry(symbol_id: &str, author_id: &str, tags: &[&str]) -> LedgerEntry {
 
 fn seed(engine: &Engine, entry: &LedgerEntry) {
     let store = AsgLedgerStore::new(&engine.repo);
-    store.append_entry(&engine.ref_name, entry, "test-agent").expect("append");
+    store
+        .append_entry(&engine.ref_name, entry, "test-agent")
+        .expect("append");
 }
 
 // ---------------------------------------------------------------------------
@@ -35,14 +40,33 @@ fn approve_transitions_entry_to_approved() {
 
     let store = RatifyLedgerStore::new(&engine.repo);
     let outcome = store
-        .approve_entry(&engine.ref_name, &entry.entry_id, "bob", "human", None, "test-agent")
+        .approve_entry(
+            &engine.ref_name,
+            &entry.entry_id,
+            "bob",
+            "human",
+            None,
+            "test-agent",
+        )
         .expect("approve");
 
     assert!(!outcome.already_approved);
     assert!(outcome.entry.tags.iter().any(|t| t == "approved"));
     assert!(!outcome.entry.tags.iter().any(|t| t == "awaiting-approval"));
-    assert!(outcome.entry.tags.iter().any(|t| t.starts_with("approved-by:")));
-    assert!(outcome.entry.tags.iter().any(|t| t.starts_with("approved-at:")));
+    assert!(
+        outcome
+            .entry
+            .tags
+            .iter()
+            .any(|t| t.starts_with("approved-by:"))
+    );
+    assert!(
+        outcome
+            .entry
+            .tags
+            .iter()
+            .any(|t| t.starts_with("approved-at:"))
+    );
 }
 
 #[test]
@@ -80,14 +104,31 @@ fn approve_already_approved_is_idempotent() {
 
     let store = RatifyLedgerStore::new(&engine.repo);
     store
-        .approve_entry(&engine.ref_name, &entry.entry_id, "bob", "human", None, "test-agent")
+        .approve_entry(
+            &engine.ref_name,
+            &entry.entry_id,
+            "bob",
+            "human",
+            None,
+            "test-agent",
+        )
         .expect("first approve");
 
     let outcome = store
-        .approve_entry(&engine.ref_name, &entry.entry_id, "carol", "human", None, "test-agent")
+        .approve_entry(
+            &engine.ref_name,
+            &entry.entry_id,
+            "carol",
+            "human",
+            None,
+            "test-agent",
+        )
         .expect("second approve");
 
-    assert!(outcome.already_approved, "second approve should be idempotent");
+    assert!(
+        outcome.already_approved,
+        "second approve should be idempotent"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +154,14 @@ fn approve_rejected_entry_errors() {
         .expect("reject");
 
     let err = store
-        .approve_entry(&engine.ref_name, &entry.entry_id, "carol", "human", None, "test-agent")
+        .approve_entry(
+            &engine.ref_name,
+            &entry.entry_id,
+            "carol",
+            "human",
+            None,
+            "test-agent",
+        )
         .unwrap_err();
     assert!(err.to_string().contains("rejected"), "err: {err}");
 }
@@ -126,9 +174,19 @@ fn approve_non_awaiting_entry_errors() {
 
     let store = RatifyLedgerStore::new(&engine.repo);
     let err = store
-        .approve_entry(&engine.ref_name, &entry.entry_id, "bob", "human", None, "test-agent")
+        .approve_entry(
+            &engine.ref_name,
+            &entry.entry_id,
+            "bob",
+            "human",
+            None,
+            "test-agent",
+        )
         .unwrap_err();
-    assert!(err.to_string().contains("not awaiting approval"), "err: {err}");
+    assert!(
+        err.to_string().contains("not awaiting approval"),
+        "err: {err}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -138,7 +196,11 @@ fn approve_non_awaiting_entry_errors() {
 #[test]
 fn approve_enforces_approver_tag() {
     let engine = Engine::open_in_memory().expect("engine");
-    let entry = make_entry("sym_foo", "alice", &["awaiting-approval", "approver:security-team"]);
+    let entry = make_entry(
+        "sym_foo",
+        "alice",
+        &["awaiting-approval", "approver:security-team"],
+    );
     seed(&engine, &entry);
 
     let store = RatifyLedgerStore::new(&engine.repo);
@@ -155,15 +217,14 @@ fn approve_enforces_approver_tag() {
         .unwrap_err();
     assert!(err.to_string().contains("does not match"), "err: {err}");
 
-    let ok = store
-        .approve_entry(
-            &engine.ref_name,
-            &entry.entry_id,
-            "sec-lead",
-            "security-team",
-            None,
-            "test-agent",
-        );
+    let ok = store.approve_entry(
+        &engine.ref_name,
+        &entry.entry_id,
+        "sec-lead",
+        "security-team",
+        None,
+        "test-agent",
+    );
     assert!(ok.is_ok(), "security-team member should be allowed: {ok:?}");
 }
 
@@ -192,7 +253,13 @@ fn reject_transitions_entry_to_rejected() {
     assert!(!outcome.already_resolved);
     assert!(outcome.entry.tags.iter().any(|t| t == "rejected"));
     assert!(!outcome.entry.tags.iter().any(|t| t == "awaiting-approval"));
-    assert!(outcome.entry.tags.iter().any(|t| t.starts_with("rejected-by:")));
+    assert!(
+        outcome
+            .entry
+            .tags
+            .iter()
+            .any(|t| t.starts_with("rejected-by:"))
+    );
     let body = outcome.entry.body.expect("body");
     assert!(body.contains("needs more context"), "body: {body}");
 }
@@ -205,10 +272,24 @@ fn reject_already_rejected_is_idempotent() {
 
     let store = RatifyLedgerStore::new(&engine.repo);
     store
-        .reject_entry(&engine.ref_name, &entry.entry_id, "bob", "human", "r1", "test-agent")
+        .reject_entry(
+            &engine.ref_name,
+            &entry.entry_id,
+            "bob",
+            "human",
+            "r1",
+            "test-agent",
+        )
         .expect("first reject");
     let outcome = store
-        .reject_entry(&engine.ref_name, &entry.entry_id, "carol", "human", "r2", "test-agent")
+        .reject_entry(
+            &engine.ref_name,
+            &entry.entry_id,
+            "carol",
+            "human",
+            "r2",
+            "test-agent",
+        )
         .expect("second reject");
     assert!(outcome.already_resolved);
 }
@@ -221,7 +302,14 @@ fn reject_requires_nonempty_reason() {
 
     let store = RatifyLedgerStore::new(&engine.repo);
     let err = store
-        .reject_entry(&engine.ref_name, &entry.entry_id, "bob", "human", "  ", "test-agent")
+        .reject_entry(
+            &engine.ref_name,
+            &entry.entry_id,
+            "bob",
+            "human",
+            "  ",
+            "test-agent",
+        )
         .unwrap_err();
     assert!(err.to_string().contains("non-empty reason"), "err: {err}");
 }
@@ -244,7 +332,13 @@ fn withdraw_transitions_entry_to_withdrawn() {
     assert!(!outcome.already_resolved);
     assert!(outcome.entry.tags.iter().any(|t| t == "withdrawn"));
     assert!(!outcome.entry.tags.iter().any(|t| t == "awaiting-approval"));
-    assert!(outcome.entry.tags.iter().any(|t| t.starts_with("withdrawn-at:")));
+    assert!(
+        outcome
+            .entry
+            .tags
+            .iter()
+            .any(|t| t.starts_with("withdrawn-at:"))
+    );
 }
 
 #[test]
@@ -285,7 +379,14 @@ fn approve_missing_entry_errors() {
     let engine = Engine::open_in_memory().expect("engine");
     let store = RatifyLedgerStore::new(&engine.repo);
     let err = store
-        .approve_entry(&engine.ref_name, "nonexistent-id", "bob", "human", None, "test-agent")
+        .approve_entry(
+            &engine.ref_name,
+            "nonexistent-id",
+            "bob",
+            "human",
+            None,
+            "test-agent",
+        )
         .unwrap_err();
     assert!(err.to_string().contains("not found"), "err: {err}");
 }

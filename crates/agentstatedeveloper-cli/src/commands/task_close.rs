@@ -11,9 +11,9 @@ use serde_json::json;
 
 use agentstatedeveloper_core::{
     AsgIndexStore, AsgLedgerStore, Engine, IndexStore, LedgerKind, LedgerStore, Symbol,
+    WorkflowSummary, append_workflow_session, compute_trust_score, detect_workflow,
     schema::{Author, AuthorKind, LedgerEntry},
-    append_workflow_session, compute_trust_score,
-    detect_workflow, score_evidence_quality, WorkflowSummary,
+    score_evidence_quality,
 };
 
 use crate::config::Config;
@@ -69,24 +69,38 @@ pub fn run(cfg: &Config, args: TaskCloseArgs) -> Result<()> {
     let ledger_store = AsgLedgerStore::from_engine(&engine);
 
     // Resolve CTX plan/task from args or env vars (t-001).
-    let plan_id = args.plan.clone()
+    let plan_id = args
+        .plan
+        .clone()
         .or_else(|| std::env::var("CTXONE_PLAN").ok())
         .unwrap_or_default();
-    let task_id = args.task.clone()
+    let task_id = args
+        .task
+        .clone()
         .or_else(|| std::env::var("CTXONE_TASK").ok())
         .unwrap_or_default();
 
     // Build provenance tags.
     let mut ctx_tags: Vec<String> = Vec::new();
-    if !plan_id.is_empty() { ctx_tags.push(format!("ctx:plan:{}", plan_id)); }
-    if !task_id.is_empty() { ctx_tags.push(format!("ctx:task:{}", task_id)); }
+    if !plan_id.is_empty() {
+        ctx_tags.push(format!("ctx:plan:{}", plan_id));
+    }
+    if !task_id.is_empty() {
+        ctx_tags.push(format!("ctx:task:{}", task_id));
+    }
 
     // Resolve affected symbols.
     let target_symbols: Vec<Symbol> = if let Some(ref sym_list) = args.symbols {
-        sym_list.split(',')
+        sym_list
+            .split(',')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
-            .filter_map(|q| index_store.get_symbol_by_qname(&engine.ref_name, q).ok().flatten())
+            .filter_map(|q| {
+                index_store
+                    .get_symbol_by_qname(&engine.ref_name, q)
+                    .ok()
+                    .flatten()
+            })
             .collect()
     } else {
         // Auto-detect from git HEAD changed files.
@@ -104,14 +118,22 @@ pub fn run(cfg: &Config, args: TaskCloseArgs) -> Result<()> {
             .filter(|l| !l.is_empty())
             .collect();
 
-        let tree = engine.repo
+        let tree = engine
+            .repo
             .get_tree(&engine.ref_name, "/asd/v1/index/by-qname")
             .unwrap_or(serde_json::Value::Object(Default::default()));
-        let mut syms: Vec<Symbol> = tree.as_object()
-            .map(|m| m.values()
-                .filter_map(|v| serde_json::from_value::<Symbol>(v.clone()).ok())
-                .filter(|s| changed.iter().any(|f| s.file.ends_with(f.as_str()) || s.file == *f))
-                .collect())
+        let mut syms: Vec<Symbol> = tree
+            .as_object()
+            .map(|m| {
+                m.values()
+                    .filter_map(|v| serde_json::from_value::<Symbol>(v.clone()).ok())
+                    .filter(|s| {
+                        changed
+                            .iter()
+                            .any(|f| s.file.ends_with(f.as_str()) || s.file == *f)
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         syms.truncate(20);
         syms
@@ -119,26 +141,38 @@ pub fn run(cfg: &Config, args: TaskCloseArgs) -> Result<()> {
 
     if target_symbols.is_empty() {
         eprintln!("asd: no symbols resolved — pass --symbols or ensure HEAD has changed files");
-        println!("{}", json!({"written": [], "ctx": {"plan": plan_id, "task": task_id}}));
+        println!(
+            "{}",
+            json!({"written": [], "ctx": {"plan": plan_id, "task": task_id}})
+        );
         return Ok(());
     }
 
     // Build the proof text, incorporating evidence reference if provided.
-    let proof_base = args.proof.clone().unwrap_or_else(|| "task completed".to_string());
+    let proof_base = args
+        .proof
+        .clone()
+        .unwrap_or_else(|| "task completed".to_string());
     let proof_text = if let Some(ref ev) = args.evidence {
         format!("{} [evidence: {}]", proof_base, ev)
     } else {
         proof_base.clone()
     };
 
-    let author = Author { kind: AuthorKind::Human, id: args.author.clone() };
+    let author = Author {
+        kind: AuthorKind::Human,
+        id: args.author.clone(),
+    };
     let mut written: Vec<serde_json::Value> = Vec::new();
     let closed_at = chrono::Utc::now().to_rfc3339();
 
     for sym in &target_symbols {
         // Write Proof entry.
         let mut proof_entry = LedgerEntry::new(
-            &sym.symbol_id, LedgerKind::Proof, &proof_text, author.clone(),
+            &sym.symbol_id,
+            LedgerKind::Proof,
+            &proof_text,
+            author.clone(),
         );
         proof_entry.tags.extend(ctx_tags.iter().cloned());
         if let Some(ref ev) = args.evidence {
@@ -149,10 +183,15 @@ pub fn run(cfg: &Config, args: TaskCloseArgs) -> Result<()> {
 
         // Write ValidationScenario if --validated.
         if args.validated {
-            let validation_text = args.validation_note.clone()
+            let validation_text = args
+                .validation_note
+                .clone()
                 .unwrap_or_else(|| format!("validated: {}", proof_base));
             let mut vs_entry = LedgerEntry::new(
-                &sym.symbol_id, LedgerKind::ValidationScenario, &validation_text, author.clone(),
+                &sym.symbol_id,
+                LedgerKind::ValidationScenario,
+                &validation_text,
+                author.clone(),
             );
             vs_entry.tags.extend(ctx_tags.iter().cloned());
             ledger_store.append_entry(&engine.ref_name, &vs_entry, &args.author)?;
@@ -161,7 +200,11 @@ pub fn run(cfg: &Config, args: TaskCloseArgs) -> Result<()> {
     }
 
     if !args.quiet {
-        eprintln!("asd: wrote {} ledger entries across {} symbols", written.len(), target_symbols.len());
+        eprintln!(
+            "asd: wrote {} ledger entries across {} symbols",
+            written.len(),
+            target_symbols.len()
+        );
         if !ctx_tags.is_empty() {
             eprintln!("asd: provenance: {}", ctx_tags.join(", "));
         }
@@ -170,16 +213,19 @@ pub fn run(cfg: &Config, args: TaskCloseArgs) -> Result<()> {
     // ── Workflow Integration: evidence quality + recipe detection ──────────
     // Gather all pre-existing ledger entries for touched symbols (exclude the
     // entries we just wrote so they don't inflate the detection signals).
-    let pre_existing: Vec<LedgerEntry> = target_symbols.iter()
+    let pre_existing: Vec<LedgerEntry> = target_symbols
+        .iter()
         .flat_map(|sym| {
-            ledger_store.list_entries(&engine.ref_name, &sym.symbol_id)
+            ledger_store
+                .list_entries(&engine.ref_name, &sym.symbol_id)
                 .unwrap_or_default()
         })
         .filter(|e| {
             // Exclude entries whose summary matches what we just wrote.
             !written.iter().any(|w| {
                 w.get("summary").and_then(|s| s.as_str()) == Some(e.summary.as_str())
-                    && w.get("kind").and_then(|k| k.as_str())
+                    && w.get("kind")
+                        .and_then(|k| k.as_str())
                         .map(|k| k == format!("{:?}", e.kind).to_lowercase())
                         .unwrap_or(false)
             })
@@ -198,7 +244,8 @@ pub fn run(cfg: &Config, args: TaskCloseArgs) -> Result<()> {
 
     // Check whether any touched symbols have existing Invariant entries.
     let has_invariants = pre_existing.iter().any(|e| e.kind == LedgerKind::Invariant);
-    let (wf_type, steps_detected, missing_steps) = detect_workflow(&pre_existing, &eq, has_invariants);
+    let (wf_type, steps_detected, missing_steps) =
+        detect_workflow(&pre_existing, &eq, has_invariants);
 
     // Capture db_state for context — helps agents understand low evidence scores
     // on fresh/unannotated workspaces.

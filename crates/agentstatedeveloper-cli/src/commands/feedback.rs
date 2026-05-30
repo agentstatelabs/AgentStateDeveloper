@@ -128,7 +128,10 @@ fn run_mark(cfg: &Config, args: MarkArgs) -> Result<()> {
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let (symbol_id, symbol_qname) = if let Some(ref glob) = args.file_scope {
         // File-scoped verdict: no specific symbol required.
-        (format!("__file_scope__{}", Uuid::new_v4().simple()), glob.clone())
+        (
+            format!("__file_scope__{}", Uuid::new_v4().simple()),
+            glob.clone(),
+        )
     } else {
         let index_store = AsgIndexStore::from_engine(&engine);
         let symbol = match index_store.get_symbol_by_qname(&engine.ref_name, &args.qname)? {
@@ -163,16 +166,16 @@ fn run_mark(cfg: &Config, args: MarkArgs) -> Result<()> {
         } else {
             AuthorKind::Agent
         };
-        let author_struct = Author { kind: author_kind, id: args.author.clone() };
+        let author_struct = Author {
+            kind: author_kind,
+            id: args.author.clone(),
+        };
         let ledger_store = AsgLedgerStore::from_engine(&engine);
 
         if matches!(verdict, FeedbackVerdict::AlreadyCovered) {
-            let cover = args
-                .covered_by
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!(
-                    "--covered-by <qname> is required when --verdict already_covered"
-                ))?;
+            let cover = args.covered_by.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("--covered-by <qname> is required when --verdict already_covered")
+            })?;
             let body = serde_json::json!({
                 "from_qname": &args.qname,
                 "to_qname": cover,
@@ -204,9 +207,15 @@ fn run_mark(cfg: &Config, args: MarkArgs) -> Result<()> {
     }
 
     if args.file_scope.is_some() {
-        println!("recorded {} for files matching {:?} ({})", args.verdict, symbol_qname, entry.entry_id);
+        println!(
+            "recorded {} for files matching {:?} ({})",
+            args.verdict, symbol_qname, entry.entry_id
+        );
     } else {
-        println!("recorded {} for {} ({}){}", args.verdict, args.qname, entry.entry_id, paired_msg);
+        println!(
+            "recorded {} for {} ({}){}",
+            args.verdict, args.qname, entry.entry_id, paired_msg
+        );
     }
     Ok(())
 }
@@ -218,17 +227,27 @@ fn run_promote_as_truth(cfg: &Config, args: PromoteAsTruthArgs) -> Result<()> {
         Some(s) => s,
         None => bail!("symbol not found: {}", args.qname),
     };
-    let author_kind = if args.author == "asd-cli" { AuthorKind::Human } else { AuthorKind::Agent };
+    let author_kind = if args.author == "asd-cli" {
+        AuthorKind::Human
+    } else {
+        AuthorKind::Agent
+    };
     let mut entry = LedgerEntry::new(
         &symbol.symbol_id,
         LedgerKind::Ownership,
         &args.concept,
-        Author { kind: author_kind, id: args.author.clone() },
+        Author {
+            kind: author_kind,
+            id: args.author.clone(),
+        },
     );
     entry.tags = vec!["promote-as-truth".to_string()];
     let ledger_store = AsgLedgerStore::from_engine(&engine);
     ledger_store.append_entry(&engine.ref_name, &entry, &args.author)?;
-    println!("promoted {} as source-of-truth for \"{}\" ({})", args.qname, args.concept, entry.entry_id);
+    println!(
+        "promoted {} as source-of-truth for \"{}\" ({})",
+        args.qname, args.concept, entry.entry_id
+    );
     Ok(())
 }
 
@@ -268,10 +287,22 @@ fn run_list(cfg: &Config, args: ListArgs) -> Result<()> {
 }
 
 fn verdict_breakdown(entries: &[FeedbackEntry]) -> (usize, usize, usize, usize) {
-    let useful  = entries.iter().filter(|e| matches!(e.verdict, FeedbackVerdict::Useful)).count();
-    let noisy   = entries.iter().filter(|e| matches!(e.verdict, FeedbackVerdict::Noisy)).count();
-    let missing = entries.iter().filter(|e| matches!(e.verdict, FeedbackVerdict::Missing)).count();
-    let wl      = entries.iter().filter(|e| matches!(e.verdict, FeedbackVerdict::WrongLayer)).count();
+    let useful = entries
+        .iter()
+        .filter(|e| matches!(e.verdict, FeedbackVerdict::Useful))
+        .count();
+    let noisy = entries
+        .iter()
+        .filter(|e| matches!(e.verdict, FeedbackVerdict::Noisy))
+        .count();
+    let missing = entries
+        .iter()
+        .filter(|e| matches!(e.verdict, FeedbackVerdict::Missing))
+        .count();
+    let wl = entries
+        .iter()
+        .filter(|e| matches!(e.verdict, FeedbackVerdict::WrongLayer))
+        .count();
     (useful, noisy, missing, wl)
 }
 
@@ -282,16 +313,19 @@ fn run_export(cfg: &Config, args: ExportArgs) -> Result<()> {
 
     if args.summary {
         let (useful, noisy, missing, wl) = verdict_breakdown(&entries);
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "total": entries.len(),
-            "by_verdict": {
-                "useful": useful,
-                "noisy": noisy,
-                "missing": missing,
-                "wrong_layer": wl,
-            },
-            "db": cfg.db_path.display().to_string(),
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "total": entries.len(),
+                "by_verdict": {
+                    "useful": useful,
+                    "noisy": noisy,
+                    "missing": missing,
+                    "wrong_layer": wl,
+                },
+                "db": cfg.db_path.display().to_string(),
+            }))?
+        );
         return Ok(());
     }
 
@@ -302,7 +336,12 @@ fn run_export(cfg: &Config, args: ExportArgs) -> Result<()> {
             std::fs::write(path, &json)?;
             eprintln!(
                 "asd: exported {} feedback entries to {} (useful={}, noisy={}, missing={}, wrong_layer={})",
-                entries.len(), path, useful, noisy, missing, wl
+                entries.len(),
+                path,
+                useful,
+                noisy,
+                missing,
+                wl
             );
         }
         None => println!("{}", json),
@@ -348,17 +387,34 @@ fn run_import(cfg: &Config, args: ImportArgs) -> Result<()> {
     }
 
     let (useful, noisy, missing, wl) = {
-        let u = to_import.iter().filter(|e| matches!(e.verdict, FeedbackVerdict::Useful)).count();
-        let n = to_import.iter().filter(|e| matches!(e.verdict, FeedbackVerdict::Noisy)).count();
-        let m = to_import.iter().filter(|e| matches!(e.verdict, FeedbackVerdict::Missing)).count();
-        let w = to_import.iter().filter(|e| matches!(e.verdict, FeedbackVerdict::WrongLayer)).count();
+        let u = to_import
+            .iter()
+            .filter(|e| matches!(e.verdict, FeedbackVerdict::Useful))
+            .count();
+        let n = to_import
+            .iter()
+            .filter(|e| matches!(e.verdict, FeedbackVerdict::Noisy))
+            .count();
+        let m = to_import
+            .iter()
+            .filter(|e| matches!(e.verdict, FeedbackVerdict::Missing))
+            .count();
+        let w = to_import
+            .iter()
+            .filter(|e| matches!(e.verdict, FeedbackVerdict::WrongLayer))
+            .count();
         (u, n, m, w)
     };
 
     if args.dry_run {
         eprintln!(
             "asd: [dry-run] would import {} entries, skip {} duplicates (useful={}, noisy={}, missing={}, wrong_layer={})",
-            to_import.len(), skipped, useful, noisy, missing, wl
+            to_import.len(),
+            skipped,
+            useful,
+            noisy,
+            missing,
+            wl
         );
         return Ok(());
     }
@@ -368,7 +424,12 @@ fn run_import(cfg: &Config, args: ImportArgs) -> Result<()> {
     }
     eprintln!(
         "asd: imported {} entries, skipped {} duplicates (useful={}, noisy={}, missing={}, wrong_layer={})",
-        to_import.len(), skipped, useful, noisy, missing, wl
+        to_import.len(),
+        skipped,
+        useful,
+        noisy,
+        missing,
+        wl
     );
     Ok(())
 }

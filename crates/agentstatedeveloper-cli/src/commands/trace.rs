@@ -60,7 +60,9 @@ struct ObservedEffect {
 
 pub fn run(cfg: &Config, args: TraceArgs) -> Result<()> {
     if args.command.is_empty() {
-        return Err(anyhow!("asd trace: no command given (use `-- <cmd> [args...]`)"));
+        return Err(anyhow!(
+            "asd trace: no command given (use `-- <cmd> [args...]`)"
+        ));
     }
 
     let tracer = locate_tracer()?;
@@ -88,9 +90,7 @@ pub fn run(cfg: &Config, args: TraceArgs) -> Result<()> {
     let mut updates: Vec<serde_json::Value> = Vec::new();
 
     for obs in &report.observations {
-        let Some(symbol) =
-            index_store.get_symbol_by_qname(&engine.ref_name, &obs.qname)?
-        else {
+        let Some(symbol) = index_store.get_symbol_by_qname(&engine.ref_name, &obs.qname)? else {
             // qname not in the ASG — user code wasn't indexed; skip silently.
             continue;
         };
@@ -130,8 +130,11 @@ pub fn run(cfg: &Config, args: TraceArgs) -> Result<()> {
 
         let declared_set: HashSet<EffectCategory> =
             decl.declared.iter().map(|e| e.effect.clone()).collect();
-        let observed_set: HashSet<EffectCategory> =
-            obs.observed_effects.iter().map(|e| e.effect.clone()).collect();
+        let observed_set: HashSet<EffectCategory> = obs
+            .observed_effects
+            .iter()
+            .map(|e| e.effect.clone())
+            .collect();
 
         let mut mismatches: Vec<Mismatch> = Vec::new();
         for obs_e in &obs.observed_effects {
@@ -145,8 +148,7 @@ pub fn run(cfg: &Config, args: TraceArgs) -> Result<()> {
             }
         }
         for declared in &decl.declared {
-            if !observed_set.contains(&declared.effect) && declared.effect != EffectCategory::Pure
-            {
+            if !observed_set.contains(&declared.effect) && declared.effect != EffectCategory::Pure {
                 mismatches.push(Mismatch {
                     kind: "unobserved".to_string(),
                     effect: declared.effect.clone(),

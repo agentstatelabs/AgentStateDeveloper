@@ -16,13 +16,13 @@
 //! asd scratch clean  --older-than <7d> [--status discarded,promoted] [--dry-run]
 //! ```
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 
 use agentstatedeveloper_core::{
     AsgIndexStore, AsgLedgerStore, AsgScratchStore, Author, AuthorKind, CleanFilter, Engine,
-    IndexStore, LedgerEntry, LedgerKind, LedgerStore, ScratchEntry, ScratchFilter,
-    ScratchStatus, ScratchStore,
+    IndexStore, LedgerEntry, LedgerKind, LedgerStore, ScratchEntry, ScratchFilter, ScratchStatus,
+    ScratchStore,
 };
 
 use crate::commands::ledger::open_engine_public;
@@ -199,11 +199,15 @@ pub fn run(cfg: &Config, cmd: ScratchCmd) -> Result<()> {
 fn parse_ttl(s: &str) -> Result<chrono::Duration> {
     let s = s.trim();
     if let Some(days) = s.strip_suffix('d') {
-        let n: i64 = days.parse().map_err(|_| anyhow::anyhow!("invalid TTL: {s}"))?;
+        let n: i64 = days
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid TTL: {s}"))?;
         return Ok(chrono::Duration::days(n));
     }
     if let Some(hours) = s.strip_suffix('h') {
-        let n: i64 = hours.parse().map_err(|_| anyhow::anyhow!("invalid TTL: {s}"))?;
+        let n: i64 = hours
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid TTL: {s}"))?;
         return Ok(chrono::Duration::hours(n));
     }
     bail!("TTL must be in the form `24h` or `7d`")
@@ -231,7 +235,10 @@ fn parse_kind(s: &str) -> Result<LedgerKind> {
         "invariant" => Ok(LedgerKind::Invariant),
         "ownership" => Ok(LedgerKind::Ownership),
         "proof" => Ok(LedgerKind::Proof),
-        other => bail!("unknown ledger kind: '{}'. Valid: decision, assumption, constraint, rationale, hazard, tradeoff, invariant, ownership, proof", other),
+        other => bail!(
+            "unknown ledger kind: '{}'. Valid: decision, assumption, constraint, rationale, hazard, tradeoff, invariant, ownership, proof",
+            other
+        ),
     }
 }
 
@@ -446,15 +453,11 @@ fn promote_cmd(cfg: &Config, args: PromoteArgs) -> Result<()> {
     };
 
     // 3. Build summary.
-    let summary = args
-        .summary
-        .unwrap_or_else(|| first_line(&entry.content));
+    let summary = args.summary.unwrap_or_else(|| first_line(&entry.content));
 
     // 4. Build LedgerEntry.
     let kind = parse_kind(&args.kind)?;
-    let author_id = args
-        .author
-        .unwrap_or_else(|| cfg.agent_id.clone());
+    let author_id = args.author.unwrap_or_else(|| cfg.agent_id.clone());
     let author = Author {
         kind: AuthorKind::Agent,
         id: author_id.clone(),

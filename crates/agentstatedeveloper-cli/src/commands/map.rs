@@ -18,8 +18,8 @@ use clap::Args;
 use serde_json::json;
 
 use agentstatedeveloper_core::{
-    AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, IndexStore, LedgerEntry, LedgerKind,
-    LedgerStore, RoleTag, Symbol, ASD_PATH_PREFIX,
+    ASD_PATH_PREFIX, AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, IndexStore,
+    LedgerEntry, LedgerKind, LedgerStore, RoleTag, Symbol,
 };
 
 use crate::config::Config;
@@ -180,7 +180,12 @@ fn write_map_entry(
     author: &Author,
     ctx_task_id: Option<&str>,
 ) -> Result<()> {
-    let mut entry = LedgerEntry::new(&sym.symbol_id, LedgerKind::Ownership, summary, author.clone());
+    let mut entry = LedgerEntry::new(
+        &sym.symbol_id,
+        LedgerKind::Ownership,
+        summary,
+        author.clone(),
+    );
     // Deterministic entry id so re-running `asd map` overwrites instead
     // of appending duplicates.
     entry.entry_id = deterministic_entry_id(&sym.symbol_id, role.as_str());
@@ -205,7 +210,10 @@ fn write_map_entry(
 /// read_active_task_scope` but extracts `task_id` instead of `scope[]`.
 fn read_active_ctx_task_id(db_parent: Option<&std::path::Path>) -> Option<String> {
     let raw = std::env::var("CTX_ACTIVE_TASK").ok().or_else(|| {
-        let p = db_parent?.join(".asd").join("cache").join("active-task.json");
+        let p = db_parent?
+            .join(".asd")
+            .join("cache")
+            .join("active-task.json");
         std::fs::read_to_string(p).ok()
     })?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
@@ -249,8 +257,8 @@ const DIAGNOSTIC_BODY_MARKERS: &[&str] = &[
     ".trace(",
     "batchRender",
     "durationSeconds",
-    "/Users/",       // hard-coded paths to user dirs
-    "tmp_path",      // pytest real-fs fixtures
+    "/Users/",  // hard-coded paths to user dirs
+    "tmp_path", // pytest real-fs fixtures
     "tempfile.NamedTemporaryFile",
     "subprocess.run",
 ];
@@ -273,9 +281,7 @@ fn body_looks_diagnostic(file: &str) -> bool {
         Ok(s) => s,
         Err(_) => return false,
     };
-    DIAGNOSTIC_BODY_MARKERS
-        .iter()
-        .any(|m| head.contains(m))
+    DIAGNOSTIC_BODY_MARKERS.iter().any(|m| head.contains(m))
 }
 
 /// Classify a file as a test file and return its role tag, or None if
@@ -346,18 +352,16 @@ mod tests {
     fn body_looks_diagnostic_false_for_clean_unit_test() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("foo_test.py");
-        std::fs::write(
-            &path,
-            "def test_addition():\n    assert 1 + 1 == 2\n",
-        )
-        .unwrap();
+        std::fs::write(&path, "def test_addition():\n    assert 1 + 1 == 2\n").unwrap();
         assert!(!body_looks_diagnostic(path.to_str().unwrap()));
     }
 
     #[test]
     fn body_looks_diagnostic_false_for_missing_file() {
         // Defensive — body-sniff is opt-in refinement, never a hard req.
-        assert!(!body_looks_diagnostic("/nonexistent/path/that/cannot/exist.py"));
+        assert!(!body_looks_diagnostic(
+            "/nonexistent/path/that/cannot/exist.py"
+        ));
     }
 
     // -- Plan E t-011: CTX task provenance --------------------------------

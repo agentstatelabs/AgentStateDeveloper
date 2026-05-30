@@ -9,10 +9,10 @@ use clap::{Args, Subcommand};
 use serde_json::json;
 
 use agentstatedeveloper_core::{
-    AsgIndexStore, AsgLedgerStore, Engine, IndexStore, LedgerStore,
-    SearchFtsDb, SidecarState, format_age, sidecar_lifecycle_state,
+    AsgIndexStore, AsgLedgerStore, Engine, IndexStore, LedgerStore, SearchFtsDb, SidecarState,
+    compute_trust_score, format_age,
     schema::{LedgerKind, Symbol},
-    compute_trust_score,
+    sidecar_lifecycle_state,
 };
 
 use crate::config::Config;
@@ -63,11 +63,14 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
 
     if !fts.has_data() {
         if args.json {
-            println!("{}", json!({
-                "state": "empty",
-                "note": "run 'asd index <dir>' to build",
-                "sidecar": sidecar_state_key(&sidecar_state),
-            }));
+            println!(
+                "{}",
+                json!({
+                    "state": "empty",
+                    "note": "run 'asd index <dir>' to build",
+                    "sidecar": sidecar_state_key(&sidecar_state),
+                })
+            );
         } else {
             println!("ASD index status");
             println!("  db:       {}", cfg.db_path.display());
@@ -101,7 +104,8 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
         if let Ok(engine) = Engine::open_sqlite(&cfg.db_path) {
             let index_store = AsgIndexStore::from_engine(&engine);
             let ledger_store = AsgLedgerStore::from_engine(&engine);
-            let tree = engine.repo
+            let tree = engine
+                .repo
                 .get_tree(&engine.ref_name, "/asd/v1/index/by-qname")
                 .unwrap_or(serde_json::Value::Object(Default::default()));
             tree.as_object()
@@ -112,7 +116,8 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
                             let entries = ledger_store
                                 .list_entries(&engine.ref_name, &sym.symbol_id)
                                 .unwrap_or_default();
-                            let has_ownership = entries.iter().any(|e| e.kind == LedgerKind::Ownership);
+                            let has_ownership =
+                                entries.iter().any(|e| e.kind == LedgerKind::Ownership);
                             let has_concept = entries.iter().any(|e| e.kind == LedgerKind::Concept);
                             if has_ownership && !has_concept {
                                 Some(json!({"qname": sym.qname, "file": sym.file}))
@@ -134,7 +139,13 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
     let sidecar_action = sidecar_action_hint(&sidecar_state);
 
     if args.json {
-        let index_state = if fresh { "fresh" } else if age_hours.unwrap_or(0) >= 1 { "stale" } else { "ok" };
+        let index_state = if fresh {
+            "fresh"
+        } else if age_hours.unwrap_or(0) >= 1 {
+            "stale"
+        } else {
+            "ok"
+        };
 
         // State Trust Score rollup.
         let trust = compute_trust_score(&cfg.db_path);
@@ -153,8 +164,16 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
         });
 
         // Append compact snapshot to trust-history.jsonl.
-        append_trust_history(cfg, &trust, indexed_at, age_hours, count as u64,
-            sidecar_key, dirty_files.len(), concept_gaps.len());
+        append_trust_history(
+            cfg,
+            &trust,
+            indexed_at,
+            age_hours,
+            count as u64,
+            sidecar_key,
+            dirty_files.len(),
+            concept_gaps.len(),
+        );
 
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -169,7 +188,10 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
         Some(ts) => {
             println!("  indexed:  {} (unix {})", format_age(ts), ts);
             if age_hours.unwrap_or(0) >= 1 {
-                println!("  warning:  index is {}h old — consider re-running 'asd index'", age_hours.unwrap_or(0));
+                println!(
+                    "  warning:  index is {}h old — consider re-running 'asd index'",
+                    age_hours.unwrap_or(0)
+                );
             } else {
                 println!("  state:    fresh");
             }
@@ -178,10 +200,12 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
     }
 
     let sidecar_label = match sidecar_state {
-        SidecarState::Missing   => "missing — run 'asd sync' to create",
-        SidecarState::Present   => "present — run 'asd hydrate' to load into ASG",
-        SidecarState::Hydrated  => "hydrated",
-        SidecarState::FreshReset => "fresh-reset (deliberate reset — re-run 'asd index' + 'asd sync')",
+        SidecarState::Missing => "missing — run 'asd sync' to create",
+        SidecarState::Present => "present — run 'asd hydrate' to load into ASG",
+        SidecarState::Hydrated => "hydrated",
+        SidecarState::FreshReset => {
+            "fresh-reset (deliberate reset — re-run 'asd index' + 'asd sync')"
+        }
     };
     println!("  sidecar:  {sidecar_label}");
 
@@ -190,7 +214,10 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
         if files.is_empty() {
             println!("  dirty:    none (all tracked source files match index)");
         } else {
-            println!("  dirty:    {} modified source file(s) since last commit:", files.len());
+            println!(
+                "  dirty:    {} modified source file(s) since last commit:",
+                files.len()
+            );
             for f in &files {
                 println!("            {}", f);
             }
@@ -301,21 +328,35 @@ fn show_history(cfg: &Config, args: &StatusHistoryArgs) -> Result<()> {
     }
 
     // Human-readable table.
-    println!("{:<25} {:>6} {:>7} {:>8} {:>10} {:>8} {:>5}",
-        "timestamp", "score", "level", "symbols", "sidecar", "age_hrs", "dirty");
+    println!(
+        "{:<25} {:>6} {:>7} {:>8} {:>10} {:>8} {:>5}",
+        "timestamp", "score", "level", "symbols", "sidecar", "age_hrs", "dirty"
+    );
     println!("{}", "-".repeat(75));
     for r in &records {
-        let ts  = r.get("timestamp").and_then(|v| v.as_str()).unwrap_or("?");
+        let ts = r.get("timestamp").and_then(|v| v.as_str()).unwrap_or("?");
         // Trim to 23 chars (ISO without offset) for table width.
         let ts_short = &ts[..ts.len().min(23)];
-        let score   = r.get("trust_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let level   = r.get("trust_level").and_then(|v| v.as_str()).unwrap_or("?");
-        let syms    = r.get("symbol_count").and_then(|v| v.as_u64()).unwrap_or(0);
-        let sidecar = r.get("sidecar_state").and_then(|v| v.as_str()).unwrap_or("?");
-        let age     = r.get("age_hours").and_then(|v| v.as_i64()).map(|h| h.to_string()).unwrap_or_else(|| "?".to_string());
-        let dirty   = r.get("dirty_file_count").and_then(|v| v.as_u64()).unwrap_or(0);
-        println!("{:<25} {:>6.2} {:>7} {:>8} {:>10} {:>8} {:>5}",
-            ts_short, score, level, syms, sidecar, age, dirty);
+        let score = r.get("trust_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let level = r.get("trust_level").and_then(|v| v.as_str()).unwrap_or("?");
+        let syms = r.get("symbol_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        let sidecar = r
+            .get("sidecar_state")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let age = r
+            .get("age_hours")
+            .and_then(|v| v.as_i64())
+            .map(|h| h.to_string())
+            .unwrap_or_else(|| "?".to_string());
+        let dirty = r
+            .get("dirty_file_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        println!(
+            "{:<25} {:>6.2} {:>7} {:>8} {:>10} {:>8} {:>5}",
+            ts_short, score, level, syms, sidecar, age, dirty
+        );
     }
 
     Ok(())
@@ -327,18 +368,18 @@ fn show_history(cfg: &Config, args: &StatusHistoryArgs) -> Result<()> {
 
 fn sidecar_state_key(s: &SidecarState) -> &'static str {
     match s {
-        SidecarState::Missing    => "missing",
-        SidecarState::Present    => "present",
-        SidecarState::Hydrated   => "hydrated",
+        SidecarState::Missing => "missing",
+        SidecarState::Present => "present",
+        SidecarState::Hydrated => "hydrated",
         SidecarState::FreshReset => "fresh-reset",
     }
 }
 
 fn sidecar_action_hint(s: &SidecarState) -> &'static str {
     match s {
-        SidecarState::Missing    => "run 'asd sync' to create sidecar",
-        SidecarState::Present    => "run 'asd hydrate' to load sidecar into ASG",
-        SidecarState::Hydrated   => "sidecar is current",
+        SidecarState::Missing => "run 'asd sync' to create sidecar",
+        SidecarState::Present => "run 'asd hydrate' to load sidecar into ASG",
+        SidecarState::Hydrated => "sidecar is current",
         SidecarState::FreshReset => "re-run 'asd index' then 'asd sync'",
     }
 }
@@ -350,11 +391,17 @@ fn collect_dirty_files(cfg: &Config) -> Vec<String> {
         .current_dir(workspace)
         .output();
 
-    let Ok(out) = output else { return vec![]; };
-    if !out.status.success() { return vec![]; }
+    let Ok(out) = output else {
+        return vec![];
+    };
+    if !out.status.success() {
+        return vec![];
+    }
 
     let text = String::from_utf8_lossy(&out.stdout);
-    let source_exts = [".swift", ".py", ".ts", ".tsx", ".js", ".rs", ".go", ".kt", ".java", ".rb", ".cs"];
+    let source_exts = [
+        ".swift", ".py", ".ts", ".tsx", ".js", ".rs", ".go", ".kt", ".java", ".rb", ".cs",
+    ];
     text.lines()
         .filter(|l| source_exts.iter().any(|ext| l.ends_with(ext)))
         .map(|l| l.trim().to_string())

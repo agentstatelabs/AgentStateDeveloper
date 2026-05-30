@@ -4,13 +4,15 @@ use std::sync::Arc;
 use agentstategraph::Repository;
 use agentstategraph_storage::SqliteStorage;
 
-use crate::audit::{AuditSink, AuditEvent, NullSink, emit_audit, event_types};
+use crate::audit::{AuditEvent, AuditSink, NullSink, emit_audit, event_types};
 use crate::error::{AsdError, Result};
-use crate::search_fts::SearchFtsDb;
 use crate::index::{AsgIndexStore, IndexStore};
 use crate::ledger::{AsgLedgerStore, LedgerStore, RatifyOps};
-use crate::policy::{Decision, PermissivePolicyGate, PolicyGate, PolicyStoreGate, Situation, actions};
+use crate::policy::{
+    Decision, PermissivePolicyGate, PolicyGate, PolicyStoreGate, Situation, actions,
+};
 use crate::schema::{LedgerEntry, Symbol};
+use crate::search_fts::SearchFtsDb;
 use crate::sidecar::hydrate_from_dir;
 use serde_json::json;
 
@@ -80,15 +82,18 @@ impl Engine {
         // Fast emptiness check: reuse the already-open FTS connection — avoids
         // a second `Connection::open` that the 0.9.72 code used.
         let is_empty = {
-            let sqlite_has_symbols = engine.fts.as_ref()
+            let sqlite_has_symbols = engine
+                .fts
+                .as_ref()
                 .map(|fts| fts.symbols_cached_for(&engine.ref_name))
                 .unwrap_or(false);
             if sqlite_has_symbols {
-                false  // SQLite says there are symbols — definitely not empty.
+                false // SQLite says there are symbols — definitely not empty.
             } else {
                 // Cache absent (old version DB, fresh install, or blank slate).
                 // Fall back to git tree walk.
-                engine.repo
+                engine
+                    .repo
                     .get_tree(&engine.ref_name, "/asd/v1/index/by-qname")
                     .ok()
                     .and_then(|v| v.as_object().map(|m| m.is_empty()))
@@ -96,7 +101,12 @@ impl Engine {
             }
         };
         if is_empty && sidecar_root.exists() {
-            let _ = hydrate_from_dir(&engine.repo, &engine.ref_name, &project_root, "asd-auto-hydrate");
+            let _ = hydrate_from_dir(
+                &engine.repo,
+                &engine.ref_name,
+                &project_root,
+                "asd-auto-hydrate",
+            );
         }
 
         Ok(engine)
@@ -104,8 +114,7 @@ impl Engine {
 
     /// Open an in-memory engine — mostly for tests.
     pub fn open_in_memory() -> Result<Self> {
-        let storage =
-            SqliteStorage::in_memory().map_err(|e| AsdError::Other(e.to_string()))?;
+        let storage = SqliteStorage::in_memory().map_err(|e| AsdError::Other(e.to_string()))?;
         let repo = Repository::new(Box::new(storage));
         repo.init()?;
         Ok(Self {
@@ -154,31 +163,36 @@ impl Engine {
         let situation = Situation::new("append ledger entry")
             .with_qualifier("symbol_id", &entry.symbol_id)
             .with_qualifier("kind", entry.kind.as_str());
-        let decision = self.policy.evaluate(&situation, actions::LEDGER_APPEND, agent_id)?;
+        let decision = self
+            .policy
+            .evaluate(&situation, actions::LEDGER_APPEND, agent_id)?;
         let (matched_policy, audit_outcome) = match &decision {
             Decision::Allow { matched_policy } => (matched_policy.clone(), "allowed"),
-            Decision::RequireApproval { matched_policy, .. } => (Some(matched_policy.clone()), "awaiting-approval"),
+            Decision::RequireApproval { matched_policy, .. } => {
+                (Some(matched_policy.clone()), "awaiting-approval")
+            }
             Decision::NoPolicyMatch => (None, "allowed"),
-            Decision::Deny { matched_policy, reason } => {
+            Decision::Deny {
+                matched_policy,
+                reason,
+            } => {
                 return Err(AsdError::Other(format!(
                     "policy denied by {matched_policy}: {reason}"
                 )));
             }
         };
 
-        let store = AsgLedgerStore { repo: &self.repo, fts: self.fts.as_ref() };
+        let store = AsgLedgerStore {
+            repo: &self.repo,
+            fts: self.fts.as_ref(),
+        };
         store.append_entry(&self.ref_name, entry, agent_id)?;
 
-        let event = AuditEvent::new(
-            event_types::LEDGER_APPEND,
-            agent_id,
-            "agent",
-            audit_outcome,
-        )
-        .with_subject(&entry.entry_id)
-        .with_secondary(&entry.symbol_id)
-        .with_matched_policy(matched_policy)
-        .with_payload(json!({ "kind": entry.kind.as_str(), "tags": entry.tags }));
+        let event = AuditEvent::new(event_types::LEDGER_APPEND, agent_id, "agent", audit_outcome)
+            .with_subject(&entry.entry_id)
+            .with_secondary(&entry.symbol_id)
+            .with_matched_policy(matched_policy)
+            .with_payload(json!({ "kind": entry.kind.as_str(), "tags": entry.tags }));
         emit_audit(self.audit.as_ref(), event);
         Ok(())
     }

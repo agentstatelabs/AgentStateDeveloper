@@ -87,10 +87,13 @@ fn sync_prune_removes_orphan_files() {
 
     // sync --prune should remove it.
     let out = run_asd(&dir, &["sync", "--prune"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
-    let json: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("parse sync output");
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("parse sync output");
     assert!(
         json["pruned"].as_u64().unwrap_or(0) >= 1,
         "expected pruned >= 1, got: {json}"
@@ -105,7 +108,11 @@ fn init_installs_hook_scripts() {
 
     // init without --no-hooks (default)
     let out = run_asd(&dir, &["init"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let stdout = String::from_utf8_lossy(&out.stdout);
 
@@ -124,12 +131,30 @@ fn init_installs_hook_scripts() {
     }
 
     // Output should describe each hook.
-    assert!(stdout.contains("pre-commit"), "init output missing pre-commit");
-    assert!(stdout.contains("post-merge"), "init output missing post-merge");
-    assert!(stdout.contains("post-checkout"), "init output missing post-checkout");
-    assert!(stdout.contains("asd conclusions import"), "init output missing conclusions import command");
-    assert!(stdout.contains("asd index ."), "init output missing index command");
-    assert!(stdout.contains("--no-hooks"), "init output missing opt-out hint");
+    assert!(
+        stdout.contains("pre-commit"),
+        "init output missing pre-commit"
+    );
+    assert!(
+        stdout.contains("post-merge"),
+        "init output missing post-merge"
+    );
+    assert!(
+        stdout.contains("post-checkout"),
+        "init output missing post-checkout"
+    );
+    assert!(
+        stdout.contains("asd conclusions import"),
+        "init output missing conclusions import command"
+    );
+    assert!(
+        stdout.contains("asd index ."),
+        "init output missing index command"
+    );
+    assert!(
+        stdout.contains("--no-hooks"),
+        "init output missing opt-out hint"
+    );
 }
 
 #[test]
@@ -138,16 +163,26 @@ fn init_no_hooks_skips_installation() {
     copy_py_tree(&sample_py_repo(), &dir);
 
     let out = run_asd(&dir, &["init", "--no-hooks"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Hook scripts should NOT exist.
     for hook in &["pre-commit", "post-merge", "post-checkout"] {
         let path = dir.join(".asd/hooks").join(hook);
-        assert!(!path.exists(), "hook should not exist with --no-hooks: {hook}");
+        assert!(
+            !path.exists(),
+            "hook should not exist with --no-hooks: {hook}"
+        );
     }
 
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("skipped"), "expected 'skipped' in --no-hooks output");
+    assert!(
+        stdout.contains("skipped"),
+        "expected 'skipped' in --no-hooks output"
+    );
 }
 
 #[test]
@@ -158,10 +193,20 @@ fn hooks_subcommand_reports_status() {
     // Before init — hooks missing.
     assert!(run_asd(&dir, &["init", "--no-hooks"]).status.success());
     let out = run_asd(&dir, &["hooks"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("pre-commit"), "hooks output missing pre-commit");
-    assert!(stdout.contains("post-merge"), "hooks output missing post-merge");
+    assert!(
+        stdout.contains("pre-commit"),
+        "hooks output missing pre-commit"
+    );
+    assert!(
+        stdout.contains("post-merge"),
+        "hooks output missing post-merge"
+    );
 
     // After init with hooks — all installed.
     assert!(run_asd(&dir, &["init"]).status.success());
@@ -188,7 +233,9 @@ fn init_updates_gitignore() {
     );
     // The blanket .asd/ ignore should have been removed.
     assert!(
-        !content.lines().any(|l| l.trim() == ".asd/" || l.trim() == ".asd"),
+        !content
+            .lines()
+            .any(|l| l.trim() == ".asd/" || l.trim() == ".asd"),
         ".gitignore should not blanket-ignore .asd/; got:\n{content}"
     );
 }

@@ -117,9 +117,7 @@ fn index_extracts_at_least_one_call_edge() {
             .expect("get_callers");
         if !callees.is_empty() || !callers.is_empty() {
             found_any = true;
-            eprintln!(
-                "edge observed for {qname}: callees={callees:?} callers={callers:?}"
-            );
+            eprintln!("edge observed for {qname}: callees={callees:?} callers={callers:?}");
             break;
         }
     }

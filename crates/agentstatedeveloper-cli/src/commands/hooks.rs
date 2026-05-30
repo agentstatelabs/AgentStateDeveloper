@@ -20,10 +20,7 @@ pub fn run(cfg: &Config, _args: HooksArgs) -> Result<()> {
 
     for h in &statuses {
         let indicator = if h.installed { "✓" } else { "✗" };
-        println!(
-            "  {} {:<16} trigger:  {}",
-            indicator, h.filename, h.trigger
-        );
+        println!("  {} {:<16} trigger:  {}", indicator, h.filename, h.trigger);
         println!("    {:<16} command:  {}", "", h.command);
         println!("    {:<16} purpose:  {}", "", h.purpose);
         println!();

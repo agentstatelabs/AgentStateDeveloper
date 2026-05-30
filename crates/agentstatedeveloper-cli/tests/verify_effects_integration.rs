@@ -40,9 +40,17 @@ def pure_add(a, b):
     )
     .unwrap();
     let o = asd(dir, &["init", "--no-hooks"]);
-    assert!(o.status.success(), "init: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        o.status.success(),
+        "init: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
     let o = asd(dir, &["index", "."]);
-    assert!(o.status.success(), "index: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        o.status.success(),
+        "index: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -63,7 +71,10 @@ fn verify_effects_inferred_effect_is_mismatch() {
     assert_eq!(v["status"].as_str().unwrap(), "mismatch");
 
     let declared = v["declared"].as_array().unwrap();
-    assert!(!declared.is_empty(), "expected at least one declared effect");
+    assert!(
+        !declared.is_empty(),
+        "expected at least one declared effect"
+    );
 }
 
 #[test]
@@ -77,7 +88,10 @@ fn verify_effects_pure_symbol_has_empty_declared() {
 
     assert_eq!(v["qname"].as_str().unwrap(), "svc.pure_add");
     let declared = v["declared"].as_array().unwrap();
-    assert!(declared.is_empty(), "expected no effects for pure function; got {declared:?}");
+    assert!(
+        declared.is_empty(),
+        "expected no effects for pure function; got {declared:?}"
+    );
 }
 
 #[test]

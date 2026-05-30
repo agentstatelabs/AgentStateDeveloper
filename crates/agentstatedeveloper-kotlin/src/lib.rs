@@ -118,7 +118,13 @@ fn make_symbol(node: Node<'_>, src: &[u8], qname: String, kind: SymbolKind) -> P
     make_symbol_sig(node, src, qname, kind, None)
 }
 
-fn make_symbol_sig(node: Node<'_>, src: &[u8], qname: String, kind: SymbolKind, signature: Option<String>) -> ParsedSymbol {
+fn make_symbol_sig(
+    node: Node<'_>,
+    src: &[u8],
+    qname: String,
+    kind: SymbolKind,
+    signature: Option<String>,
+) -> ParsedSymbol {
     ParsedSymbol {
         qname,
         kind,
@@ -144,14 +150,26 @@ fn extract_sig_before_brace(node: Node<'_>, src: &[u8]) -> Option<String> {
             b'"' => {
                 i += 1;
                 while i < bytes.len() {
-                    if bytes[i] == b'\\' { i += 2; continue; }
-                    if bytes[i] == b'"' { break; }
+                    if bytes[i] == b'\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'"' {
+                        break;
+                    }
                     i += 1;
                 }
             }
             b'(' | b'[' => depth += 1,
-            b')' | b']' => { if depth > 0 { depth -= 1; } }
-            b'{' if depth == 0 => { sig_end = i; break; }
+            b')' | b']' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            b'{' if depth == 0 => {
+                sig_end = i;
+                break;
+            }
             _ => {}
         }
         i += 1;
@@ -784,15 +802,30 @@ object Config {
 "#;
         let syms = adapter().parse_symbols("PaymentService.kt", src).unwrap();
         let qnames: Vec<&str> = syms.iter().map(|s| s.qname.as_str()).collect();
-        assert!(qnames.contains(&"com.example.payments.PaymentService"), "{qnames:?}");
-        assert!(qnames.contains(&"com.example.payments.PaymentService.charge"), "{qnames:?}");
-        assert!(qnames.contains(&"com.example.payments.Gateway"), "{qnames:?}");
-        assert!(qnames.contains(&"com.example.payments.Config"), "{qnames:?}");
+        assert!(
+            qnames.contains(&"com.example.payments.PaymentService"),
+            "{qnames:?}"
+        );
+        assert!(
+            qnames.contains(&"com.example.payments.PaymentService.charge"),
+            "{qnames:?}"
+        );
+        assert!(
+            qnames.contains(&"com.example.payments.Gateway"),
+            "{qnames:?}"
+        );
+        assert!(
+            qnames.contains(&"com.example.payments.Config"),
+            "{qnames:?}"
+        );
     }
 
     #[test]
     fn package_prefix_parses_correctly() {
-        assert_eq!(package_prefix("package com.example.payments"), "com.example.payments");
+        assert_eq!(
+            package_prefix("package com.example.payments"),
+            "com.example.payments"
+        );
         assert_eq!(package_prefix("// no package"), "");
         assert_eq!(package_prefix("package  org.acme"), "org.acme");
     }
@@ -833,16 +866,36 @@ class UserRepo {
 }
 "#;
         let syms = adapter().parse_symbols("UserRepo.kt", src).unwrap();
-        let find = syms.iter().find(|s| s.qname.ends_with(".findUser")).unwrap();
-        let save = syms.iter().find(|s| s.qname.ends_with(".saveUser")).unwrap();
+        let find = syms
+            .iter()
+            .find(|s| s.qname.ends_with(".findUser"))
+            .unwrap();
+        let save = syms
+            .iter()
+            .find(|s| s.qname.ends_with(".saveUser"))
+            .unwrap();
         let find_effs = adapter().infer_effects("", find);
         let save_effs = adapter().infer_effects("", save);
-        assert!(find_effs.iter().any(|e| e.effect == EffectCategory::EnvRead));
-        assert!(save_effs.iter().any(|e| e.effect == EffectCategory::IoDbWrite));
+        assert!(
+            find_effs
+                .iter()
+                .any(|e| e.effect == EffectCategory::EnvRead)
+        );
+        assert!(
+            save_effs
+                .iter()
+                .any(|e| e.effect == EffectCategory::IoDbWrite)
+        );
 
-        let env_eff = find_effs.iter().find(|e| e.effect == EffectCategory::EnvRead).unwrap();
+        let env_eff = find_effs
+            .iter()
+            .find(|e| e.effect == EffectCategory::EnvRead)
+            .unwrap();
         if let Some(vars) = env_eff.qualifiers.get("vars") {
-            let vars: Vec<&str> = vars.as_array().unwrap().iter()
+            let vars: Vec<&str> = vars
+                .as_array()
+                .unwrap()
+                .iter()
                 .map(|v| v.as_str().unwrap())
                 .collect();
             assert!(vars.contains(&"DATABASE_URL"), "{vars:?}");

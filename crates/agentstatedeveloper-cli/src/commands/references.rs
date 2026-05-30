@@ -23,9 +23,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use serde_json::{Value, json};
 
-use agentstatedeveloper_core::{
-    AsgIndexStore, Engine, IndexStore, Symbol,
-};
+use agentstatedeveloper_core::{AsgIndexStore, Engine, IndexStore, Symbol};
 
 use crate::config::Config;
 
@@ -67,7 +65,10 @@ pub fn run(cfg: &Config, args: ReferencesArgs) -> Result<()> {
 
     let (occurrences, scan_status) = match rg_result {
         Ok(occ) => (occ, "ok"),
-        Err(e) => (Vec::new(), Box::leak(e.to_string().into_boxed_str()) as &str),
+        Err(e) => (
+            Vec::new(),
+            Box::leak(e.to_string().into_boxed_str()) as &str,
+        ),
     };
 
     let out = json!({
@@ -93,11 +94,7 @@ pub fn run(cfg: &Config, args: ReferencesArgs) -> Result<()> {
 /// - If `name` contains `.`, treat as a qname for direct lookup.
 /// - Otherwise scan the qname index and collect symbols whose qname equals
 ///   `name` or ends with `.name` (case-sensitive — matches rg's default).
-fn lookup_definitions(
-    engine: &Engine,
-    index: &AsgIndexStore,
-    name: &str,
-) -> Result<Vec<Symbol>> {
+fn lookup_definitions(engine: &Engine, index: &AsgIndexStore, name: &str) -> Result<Vec<Symbol>> {
     if name.contains('.') {
         return Ok(index
             .get_symbol_by_qname(&engine.ref_name, name)?
@@ -105,7 +102,10 @@ fn lookup_definitions(
             .collect());
     }
 
-    let prefix = format!("{}/index/by-qname", agentstatedeveloper_core::paths::ASD_ROOT);
+    let prefix = format!(
+        "{}/index/by-qname",
+        agentstatedeveloper_core::paths::ASD_ROOT
+    );
     let tree = match engine.repo.get_tree(&engine.ref_name, &prefix) {
         Ok(t) => t,
         Err(_) => return Ok(Vec::new()),
@@ -173,7 +173,10 @@ fn rg_occurrences(
             .and_then(|p| p.get("text"))
             .and_then(|t| t.as_str())
             .unwrap_or("");
-        let line_no = data.get("line_number").and_then(|n| n.as_u64()).unwrap_or(0);
+        let line_no = data
+            .get("line_number")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0);
         let text = data
             .get("lines")
             .and_then(|l| l.get("text"))
@@ -218,8 +221,11 @@ mod tests {
         let workspace_root = manifest.parent().unwrap().parent().unwrap();
         let hits = rg_occurrences(workspace_root, "ReferencesArgs", &[], 50).unwrap();
         assert!(
-            hits.iter()
-                .any(|h| h.get("file").and_then(|f| f.as_str()).unwrap_or("").ends_with("references.rs")),
+            hits.iter().any(|h| h
+                .get("file")
+                .and_then(|f| f.as_str())
+                .unwrap_or("")
+                .ends_with("references.rs")),
             "expected at least one ReferencesArgs hit in references.rs; got {hits:?}"
         );
     }
@@ -239,7 +245,10 @@ mod tests {
             .filter_map(|h| h.get("line").and_then(|l| l.as_u64()))
             .collect();
         assert!(lines.contains(&1));
-        assert!(!lines.contains(&2), "foobar should not match word `foo`; got {hits:?}");
+        assert!(
+            !lines.contains(&2),
+            "foobar should not match word `foo`; got {hits:?}"
+        );
         assert!(lines.contains(&3));
     }
 }

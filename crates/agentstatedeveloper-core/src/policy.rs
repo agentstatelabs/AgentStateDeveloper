@@ -17,16 +17,15 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use agentstategraph::Repository;
-use agentstategraph_storage::SqliteStorage;
 use agentstategraph_policy::{
-    PolicyStore,
-    Situation as AsgSituation,
-    types::{ApprovalRule, AuthorizedAction, FallbackAction, Policy},
+    PolicyStore, Situation as AsgSituation,
     selector::Selector,
+    types::{ApprovalRule, AuthorizedAction, FallbackAction, Policy},
 };
+use agentstategraph_storage::SqliteStorage;
 
-use crate::error::Result;
 use crate::AsdError;
+use crate::error::Result;
 
 // ---------------------------------------------------------------------------
 // ASD-local Decision + Situation + PolicyGate trait
@@ -100,7 +99,9 @@ pub struct PermissivePolicyGate;
 
 impl PolicyGate for PermissivePolicyGate {
     fn evaluate(&self, _: &Situation, _: &str, _: &str) -> Result<Decision> {
-        Ok(Decision::Allow { matched_policy: None })
+        Ok(Decision::Allow {
+            matched_policy: None,
+        })
     }
 }
 
@@ -125,8 +126,7 @@ impl PolicyStoreGate {
     pub fn from_file(path: &Path) -> Result<Self> {
         let file = PolicyFile::load(path)?;
 
-        let storage = SqliteStorage::in_memory()
-            .map_err(|e| AsdError::Other(e.to_string()))?;
+        let storage = SqliteStorage::in_memory().map_err(|e| AsdError::Other(e.to_string()))?;
         let repo = Repository::new(Box::new(storage));
         repo.init()?;
         let ref_name = "main";
@@ -143,11 +143,19 @@ impl PolicyStoreGate {
             // `handle` is "path@version" — ratify takes just the path.
             let policy_path = handle.rsplitn(2, '@').nth(1).unwrap_or(&handle);
             store
-                .ratify(ref_name, policy_path, "asd-policy-import", "imported from policy file")
+                .ratify(
+                    ref_name,
+                    policy_path,
+                    "asd-policy-import",
+                    "imported from policy file",
+                )
                 .map_err(|e| AsdError::Other(e.to_string()))?;
         }
 
-        Ok(Self { store, ref_name: ref_name.to_string() })
+        Ok(Self {
+            store,
+            ref_name: ref_name.to_string(),
+        })
     }
 }
 
@@ -184,7 +192,9 @@ pub struct PolicyRule {
     pub agent_id: Option<String>,
 }
 
-fn default_version() -> u32 { 1 }
+fn default_version() -> u32 {
+    1
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PolicyFile {
@@ -215,15 +225,24 @@ impl FilePolicyGate {
     }
 
     pub fn from_policy_file(file: PolicyFile, source: impl Into<String>) -> Self {
-        Self { file, source: source.into() }
+        Self {
+            file,
+            source: source.into(),
+        }
     }
 
-    pub fn source(&self) -> &str { &self.source }
-    pub fn rule_count(&self) -> usize { self.file.policies.len() }
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+    pub fn rule_count(&self) -> usize {
+        self.file.policies.len()
+    }
 
     fn matches(rule: &PolicyRule, action: &str, agent_id: &str) -> bool {
         if let Some(pinned) = &rule.agent_id {
-            if pinned != agent_id { return false; }
+            if pinned != agent_id {
+                return false;
+            }
         }
         if let Some(prefix) = rule.match_action.strip_suffix(".*") {
             action == prefix || action.starts_with(&format!("{}.", prefix))
@@ -243,10 +262,15 @@ impl FilePolicyGate {
         } else if rule.deny {
             Decision::Deny {
                 matched_policy: matched,
-                reason: rule.reason.clone().unwrap_or_else(|| "policy deny".to_string()),
+                reason: rule
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "policy deny".to_string()),
             }
         } else {
-            Decision::Allow { matched_policy: Some(matched) }
+            Decision::Allow {
+                matched_policy: Some(matched),
+            }
         }
     }
 }
@@ -261,7 +285,9 @@ impl PolicyGate for FilePolicyGate {
         if self.file.strict {
             Ok(Decision::NoPolicyMatch)
         } else {
-            Ok(Decision::Allow { matched_policy: None })
+            Ok(Decision::Allow {
+                matched_policy: None,
+            })
         }
     }
 }
@@ -295,11 +321,18 @@ fn asg_decision_to_asd(d: agentstategraph_policy::Decision) -> Decision {
         D::Allow { matched_policy, .. } => Decision::Allow {
             matched_policy: Some(matched_policy),
         },
-        D::Deny { matched_policy, reason } => Decision::Deny {
+        D::Deny {
+            matched_policy,
+            reason,
+        } => Decision::Deny {
             matched_policy,
             reason,
         },
-        D::RequireApproval { matched_policy, approvers, .. } => Decision::RequireApproval {
+        D::RequireApproval {
+            matched_policy,
+            approvers,
+            ..
+        } => Decision::RequireApproval {
             matched_policy,
             approvers,
             reason: None,
@@ -311,7 +344,10 @@ fn asg_decision_to_asd(d: agentstategraph_policy::Decision) -> Decision {
 /// Convert an ASD `PolicyRule` to an ASG `Policy` ready for `propose`.
 fn rule_to_policy(rule: &PolicyRule, _strict: bool) -> Policy {
     let situation_selector = match &rule.agent_id {
-        Some(id) => Selector::Eq { key: "agent_id".to_string(), value: id.clone() },
+        Some(id) => Selector::Eq {
+            key: "agent_id".to_string(),
+            value: id.clone(),
+        },
         None => Selector::Always,
     };
 
@@ -343,7 +379,10 @@ fn rule_to_policy(rule: &PolicyRule, _strict: bool) -> Policy {
     Policy {
         path: rule.path.trim_start_matches('/').to_string(),
         version: 1,
-        situation: rule.description.clone().unwrap_or_else(|| rule.path.clone()),
+        situation: rule
+            .description
+            .clone()
+            .unwrap_or_else(|| rule.path.clone()),
         situation_selector,
         allow,
         deny,
@@ -400,7 +439,13 @@ mod tests {
     use super::*;
 
     fn make_file(rules: Vec<PolicyRule>, strict: bool) -> FilePolicyGate {
-        FilePolicyGate::from_policy_file(PolicyFile { policies: rules, strict }, "test")
+        FilePolicyGate::from_policy_file(
+            PolicyFile {
+                policies: rules,
+                strict,
+            },
+            "test",
+        )
     }
 
     fn sit() -> Situation {
@@ -409,19 +454,28 @@ mod tests {
 
     #[test]
     fn exact_match_require_approval() {
-        let gate = make_file(vec![PolicyRule {
-            path: "/policies/code/hazard".into(),
-            version: 1,
-            description: None,
-            match_action: actions::LEDGER_APPEND_HAZARD.into(),
-            deny: false,
-            require_approval: vec!["human".into()],
-            reason: Some("audit".into()),
-            agent_id: None,
-        }], false);
-        let d = gate.evaluate(&sit(), actions::LEDGER_APPEND_HAZARD, "asd-mcp").unwrap();
+        let gate = make_file(
+            vec![PolicyRule {
+                path: "/policies/code/hazard".into(),
+                version: 1,
+                description: None,
+                match_action: actions::LEDGER_APPEND_HAZARD.into(),
+                deny: false,
+                require_approval: vec!["human".into()],
+                reason: Some("audit".into()),
+                agent_id: None,
+            }],
+            false,
+        );
+        let d = gate
+            .evaluate(&sit(), actions::LEDGER_APPEND_HAZARD, "asd-mcp")
+            .unwrap();
         match d {
-            Decision::RequireApproval { matched_policy, approvers, reason } => {
+            Decision::RequireApproval {
+                matched_policy,
+                approvers,
+                reason,
+            } => {
                 assert_eq!(matched_policy, "/policies/code/hazard@1");
                 assert_eq!(approvers, vec!["human"]);
                 assert_eq!(reason.as_deref(), Some("audit"));
@@ -432,17 +486,22 @@ mod tests {
 
     #[test]
     fn prefix_wildcard_matches_suffix() {
-        let gate = make_file(vec![PolicyRule {
-            path: "/p/any-ledger".into(),
-            version: 1,
-            description: None,
-            match_action: "asd.ledger.*".into(),
-            deny: true,
-            require_approval: vec![],
-            reason: Some("paused".into()),
-            agent_id: None,
-        }], false);
-        let d = gate.evaluate(&sit(), "asd.ledger.append.decision", "whoever").unwrap();
+        let gate = make_file(
+            vec![PolicyRule {
+                path: "/p/any-ledger".into(),
+                version: 1,
+                description: None,
+                match_action: "asd.ledger.*".into(),
+                deny: true,
+                require_approval: vec![],
+                reason: Some("paused".into()),
+                agent_id: None,
+            }],
+            false,
+        );
+        let d = gate
+            .evaluate(&sit(), "asd.ledger.append.decision", "whoever")
+            .unwrap();
         assert!(matches!(d, Decision::Deny { .. }));
     }
 
@@ -450,7 +509,12 @@ mod tests {
     fn no_match_non_strict_is_allow() {
         let gate = make_file(vec![], false);
         let d = gate.evaluate(&sit(), "asd.anything", "x").unwrap();
-        assert!(matches!(d, Decision::Allow { matched_policy: None }));
+        assert!(matches!(
+            d,
+            Decision::Allow {
+                matched_policy: None
+            }
+        ));
     }
 
     #[test]
@@ -473,9 +537,13 @@ mod tests {
             agent_id: Some("bot-v1".into()),
         };
         let gate = make_file(vec![rule], false);
-        let d1 = gate.evaluate(&sit(), "asd.effect.declare", "bot-v1").unwrap();
+        let d1 = gate
+            .evaluate(&sit(), "asd.effect.declare", "bot-v1")
+            .unwrap();
         assert!(matches!(d1, Decision::Deny { .. }));
-        let d2 = gate.evaluate(&sit(), "asd.effect.declare", "bot-v2").unwrap();
+        let d2 = gate
+            .evaluate(&sit(), "asd.effect.declare", "bot-v2")
+            .unwrap();
         assert!(matches!(d2, Decision::Allow { .. }));
     }
 
@@ -486,8 +554,14 @@ mod tests {
         write!(f, r#"{{"policies":[{{"path":"/policies/test/no-tradeoffs","match_action":"asd.ledger.append.tradeoff","deny":true,"reason":"disabled"}}],"strict":false}}"#).unwrap();
         let gate = PolicyStoreGate::from_file(f.path()).expect("from_file");
         let sit = Situation::new("test");
-        let d = gate.evaluate(&sit, "asd.ledger.append.tradeoff", "agent").unwrap();
-        assert!(matches!(d, Decision::Deny { .. }), "expected Deny, got {:?}", d);
+        let d = gate
+            .evaluate(&sit, "asd.ledger.append.tradeoff", "agent")
+            .unwrap();
+        assert!(
+            matches!(d, Decision::Deny { .. }),
+            "expected Deny, got {:?}",
+            d
+        );
     }
 
     #[test]
@@ -497,7 +571,9 @@ mod tests {
         write!(f, r#"{{"policies":[{{"path":"/policies/test/no-tradeoffs","match_action":"asd.ledger.append.tradeoff","deny":true,"reason":"disabled"}}],"strict":false}}"#).unwrap();
         let gate = PolicyStoreGate::from_file(f.path()).expect("from_file");
         let sit = Situation::new("test");
-        let d = gate.evaluate(&sit, "asd.ledger.append.decision", "agent").unwrap();
+        let d = gate
+            .evaluate(&sit, "asd.ledger.append.decision", "agent")
+            .unwrap();
         assert!(
             matches!(d, Decision::Allow { .. } | Decision::NoPolicyMatch),
             "expected Allow/NoPolicyMatch, got {:?}",

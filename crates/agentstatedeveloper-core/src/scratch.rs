@@ -19,9 +19,9 @@
 //! `exclude_expired` defaults to `true` — expired drafts are hidden unless
 //! the caller opts in.
 
-use chrono::Utc;
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
+use chrono::Utc;
 use serde_json::Value;
 
 use crate::error::{AsdError, Result};
@@ -133,8 +133,12 @@ impl CleanFilter {
 pub trait ScratchStore {
     /// Persist a new scratch entry. Returns the stored entry (may have
     /// `updated_at` refreshed by the impl).
-    fn write_entry(&self, ref_name: &str, entry: &ScratchEntry, agent_id: &str)
-        -> Result<ScratchEntry>;
+    fn write_entry(
+        &self,
+        ref_name: &str,
+        entry: &ScratchEntry,
+        agent_id: &str,
+    ) -> Result<ScratchEntry>;
 
     /// Read a single entry by scratch_id.
     fn read_entry(&self, ref_name: &str, scratch_id: &str) -> Result<ScratchEntry>;
@@ -149,8 +153,7 @@ pub trait ScratchStore {
     ) -> Result<ScratchEntry>;
 
     /// List entries matching the filter, newest first.
-    fn list_entries(&self, ref_name: &str, filter: &ScratchFilter)
-        -> Result<Vec<ScratchEntry>>;
+    fn list_entries(&self, ref_name: &str, filter: &ScratchFilter) -> Result<Vec<ScratchEntry>>;
 
     /// Transition status to `Discarded`. No data is deleted; the entry remains
     /// until `clean_entries` removes it.
@@ -168,12 +171,7 @@ pub trait ScratchStore {
 
     /// Permanently delete entries matching the filter. Returns the number
     /// of entries removed (0 when `dry_run` is true).
-    fn clean_entries(
-        &self,
-        ref_name: &str,
-        filter: &CleanFilter,
-        dry_run: bool,
-    ) -> Result<usize>;
+    fn clean_entries(&self, ref_name: &str, filter: &CleanFilter, dry_run: bool) -> Result<usize>;
 }
 
 // ---------------------------------------------------------------------------
@@ -186,9 +184,12 @@ pub struct AsgScratchStore<'a> {
 }
 
 impl<'a> ScratchStore for AsgScratchStore<'a> {
-    fn write_entry(&self, ref_name: &str, entry: &ScratchEntry, agent_id: &str)
-        -> Result<ScratchEntry>
-    {
+    fn write_entry(
+        &self,
+        ref_name: &str,
+        entry: &ScratchEntry,
+        agent_id: &str,
+    ) -> Result<ScratchEntry> {
         let path = paths::scratch_entry_path(&entry.scratch_id);
         let val = serde_json::to_value(entry)?;
         let opts = CommitOptions::new(
@@ -230,9 +231,7 @@ impl<'a> ScratchStore for AsgScratchStore<'a> {
         self.write_entry(ref_name, &entry, agent_id)
     }
 
-    fn list_entries(&self, ref_name: &str, filter: &ScratchFilter)
-        -> Result<Vec<ScratchEntry>>
-    {
+    fn list_entries(&self, ref_name: &str, filter: &ScratchFilter) -> Result<Vec<ScratchEntry>> {
         let prefix = paths::scratch_root();
         let map = match self.repo.get_tree(ref_name, prefix) {
             Ok(Value::Object(m)) => m,
@@ -270,18 +269,11 @@ impl<'a> ScratchStore for AsgScratchStore<'a> {
         self.write_entry(ref_name, &entry, agent_id)
     }
 
-    fn clean_entries(
-        &self,
-        ref_name: &str,
-        filter: &CleanFilter,
-        dry_run: bool,
-    ) -> Result<usize> {
+    fn clean_entries(&self, ref_name: &str, filter: &CleanFilter, dry_run: bool) -> Result<usize> {
         let all_filter = ScratchFilter::all();
         let entries = self.list_entries(ref_name, &all_filter)?;
-        let to_delete: Vec<ScratchEntry> = entries
-            .into_iter()
-            .filter(|e| filter.matches(e))
-            .collect();
+        let to_delete: Vec<ScratchEntry> =
+            entries.into_iter().filter(|e| filter.matches(e)).collect();
         let count = to_delete.len();
         if dry_run {
             return Ok(count);

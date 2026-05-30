@@ -15,8 +15,8 @@ fn prime_db(db_path: &std::path::Path) {
     use std::sync::Arc;
 
     use agentstatedeveloper_core::{
-        AsgEffectStore, AsgIndexStore, EffectDecl, EffectStore, Engine, IndexStore, LanguageAdapter,
-        Position, Symbol, Verification, VerificationSource, VerificationStatus,
+        AsgEffectStore, AsgIndexStore, EffectDecl, EffectStore, Engine, IndexStore,
+        LanguageAdapter, Position, Symbol, Verification, VerificationSource, VerificationStatus,
         canonical_symbol_id, symbol_fingerprint,
     };
     use agentstatedeveloper_python::PythonAdapter;

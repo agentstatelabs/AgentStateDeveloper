@@ -162,7 +162,10 @@ impl<'a> AsgLedgerStore<'a> {
     }
     /// Convenience: borrow the FTS connection already open in `engine`.
     pub fn from_engine(engine: &'a Engine) -> Self {
-        Self { repo: &engine.repo, fts: engine.fts.as_ref() }
+        Self {
+            repo: &engine.repo,
+            fts: engine.fts.as_ref(),
+        }
     }
 }
 
@@ -185,7 +188,8 @@ impl<'a> LedgerStore for AsgLedgerStore<'a> {
             IntentCategory::Refine,
             format!("ledger-idx {}", entry.entry_id),
         );
-        self.repo.set_json(ref_name, &idx_path, &idx_val, idx_opts)?;
+        self.repo
+            .set_json(ref_name, &idx_path, &idx_val, idx_opts)?;
 
         // Best-effort SQLite write-through; failures are non-fatal.
         if let Some(fts) = self.fts {
@@ -333,7 +337,11 @@ mod tests {
             .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("commercial feature"), "msg: {}", msg);
-        assert!(msg.contains("agentstatedeveloper.dev/pricing"), "msg: {}", msg);
+        assert!(
+            msg.contains("agentstatedeveloper.dev/pricing"),
+            "msg: {}",
+            msg
+        );
     }
 
     #[test]
@@ -344,7 +352,11 @@ mod tests {
             .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("commercial feature"), "msg: {}", msg);
-        assert!(msg.contains("agentstatedeveloper.dev/pricing"), "msg: {}", msg);
+        assert!(
+            msg.contains("agentstatedeveloper.dev/pricing"),
+            "msg: {}",
+            msg
+        );
     }
 
     #[test]
@@ -355,6 +367,10 @@ mod tests {
             .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("commercial feature"), "msg: {}", msg);
-        assert!(msg.contains("agentstatedeveloper.dev/pricing"), "msg: {}", msg);
+        assert!(
+            msg.contains("agentstatedeveloper.dev/pricing"),
+            "msg: {}",
+            msg
+        );
     }
 }

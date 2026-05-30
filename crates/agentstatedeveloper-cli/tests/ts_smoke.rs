@@ -56,7 +56,10 @@ fn ts_smoke_shows_transitive_effects() {
         .output()
         .expect("run asd init");
     assert!(init.status.success());
-    eprintln!("--- asd init ---\n{}", String::from_utf8_lossy(&init.stdout));
+    eprintln!(
+        "--- asd init ---\n{}",
+        String::from_utf8_lossy(&init.stdout)
+    );
 
     let src_dir = workdir.join("src");
     let index = Command::new(bin)
@@ -69,7 +72,10 @@ fn ts_smoke_shows_transitive_effects() {
         .output()
         .expect("run asd index");
     assert!(index.status.success());
-    eprintln!("--- asd index src ---\n{}", String::from_utf8_lossy(&index.stdout));
+    eprintln!(
+        "--- asd index src ---\n{}",
+        String::from_utf8_lossy(&index.stdout)
+    );
 
     let read = Command::new(bin)
         .args(["--db", db.to_str().unwrap(), "read", "driver.main"])

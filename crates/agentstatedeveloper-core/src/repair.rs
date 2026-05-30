@@ -353,11 +353,17 @@ fn rewrite_edge_lists(
         let opts = CommitOptions::new(
             agent_id,
             IntentCategory::Refine,
-            format!("repair: dropped {} orphaned {} ref(s) from {}", dropped, field, owner_id),
+            format!(
+                "repair: dropped {} orphaned {} ref(s) from {}",
+                dropped, field, owner_id
+            ),
         );
         match repo.set_json(ref_name, &path_fn(owner_id), &new_val, opts) {
             Ok(_) => total_dropped += dropped,
-            Err(e) => eprintln!("asd repair: rewrite {} for {} failed: {}", field, owner_id, e),
+            Err(e) => eprintln!(
+                "asd repair: rewrite {} for {} failed: {}",
+                field, owner_id, e
+            ),
         }
     }
     total_dropped
@@ -367,20 +373,24 @@ fn rewrite_edge_lists(
 /// exists in the live index.  Returns the total number of individual refs
 /// dropped.  Called by [`hydrate_from_dir`] after a hydrate pass to clean
 /// up any stale edges the sidecar may have carried.
-pub fn drop_orphaned_edge_refs(
-    repo: &Repository,
-    ref_name: &str,
-    agent_id: &str,
-) -> Result<usize> {
+pub fn drop_orphaned_edge_refs(repo: &Repository, ref_name: &str, agent_id: &str) -> Result<usize> {
     let live = build_live_symbol_ids(repo, ref_name);
     let mut dropped = 0usize;
     dropped += rewrite_edge_lists(
-        repo, ref_name, agent_id, &live, "callees",
+        repo,
+        ref_name,
+        agent_id,
+        &live,
+        "callees",
         &format!("{}/index/callees", paths::ASD_ROOT),
         |id| paths::callees_path(id),
     );
     dropped += rewrite_edge_lists(
-        repo, ref_name, agent_id, &live, "callers",
+        repo,
+        ref_name,
+        agent_id,
+        &live,
+        "callers",
         &format!("{}/index/callers", paths::ASD_ROOT),
         |id| paths::callers_path(id),
     );

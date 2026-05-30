@@ -17,20 +17,16 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine,
-    FeedbackStore, FtsFilters, IndexStore, LedgerKind, LedgerStore, SearchFtsDb,
-    apply_feedback_adjustments, compute_trust_score, compute_uncertainty, FeedbackMetrics,
-    classify_layer_sym, confidence_scores, derive_cold_hints, detect_ambiguous_tokens,
-    detect_possible_misses, estimate_tokens, explain_match, extract_summary, fetch_all_test_file_paths,
-    find_candidates, gather_recency, git_dirty_files, glob_match,
-    intent_focus, intent_layer_order, load_layer_overrides, parse_intent, parse_query,
-    propose_test_path, resolve_scope, result_bucket, stale_warning, symbol_tier,
-    test_files_for_source, trim_for_agent,
+    FeedbackMetrics, FeedbackStore, FtsFilters, IndexStore, LedgerKind, LedgerStore, SearchFtsDb,
+    apply_feedback_adjustments, classify_layer_sym, compute_trust_score, compute_uncertainty,
+    confidence_scores, derive_cold_hints, detect_ambiguous_tokens, detect_possible_misses,
+    estimate_tokens, explain_match, extract_summary, fetch_all_test_file_paths, find_candidates,
+    gather_recency, git_dirty_files, glob_match, intent_focus, intent_layer_order,
+    load_layer_overrides, parse_intent, parse_query, propose_test_path, resolve_scope,
+    result_bucket, stale_warning, symbol_tier, test_files_for_source, trim_for_agent,
 };
 
-use crate::commands::{
-    graph::build_id_map,
-    impact::git_recent_touches_pub,
-};
+use crate::commands::{graph::build_id_map, impact::git_recent_touches_pub};
 use crate::config::Config;
 
 #[derive(Debug, Args)]
@@ -128,7 +124,11 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
 
     let (mut tokens, mut exclusions) = parse_query(&args.description);
     if let Some(ref excl) = args.exclude {
-        for term in excl.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()) {
+        for term in excl
+            .split(',')
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+        {
             exclusions.push(term);
         }
     }
@@ -137,11 +137,15 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     let auto_ctx_plan = std::env::var("CTXONE_PLAN").ok().filter(|s| !s.is_empty());
     let auto_ctx_task = std::env::var("CTXONE_TASK").ok().filter(|s| !s.is_empty());
     let ctx_text = args.task_context.clone().or_else(|| {
-        let parts: Vec<&str> = [
-            auto_ctx_plan.as_deref(),
-            auto_ctx_task.as_deref(),
-        ].iter().filter_map(|x| *x).collect();
-        if parts.is_empty() { None } else { Some(parts.join(" ")) }
+        let parts: Vec<&str> = [auto_ctx_plan.as_deref(), auto_ctx_task.as_deref()]
+            .iter()
+            .filter_map(|x| *x)
+            .collect();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" "))
+        }
     });
     if let Some(ref ctx) = ctx_text {
         let (ctx_tokens, _) = parse_query(ctx);
@@ -152,7 +156,10 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         }
     }
     if tokens.is_empty() {
-        println!("{}", json!({"description": args.description, "entry_points": {}}));
+        println!(
+            "{}",
+            json!({"description": args.description, "entry_points": {}})
+        );
         return Ok(());
     }
 
@@ -161,7 +168,12 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         paths_filter.extend(resolve_scope(scope, &cfg.db_path));
     }
     if let Some(ref paths) = args.paths {
-        paths_filter.extend(paths.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()));
+        paths_filter.extend(
+            paths
+                .split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty()),
+        );
     }
     let _has_paths_filter = !paths_filter.is_empty();
     let filters = FtsFilters {
@@ -187,13 +199,23 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // list_all() is hoisted here and reused for wrong_layer_files below — avoids two separate
     // git-object reads for the same feedback data.
     let feedback_store = AsgFeedbackStore::from_engine(&engine);
-    let all_fb = feedback_store.list_all(&engine.ref_name).unwrap_or_default();
+    let all_fb = feedback_store
+        .list_all(&engine.ref_name)
+        .unwrap_or_default();
     // Derive flat_verdicts from the hoisted list (same logic as the FeedbackStore default impl).
-    let feedback_verdicts: Vec<(String, String, agentstatedeveloper_core::FeedbackVerdict)> = all_fb.iter()
-        .filter(|e| e.file_scope.is_none())
-        .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict))
-        .collect();
-    let feedback_metrics = apply_feedback_adjustments(&engine, &index_store, &args.description, &mut candidates, &feedback_verdicts);
+    let feedback_verdicts: Vec<(String, String, agentstatedeveloper_core::FeedbackVerdict)> =
+        all_fb
+            .iter()
+            .filter(|e| e.file_scope.is_none())
+            .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict))
+            .collect();
+    let feedback_metrics = apply_feedback_adjustments(
+        &engine,
+        &index_store,
+        &args.description,
+        &mut candidates,
+        &feedback_verdicts,
+    );
 
     // Recency pass (one git call for all files).
     let recency = gather_recency(200, 14.0);
@@ -223,8 +245,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // file_score_floor(), push_file_score()). The orchestration loop here is
     // still duplicated with the MCP handler; Plan F will lift the full
     // walk. Until then, prefer the core helpers when editing scoring logic.
-    let mut file_scores: Vec<(f64, String, String, Option<f64>, bool, String, String)> =
-        Vec::new();
+    let mut file_scores: Vec<(f64, String, String, Option<f64>, bool, String, String)> = Vec::new();
     let mut seen_files: HashSet<String> = HashSet::new();
     let file_score_floor = candidates.first().map(|(s, _)| s * 0.25).unwrap_or(0.0);
 
@@ -307,7 +328,9 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             if let Ok(Some(decl)) = effect_store.get_effects(&engine.ref_name, &sym.symbol_id) {
                 let has_high_signal = decl.declared.iter().any(|e| !e.effect.is_low_signal());
                 for eff in &decl.declared {
-                    if has_high_signal && eff.effect.is_low_signal() { continue; }
+                    if has_high_signal && eff.effect.is_low_signal() {
+                        continue;
+                    }
                     let cat = eff.effect.as_str().to_string();
                     let key = format!("{}:{}", cat, sym.qname);
                     if seen_effect.insert(key) {
@@ -365,7 +388,11 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         .map(|(score, file, layer, days, hot, top_symbol, why)| {
             let file_role = classify_file_role(file);
             let conflict_risk = dirty_files.contains(file.as_str());
-            let conflict_detail = if conflict_risk { explain_conflict_risk(file) } else { None };
+            let conflict_detail = if conflict_risk {
+                explain_conflict_risk(file)
+            } else {
+                None
+            };
             json!({
                 "file": file,
                 "layer": layer,
@@ -390,33 +417,43 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         visited.insert(start_id.clone());
         queue.push_back((start_id, 0));
         while let Some((sid, depth)) = queue.pop_front() {
-            if depth >= args.test_depth { continue; }
+            if depth >= args.test_depth {
+                continue;
+            }
             let callers = index_store
                 .get_callers(&engine.ref_name, &sid)
                 .unwrap_or_default();
             for cid in callers {
-                if visited.contains(&cid) { continue; }
+                if visited.contains(&cid) {
+                    continue;
+                }
                 visited.insert(cid.clone());
                 if let Some(s) = id_map.get(&cid) {
                     if symbol_tier(&s.file) == 2 && seen_test_names.insert(s.qname.clone()) {
                         // Use both qname words and doc comment words for behavioral matching
                         // so "test_plays_silence_at_loop_end" and a doc saying "verifies
                         // loop boundary" both surface the relevant invariant.
-                        let qname_words: Vec<String> = s.qname
+                        let qname_words: Vec<String> = s
+                            .qname
                             .split(|c: char| !c.is_alphabetic())
                             .filter(|t| t.len() > 2)
                             .map(|t| t.to_lowercase())
                             .collect();
-                        let doc_words: Vec<String> = s.doc.as_deref().unwrap_or("")
+                        let doc_words: Vec<String> = s
+                            .doc
+                            .as_deref()
+                            .unwrap_or("")
                             .split(|c: char| !c.is_alphabetic())
                             .filter(|t| t.len() > 2)
                             .map(|t| t.to_lowercase())
                             .collect();
-                        let test_tokens: Vec<&str> = qname_words.iter()
+                        let test_tokens: Vec<&str> = qname_words
+                            .iter()
                             .chain(doc_words.iter())
                             .map(|s| s.as_str())
                             .collect();
-                        let covers: Vec<&str> = design_invariants.iter()
+                        let covers: Vec<&str> = design_invariants
+                            .iter()
                             .filter_map(|inv| inv.get("summary").and_then(Value::as_str))
                             .filter(|summary| {
                                 let sl = summary.to_lowercase();
@@ -444,8 +481,15 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         let mut callee_layers: HashMap<String, usize> = HashMap::new();
         let mut total_callers = 0usize;
         let mut total_callees = 0usize;
-        let top_sids: Vec<String> = candidates.iter().take(5)
-            .filter_map(|(_, q)| index_store.get_symbol_by_qname(&engine.ref_name, q).ok().flatten())
+        let top_sids: Vec<String> = candidates
+            .iter()
+            .take(5)
+            .filter_map(|(_, q)| {
+                index_store
+                    .get_symbol_by_qname(&engine.ref_name, q)
+                    .ok()
+                    .flatten()
+            })
             .map(|s| s.symbol_id)
             .collect();
 
@@ -461,12 +505,18 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             visited.insert(sid.clone());
             q.push_back((sid.clone(), vec![anchor_qname.clone()]));
             while let Some((cid, path)) = q.pop_front() {
-                if path.len() > 4 { continue; }
-                for caller_id in index_store.get_callers(&engine.ref_name, &cid).unwrap_or_default() {
+                if path.len() > 4 {
+                    continue;
+                }
+                for caller_id in index_store
+                    .get_callers(&engine.ref_name, &cid)
+                    .unwrap_or_default()
+                {
                     if visited.insert(caller_id.clone()) {
                         if let Some(sym) = id_map.get(&caller_id) {
                             let tier = symbol_tier(&sym.file);
-                            let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
+                            let layer =
+                                classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
                             *caller_layers.entry(layer.to_string()).or_default() += 1;
                             total_callers += 1;
                             // Build path: prepend this caller.
@@ -480,7 +530,10 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
                     }
                 }
             }
-            for callee_id in index_store.get_callees(&engine.ref_name, sid).unwrap_or_default() {
+            for callee_id in index_store
+                .get_callees(&engine.ref_name, sid)
+                .unwrap_or_default()
+            {
                 if let Some(sym) = id_map.get(&callee_id) {
                     let tier = symbol_tier(&sym.file);
                     let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
@@ -520,18 +573,29 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     let all_test_file_paths = fetch_all_test_file_paths(&cfg.db_path);
     let test_gap = affected_tests.is_empty();
     // Try to find a real indexed test file before falling back to a suggested path.
-    let proposed_test_path = test_gap.then(|| {
-        let source = file_scores.first().map(|(_, f, _, _, _, _, _)| f.as_str()).unwrap_or("");
-        if source.is_empty() { return None; }
-        let real = test_files_for_source(&all_test_file_paths, source);
-        if real.is_empty() {
-            Some(format!("no known test target (suggested: {})", propose_test_path(source)))
-        } else {
-            Some(real.join(", "))
-        }
-    }).flatten();
+    let proposed_test_path = test_gap
+        .then(|| {
+            let source = file_scores
+                .first()
+                .map(|(_, f, _, _, _, _, _)| f.as_str())
+                .unwrap_or("");
+            if source.is_empty() {
+                return None;
+            }
+            let real = test_files_for_source(&all_test_file_paths, source);
+            if real.is_empty() {
+                Some(format!(
+                    "no known test target (suggested: {})",
+                    propose_test_path(source)
+                ))
+            } else {
+                Some(real.join(", "))
+            }
+        })
+        .flatten();
     let suggested_test_coverage: Vec<String> = if test_gap {
-        let mut hints: Vec<String> = design_invariants.iter()
+        let mut hints: Vec<String> = design_invariants
+            .iter()
             .filter_map(|inv| inv.get("summary").and_then(Value::as_str))
             .map(|s| s.to_string())
             .collect();
@@ -548,7 +612,9 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         if design_invariants.is_empty() {
             if let Some((_, qname)) = candidates.first() {
                 if let Ok(Some(sym)) = index_store.get_symbol_by_qname(&engine.ref_name, qname) {
-                    for h in derive_cold_hints(&sym.qname, sym.signature.as_deref(), sym.doc.as_deref()) {
+                    for h in
+                        derive_cold_hints(&sym.qname, sym.signature.as_deref(), sym.doc.as_deref())
+                    {
                         if !hints.contains(&h) {
                             hints.push(h);
                         }
@@ -562,10 +628,23 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     };
 
     const CONSTRAINT_WORDS: &[&str] = &[
-        "must", "never", "shall", "always", "only", "cannot", "no ", "not ",
-        "require", "ensure", "prevent", "guarantee", "invariant", "forbidden",
+        "must",
+        "never",
+        "shall",
+        "always",
+        "only",
+        "cannot",
+        "no ",
+        "not ",
+        "require",
+        "ensure",
+        "prevent",
+        "guarantee",
+        "invariant",
+        "forbidden",
     ];
-    let scenario_tests: Vec<Value> = design_invariants.iter()
+    let scenario_tests: Vec<Value> = design_invariants
+        .iter()
         .filter_map(|inv| inv.get("summary").and_then(Value::as_str))
         .filter(|s| {
             let sl = s.to_lowercase();
@@ -578,11 +657,15 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // t-001: broad_query = at least half the query tokens are flagged as ambiguous.
     let broad_query = !ambiguous_terms.is_empty() && {
         let amb_set: HashSet<&str> = ambiguous_terms.iter().map(|s| s.as_str()).collect();
-        let amb_count = tokens.iter().filter(|t| amb_set.contains(t.as_str())).count();
+        let amb_count = tokens
+            .iter()
+            .filter(|t| amb_set.contains(t.as_str()))
+            .count();
         amb_count * 2 >= tokens.len().max(1)
     };
 
-    let layers_present: std::collections::HashSet<&str> = file_scores.iter()
+    let layers_present: std::collections::HashSet<&str> = file_scores
+        .iter()
         .map(|(_, _, layer, _, _, _, _)| layer.as_str())
         .collect();
     // Suppress possible-miss warnings when the user explicitly narrowed scope.
@@ -603,17 +686,19 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             language: filters.language.clone(),
             include_tests: filters.include_tests,
             exclude_terms: filters.exclude_terms.clone(),
-            paths_filter: vec![],  // no path filter
+            paths_filter: vec![], // no path filter
         };
         let unscoped_hits = SearchFtsDb::open(&cfg.db_path)
             .ok()
             .filter(|fts| fts.has_data())
             .and_then(|fts| fts.search(&args.description, &unscoped_filters, 20).ok())
             .unwrap_or_default();
-        let scoped_file_set: std::collections::HashSet<&str> = file_scores.iter()
+        let scoped_file_set: std::collections::HashSet<&str> = file_scores
+            .iter()
             .map(|(_, f, _, _, _, _, _)| f.as_str())
             .collect();
-        unscoped_hits.iter()
+        unscoped_hits
+            .iter()
             .filter(|h| !filters.paths_filter.iter().any(|p| glob_match(p, &h.file)))
             .filter(|h| !scoped_file_set.contains(h.file.as_str()))
             .take(5)
@@ -637,8 +722,15 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
 
     // Graph-based omissions: callers/callees outside scope.
     let likely_omitted_files: Vec<Value> = if scope_narrowed && !filters.paths_filter.is_empty() {
-        let top_sids_omit: Vec<String> = candidates.iter().take(3)
-            .filter_map(|(_, q)| index_store.get_symbol_by_qname(&engine.ref_name, q).ok().flatten())
+        let top_sids_omit: Vec<String> = candidates
+            .iter()
+            .take(3)
+            .filter_map(|(_, q)| {
+                index_store
+                    .get_symbol_by_qname(&engine.ref_name, q)
+                    .ok()
+                    .flatten()
+            })
             .map(|s| s.symbol_id)
             .collect();
         let mut omitted: Vec<Value> = Vec::new();
@@ -646,9 +738,15 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         for sid in &top_sids_omit {
             let anchor_qname = id_map.get(sid).map(|s| s.qname.clone()).unwrap_or_default();
             // Check callers outside scope.
-            for caller_id in index_store.get_callers(&engine.ref_name, sid).unwrap_or_default() {
+            for caller_id in index_store
+                .get_callers(&engine.ref_name, sid)
+                .unwrap_or_default()
+            {
                 if let Some(sym) = id_map.get(&caller_id) {
-                    let in_scope = filters.paths_filter.iter().any(|p| glob_match(p, &sym.file));
+                    let in_scope = filters
+                        .paths_filter
+                        .iter()
+                        .any(|p| glob_match(p, &sym.file));
                     if !in_scope && seen_files.insert(sym.file.clone()) {
                         let dir = std::path::Path::new(&sym.file)
                             .parent()
@@ -664,9 +762,15 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
                 }
             }
             // Check callees outside scope.
-            for callee_id in index_store.get_callees(&engine.ref_name, sid).unwrap_or_default() {
+            for callee_id in index_store
+                .get_callees(&engine.ref_name, sid)
+                .unwrap_or_default()
+            {
                 if let Some(sym) = id_map.get(&callee_id) {
-                    let in_scope = filters.paths_filter.iter().any(|p| glob_match(p, &sym.file));
+                    let in_scope = filters
+                        .paths_filter
+                        .iter()
+                        .any(|p| glob_match(p, &sym.file));
                     if !in_scope && seen_files.insert(sym.file.clone()) {
                         let dir = std::path::Path::new(&sym.file)
                             .parent()
@@ -704,12 +808,15 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
 
     // T1: safe-change recipe — actionable sections for an agent or developer.
     // T4: manually_validate includes concrete ValidationScenario entries.
-    let recipe_inspect: Vec<Value> = file_scores.iter()
-        .map(|(score, file, layer, days, hot, top_symbol, why)| json!({
-            "file": file, "layer": layer, "score": score,
-            "last_touched_days": days, "hot": hot,
-            "top_symbol": top_symbol, "why": why,
-        }))
+    let recipe_inspect: Vec<Value> = file_scores
+        .iter()
+        .map(|(score, file, layer, days, hot, top_symbol, why)| {
+            json!({
+                "file": file, "layer": layer, "score": score,
+                "last_touched_days": days, "hot": hot,
+                "top_symbol": top_symbol, "why": why,
+            })
+        })
         .collect();
     let recipe_preserve: Vec<Value> = design_invariants.iter()
         .map(|inv| json!({ "constraint": inv["summary"], "source": inv["source"], "kind": "invariant" }))
@@ -728,17 +835,27 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             .collect();
         let mut wl_files = _HSet::new();
         for entry in &all_fb {
-            if !matches!(entry.verdict, agentstatedeveloper_core::FeedbackVerdict::WrongLayer) { continue; }
+            if !matches!(
+                entry.verdict,
+                agentstatedeveloper_core::FeedbackVerdict::WrongLayer
+            ) {
+                continue;
+            }
             // Query-family match: share at least one token.
-            let fb_tokens: std::collections::HashSet<String> = entry.query
+            let fb_tokens: std::collections::HashSet<String> = entry
+                .query
                 .split(|c: char| !c.is_alphabetic())
                 .filter(|t: &&str| t.len() > 2)
                 .map(|t: &str| t.to_string())
                 .collect();
             let overlaps = desc_tokens.iter().any(|t| fb_tokens.contains(t));
-            if !overlaps { continue; }
+            if !overlaps {
+                continue;
+            }
             // Look up the symbol's file via qname.
-            if let Ok(Some(sym)) = index_store.get_symbol_by_qname(&engine.ref_name, &entry.symbol_qname) {
+            if let Ok(Some(sym)) =
+                index_store.get_symbol_by_qname(&engine.ref_name, &entry.symbol_qname)
+            {
                 wl_files.insert(sym.file);
             }
         }
@@ -751,7 +868,9 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             for (_, file, _, _, _, _, _) in &file_scores {
                 let entry = file_to_tests.entry(file.clone()).or_default();
                 let tf = test_file.to_string();
-                if !entry.contains(&tf) { entry.push(tf); }
+                if !entry.contains(&tf) {
+                    entry.push(tf);
+                }
             }
         }
     }
@@ -761,34 +880,37 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // unless the query explicitly names them. Other view-like files are demoted only
     // on broad queries. A file is retained when ≥2 of its stem words appear in the
     // query tokens (generalised domain anchor — no hardcoded token list needed).
-    let recipe_edit: Vec<Value> = likely_edit_files.iter()
+    let recipe_edit: Vec<Value> = likely_edit_files
+        .iter()
         .filter(|f| {
             let file = f["file"].as_str().unwrap_or("");
             let layer = f["layer"].as_str().unwrap_or("");
             let names_file = query_names_file(&tokens, file);
             // Domain anchor: retain when query shares ≥2 stem words with the file.
             let stem_words = split_camel_lower(
-                std::path::Path::new(file).file_stem().and_then(|n| n.to_str()).unwrap_or("")
+                std::path::Path::new(file)
+                    .file_stem()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(""),
             );
-            let domain_overlap = stem_words.iter()
+            let domain_overlap = stem_words
+                .iter()
                 .filter(|w| tokens.iter().any(|t| t == *w))
                 .count();
             let has_domain_anchor = domain_overlap >= 2;
             // Rendering surfaces: unconditional demotion unless query names them.
             let surface_demote = is_rendering_surface(file) && !names_file;
             // View-like: demote on broad queries unless domain anchor present.
-            let broad_demote = broad_query
-                && is_view_like_file(file, layer)
-                && !names_file
-                && !has_domain_anchor;
+            let broad_demote =
+                broad_query && is_view_like_file(file, layer) && !names_file && !has_domain_anchor;
             // Anchor-missing: view-like file with zero domain overlap is always
             // reference-only regardless of broad_query. A drift/playhead query should
             // never put PianoRollView or SheetMusicView (notation views, zero overlap)
             // into edit — they are unrelated surfaces even when the query is specific.
-            let anchor_missing_demote = is_view_like_file(file, layer)
-                && !names_file
-                && domain_overlap == 0;
-            let demote = !wrong_layer_files.contains(file) && (surface_demote || broad_demote || anchor_missing_demote);
+            let anchor_missing_demote =
+                is_view_like_file(file, layer) && !names_file && domain_overlap == 0;
+            let demote = !wrong_layer_files.contains(file)
+                && (surface_demote || broad_demote || anchor_missing_demote);
             f["file_role"].as_str() == Some("impl") && !wrong_layer_files.contains(file) && !demote
         })
         .map(|f| {
@@ -797,7 +919,9 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             let mut indexed = test_files_for_source(&all_test_file_paths, file);
             if let Some(extra) = file_to_tests.get(file) {
                 for t in extra {
-                    if !indexed.contains(t) { indexed.push(t.clone()); }
+                    if !indexed.contains(t) {
+                        indexed.push(t.clone());
+                    }
                 }
             }
             let run_cmd = detect_test_command(file);
@@ -822,23 +946,28 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         })
         .collect();
     // reference: example/doc files + WrongLayer demotions + view/surface demotions.
-    let recipe_reference: Vec<Value> = likely_edit_files.iter()
+    let recipe_reference: Vec<Value> = likely_edit_files
+        .iter()
         .filter(|f| {
             let file = f["file"].as_str().unwrap_or("");
             let layer = f["layer"].as_str().unwrap_or("");
             let names_file = query_names_file(&tokens, file);
             let stem_words = split_camel_lower(
-                std::path::Path::new(file).file_stem().and_then(|n| n.to_str()).unwrap_or("")
+                std::path::Path::new(file)
+                    .file_stem()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(""),
             );
-            let domain_overlap = stem_words.iter()
+            let domain_overlap = stem_words
+                .iter()
                 .filter(|w| tokens.iter().any(|t| t == *w))
                 .count();
             let has_domain_anchor = domain_overlap >= 2;
             let surface_demote = is_rendering_surface(file) && !names_file;
-            let broad_demote = broad_query && is_view_like_file(file, layer)
-                && !names_file && !has_domain_anchor;
-            let anchor_missing_demote = is_view_like_file(file, layer)
-                && !names_file && domain_overlap == 0;
+            let broad_demote =
+                broad_query && is_view_like_file(file, layer) && !names_file && !has_domain_anchor;
+            let anchor_missing_demote =
+                is_view_like_file(file, layer) && !names_file && domain_overlap == 0;
             let view_demote = surface_demote || broad_demote || anchor_missing_demote;
             matches!(f["file_role"].as_str(), Some("example") | Some("reference"))
                 || (f["file_role"].as_str() == Some("impl") && wrong_layer_files.contains(file))
@@ -854,16 +983,22 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // Keep the full pre-split list for classification_debug + rationale computation
     // (we need rationale for reference_only files too).
     let all_candidate_files: Vec<Value> = likely_edit_files.clone();
-    let edit_file_set: HashSet<&str> = recipe_edit.iter()
+    let edit_file_set: HashSet<&str> = recipe_edit
+        .iter()
         .filter_map(|e| e["file"].as_str())
         .collect();
     let likely_edit_files: Vec<Value> = likely_edit_files
         .into_iter()
-        .filter(|e| e["file"].as_str().map_or(false, |f| edit_file_set.contains(f)))
+        .filter(|e| {
+            e["file"]
+                .as_str()
+                .map_or(false, |f| edit_file_set.contains(f))
+        })
         .collect();
 
     // t-002: include exact build/test commands for each affected test file.
-    let mut recipe_run: Vec<Value> = affected_tests.iter()
+    let mut recipe_run: Vec<Value> = affected_tests
+        .iter()
         .map(|t| {
             let file = t["file"].as_str().unwrap_or("");
             let cmd = detect_test_command(file);
@@ -889,7 +1024,8 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         }
     }
     // t-005: manually_validate with concrete step/expected pairs.
-    let mut recipe_manually_validate: Vec<Value> = validation_scenarios_ledger.iter()
+    let mut recipe_manually_validate: Vec<Value> = validation_scenarios_ledger
+        .iter()
         .map(|vs| {
             let text = vs["scenario"].as_str().unwrap_or("");
             let scenario = invariant_to_scenario(text);
@@ -930,66 +1066,74 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // even when --debug-classification is not set.  The full array is only emitted
     // in the JSON when --debug-classification is explicitly requested.
     // Uses all_candidate_files (edit + reference) so the rationale map covers every file.
-    let classification_debug: Vec<Value> = all_candidate_files.iter().map(|f| {
-        let file = f["file"].as_str().unwrap_or("");
-        let layer = f["layer"].as_str().unwrap_or("");
-        let file_role = f["file_role"].as_str().unwrap_or("unknown");
-        let names_file = query_names_file(&tokens, file);
-        let stem_words = split_camel_lower(
-            std::path::Path::new(file).file_stem().and_then(|n| n.to_str()).unwrap_or("")
-        );
-        let matched_stem_words: Vec<&str> = stem_words.iter()
-            .filter(|w| tokens.iter().any(|t| t == *w))
-            .map(|w| w.as_str())
-            .collect();
-        let domain_overlap = matched_stem_words.len();
-        let has_domain_anchor = domain_overlap >= 2;
-        let surface_demoted = is_rendering_surface(file) && !names_file;
-        let broad_demoted = broad_query && is_view_like_file(file, layer)
-            && !names_file && !has_domain_anchor;
-        let anchor_missing_demoted = is_view_like_file(file, layer)
-            && !names_file && domain_overlap == 0;
-        let is_wrong_layer = wrong_layer_files.contains(file);
-        let rule_that_won = if file_role == "test" {
-            "test"
-        } else if is_wrong_layer {
-            "wrong-layer → reference"
-        } else if surface_demoted {
-            "surface → reference"
-        } else if broad_demoted {
-            "broad-query view → reference"
-        } else if anchor_missing_demoted {
-            "anchor-missing view → reference"
-        } else if file_role == "impl" {
-            "edit"
-        } else {
-            file_role
-        };
-        let rationale = make_file_rationale(
-            rule_that_won,
-            surface_demoted,
-            has_domain_anchor,
-            &matched_stem_words,
-            names_file,
-            broad_query,
-        );
-        json!({
-            "file": file,
-            "file_role": file_role,
-            "surface_demoted": surface_demoted,
-            "domain_anchor_retained": has_domain_anchor,
-            "matched_stem_words": matched_stem_words,
-            "domain_overlap": domain_overlap,
-            "names_file": names_file,
-            "is_wrong_layer": is_wrong_layer,
-            "broad_query": broad_query,
-            "rule_that_won": rule_that_won,
-            "rationale": rationale,
+    let classification_debug: Vec<Value> = all_candidate_files
+        .iter()
+        .map(|f| {
+            let file = f["file"].as_str().unwrap_or("");
+            let layer = f["layer"].as_str().unwrap_or("");
+            let file_role = f["file_role"].as_str().unwrap_or("unknown");
+            let names_file = query_names_file(&tokens, file);
+            let stem_words = split_camel_lower(
+                std::path::Path::new(file)
+                    .file_stem()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(""),
+            );
+            let matched_stem_words: Vec<&str> = stem_words
+                .iter()
+                .filter(|w| tokens.iter().any(|t| t == *w))
+                .map(|w| w.as_str())
+                .collect();
+            let domain_overlap = matched_stem_words.len();
+            let has_domain_anchor = domain_overlap >= 2;
+            let surface_demoted = is_rendering_surface(file) && !names_file;
+            let broad_demoted =
+                broad_query && is_view_like_file(file, layer) && !names_file && !has_domain_anchor;
+            let anchor_missing_demoted =
+                is_view_like_file(file, layer) && !names_file && domain_overlap == 0;
+            let is_wrong_layer = wrong_layer_files.contains(file);
+            let rule_that_won = if file_role == "test" {
+                "test"
+            } else if is_wrong_layer {
+                "wrong-layer → reference"
+            } else if surface_demoted {
+                "surface → reference"
+            } else if broad_demoted {
+                "broad-query view → reference"
+            } else if anchor_missing_demoted {
+                "anchor-missing view → reference"
+            } else if file_role == "impl" {
+                "edit"
+            } else {
+                file_role
+            };
+            let rationale = make_file_rationale(
+                rule_that_won,
+                surface_demoted,
+                has_domain_anchor,
+                &matched_stem_words,
+                names_file,
+                broad_query,
+            );
+            json!({
+                "file": file,
+                "file_role": file_role,
+                "surface_demoted": surface_demoted,
+                "domain_anchor_retained": has_domain_anchor,
+                "matched_stem_words": matched_stem_words,
+                "domain_overlap": domain_overlap,
+                "names_file": names_file,
+                "is_wrong_layer": is_wrong_layer,
+                "broad_query": broad_query,
+                "rule_that_won": rule_that_won,
+                "rationale": rationale,
+            })
         })
-    }).collect();
+        .collect();
 
     // Build file → rationale map from classification_debug.
-    let file_rationale: HashMap<String, String> = classification_debug.iter()
+    let file_rationale: HashMap<String, String> = classification_debug
+        .iter()
         .filter_map(|e| {
             let file = e["file"].as_str()?.to_string();
             let rat = e["rationale"].as_str()?.to_string();
@@ -1000,9 +1144,13 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // Classification summary: rule_that_won counts aggregated across all files.
     // Always emitted — lets dashboards answer "is ASD classifying on real domain
     // anchors or weaker heuristics?" without needing --debug-classification.
-    let mut rule_counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut rule_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
     for entry in &classification_debug {
-        let rule = entry.get("rule_that_won").and_then(Value::as_str).unwrap_or("unknown");
+        let rule = entry
+            .get("rule_that_won")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
         *rule_counts.entry(rule.to_string()).or_default() += 1;
     }
 
@@ -1035,35 +1183,58 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     let classification_summary = Value::Object(classification_summary);
 
     // Enrich likely_edit_files with per-file rationale.
-    let likely_edit_files: Vec<Value> = likely_edit_files.into_iter().map(|mut f| {
-        if let Some(obj) = f.as_object_mut() {
-            let file = obj.get("file").and_then(Value::as_str).unwrap_or("").to_string();
-            if let Some(rat) = file_rationale.get(&file) {
-                obj.insert("rationale".into(), json!(rat));
+    let likely_edit_files: Vec<Value> = likely_edit_files
+        .into_iter()
+        .map(|mut f| {
+            if let Some(obj) = f.as_object_mut() {
+                let file = obj
+                    .get("file")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(rat) = file_rationale.get(&file) {
+                    obj.insert("rationale".into(), json!(rat));
+                }
             }
-        }
-        f
-    }).collect();
+            f
+        })
+        .collect();
 
     // Enrich recipe_edit and recipe_reference with per-file rationale.
-    let recipe_edit: Vec<Value> = recipe_edit.into_iter().map(|mut f| {
-        if let Some(obj) = f.as_object_mut() {
-            let file = obj.get("file").and_then(Value::as_str).unwrap_or("").to_string();
-            if let Some(rat) = file_rationale.get(&file) {
-                obj.entry("rationale".to_string()).or_insert_with(|| json!(rat));
+    let recipe_edit: Vec<Value> = recipe_edit
+        .into_iter()
+        .map(|mut f| {
+            if let Some(obj) = f.as_object_mut() {
+                let file = obj
+                    .get("file")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(rat) = file_rationale.get(&file) {
+                    obj.entry("rationale".to_string())
+                        .or_insert_with(|| json!(rat));
+                }
             }
-        }
-        f
-    }).collect();
-    let recipe_reference: Vec<Value> = recipe_reference.into_iter().map(|mut f| {
-        if let Some(obj) = f.as_object_mut() {
-            let file = obj.get("file").and_then(Value::as_str).unwrap_or("").to_string();
-            if let Some(rat) = file_rationale.get(&file) {
-                obj.entry("rationale".to_string()).or_insert_with(|| json!(rat));
+            f
+        })
+        .collect();
+    let recipe_reference: Vec<Value> = recipe_reference
+        .into_iter()
+        .map(|mut f| {
+            if let Some(obj) = f.as_object_mut() {
+                let file = obj
+                    .get("file")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(rat) = file_rationale.get(&file) {
+                    obj.entry("rationale".to_string())
+                        .or_insert_with(|| json!(rat));
+                }
             }
-        }
-        f
-    }).collect();
+            f
+        })
+        .collect();
 
     let safe_change_recipe = json!({
         "inspect": recipe_inspect,
@@ -1077,18 +1248,27 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     });
 
     // Scoped suggestions for prepare-change: use edit files as top_qnames proxy.
-    let edit_file_names: Vec<String> = likely_edit_files.iter()
+    let edit_file_names: Vec<String> = likely_edit_files
+        .iter()
         .filter_map(|v| v.get("file").and_then(Value::as_str).map(|s| s.to_string()))
         .collect();
     let scoped_suggestions_pc: Vec<String> = if !ambiguous_terms.is_empty() {
-        agentstatedeveloper_core::suggest_scoped_queries(&tokens, &ambiguous_terms, &edit_file_names)
+        agentstatedeveloper_core::suggest_scoped_queries(
+            &tokens,
+            &ambiguous_terms,
+            &edit_file_names,
+        )
     } else {
         vec![]
     };
     // Re-use the db_state already computed for edit_confidence (trust score above).
     let uncertainty = compute_uncertainty(
-        &tokens, &ambiguous_terms, &possible_misses,
-        file_scores.len(), &scoped_suggestions_pc, engine.fts.as_ref(),
+        &tokens,
+        &ambiguous_terms,
+        &possible_misses,
+        file_scores.len(),
+        &scoped_suggestions_pc,
+        engine.fts.as_ref(),
         Some(trust_dq.data_quality.state.as_str()),
     );
 
@@ -1164,38 +1344,56 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
 
 fn classify_file_role(file: &str) -> &'static str {
     let fl = file.to_lowercase();
-    if fl.contains("/test") || fl.contains("/spec")
-        || fl.contains("_test.") || fl.contains("spec.")
-        || fl.ends_with("tests.swift") || fl.contains("/tests/")
+    if fl.contains("/test")
+        || fl.contains("/spec")
+        || fl.contains("_test.")
+        || fl.contains("spec.")
+        || fl.ends_with("tests.swift")
+        || fl.contains("/tests/")
     {
         return "test";
     }
-    if fl.contains("/example") || fl.contains("/examples")
-        || fl.contains("/sample") || fl.contains("/samples")
-        || fl.contains("/demo") || fl.contains("/demos")
+    if fl.contains("/example")
+        || fl.contains("/examples")
+        || fl.contains("/sample")
+        || fl.contains("/samples")
+        || fl.contains("/demo")
+        || fl.contains("/demos")
     {
         return "example";
     }
-    if fl.contains("/fixture") || fl.contains("/fixtures")
-        || fl.contains("/seed") || fl.contains("/seeds")
+    if fl.contains("/fixture")
+        || fl.contains("/fixtures")
+        || fl.contains("/seed")
+        || fl.contains("/seeds")
     {
         return "fixture";
     }
-    if fl.contains("/script") || fl.contains("/scripts")
-        || fl.contains("/tool/") || fl.contains("/tools/")
-        || fl.contains("/bin/") || fl.contains("/hack/")
+    if fl.contains("/script")
+        || fl.contains("/scripts")
+        || fl.contains("/tool/")
+        || fl.contains("/tools/")
+        || fl.contains("/bin/")
+        || fl.contains("/hack/")
     {
         return "script";
     }
-    if fl.contains("/generated") || fl.contains("/gen/")
-        || fl.contains(".generated.") || fl.contains(".pb.")
-        || fl.contains(".pb.swift") || fl.contains("_generated")
+    if fl.contains("/generated")
+        || fl.contains("/gen/")
+        || fl.contains(".generated.")
+        || fl.contains(".pb.")
+        || fl.contains(".pb.swift")
+        || fl.contains("_generated")
     {
         return "generated";
     }
-    if fl.contains("/doc") || fl.contains("/docs")
-        || fl.contains("/reference") || fl.contains("readme")
-        || fl.ends_with(".md") || fl.ends_with(".rst") || fl.ends_with(".adoc")
+    if fl.contains("/doc")
+        || fl.contains("/docs")
+        || fl.contains("/reference")
+        || fl.contains("readme")
+        || fl.ends_with(".md")
+        || fl.ends_with(".rst")
+        || fl.ends_with(".adoc")
     {
         return "reference";
     }
@@ -1214,7 +1412,8 @@ fn detect_test_command(file: &str) -> Option<String> {
     loop {
         if dir.join("Cargo.toml").exists() {
             // Try to extract the package name for a precise `cargo test -p` command.
-            let pkg_name = std::fs::read_to_string(dir.join("Cargo.toml")).ok()
+            let pkg_name = std::fs::read_to_string(dir.join("Cargo.toml"))
+                .ok()
                 .and_then(|s| {
                     s.lines()
                         .skip_while(|l| !l.trim_start().starts_with("[package]"))
@@ -1238,8 +1437,10 @@ fn detect_test_command(file: &str) -> Option<String> {
                 "npm test".to_string()
             });
         }
-        if dir.join("pyproject.toml").exists() || dir.join("setup.py").exists()
-            || dir.join("pytest.ini").exists() || dir.join("setup.cfg").exists()
+        if dir.join("pyproject.toml").exists()
+            || dir.join("setup.py").exists()
+            || dir.join("pytest.ini").exists()
+            || dir.join("setup.cfg").exists()
         {
             let rel = p.strip_prefix(dir).unwrap_or(p).to_string_lossy();
             return Some(format!("pytest {}", rel));
@@ -1255,7 +1456,9 @@ fn detect_test_command(file: &str) -> Option<String> {
             return Some("mvn test".to_string());
         }
         if dir.join("go.mod").exists() {
-            let pkg_dir = p.parent().map(|d| d.to_string_lossy().to_string())
+            let pkg_dir = p
+                .parent()
+                .map(|d| d.to_string_lossy().to_string())
                 .unwrap_or_else(|| ".".to_string());
             return Some(format!("go test {}/...", pkg_dir));
         }
@@ -1290,10 +1493,10 @@ fn explain_conflict_risk(file: &str) -> Option<String> {
     let code = status_str.chars().take(2).collect::<String>();
     let reason = match code.trim() {
         "M" | "MM" => "has unstaged modifications",
-        "A"        => "is newly staged",
-        "D"        => "is staged for deletion",
-        "R"        => "has been renamed (staged)",
-        "UU"       => "has unmerged changes",
+        "A" => "is newly staged",
+        "D" => "is staged for deletion",
+        "R" => "has been renamed (staged)",
+        "UU" => "has unmerged changes",
         s if s.contains('M') => "has staged and/or unstaged modifications",
         _ => "has uncommitted changes",
     };
@@ -1308,8 +1511,19 @@ fn explain_conflict_risk(file: &str) -> Option<String> {
 /// Files whose stem is composed entirely of these tokens + "state"/"view"/"model" are
 /// demoted to reference_only on broad queries unless the query names them directly.
 const GENERIC_FILE_STEMS: &[&str] = &[
-    "playhead", "state", "update", "position", "value", "cursor", "progress",
-    "indicator", "status", "mode", "flag", "current", "local",
+    "playhead",
+    "state",
+    "update",
+    "position",
+    "value",
+    "cursor",
+    "progress",
+    "indicator",
+    "status",
+    "mode",
+    "flag",
+    "current",
+    "local",
 ];
 
 /// Returns true for files that are pure rendering surfaces regardless of query.
@@ -1319,26 +1533,46 @@ fn is_rendering_surface(file: &str) -> bool {
         .file_stem()
         .and_then(|n| n.to_str())
         .unwrap_or(file);
-    name.ends_with("Canvas") || name.ends_with("Overlay") || name.ends_with("Surface")
-        || name.ends_with("Roll") || name.ends_with("Sheet") || name.ends_with("Layer")
-        || name.ends_with("Renderer") || name.ends_with("Drawable")
+    name.ends_with("Canvas")
+        || name.ends_with("Overlay")
+        || name.ends_with("Surface")
+        || name.ends_with("Roll")
+        || name.ends_with("Sheet")
+        || name.ends_with("Layer")
+        || name.ends_with("Renderer")
+        || name.ends_with("Drawable")
 }
 
 fn is_view_like_file(file: &str, layer: &str) -> bool {
-    if layer == "view" { return true; }
+    if layer == "view" {
+        return true;
+    }
     let name = std::path::Path::new(file)
         .file_stem()
         .and_then(|n| n.to_str())
         .unwrap_or(file);
     // Common view/UI naming conventions in iOS/macOS/web/Android.
-    if name.ends_with("View") || name.ends_with("ViewController") || name.ends_with("Screen")
-        || name.ends_with("Widget") || name.ends_with("Panel") || name.ends_with("Cell")
-        || name.ends_with("Button") || name.ends_with("Label") || name.ends_with("Row")
-        || name.ends_with("Canvas") || name.ends_with("Overlay") || name.ends_with("Surface")
-        || name.ends_with("Roll") || name.ends_with("Sheet") || name.ends_with("Layer")
-        || name.ends_with("Renderer") || name.ends_with("Drawable")
-        || name.contains("ViewController") || name.contains("Renderer")
-        || name.ends_with("Page") || name.ends_with("Fragment")
+    if name.ends_with("View")
+        || name.ends_with("ViewController")
+        || name.ends_with("Screen")
+        || name.ends_with("Widget")
+        || name.ends_with("Panel")
+        || name.ends_with("Cell")
+        || name.ends_with("Button")
+        || name.ends_with("Label")
+        || name.ends_with("Row")
+        || name.ends_with("Canvas")
+        || name.ends_with("Overlay")
+        || name.ends_with("Surface")
+        || name.ends_with("Roll")
+        || name.ends_with("Sheet")
+        || name.ends_with("Layer")
+        || name.ends_with("Renderer")
+        || name.ends_with("Drawable")
+        || name.contains("ViewController")
+        || name.contains("Renderer")
+        || name.ends_with("Page")
+        || name.ends_with("Fragment")
     {
         return true;
     }
@@ -1348,7 +1582,9 @@ fn is_view_like_file(file: &str, layer: &str) -> bool {
         let name_lower = name.to_lowercase();
         let stem_words = split_camel_lower(&name_lower);
         if !stem_words.is_empty()
-            && stem_words.iter().all(|w| GENERIC_FILE_STEMS.iter().any(|g| *g == w.as_str()))
+            && stem_words
+                .iter()
+                .all(|w| GENERIC_FILE_STEMS.iter().any(|g| *g == w.as_str()))
         {
             return true;
         }
@@ -1364,9 +1600,14 @@ fn query_names_file(query_tokens: &[String], file: &str) -> bool {
         .and_then(|n| n.to_str())
         .unwrap_or("")
         .to_lowercase();
-    if name.is_empty() { return false; }
+    if name.is_empty() {
+        return false;
+    }
     let stem_words = split_camel_lower(&name);
-    let matches = stem_words.iter().filter(|w| query_tokens.iter().any(|t| t == *w)).count();
+    let matches = stem_words
+        .iter()
+        .filter(|w| query_tokens.iter().any(|t| t == *w))
+        .count();
     matches >= 2.min(stem_words.len())
 }
 
@@ -1387,7 +1628,9 @@ fn split_camel_lower(s: &str) -> Vec<String> {
             current.push(ch);
         }
     }
-    if !current.is_empty() { words.push(current.to_lowercase()); }
+    if !current.is_empty() {
+        words.push(current.to_lowercase());
+    }
     words
 }
 
@@ -1399,10 +1642,32 @@ fn split_camel_lower(s: &str) -> Vec<String> {
 /// Returns the first 3–6 words after stripping leading modal/constraint words.
 fn extract_subject(text: &str) -> String {
     const SKIP: &[&str] = &[
-        "the", "a", "an", "this", "that", "it",
-        "must", "never", "cannot", "shall", "always", "only", "not", "no",
-        "should", "will", "would", "is", "are", "be", "been",
-        "require", "ensure", "prevent", "guarantee", "invariant",
+        "the",
+        "a",
+        "an",
+        "this",
+        "that",
+        "it",
+        "must",
+        "never",
+        "cannot",
+        "shall",
+        "always",
+        "only",
+        "not",
+        "no",
+        "should",
+        "will",
+        "would",
+        "is",
+        "are",
+        "be",
+        "been",
+        "require",
+        "ensure",
+        "prevent",
+        "guarantee",
+        "invariant",
     ];
     text.split_whitespace()
         .filter(|w| {
@@ -1418,12 +1683,23 @@ fn extract_subject(text: &str) -> String {
 fn invariant_to_scenario(text: &str) -> Value {
     let tl = text.to_lowercase();
     let subject = extract_subject(text);
-    let subj = if subject.is_empty() { text.to_string() } else { subject };
+    let subj = if subject.is_empty() {
+        text.to_string()
+    } else {
+        subject
+    };
 
-    let (step, expected) = if tl.contains("must not") || tl.contains("never") || tl.contains("cannot") || tl.contains("forbidden") {
+    let (step, expected) = if tl.contains("must not")
+        || tl.contains("never")
+        || tl.contains("cannot")
+        || tl.contains("forbidden")
+    {
         (
             format!("Trigger conditions that would violate: {}", subj),
-            format!("System rejects or prevents the violation — «{}» holds", text),
+            format!(
+                "System rejects or prevents the violation — «{}» holds",
+                text
+            ),
         )
     } else if tl.contains("must") || tl.contains("shall") || tl.contains("always") {
         (
@@ -1437,7 +1713,10 @@ fn invariant_to_scenario(text: &str) -> Value {
         )
     } else if tl.contains("require") {
         (
-            format!("Attempt to call without satisfying the precondition for: {}", subj),
+            format!(
+                "Attempt to call without satisfying the precondition for: {}",
+                subj
+            ),
             format!("Guard fires or error raised before violating «{}»", text),
         )
     } else if tl.contains("only") || tl.contains("prevent") {
@@ -1473,27 +1752,40 @@ fn make_file_rationale(
     match rule {
         "edit" if names_file => "edit: query names this file directly".to_string(),
         "edit" if domain_anchor => {
-            format!("edit: domain-anchored — {} query token(s) match file name ({})",
+            format!(
+                "edit: domain-anchored — {} query token(s) match file name ({})",
                 matched_stems.len(),
-                matched_stems.join(", "))
+                matched_stems.join(", ")
+            )
         }
         "edit" if !matched_stems.is_empty() => {
-            format!("edit: impl file matching query token '{}'", matched_stems[0])
+            format!(
+                "edit: impl file matching query token '{}'",
+                matched_stems[0]
+            )
         }
         "edit" => "edit: impl file in query scope".to_string(),
 
         r if r.contains("surface") => {
-            "reference: rendering surface — read-only layer (WaveformCanvas, SheetMusicView, etc.)".to_string()
+            "reference: rendering surface — read-only layer (WaveformCanvas, SheetMusicView, etc.)"
+                .to_string()
         }
         r if r.contains("broad-query view") => {
             if domain_anchor {
-                format!("reference: view layer but domain-anchored ({})", matched_stems.join(", "))
+                format!(
+                    "reference: view layer but domain-anchored ({})",
+                    matched_stems.join(", ")
+                )
             } else {
-                format!("reference: view layer on broad query — needs ≥2 matching tokens to enter edit (matched: {})", matched_stems.len())
+                format!(
+                    "reference: view layer on broad query — needs ≥2 matching tokens to enter edit (matched: {})",
+                    matched_stems.len()
+                )
             }
         }
         r if r.contains("anchor-missing") => {
-            "reference: view/surface layer with no domain overlap — unrelated rendering file".to_string()
+            "reference: view/surface layer with no domain overlap — unrelated rendering file"
+                .to_string()
         }
         r if r.contains("wrong-layer") => {
             "reference: wrong layer for this change type — structural mismatch".to_string()
@@ -1507,7 +1799,10 @@ fn make_file_rationale(
             if broad_query {
                 format!("reference: broad query heuristic — {}", rule)
             } else {
-                format!("classified as: {} (surface_demoted={}, domain_anchor={})", rule, surface_demoted, domain_anchor)
+                format!(
+                    "classified as: {} (surface_demoted={}, domain_anchor={})",
+                    rule, surface_demoted, domain_anchor
+                )
             }
         }
     }

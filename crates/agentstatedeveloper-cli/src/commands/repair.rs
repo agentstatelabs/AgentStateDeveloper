@@ -88,7 +88,11 @@ fn print_report_human(report: &agentstatedeveloper_core::RepairReport, dry_run: 
             IssueSeverity::Warn => "WARN ",
             IssueSeverity::Error => "ERROR",
         };
-        let fixable = if issue.auto_fixable { "  [auto-fixable]" } else { "" };
+        let fixable = if issue.auto_fixable {
+            "  [auto-fixable]"
+        } else {
+            ""
+        };
         println!("{sev}  {}  {}", issue.kind, issue.path);
         println!("      {}{}\n", issue.detail, fixable);
     }

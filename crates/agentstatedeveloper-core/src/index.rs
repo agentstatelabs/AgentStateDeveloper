@@ -49,7 +49,10 @@ impl<'a> AsgIndexStore<'a> {
 
     /// Convenience: borrow the FTS connection already open in `engine`.
     pub fn from_engine(engine: &'a Engine) -> Self {
-        Self { repo: &engine.repo, fts: engine.fts.as_ref() }
+        Self {
+            repo: &engine.repo,
+            fts: engine.fts.as_ref(),
+        }
     }
 
     /// Build the full `symbol_id → Symbol` map using the borrowed FTS connection.

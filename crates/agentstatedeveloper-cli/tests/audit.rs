@@ -52,52 +52,80 @@ fn cli_emits_audit_events_for_ledger_ops() {
     let policy = repo_root().join("examples/policies.json");
 
     // init + index
+    run(Command::new(asd_bin()).arg("--db").arg(&db).arg("init"));
     run(Command::new(asd_bin())
-        .arg("--db").arg(&db)
-        .arg("init"));
-    run(Command::new(asd_bin())
-        .arg("--db").arg(&db)
-        .arg("index").arg(&dst));
+        .arg("--db")
+        .arg(&db)
+        .arg("index")
+        .arg(&dst));
 
     // append a hazard under policy (should emit awaiting-approval)
     let out = run(Command::new(asd_bin())
-        .arg("--db").arg(&db)
-        .arg("--policy").arg(&policy)
-        .arg("--audit-log").arg(&audit)
-        .arg("ledger").arg("append").arg("payments.charge_card")
-        .arg("--kind").arg("hazard")
-        .arg("--summary").arg("hazard test")
-        .arg("--author-id").arg("alice")
-        .arg("--author-kind").arg("human"));
+        .arg("--db")
+        .arg(&db)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--audit-log")
+        .arg(&audit)
+        .arg("ledger")
+        .arg("append")
+        .arg("payments.charge_card")
+        .arg("--kind")
+        .arg("hazard")
+        .arg("--summary")
+        .arg("hazard test")
+        .arg("--author-id")
+        .arg("alice")
+        .arg("--author-kind")
+        .arg("human"));
     let stdout = String::from_utf8_lossy(&out.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("parse json");
     let entry_id = parsed["entry_id"].as_str().expect("entry_id").to_string();
 
     // approve it
     run(Command::new(asd_bin())
-        .arg("--db").arg(&db)
-        .arg("--audit-log").arg(&audit)
-        .arg("ledger").arg("approve").arg(&entry_id)
-        .arg("--approver").arg("alice")
-        .arg("--approver-kind").arg("human"));
+        .arg("--db")
+        .arg(&db)
+        .arg("--audit-log")
+        .arg(&audit)
+        .arg("ledger")
+        .arg("approve")
+        .arg(&entry_id)
+        .arg("--approver")
+        .arg("alice")
+        .arg("--approver-kind")
+        .arg("human"));
 
     // policy-denied append (experimental-bot + tradeoff → deny)
     let denied = Command::new(asd_bin())
-        .arg("--db").arg(&db)
-        .arg("--policy").arg(&policy)
-        .arg("--audit-log").arg(&audit)
-        .arg("ledger").arg("append").arg("payments.charge_card")
-        .arg("--kind").arg("tradeoff")
-        .arg("--summary").arg("rejected op")
-        .arg("--author-id").arg("experimental-bot")
-        .arg("--author-kind").arg("agent")
+        .arg("--db")
+        .arg(&db)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--audit-log")
+        .arg(&audit)
+        .arg("ledger")
+        .arg("append")
+        .arg("payments.charge_card")
+        .arg("--kind")
+        .arg("tradeoff")
+        .arg("--summary")
+        .arg("rejected op")
+        .arg("--author-id")
+        .arg("experimental-bot")
+        .arg("--author-kind")
+        .arg("agent")
         .output()
         .unwrap();
     assert!(!denied.status.success(), "expected denied op to fail");
 
     // Read back events.
     let events = read_jsonl(&audit).expect("read audit log");
-    assert!(events.len() >= 3, "expected ≥3 events, got {}", events.len());
+    assert!(
+        events.len() >= 3,
+        "expected ≥3 events, got {}",
+        events.len()
+    );
 
     // Verify shapes.
     let append_evt = events

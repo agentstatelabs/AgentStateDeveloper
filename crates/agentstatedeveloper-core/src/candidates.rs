@@ -102,11 +102,21 @@ pub fn in_memory_score(
 
     let mut score: u32 = 0;
     for token in tokens {
-        if qname_lower.contains(token.as_str()) { score += 4; }
-        if !sig_lower.is_empty() && sig_lower.contains(token.as_str()) { score += 3; }
-        if !doc_lower.is_empty() && doc_lower.contains(token.as_str()) { score += 3; }
-        if !ledger_text.is_empty() && ledger_text.contains(token.as_str()) { score += 2; }
-        if file_lower.contains(token.as_str()) { score += 1; }
+        if qname_lower.contains(token.as_str()) {
+            score += 4;
+        }
+        if !sig_lower.is_empty() && sig_lower.contains(token.as_str()) {
+            score += 3;
+        }
+        if !doc_lower.is_empty() && doc_lower.contains(token.as_str()) {
+            score += 3;
+        }
+        if !ledger_text.is_empty() && ledger_text.contains(token.as_str()) {
+            score += 2;
+        }
+        if file_lower.contains(token.as_str()) {
+            score += 1;
+        }
     }
     score
 }
@@ -140,12 +150,9 @@ fn glob_match_parts(pat: &[&str], path: &[&str]) -> bool {
         }
         (Some(&"**"), _) => {
             // ** matches zero segments (skip it) or one segment (consume path head)
-            glob_match_parts(&pat[1..], path)
-                || glob_match_parts(pat, &path[1..])
+            glob_match_parts(&pat[1..], path) || glob_match_parts(pat, &path[1..])
         }
-        (Some(p), Some(s)) => {
-            segment_match(p, s) && glob_match_parts(&pat[1..], &path[1..])
-        }
+        (Some(p), Some(s)) => segment_match(p, s) && glob_match_parts(&pat[1..], &path[1..]),
     }
 }
 
@@ -158,10 +165,14 @@ fn segment_match(pat: &str, seg: &str) -> bool {
     let mut remaining = seg;
     for (i, part) in parts.iter().enumerate() {
         if i == 0 {
-            if !remaining.starts_with(part) { return false; }
+            if !remaining.starts_with(part) {
+                return false;
+            }
             remaining = &remaining[part.len()..];
         } else if i == parts.len() - 1 {
-            if !remaining.ends_with(part) { return false; }
+            if !remaining.ends_with(part) {
+                return false;
+            }
         } else {
             match remaining.find(part) {
                 Some(pos) => remaining = &remaining[pos + part.len()..],
@@ -203,23 +214,36 @@ pub fn load_scope_aliases(db_path: &Path) -> HashMap<String, Vec<String>> {
         Ok(t) => t,
         Err(_) => return HashMap::new(),
     };
-    table.into_iter().filter_map(|(k, v)| {
-        let globs = match v {
-            toml::Value::Array(arr) => arr.into_iter().filter_map(|v| {
-                if let toml::Value::String(s) = v { Some(s) } else { None }
-            }).collect(),
-            toml::Value::String(s) => vec![s],
-            _ => return None,
-        };
-        Some((k, globs))
-    }).collect()
+    table
+        .into_iter()
+        .filter_map(|(k, v)| {
+            let globs = match v {
+                toml::Value::Array(arr) => arr
+                    .into_iter()
+                    .filter_map(|v| {
+                        if let toml::Value::String(s) = v {
+                            Some(s)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect(),
+                toml::Value::String(s) => vec![s],
+                _ => return None,
+            };
+            Some((k, globs))
+        })
+        .collect()
 }
 
 /// Resolve a `--scope` name to path globs.
 /// Falls back to treating the scope name itself as a path glob if not in the map.
 pub fn resolve_scope(scope: &str, db_path: &Path) -> Vec<String> {
     let aliases = load_scope_aliases(db_path);
-    aliases.get(scope).cloned().unwrap_or_else(|| vec![scope.to_string()])
+    aliases
+        .get(scope)
+        .cloned()
+        .unwrap_or_else(|| vec![scope.to_string()])
 }
 
 // ---------------------------------------------------------------------------
@@ -235,7 +259,9 @@ fn apply_paths_filter(
     paths_filter: &[String],
     scored: &mut Vec<(f64, String)>,
 ) {
-    if paths_filter.is_empty() { return; }
+    if paths_filter.is_empty() {
+        return;
+    }
     // M62: reuse the caller's open connection — no extra open() per call.
     let qname_strs: Vec<&str> = scored.iter().map(|(_, q)| q.as_str()).collect();
     let resolved = fts
@@ -266,7 +292,9 @@ fn apply_exclusions(
     exclude_terms: &[String],
     scored: &mut Vec<(f64, String)>,
 ) {
-    if exclude_terms.is_empty() { return; }
+    if exclude_terms.is_empty() {
+        return;
+    }
     // M62: reuse the caller's open connection — no extra open() per call.
     let qname_strs: Vec<&str> = scored.iter().map(|(_, q)| q.as_str()).collect();
     let resolved = fts
@@ -274,23 +302,22 @@ fn apply_exclusions(
         .unwrap_or_default();
     scored.retain(|(_, qname)| {
         let qname_lower = qname.to_lowercase();
-        let (file_lower, doc_lower, sig_lower) =
-            if let Some(rsym) = resolved.get(qname.as_str()) {
-                (
-                    rsym.file.to_lowercase(),
-                    rsym.doc.as_deref().unwrap_or("").to_lowercase(),
-                    rsym.signature.as_deref().unwrap_or("").to_lowercase(),
-                )
-            } else {
-                match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
-                    Ok(Some(s)) => (
-                        s.file.to_lowercase(),
-                        s.doc.as_deref().unwrap_or("").to_lowercase(),
-                        s.signature.as_deref().unwrap_or("").to_lowercase(),
-                    ),
-                    _ => return true,
-                }
-            };
+        let (file_lower, doc_lower, sig_lower) = if let Some(rsym) = resolved.get(qname.as_str()) {
+            (
+                rsym.file.to_lowercase(),
+                rsym.doc.as_deref().unwrap_or("").to_lowercase(),
+                rsym.signature.as_deref().unwrap_or("").to_lowercase(),
+            )
+        } else {
+            match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+                Ok(Some(s)) => (
+                    s.file.to_lowercase(),
+                    s.doc.as_deref().unwrap_or("").to_lowercase(),
+                    s.signature.as_deref().unwrap_or("").to_lowercase(),
+                ),
+                _ => return true,
+            }
+        };
         !exclude_terms.iter().any(|excl| {
             qname_lower.contains(excl.as_str())
                 || file_lower.contains(excl.as_str())
@@ -325,7 +352,9 @@ fn ledger_anchor_pass(
     tokens: &[String],
     candidates: &mut Vec<(f64, String)>,
 ) {
-    if tokens.is_empty() { return; }
+    if tokens.is_empty() {
+        return;
+    }
 
     let existing_qnames: HashSet<String> = candidates.iter().map(|(_, q)| q.clone()).collect();
 
@@ -367,7 +396,9 @@ fn ledger_anchor_pass(
         }
     }
 
-    if matching_sym_ids.is_empty() { return; }
+    if matching_sym_ids.is_empty() {
+        return;
+    }
 
     let qname_prefix = format!("{}/index/by-qname", crate::paths::ASD_ROOT);
     let id_map: HashMap<String, Symbol> =
@@ -382,7 +413,9 @@ fn ledger_anchor_pass(
 
     let mut anchors = 0usize;
     for sym_id in matching_sym_ids {
-        if anchors >= MAX_ANCHORS { break; }
+        if anchors >= MAX_ANCHORS {
+            break;
+        }
         if let Some(sym) = id_map.get(&sym_id) {
             if !existing_qnames.contains(&sym.qname) {
                 candidates.push((ANCHOR_SCORE, sym.qname.clone()));
@@ -453,17 +486,23 @@ pub fn find_candidates(
                     let text_boost = if hit.ledger_text.is_empty() {
                         0.0
                     } else {
-                        let matches = tokens.iter()
+                        let matches = tokens
+                            .iter()
                             .filter(|t| hit.ledger_text.contains(t.as_str()))
                             .count() as f64;
                         if matches == 0.0 {
                             0.0
                         } else {
                             // Weight by highest-priority kind flagged for this symbol.
-                            let weight = if hit.has_ownership()  { 3.0 }
-                                    else if hit.has_invariant() { 1.5 }
-                                    else if hit.has_hazard()    { 1.0 }
-                                    else                        { 0.5 };
+                            let weight = if hit.has_ownership() {
+                                3.0
+                            } else if hit.has_invariant() {
+                                1.5
+                            } else if hit.has_hazard() {
+                                1.0
+                            } else {
+                                0.5
+                            };
                             matches * weight
                         }
                     };
@@ -473,7 +512,10 @@ pub fn find_candidates(
                     (text_boost, sot)
                 };
                 qname_to_sym.insert(hit.qname.clone(), (hit.symbol_id.clone(), hit.file.clone()));
-                tmp.push((hit.bm25_score + boost + ledger_boost + ownership_struct_boost, hit.qname));
+                tmp.push((
+                    hit.bm25_score + boost + ledger_boost + ownership_struct_boost,
+                    hit.qname,
+                ));
             }
             tmp
         };
@@ -499,7 +541,8 @@ pub fn find_candidates(
             .collect();
 
         const VIEW_STEM_HINTS: &[&str] = &[
-            "view", "ui", "render", "display", "screen", "layout", "widget", "cell", "button", "pad",
+            "view", "ui", "render", "display", "screen", "layout", "widget", "cell", "button",
+            "pad",
         ];
         let query_lower = query.to_lowercase();
         let is_view_query = VIEW_STEM_HINTS.iter().any(|h| query_lower.contains(h));
@@ -512,12 +555,16 @@ pub fn find_candidates(
                         let boost = hybrid_boost(&hit, tokens);
                         let tier = hit.tier;
                         let layer = classify_layer_sym(&hit.file, &hit.qname, tier, &[]);
-                        let view_boost = if is_view_query
-                            && (layer == "ui" || layer == "viewmodel")
-                        { 2.0 } else { 0.0 };
+                        let view_boost = if is_view_query && (layer == "ui" || layer == "viewmodel")
+                        {
+                            2.0
+                        } else {
+                            0.0
+                        };
                         // Extend maps so the has_ledger + file-dedup passes below
                         // can use cache lookups instead of get_symbol_by_qname reads.
-                        qname_to_sym.entry(hit.qname.clone())
+                        qname_to_sym
+                            .entry(hit.qname.clone())
                             .or_insert_with(|| (hit.symbol_id.clone(), hit.file.clone()));
                         // M59: propagate ledger presence from stem hit into has_ledger_ids.
                         if hit.has_ledger() {
@@ -551,7 +598,8 @@ pub fn find_candidates(
         scored.sort_by(|a, b| {
             let a_ledger = has_ledger.contains(&a.1);
             let b_ledger = has_ledger.contains(&b.1);
-            b_ledger.cmp(&a_ledger)
+            b_ledger
+                .cmp(&a_ledger)
                 .then_with(|| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal))
         });
         let mut seen_files: HashSet<String> = HashSet::new();
@@ -566,7 +614,13 @@ pub fn find_candidates(
         scored.truncate(depth);
 
         apply_paths_filter(engine, index_store, fts, &filters.paths_filter, &mut scored);
-        apply_exclusions(engine, index_store, fts, &filters.exclude_terms, &mut scored);
+        apply_exclusions(
+            engine,
+            index_store,
+            fts,
+            &filters.exclude_terms,
+            &mut scored,
+        );
 
         // Ledger-anchor pass: inject invariant/hazard-bearing symbols that
         // matched query tokens but were dropped by dedup or FTS ranking.
@@ -595,10 +649,14 @@ pub fn find_candidates(
             _ => continue,
         };
         if let Some(ref k) = kind_filter {
-            if kind_str(&sym.kind) != k.as_str() { continue; }
+            if kind_str(&sym.kind) != k.as_str() {
+                continue;
+            }
         }
         if let Some(lang) = lang_filter {
-            if sym.language != lang { continue; }
+            if sym.language != lang {
+                continue;
+            }
         }
         let s = in_memory_score(&sym, tokens, ledger_store, engine);
         if s > 0 {
@@ -608,7 +666,13 @@ pub fn find_candidates(
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(depth);
     apply_paths_filter(engine, index_store, fts, &filters.paths_filter, &mut scored);
-    apply_exclusions(engine, index_store, fts, &filters.exclude_terms, &mut scored);
+    apply_exclusions(
+        engine,
+        index_store,
+        fts,
+        &filters.exclude_terms,
+        &mut scored,
+    );
     ledger_anchor_pass(engine, fts, tokens, &mut scored);
     scored
 }
@@ -643,23 +707,41 @@ pub fn explain_match(
         }
     }
 
-    let inv_count = ledger_entries.iter().filter(|e| matches!(e.kind, LedgerKind::Invariant)).count();
-    let haz_count = ledger_entries.iter().filter(|e| matches!(e.kind, LedgerKind::Hazard)).count();
+    let inv_count = ledger_entries
+        .iter()
+        .filter(|e| matches!(e.kind, LedgerKind::Invariant))
+        .count();
+    let haz_count = ledger_entries
+        .iter()
+        .filter(|e| matches!(e.kind, LedgerKind::Hazard))
+        .count();
     if inv_count > 0 {
         reasons.push(format!("invariant-attached:{}", inv_count));
     }
     if haz_count > 0 {
-        reasons.push(format!("ledger:{} hazard{}", haz_count, if haz_count == 1 { "" } else { "s" }));
+        reasons.push(format!(
+            "ledger:{} hazard{}",
+            haz_count,
+            if haz_count == 1 { "" } else { "s" }
+        ));
     }
     // Ownership-boundary: this symbol is explicitly declared as the source-of-truth
     // for a domain concept that overlaps the query.
-    let owns: Vec<&str> = ledger_entries.iter()
+    let owns: Vec<&str> = ledger_entries
+        .iter()
         .filter(|e| e.kind == LedgerKind::Ownership)
         .map(|e| e.summary.as_str())
         .filter(|s| tokens.iter().any(|t| s.to_lowercase().contains(t.as_str())))
         .collect();
     if !owns.is_empty() {
-        reasons.push(format!("ownership:{}", owns[0].split_whitespace().take(4).collect::<Vec<_>>().join("-")));
+        reasons.push(format!(
+            "ownership:{}",
+            owns[0]
+                .split_whitespace()
+                .take(4)
+                .collect::<Vec<_>>()
+                .join("-")
+        ));
     }
     if is_hot {
         reasons.push("recent-edit".to_string());
@@ -675,13 +757,22 @@ pub fn explain_match(
 /// Normalize raw scores to [0.1, 1.0] confidence within the result set.
 /// The highest-scoring result gets 1.0; the lowest gets 0.1.
 pub fn confidence_scores(scores: &[f64]) -> Vec<f64> {
-    if scores.is_empty() { return vec![]; }
-    if scores.len() == 1 { return vec![1.0]; }
+    if scores.is_empty() {
+        return vec![];
+    }
+    if scores.len() == 1 {
+        return vec![1.0];
+    }
     let max = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let min = scores.iter().cloned().fold(f64::INFINITY, f64::min);
     let range = max - min;
-    if range < 1e-9 { return vec![1.0; scores.len()]; }
-    scores.iter().map(|&s| 0.1 + 0.9 * (s - min) / range).collect()
+    if range < 1e-9 {
+        return vec![1.0; scores.len()];
+    }
+    scores
+        .iter()
+        .map(|&s| 0.1 + 0.9 * (s - min) / range)
+        .collect()
 }
 
 /// Classify a result into a semantic bucket.
@@ -698,12 +789,22 @@ pub fn result_bucket(
     is_hot: bool,
 ) -> &'static str {
     use crate::search_fts::symbol_tier;
-    if symbol_tier(file) == 2 { return "test-only"; }
+    if symbol_tier(file) == 2 {
+        return "test-only";
+    }
     let has_name = match_reasons.iter().any(|r| r.starts_with("name:"));
-    let has_doc_or_file = match_reasons.iter().any(|r| r.starts_with("doc:") || r.starts_with("file:"));
-    if has_ledger && (has_name || is_hot) { return "core"; }
-    if has_ledger || has_name { return "relevant"; }
-    if is_hot || has_doc_or_file { return "peripheral"; }
+    let has_doc_or_file = match_reasons
+        .iter()
+        .any(|r| r.starts_with("doc:") || r.starts_with("file:"));
+    if has_ledger && (has_name || is_hot) {
+        return "core";
+    }
+    if has_ledger || has_name {
+        return "relevant";
+    }
+    if is_hot || has_doc_or_file {
+        return "peripheral";
+    }
     "noisy"
 }
 
@@ -712,11 +813,13 @@ pub fn result_bucket(
 /// Used in `--explain` output and agent JSON to replace the bare bucket label.
 pub fn confidence_reason(match_reasons: &[String], has_ledger: bool, is_hot: bool) -> String {
     let has_name = match_reasons.iter().any(|r| r.starts_with("name:"));
-    let has_inv  = match_reasons.iter().any(|r| r.starts_with("invariant-attached:"));
-    let has_own  = match_reasons.iter().any(|r| r.starts_with("ownership:"));
-    let has_haz  = match_reasons.iter().any(|r| r.starts_with("ledger:"));
-    let has_sig  = match_reasons.iter().any(|r| r.starts_with("sig:"));
-    let has_doc  = match_reasons.iter().any(|r| r.starts_with("doc:"));
+    let has_inv = match_reasons
+        .iter()
+        .any(|r| r.starts_with("invariant-attached:"));
+    let has_own = match_reasons.iter().any(|r| r.starts_with("ownership:"));
+    let has_haz = match_reasons.iter().any(|r| r.starts_with("ledger:"));
+    let has_sig = match_reasons.iter().any(|r| r.starts_with("sig:"));
+    let has_doc = match_reasons.iter().any(|r| r.starts_with("doc:"));
     let has_file = match_reasons.iter().any(|r| r.starts_with("file:"));
 
     if has_name && has_inv {
@@ -763,16 +866,21 @@ pub fn detect_ambiguous_tokens(
         Some(f) if f.has_data() => f,
         _ => return vec![],
     };
-    let candidates: Vec<&str> = tokens.iter()
+    let candidates: Vec<&str> = tokens
+        .iter()
         .filter(|t| !is_stopword(t))
         .map(|t| t.as_str())
         .collect();
-    if candidates.is_empty() { return vec![]; }
+    if candidates.is_empty() {
+        return vec![];
+    }
 
-    let counts = fts.count_distinct_files_per_token(&candidates, filters.include_tests)
+    let counts = fts
+        .count_distinct_files_per_token(&candidates, filters.include_tests)
         .unwrap_or_default();
 
-    counts.into_iter()
+    counts
+        .into_iter()
         .filter(|(_, cnt)| *cnt > THRESHOLD)
         .map(|(tok, _)| tok)
         .collect()
@@ -809,7 +917,16 @@ pub fn detect_possible_misses(
     }
 
     // t-004: service/domain query with results only in UI layer.
-    const SERVICE_HINTS: &[&str] = &["service", "manager", "coordinator", "handler", "processor", "store", "repository", "repo"];
+    const SERVICE_HINTS: &[&str] = &[
+        "service",
+        "manager",
+        "coordinator",
+        "handler",
+        "processor",
+        "store",
+        "repository",
+        "repo",
+    ];
     const SERVICE_LAYERS: &[&str] = &["service", "domain", "core", "infrastructure"];
     if SERVICE_HINTS.iter().any(|h| ql.contains(h))
         && result_count > 0
@@ -824,7 +941,15 @@ pub fn detect_possible_misses(
     }
 
     // t-004: data/model query missing persistence layer.
-    const DATA_HINTS: &[&str] = &["model", "entity", "persist", "database", "migration", "schema", "table"];
+    const DATA_HINTS: &[&str] = &[
+        "model",
+        "entity",
+        "persist",
+        "database",
+        "migration",
+        "schema",
+        "table",
+    ];
     const DATA_LAYERS: &[&str] = &["persistence", "data", "infrastructure", "domain"];
     if DATA_HINTS.iter().any(|h| ql.contains(h))
         && result_count > 0
@@ -837,7 +962,16 @@ pub fn detect_possible_misses(
     }
 
     // t-005: Named-layer warnings for scheduler, engine, and network.
-    const SCHEDULER_HINTS: &[&str] = &["scheduler", "schedule", "clock", "timer", "tick", "dispatch", "queue", "async"];
+    const SCHEDULER_HINTS: &[&str] = &[
+        "scheduler",
+        "schedule",
+        "clock",
+        "timer",
+        "tick",
+        "dispatch",
+        "queue",
+        "async",
+    ];
     if SCHEDULER_HINTS.iter().any(|h| ql.contains(h))
         && result_count > 0
         && !layers_present.contains("scheduler")
@@ -849,7 +983,15 @@ pub fn detect_possible_misses(
         );
     }
 
-    const ENGINE_HINTS: &[&str] = &["engine", "audio", "video", "render", "pipeline", "runtime", "processor"];
+    const ENGINE_HINTS: &[&str] = &[
+        "engine",
+        "audio",
+        "video",
+        "render",
+        "pipeline",
+        "runtime",
+        "processor",
+    ];
     if ENGINE_HINTS.iter().any(|h| ql.contains(h))
         && result_count > 0
         && !layers_present.contains("engine")
@@ -862,7 +1004,9 @@ pub fn detect_possible_misses(
         );
     }
 
-    const NETWORK_HINTS: &[&str] = &["network", "api", "http", "request", "response", "endpoint", "fetch", "upload", "download"];
+    const NETWORK_HINTS: &[&str] = &[
+        "network", "api", "http", "request", "response", "endpoint", "fetch", "upload", "download",
+    ];
     if NETWORK_HINTS.iter().any(|h| ql.contains(h))
         && result_count > 0
         && !layers_present.contains("network")
@@ -896,10 +1040,13 @@ pub fn suggest_scoped_queries(
     ambiguous_terms: &[String],
     top_qnames: &[String],
 ) -> Vec<String> {
-    if ambiguous_terms.is_empty() || top_qnames.is_empty() { return vec![]; }
+    if ambiguous_terms.is_empty() || top_qnames.is_empty() {
+        return vec![];
+    }
 
     let amb_set: HashSet<&str> = ambiguous_terms.iter().map(|s| s.as_str()).collect();
-    let specific_tokens: Vec<&str> = original_tokens.iter()
+    let specific_tokens: Vec<&str> = original_tokens
+        .iter()
         .filter(|t| !amb_set.contains(t.as_str()))
         .map(|s| s.as_str())
         .collect();
@@ -907,19 +1054,26 @@ pub fn suggest_scoped_queries(
     // Extract candidate narrowing terms from top result qnames (last segment words).
     let mut cooccur: HashMap<String, usize> = HashMap::new();
     for qname in top_qnames {
-        let last = qname.rsplit(|c: char| c == '.' || c == ':' || c == '/').next().unwrap_or(qname);
+        let last = qname
+            .rsplit(|c: char| c == '.' || c == ':' || c == '/')
+            .next()
+            .unwrap_or(qname);
         // Split CamelCase into words.
         let mut cur = String::new();
         let mut words: Vec<String> = Vec::new();
         for ch in last.chars() {
             if ch.is_uppercase() && !cur.is_empty() {
-                words.push(cur.clone()); cur.clear();
+                words.push(cur.clone());
+                cur.clear();
             }
             cur.push(ch.to_lowercase().next().unwrap_or(ch));
         }
-        if !cur.is_empty() { words.push(cur); }
+        if !cur.is_empty() {
+            words.push(cur);
+        }
         // Also split snake_case.
-        let words: Vec<String> = words.iter()
+        let words: Vec<String> = words
+            .iter()
             .flat_map(|w| w.split('_').map(|s| s.to_string()).collect::<Vec<_>>())
             .filter(|w| w.len() > 2 && !is_stopword(w) && !amb_set.contains(w.as_str()))
             .collect();
@@ -994,7 +1148,9 @@ pub fn detect_confidence_warnings(
 ///
 /// Returns a vec of suggestion strings. Empty when the query is already focused.
 pub fn suggest_better_queries(tokens: &[String], query: &str) -> Vec<String> {
-    if tokens.is_empty() { return vec![]; }
+    if tokens.is_empty() {
+        return vec![];
+    }
     let mut suggestions = Vec::new();
 
     // Single-token broad queries.
@@ -1002,8 +1158,15 @@ pub fn suggest_better_queries(tokens: &[String], query: &str) -> Vec<String> {
     let meaningful = tokens.len() - stopword_count;
 
     if meaningful <= 1 {
-        let tok = tokens.iter().find(|t| !is_stopword(t)).map(|s| s.as_str()).unwrap_or(query);
-        suggestions.push(format!("try a more specific phrase, e.g. \"{} <subsystem>\" or \"{} <action>\"", tok, tok));
+        let tok = tokens
+            .iter()
+            .find(|t| !is_stopword(t))
+            .map(|s| s.as_str())
+            .unwrap_or(query);
+        suggestions.push(format!(
+            "try a more specific phrase, e.g. \"{} <subsystem>\" or \"{} <action>\"",
+            tok, tok
+        ));
     }
 
     // Stopword-heavy query (>50% stopwords with 3+ tokens).
@@ -1015,7 +1178,11 @@ pub fn suggest_better_queries(tokens: &[String], query: &str) -> Vec<String> {
     }
 
     // Very common single terms likely to be ambiguous.
-    const BROAD_TERMS: &[&str] = &["update", "get", "set", "handle", "process", "run", "execute", "init", "start", "stop", "load", "save", "create", "delete", "state", "data", "model", "manager", "service", "util", "helper", "config"];
+    const BROAD_TERMS: &[&str] = &[
+        "update", "get", "set", "handle", "process", "run", "execute", "init", "start", "stop",
+        "load", "save", "create", "delete", "state", "data", "model", "manager", "service", "util",
+        "helper", "config",
+    ];
     for tok in tokens {
         if BROAD_TERMS.contains(&tok.as_str()) && tokens.len() == 1 {
             suggestions.push(format!(
@@ -1042,7 +1209,10 @@ fn fb_query_tokens(q: &str) -> std::collections::HashSet<String> {
 /// Takes the last `::` or `.`-delimited segment, then splits snake_case by `_`
 /// and CamelCase at uppercase boundaries.
 fn name_tokens_from_qname(qname: &str) -> HashSet<String> {
-    let last = qname.rsplit(|c| c == ':' || c == '.').next().unwrap_or(qname);
+    let last = qname
+        .rsplit(|c| c == ':' || c == '.')
+        .next()
+        .unwrap_or(qname);
     // Split CamelCase at uppercase boundaries.
     let mut tokens: Vec<String> = Vec::new();
     let mut cur = String::new();
@@ -1052,9 +1222,12 @@ fn name_tokens_from_qname(qname: &str) -> HashSet<String> {
         }
         cur.push(ch.to_lowercase().next().unwrap_or(ch));
     }
-    if !cur.is_empty() { tokens.push(cur); }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
     // Also split by `_`.
-    tokens.iter()
+    tokens
+        .iter()
         .flat_map(|t| t.split('_'))
         .filter(|t| t.len() > 2 && !is_stopword(t))
         .map(|t| t.to_string())
@@ -1065,10 +1238,17 @@ fn name_tokens_from_qname(qname: &str) -> HashSet<String> {
 /// when their token sets overlap by at least one token (not just substring match).
 /// This makes "drift playhead" verdicts apply to "playhead drift" and
 /// "drift pad playhead position".
-fn query_family_matches(current_query_tokens: &std::collections::HashSet<String>, fb_query: &str) -> bool {
-    if fb_query.is_empty() { return true; }
+fn query_family_matches(
+    current_query_tokens: &std::collections::HashSet<String>,
+    fb_query: &str,
+) -> bool {
+    if fb_query.is_empty() {
+        return true;
+    }
     let fb_tokens = fb_query_tokens(fb_query);
-    if fb_tokens.is_empty() { return true; }
+    if fb_tokens.is_empty() {
+        return true;
+    }
     // Any shared non-stopword token means the queries are in the same family.
     fb_tokens.iter().any(|t| current_query_tokens.contains(t))
 }
@@ -1141,7 +1321,10 @@ pub fn read_active_task_scope_from(
     db_path_parent: Option<&std::path::Path>,
 ) -> Option<Vec<String>> {
     let raw: String = env_raw.map(|s| s.to_string()).or_else(|| {
-        let p = db_path_parent?.join(".asd").join("cache").join("active-task.json");
+        let p = db_path_parent?
+            .join(".asd")
+            .join("cache")
+            .join("active-task.json");
         std::fs::read_to_string(p).ok()
     })?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
@@ -1179,14 +1362,13 @@ pub fn apply_task_bias(
         .filter(|(s, _)| s.is_finite())
         .map(|(_, q)| q.clone())
         .collect();
-    let file_by_qname: std::collections::HashMap<String, String> = if let Some(fts) =
-        engine.fts.as_ref()
-    {
-        let qnames_ref: Vec<&str> = qnames_owned.iter().map(|s| s.as_str()).collect();
-        fts.files_for_qnames(&qnames_ref, &engine.ref_name)
-    } else {
-        std::collections::HashMap::new()
-    };
+    let file_by_qname: std::collections::HashMap<String, String> =
+        if let Some(fts) = engine.fts.as_ref() {
+            let qnames_ref: Vec<&str> = qnames_owned.iter().map(|s| s.as_str()).collect();
+            fts.files_for_qnames(&qnames_ref, &engine.ref_name)
+        } else {
+            std::collections::HashMap::new()
+        };
 
     let mut boosted = 0;
     for (score, qname) in scored.iter_mut() {
@@ -1379,7 +1561,8 @@ pub fn apply_feedback_adjustments(
     let current_tokens_vec: Vec<&str> = current_tokens.iter().map(|s| s.as_str()).collect();
 
     // Metrics accumulators.
-    let entries_applied = feedback_entries.iter()
+    let entries_applied = feedback_entries
+        .iter()
         .filter(|(_, fb_q, _)| query_family_matches(&current_tokens, fb_q))
         .count();
     let mut preserved_useful_siblings: usize = 0;
@@ -1389,25 +1572,37 @@ pub fn apply_feedback_adjustments(
     let mut rules_applied: Vec<String> = Vec::new();
     macro_rules! record_rule {
         ($name:expr) => {
-            if rules_seen.insert($name) { rules_applied.push($name.to_string()); }
+            if rules_seen.insert($name) {
+                rules_applied.push($name.to_string());
+            }
         };
     }
 
     // --- Recurring false positive map ---
-    let mut noisy_queries_by_sym: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
+    let mut noisy_queries_by_sym: std::collections::HashMap<&str, Vec<&str>> =
+        std::collections::HashMap::new();
     for (sym_id, fb_query, verdict) in feedback_entries {
-        if matches!(verdict, crate::schema::FeedbackVerdict::Noisy | crate::schema::FeedbackVerdict::WrongLayer) {
-            noisy_queries_by_sym.entry(sym_id.as_str()).or_default().push(fb_query.as_str());
+        if matches!(
+            verdict,
+            crate::schema::FeedbackVerdict::Noisy | crate::schema::FeedbackVerdict::WrongLayer
+        ) {
+            noisy_queries_by_sym
+                .entry(sym_id.as_str())
+                .or_default()
+                .push(fb_query.as_str());
         }
     }
     let recurring_fp: std::collections::HashMap<&str, Vec<String>> = noisy_queries_by_sym
         .into_iter()
         .filter(|(_, queries)| queries.len() >= 2)
         .map(|(sym_id, queries)| {
-            let mut token_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            let mut token_counts: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
             for q in &queries {
                 let tokens = fb_query_tokens(q);
-                for t in tokens { *token_counts.entry(t).or_default() += 1; }
+                for t in tokens {
+                    *token_counts.entry(t).or_default() += 1;
+                }
             }
             let suppression_tokens: Vec<String> = token_counts
                 .into_iter()
@@ -1420,42 +1615,58 @@ pub fn apply_feedback_adjustments(
 
     // --- t-001: Build noisy-file map via asd_symbols_meta (M60: no git read).
     // Falls back to get_tree when FTS index is unavailable.
-    struct NoisySymInfo { sym_id: String, name_tokens: HashSet<String> }
+    struct NoisySymInfo {
+        sym_id: String,
+        name_tokens: HashSet<String>,
+    }
     let mut noisy_file_syms: HashMap<String, Vec<NoisySymInfo>> = HashMap::new();
     {
-        let noisy_ids: Vec<&str> = feedback_entries.iter()
+        let noisy_ids: Vec<&str> = feedback_entries
+            .iter()
             .filter(|(_, fb_query, verdict)| {
-                matches!(verdict, crate::schema::FeedbackVerdict::Noisy | crate::schema::FeedbackVerdict::WrongLayer)
-                    && query_family_matches(&current_tokens, fb_query)
+                matches!(
+                    verdict,
+                    crate::schema::FeedbackVerdict::Noisy
+                        | crate::schema::FeedbackVerdict::WrongLayer
+                ) && query_family_matches(&current_tokens, fb_query)
             })
             .map(|(sym_id, _, _)| sym_id.as_str())
             .collect();
         if !noisy_ids.is_empty() {
             // M60: bulk-resolve noisy symbol_ids via FTS — one SQL query.
-            let resolved = engine.fts.as_ref()
+            let resolved = engine
+                .fts
+                .as_ref()
                 .map(|fts| fts.resolve_symbol_ids_bulk(&noisy_ids))
                 .unwrap_or_default();
             if !resolved.is_empty() {
                 for (sym_id_str, rsym) in &resolved {
                     let name_tokens = name_tokens_from_qname(&rsym.qname);
-                    noisy_file_syms.entry(rsym.file.clone()).or_default().push(NoisySymInfo {
-                        sym_id: sym_id_str.clone(),
-                        name_tokens,
-                    });
+                    noisy_file_syms
+                        .entry(rsym.file.clone())
+                        .or_default()
+                        .push(NoisySymInfo {
+                            sym_id: sym_id_str.clone(),
+                            name_tokens,
+                        });
                 }
             } else {
                 // Fallback: git object store.
                 let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-                if let Ok(serde_json::Value::Object(map)) = engine.repo.get_tree(&engine.ref_name, &prefix) {
+                if let Ok(serde_json::Value::Object(map)) =
+                    engine.repo.get_tree(&engine.ref_name, &prefix)
+                {
                     let noisy_set: HashSet<&str> = noisy_ids.into_iter().collect();
                     for sym_val in map.values() {
                         if let Ok(sym) = serde_json::from_value::<Symbol>(sym_val.clone()) {
                             if noisy_set.contains(sym.symbol_id.as_str()) {
                                 let name_tokens = name_tokens_from_qname(&sym.qname);
-                                noisy_file_syms.entry(sym.file.clone()).or_default().push(NoisySymInfo {
-                                    sym_id: sym.symbol_id,
-                                    name_tokens,
-                                });
+                                noisy_file_syms.entry(sym.file.clone()).or_default().push(
+                                    NoisySymInfo {
+                                        sym_id: sym.symbol_id,
+                                        name_tokens,
+                                    },
+                                );
                             }
                         }
                     }
@@ -1466,7 +1677,9 @@ pub fn apply_feedback_adjustments(
 
     // M60: pre-fetch all scored qnames in one SQL batch — no per-symbol git read.
     let scored_qnames: Vec<&str> = scored.iter().map(|(_, q)| q.as_str()).collect();
-    let resolved_map = engine.fts.as_ref()
+    let resolved_map = engine
+        .fts
+        .as_ref()
         .map(|fts| fts.resolve_qnames_bulk(&scored_qnames))
         .unwrap_or_default();
 
@@ -1485,9 +1698,9 @@ pub fn apply_feedback_adjustments(
         let sym_id = &sym_symbol_id;
         // Reconstruct a minimal view for the checks below.
         let sym_kind_enum = match sym_kind.as_str() {
-            "class"  => SymbolKind::Class,
+            "class" => SymbolKind::Class,
             "module" => SymbolKind::Module,
-            _        => SymbolKind::Function,
+            _ => SymbolKind::Function,
         };
 
         // Sibling file suppression: a symbol sharing a file with a noisy symbol
@@ -1535,9 +1748,13 @@ pub fn apply_feedback_adjustments(
 
         // Per-symbol verdict matching (t-003: query-family aware).
         for (fb_symbol_id, fb_query, verdict) in feedback_entries {
-            if fb_symbol_id != sym_id { continue; }
+            if fb_symbol_id != sym_id {
+                continue;
+            }
             // t-003: use token-family matching instead of substring containment.
-            if !query_family_matches(&current_tokens, fb_query) { continue; }
+            if !query_family_matches(&current_tokens, fb_query) {
+                continue;
+            }
             match verdict {
                 crate::schema::FeedbackVerdict::Useful => {
                     *score += 1.5;
@@ -1570,7 +1787,10 @@ pub fn apply_feedback_adjustments(
         // Recurring false positive suppression.
         if score.is_finite() {
             if let Some(sup_tokens) = recurring_fp.get(sym_id.as_str()) {
-                if current_tokens_vec.iter().any(|qt| sup_tokens.iter().any(|st| st == *qt)) {
+                if current_tokens_vec
+                    .iter()
+                    .any(|qt| sup_tokens.iter().any(|st| st == *qt))
+                {
                     *score = f64::NEG_INFINITY;
                     recurring_fp_suppressed += 1;
                     record_rule!("recurring_fp");
@@ -1581,7 +1801,8 @@ pub fn apply_feedback_adjustments(
     let before = scored.len();
     scored.retain(|(s, _)| s.is_finite());
     let suppressed = before - scored.len();
-    if constraint_penalties_applied > 0 && !rules_applied.iter().any(|r| r == "constraint_penalty") {
+    if constraint_penalties_applied > 0 && !rules_applied.iter().any(|r| r == "constraint_penalty")
+    {
         rules_applied.push("constraint_penalty".to_string());
     }
     if task_bias_boosted > 0 && !rules_applied.iter().any(|r| r == "task_bias") {
@@ -1623,44 +1844,62 @@ pub fn explain_feedback_impacts(
     feedback_entries: &[crate::schema::FeedbackEntry],
 ) -> HashMap<String, FeedbackImpact> {
     let mut impacts: HashMap<String, FeedbackImpact> = HashMap::new();
-    if feedback_entries.is_empty() || qnames.is_empty() { return impacts; }
+    if feedback_entries.is_empty() || qnames.is_empty() {
+        return impacts;
+    }
     let query_norm = query.to_lowercase();
     let current_tokens = fb_query_tokens(&query_norm);
 
     // M60: Build noisy-file map via resolve_symbol_ids_bulk — no git read.
-    struct NoisyFileEntry { sym_id: String, name_tokens: HashSet<String> }
+    struct NoisyFileEntry {
+        sym_id: String,
+        name_tokens: HashSet<String>,
+    }
     let mut noisy_file_syms: HashMap<String, Vec<NoisyFileEntry>> = HashMap::new();
     {
-        let noisy_ids: Vec<&str> = feedback_entries.iter()
+        let noisy_ids: Vec<&str> = feedback_entries
+            .iter()
             .filter(|e| {
-                matches!(e.verdict, crate::schema::FeedbackVerdict::Noisy | crate::schema::FeedbackVerdict::WrongLayer)
-                    && query_family_matches(&current_tokens, &e.query)
+                matches!(
+                    e.verdict,
+                    crate::schema::FeedbackVerdict::Noisy
+                        | crate::schema::FeedbackVerdict::WrongLayer
+                ) && query_family_matches(&current_tokens, &e.query)
             })
             .map(|e| e.symbol_id.as_str())
             .collect();
         if !noisy_ids.is_empty() {
-            let resolved = engine.fts.as_ref()
+            let resolved = engine
+                .fts
+                .as_ref()
                 .map(|fts| fts.resolve_symbol_ids_bulk(&noisy_ids))
                 .unwrap_or_default();
             if !resolved.is_empty() {
                 for (sym_id_str, rsym) in &resolved {
-                    noisy_file_syms.entry(rsym.file.clone()).or_default().push(NoisyFileEntry {
-                        sym_id: sym_id_str.clone(),
-                        name_tokens: name_tokens_from_qname(&rsym.qname),
-                    });
+                    noisy_file_syms
+                        .entry(rsym.file.clone())
+                        .or_default()
+                        .push(NoisyFileEntry {
+                            sym_id: sym_id_str.clone(),
+                            name_tokens: name_tokens_from_qname(&rsym.qname),
+                        });
                 }
             } else {
                 // Fallback: git object store.
                 let noisy_set: HashSet<&str> = noisy_ids.into_iter().collect();
                 let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-                if let Ok(serde_json::Value::Object(map)) = engine.repo.get_tree(&engine.ref_name, &prefix) {
+                if let Ok(serde_json::Value::Object(map)) =
+                    engine.repo.get_tree(&engine.ref_name, &prefix)
+                {
                     for sym_val in map.values() {
                         if let Ok(sym) = serde_json::from_value::<Symbol>(sym_val.clone()) {
                             if noisy_set.contains(sym.symbol_id.as_str()) {
-                                noisy_file_syms.entry(sym.file.clone()).or_default().push(NoisyFileEntry {
-                                    sym_id: sym.symbol_id,
-                                    name_tokens: name_tokens_from_qname(&sym.qname),
-                                });
+                                noisy_file_syms.entry(sym.file.clone()).or_default().push(
+                                    NoisyFileEntry {
+                                        sym_id: sym.symbol_id,
+                                        name_tokens: name_tokens_from_qname(&sym.qname),
+                                    },
+                                );
                             }
                         }
                     }
@@ -1671,7 +1910,9 @@ pub fn explain_feedback_impacts(
 
     // M60: pre-fetch all qnames in one SQL batch.
     let qname_strs: Vec<&str> = qnames.iter().map(|q| q.as_str()).collect();
-    let resolved_map = engine.fts.as_ref()
+    let resolved_map = engine
+        .fts
+        .as_ref()
         .map(|fts| fts.resolve_qnames_bulk(&qname_strs))
         .unwrap_or_default();
 
@@ -1679,9 +1920,9 @@ pub fn explain_feedback_impacts(
         let (sym_id_owned, sym_file, sym_kind_enum) =
             if let Some(rsym) = resolved_map.get(qname.as_str()) {
                 let kind = match rsym.kind.as_str() {
-                    "class"  => SymbolKind::Class,
+                    "class" => SymbolKind::Class,
                     "module" => SymbolKind::Module,
-                    _        => SymbolKind::Function,
+                    _ => SymbolKind::Function,
                 };
                 (rsym.symbol_id.clone(), rsym.file.clone(), kind)
             } else {
@@ -1698,18 +1939,27 @@ pub fn explain_feedback_impacts(
         // Check per-symbol verdicts first (direct match takes priority).
         let mut found = false;
         for entry in feedback_entries {
-            if entry.symbol_id != *sym_id { continue; }
-            if !query_family_matches(&current_tokens, &entry.query) { continue; }
+            if entry.symbol_id != *sym_id {
+                continue;
+            }
+            if !query_family_matches(&current_tokens, &entry.query) {
+                continue;
+            }
             let v_str = entry.verdict.as_str();
-            impacts.insert(qname.clone(), FeedbackImpact {
-                verdict: v_str.to_string(),
-                matched_query: entry.query.clone(),
-                author: entry.author.clone(),
-            });
+            impacts.insert(
+                qname.clone(),
+                FeedbackImpact {
+                    verdict: v_str.to_string(),
+                    matched_query: entry.query.clone(),
+                    author: entry.author.clone(),
+                },
+            );
             found = true;
             break;
         }
-        if found { continue; }
+        if found {
+            continue;
+        }
 
         // Check sibling suppression.
         if let Some(noisy_syms) = noisy_file_syms.get(&sym_file) {
@@ -1722,14 +1972,21 @@ pub fn explain_feedback_impacts(
                 if overlaps {
                     if let Some(entry) = feedback_entries.iter().find(|e| {
                         noisy_syms.iter().any(|ns| ns.sym_id == e.symbol_id)
-                            && matches!(e.verdict, crate::schema::FeedbackVerdict::Noisy | crate::schema::FeedbackVerdict::WrongLayer)
+                            && matches!(
+                                e.verdict,
+                                crate::schema::FeedbackVerdict::Noisy
+                                    | crate::schema::FeedbackVerdict::WrongLayer
+                            )
                             && query_family_matches(&current_tokens, &e.query)
                     }) {
-                        impacts.insert(qname.clone(), FeedbackImpact {
-                            verdict: "sibling_suppressed".to_string(),
-                            matched_query: entry.query.clone(),
-                            author: entry.author.clone(),
-                        });
+                        impacts.insert(
+                            qname.clone(),
+                            FeedbackImpact {
+                                verdict: "sibling_suppressed".to_string(),
+                                matched_query: entry.query.clone(),
+                                author: entry.author.clone(),
+                            },
+                        );
                     }
                 }
             }
@@ -1753,18 +2010,24 @@ pub fn apply_file_scope_feedback(
     scored: &mut Vec<(f64, String)>,
     file_scope_entries: &[(String, crate::schema::FeedbackVerdict, String)],
 ) {
-    if file_scope_entries.is_empty() { return; }
+    if file_scope_entries.is_empty() {
+        return;
+    }
     let query_norm = query.to_lowercase();
     let current_tokens = fb_query_tokens(&query_norm);
 
     // M60: pre-fetch all scored qnames in one SQL batch — no per-symbol git read.
     let qname_strs: Vec<&str> = scored.iter().map(|(_, q)| q.as_str()).collect();
-    let resolved_map = engine.fts.as_ref()
+    let resolved_map = engine
+        .fts
+        .as_ref()
         .map(|fts| fts.resolve_qnames_bulk(&qname_strs))
         .unwrap_or_default();
 
     for (score, qname) in scored.iter_mut() {
-        if !score.is_finite() { continue; }
+        if !score.is_finite() {
+            continue;
+        }
         let file = if let Some(rsym) = resolved_map.get(qname.as_str()) {
             rsym.file.clone()
         } else {
@@ -1774,8 +2037,12 @@ pub fn apply_file_scope_feedback(
             }
         };
         for (file_glob, verdict, entry_query) in file_scope_entries {
-            if !query_family_matches(&current_tokens, entry_query) { continue; }
-            if !glob_match(file_glob, &file) { continue; }
+            if !query_family_matches(&current_tokens, entry_query) {
+                continue;
+            }
+            if !glob_match(file_glob, &file) {
+                continue;
+            }
             // Plan C t-005: all suppression verdicts collapse here. Boost
             // and Missing handled explicitly; rest delegates to
             // `verdict.is_suppression()` so future variants don't need a
@@ -1817,15 +2084,11 @@ pub enum UncertaintyReason {
     /// The query consists entirely of generic/stopword-like tokens with
     /// no domain anchor. Results are likely noisy.
     /// Source: `query`
-    GenericQuery {
-        tokens: Vec<String>,
-    },
+    GenericQuery { tokens: Vec<String> },
     /// Fewer results than expected for a multi-term query. Index may be
     /// incomplete for this area, or the query is too specific.
     /// Source: `result_set`
-    LowResultCount {
-        count: usize,
-    },
+    LowResultCount { count: usize },
     /// The query implies a layer that is absent from the result set.
     /// Source: `result_set`
     MissingLayer {
@@ -1850,12 +2113,12 @@ impl UncertaintyReason {
     /// Score contribution: how much uncertainty this reason adds (0.0–1.0 range).
     pub fn weight(&self) -> f64 {
         match self {
-            UncertaintyReason::AmbiguousTerm { .. }     => 0.20,
-            UncertaintyReason::GenericQuery { .. }      => 0.25,
-            UncertaintyReason::LowResultCount { .. }    => 0.20,
-            UncertaintyReason::MissingLayer { .. }      => 0.10,
-            UncertaintyReason::SparseIndex              => 0.15,
-            UncertaintyReason::DbStateUnannotated { .. }=> 0.10,
+            UncertaintyReason::AmbiguousTerm { .. } => 0.20,
+            UncertaintyReason::GenericQuery { .. } => 0.25,
+            UncertaintyReason::LowResultCount { .. } => 0.20,
+            UncertaintyReason::MissingLayer { .. } => 0.10,
+            UncertaintyReason::SparseIndex => 0.15,
+            UncertaintyReason::DbStateUnannotated { .. } => 0.10,
         }
     }
 
@@ -1864,11 +2127,11 @@ impl UncertaintyReason {
     /// Returns one of: `"query"` | `"db_state"` | `"result_set"`
     pub fn source(&self) -> &'static str {
         match self {
-            UncertaintyReason::AmbiguousTerm { .. }      => "query",
-            UncertaintyReason::GenericQuery { .. }       => "query",
-            UncertaintyReason::LowResultCount { .. }     => "result_set",
-            UncertaintyReason::MissingLayer { .. }       => "result_set",
-            UncertaintyReason::SparseIndex               => "result_set",
+            UncertaintyReason::AmbiguousTerm { .. } => "query",
+            UncertaintyReason::GenericQuery { .. } => "query",
+            UncertaintyReason::LowResultCount { .. } => "result_set",
+            UncertaintyReason::MissingLayer { .. } => "result_set",
+            UncertaintyReason::SparseIndex => "result_set",
             UncertaintyReason::DbStateUnannotated { .. } => "db_state",
         }
     }
@@ -1969,8 +2232,7 @@ pub fn compute_uncertainty(
     // -----------------------------------------------------------------------
     let per_token_counts: HashMap<String, usize> = if !ambiguous_terms.is_empty() {
         let tok_refs: Vec<&str> = ambiguous_terms.iter().map(|s| s.as_str()).collect();
-        fts
-            .and_then(|f| f.count_distinct_files_per_token(&tok_refs, false).ok())
+        fts.and_then(|f| f.count_distinct_files_per_token(&tok_refs, false).ok())
             .unwrap_or_default()
             .into_iter()
             .collect()
@@ -1990,13 +2252,15 @@ pub fn compute_uncertainty(
     // 2. Generic query — all meaningful tokens are broad/stopword-adjacent
     // -----------------------------------------------------------------------
     const BROAD_TERMS: &[&str] = &[
-        "update", "get", "set", "handle", "process", "run", "execute",
-        "init", "start", "stop", "load", "save", "create", "delete",
-        "state", "data", "model", "manager", "service", "util", "helper", "config",
+        "update", "get", "set", "handle", "process", "run", "execute", "init", "start", "stop",
+        "load", "save", "create", "delete", "state", "data", "model", "manager", "service", "util",
+        "helper", "config",
     ];
     let meaningful: Vec<&String> = tokens.iter().filter(|t| !is_stopword(t)).collect();
     let all_broad = !meaningful.is_empty()
-        && meaningful.iter().all(|t| BROAD_TERMS.contains(&t.as_str()) || ambiguous_terms.contains(t));
+        && meaningful
+            .iter()
+            .all(|t| BROAD_TERMS.contains(&t.as_str()) || ambiguous_terms.contains(t));
     if all_broad && meaningful.len() <= 2 {
         reasons.push(UncertaintyReason::GenericQuery {
             tokens: meaningful.iter().map(|s| s.to_string()).collect(),
@@ -2007,7 +2271,9 @@ pub fn compute_uncertainty(
     // 3. Low result count (< 3 and multi-term query)
     // -----------------------------------------------------------------------
     if result_count < 3 && result_count > 0 && tokens.len() >= 2 {
-        reasons.push(UncertaintyReason::LowResultCount { count: result_count });
+        reasons.push(UncertaintyReason::LowResultCount {
+            count: result_count,
+        });
     }
     if result_count == 0 && !tokens.is_empty() {
         reasons.push(UncertaintyReason::LowResultCount { count: 0 });
@@ -2019,17 +2285,35 @@ pub fn compute_uncertainty(
     for miss in possible_misses {
         let ml = miss.to_lowercase();
         let (layer, hint) = if ml.contains("view") || ml.contains("ui") {
-            ("view", "query implies UI involvement — check scope or path coverage")
+            (
+                "view",
+                "query implies UI involvement — check scope or path coverage",
+            )
         } else if ml.contains("service") || ml.contains("domain") {
-            ("service", "query implies service/domain involvement — check layer indexing")
+            (
+                "service",
+                "query implies service/domain involvement — check layer indexing",
+            )
         } else if ml.contains("persist") || ml.contains("data") {
-            ("persistence", "query implies data model involvement — check index coverage")
+            (
+                "persistence",
+                "query implies data model involvement — check index coverage",
+            )
         } else if ml.contains("scheduler") || ml.contains("timing") {
-            ("scheduler", "query implies timing/dispatch — check scheduler symbols indexed")
+            (
+                "scheduler",
+                "query implies timing/dispatch — check scheduler symbols indexed",
+            )
         } else if ml.contains("engine") || ml.contains("runtime") {
-            ("engine", "query implies runtime processing — consider broadening scope")
+            (
+                "engine",
+                "query implies runtime processing — consider broadening scope",
+            )
         } else if ml.contains("network") || ml.contains("api") {
-            ("network", "query implies network/API — check network client indexing")
+            (
+                "network",
+                "query implies network/API — check network client indexing",
+            )
         } else {
             continue; // Unknown layer, skip structured encoding
         };
@@ -2062,11 +2346,13 @@ pub fn compute_uncertainty(
     // -----------------------------------------------------------------------
     // Cap ambiguous_term contributions at 2 terms (0.40 max) to avoid
     // artificially high scores for long ambiguous queries.
-    let amb_count = reasons.iter()
+    let amb_count = reasons
+        .iter()
         .filter(|r| matches!(r, UncertaintyReason::AmbiguousTerm { .. }))
         .count()
         .min(2);
-    let non_amb_score: f64 = reasons.iter()
+    let non_amb_score: f64 = reasons
+        .iter()
         .filter(|r| !matches!(r, UncertaintyReason::AmbiguousTerm { .. }))
         .map(|r| r.weight())
         .sum::<f64>()
@@ -2100,9 +2386,7 @@ pub fn compute_uncertainty(
         // Only check if the token looks like a proper name (starts with uppercase
         // or is >= 5 chars to avoid false-positives on tiny common words).
         if tok.len() >= 5 || tok.chars().next().map_or(false, |c| c.is_uppercase()) {
-            fts
-                .map(|f| f.has_exact_symbol_name(tok))
-                .unwrap_or(false)
+            fts.map(|f| f.has_exact_symbol_name(tok)).unwrap_or(false)
         } else {
             false
         }
@@ -2120,13 +2404,27 @@ pub fn compute_uncertainty(
     // -----------------------------------------------------------------------
     // Recommended action (most actionable, highest-weight reason wins)
     // -----------------------------------------------------------------------
-    let recommended_action = if reasons.iter().any(|r| matches!(r, UncertaintyReason::AmbiguousTerm { .. })) {
+    let recommended_action = if reasons
+        .iter()
+        .any(|r| matches!(r, UncertaintyReason::AmbiguousTerm { .. }))
+    {
         "narrow_query"
-    } else if reasons.iter().any(|r| matches!(r, UncertaintyReason::GenericQuery { .. })) {
+    } else if reasons
+        .iter()
+        .any(|r| matches!(r, UncertaintyReason::GenericQuery { .. }))
+    {
         "add_domain_term"
-    } else if reasons.iter().any(|r| matches!(r, UncertaintyReason::MissingLayer { .. } | UncertaintyReason::SparseIndex)) {
+    } else if reasons.iter().any(|r| {
+        matches!(
+            r,
+            UncertaintyReason::MissingLayer { .. } | UncertaintyReason::SparseIndex
+        )
+    }) {
         "check_index_coverage"
-    } else if reasons.iter().any(|r| matches!(r, UncertaintyReason::LowResultCount { .. })) {
+    } else if reasons
+        .iter()
+        .any(|r| matches!(r, UncertaintyReason::LowResultCount { .. }))
+    {
         "broaden_query"
     } else {
         "none"
@@ -2135,66 +2433,78 @@ pub fn compute_uncertainty(
     // -----------------------------------------------------------------------
     // Recovery quality metrics per suggestion
     // -----------------------------------------------------------------------
-    let amb_set: std::collections::HashSet<&str> = ambiguous_terms.iter()
-        .map(|s| s.as_str()).collect();
-    let original_token_set: std::collections::HashSet<&str> = tokens.iter()
-        .map(|s| s.as_str()).collect();
+    let amb_set: std::collections::HashSet<&str> =
+        ambiguous_terms.iter().map(|s| s.as_str()).collect();
+    let original_token_set: std::collections::HashSet<&str> =
+        tokens.iter().map(|s| s.as_str()).collect();
 
-    let recovery_suggestions: Vec<RecoverySuggestion> = scoped_suggestions.iter().map(|sugg| {
-        let sugg_tokens: Vec<String> = sugg
-            .split_whitespace()
-            .map(|t| t.to_lowercase())
-            .filter(|t| !is_stopword(t))
-            .collect();
+    let recovery_suggestions: Vec<RecoverySuggestion> = scoped_suggestions
+        .iter()
+        .map(|sugg| {
+            let sugg_tokens: Vec<String> = sugg
+                .split_whitespace()
+                .map(|t| t.to_lowercase())
+                .filter(|t| !is_stopword(t))
+                .collect();
 
-        // How many ambiguous terms does this suggestion eliminate?
-        let amb_in_sugg: std::collections::HashSet<&str> = sugg_tokens.iter()
-            .map(|s| s.as_str())
-            .filter(|t| amb_set.contains(t))
-            .collect();
-        let ambiguous_terms_removed = ambiguous_terms.len().saturating_sub(amb_in_sugg.len());
+            // How many ambiguous terms does this suggestion eliminate?
+            let amb_in_sugg: std::collections::HashSet<&str> = sugg_tokens
+                .iter()
+                .map(|s| s.as_str())
+                .filter(|t| amb_set.contains(t))
+                .collect();
+            let ambiguous_terms_removed = ambiguous_terms.len().saturating_sub(amb_in_sugg.len());
 
-        // Which tokens are genuinely new (not in original query)?
-        let domain_terms_added: Vec<String> = sugg_tokens.iter()
-            .filter(|t| !original_token_set.contains(t.as_str()) && !is_stopword(t))
-            .cloned()
-            .collect();
+            // Which tokens are genuinely new (not in original query)?
+            let domain_terms_added: Vec<String> = sugg_tokens
+                .iter()
+                .filter(|t| !original_token_set.contains(t.as_str()) && !is_stopword(t))
+                .cloned()
+                .collect();
 
-        let estimated_recovery = if ambiguous_terms_removed == ambiguous_terms.len()
-            && !domain_terms_added.is_empty()
-        {
-            "strong"
-        } else if ambiguous_terms_removed > 0 || !domain_terms_added.is_empty() {
-            "partial"
-        } else {
-            "weak"
-        };
+            let estimated_recovery = if ambiguous_terms_removed == ambiguous_terms.len()
+                && !domain_terms_added.is_empty()
+            {
+                "strong"
+            } else if ambiguous_terms_removed > 0 || !domain_terms_added.is_empty() {
+                "partial"
+            } else {
+                "weak"
+            };
 
-        RecoverySuggestion {
-            query: sugg.clone(),
-            ambiguous_terms_removed,
-            domain_terms_added,
-            estimated_recovery: estimated_recovery.to_string(),
-        }
-    }).collect();
+            RecoverySuggestion {
+                query: sugg.clone(),
+                ambiguous_terms_removed,
+                domain_terms_added,
+                estimated_recovery: estimated_recovery.to_string(),
+            }
+        })
+        .collect();
 
     // Sort reasons by weight descending for readability.
-    reasons.sort_by(|a, b| b.weight().partial_cmp(&a.weight()).unwrap_or(std::cmp::Ordering::Equal));
+    reasons.sort_by(|a, b| {
+        b.weight()
+            .partial_cmp(&a.weight())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // -----------------------------------------------------------------------
     // Source breakdown: per-source contribution scores
     // -----------------------------------------------------------------------
-    let query_score: f64 = reasons.iter()
+    let query_score: f64 = reasons
+        .iter()
         .filter(|r| r.source() == "query")
         .map(|r| r.weight())
         .sum::<f64>()
         .min(1.0);
-    let db_state_score: f64 = reasons.iter()
+    let db_state_score: f64 = reasons
+        .iter()
         .filter(|r| r.source() == "db_state")
         .map(|r| r.weight())
         .sum::<f64>()
         .min(1.0);
-    let result_set_score: f64 = reasons.iter()
+    let result_set_score: f64 = reasons
+        .iter()
         .filter(|r| r.source() == "result_set")
         .map(|r| r.weight())
         .sum::<f64>()
@@ -2202,11 +2512,14 @@ pub fn compute_uncertainty(
 
     let primary_source = {
         let scores = [
-            ("query",      query_score),
-            ("db_state",   db_state_score),
+            ("query", query_score),
+            ("db_state", db_state_score),
             ("result_set", result_set_score),
         ];
-        let max = scores.iter().cloned().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let max = scores
+            .iter()
+            .cloned()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         match max {
             Some((src, s)) if s > 0.0 => src,
             _ => "none",
@@ -2214,10 +2527,10 @@ pub fn compute_uncertainty(
     };
 
     let sources = UncertaintySourceBreakdown {
-        query:      ((query_score * 100.0).round() / 100.0).max(0.0),
-        db_state:   ((db_state_score * 100.0).round() / 100.0).max(0.0),
+        query: ((query_score * 100.0).round() / 100.0).max(0.0),
+        db_state: ((db_state_score * 100.0).round() / 100.0).max(0.0),
         result_set: ((result_set_score * 100.0).round() / 100.0).max(0.0),
-        primary:    primary_source.to_string(),
+        primary: primary_source.to_string(),
     };
 
     UncertaintyReport {
@@ -2294,11 +2607,14 @@ pub fn build_feedback_state_from_entries(
         .filter(|t| t.len() >= 2)
         .collect();
 
-    let query_matches = all.iter().filter(|e| {
-        e.query
-            .split_whitespace()
-            .any(|t| q_tokens.contains(&t.to_lowercase()))
-    }).count();
+    let query_matches = all
+        .iter()
+        .filter(|e| {
+            e.query
+                .split_whitespace()
+                .any(|t| q_tokens.contains(&t.to_lowercase()))
+        })
+        .count();
 
     let reason = if entries_applied > 0 {
         "entries_applied"
@@ -2369,10 +2685,15 @@ mod plan_c_t003_tests {
             sym_id,
             LedgerKind::Constraint,
             "legacy api should not be used in new code",
-            Author { kind: AuthorKind::Agent, id: "test".into() },
+            Author {
+                kind: AuthorKind::Agent,
+                id: "test".into(),
+            },
         );
         entry.role = role.map(str::to_string);
-        ledger.append_entry(&engine.ref_name, &entry, "test").unwrap();
+        ledger
+            .append_entry(&engine.ref_name, &entry, "test")
+            .unwrap();
     }
 
     #[test]
@@ -2434,7 +2755,12 @@ mod plan_c_t003_tests {
         let metrics =
             super::apply_feedback_adjustments(&engine, &index, "legacy", &mut scored, &[]);
         assert_eq!(metrics.constraint_penalties_applied, 1);
-        assert!(metrics.rules_applied.iter().any(|r| r == "constraint_penalty"));
+        assert!(
+            metrics
+                .rules_applied
+                .iter()
+                .any(|r| r == "constraint_penalty")
+        );
         assert_eq!(scored[0].0, f64::NEG_INFINITY);
     }
 
@@ -2545,7 +2871,10 @@ mod plan_c_t003_tests {
         assert_eq!(n, 1);
         // In-scope was boosted, out-of-scope was not.
         let in_scope = scored.iter().find(|(_, q)| q == "pkg.in_scope.fn").unwrap();
-        let out_scope = scored.iter().find(|(_, q)| q == "pkg.out_of_scope.fn").unwrap();
+        let out_scope = scored
+            .iter()
+            .find(|(_, q)| q == "pkg.out_of_scope.fn")
+            .unwrap();
         assert_eq!(in_scope.0, 6.0);
         assert_eq!(out_scope.0, 5.0);
     }
@@ -2618,7 +2947,10 @@ mod plan_c_t003_tests {
 
     #[test]
     fn read_active_task_scope_returns_none_on_malformed_json() {
-        assert_eq!(super::read_active_task_scope_from(Some("not json"), None), None);
+        assert_eq!(
+            super::read_active_task_scope_from(Some("not json"), None),
+            None
+        );
         assert_eq!(super::read_active_task_scope_from(Some("{}"), None), None);
     }
 
@@ -2629,16 +2961,28 @@ mod plan_c_t003_tests {
         let body = r#"{"scope":["src/legacy/**","tests/legacy/**"]}"#;
         assert_eq!(
             super::constraint_scope_from_body(Some(body)),
-            Some(vec!["src/legacy/**".to_string(), "tests/legacy/**".to_string()])
+            Some(vec![
+                "src/legacy/**".to_string(),
+                "tests/legacy/**".to_string()
+            ])
         );
     }
 
     #[test]
     fn constraint_scope_from_body_returns_none_when_unset() {
         assert_eq!(super::constraint_scope_from_body(None), None);
-        assert_eq!(super::constraint_scope_from_body(Some("plain text body")), None);
-        assert_eq!(super::constraint_scope_from_body(Some(r#"{"other":"field"}"#)), None);
-        assert_eq!(super::constraint_scope_from_body(Some(r#"{"scope":[]}"#)), None);
+        assert_eq!(
+            super::constraint_scope_from_body(Some("plain text body")),
+            None
+        );
+        assert_eq!(
+            super::constraint_scope_from_body(Some(r#"{"other":"field"}"#)),
+            None
+        );
+        assert_eq!(
+            super::constraint_scope_from_body(Some(r#"{"scope":[]}"#)),
+            None
+        );
     }
 
     fn seed_engine_with_two_symbols() -> (Engine, String, String) {
@@ -2662,7 +3006,11 @@ mod plan_c_t003_tests {
             };
             index.put_symbol(&engine.ref_name, &sym, "test").unwrap();
         }
-        (engine, "sym_app.legacy.api".into(), "sym_app.modern.api".into())
+        (
+            engine,
+            "sym_app.legacy.api".into(),
+            "sym_app.modern.api".into(),
+        )
     }
 
     fn append_scoped_constraint(engine: &Engine, sym_id: &str, scope_json: &str) {
@@ -2671,11 +3019,16 @@ mod plan_c_t003_tests {
             sym_id,
             LedgerKind::Constraint,
             "legacy api may not be used in new code",
-            Author { kind: AuthorKind::Agent, id: "t".into() },
+            Author {
+                kind: AuthorKind::Agent,
+                id: "t".into(),
+            },
         );
         entry.role = Some("stale-api".into());
         entry.body = Some(scope_json.to_string());
-        ledger.append_entry(&engine.ref_name, &entry, "test").unwrap();
+        ledger
+            .append_entry(&engine.ref_name, &entry, "test")
+            .unwrap();
     }
 
     #[test]

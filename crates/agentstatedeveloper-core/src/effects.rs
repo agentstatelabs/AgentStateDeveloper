@@ -32,7 +32,10 @@ impl<'a> AsgEffectStore<'a> {
     }
     /// Convenience: borrow the FTS connection already open in `engine`.
     pub fn from_engine(engine: &'a Engine) -> Self {
-        Self { repo: &engine.repo, fts: engine.fts.as_ref() }
+        Self {
+            repo: &engine.repo,
+            fts: engine.fts.as_ref(),
+        }
     }
 }
 

@@ -7,8 +7,8 @@
 //! - Error: rebind to an unknown qname returns an error before writing anything
 
 use agentstatedeveloper_core::{
-    paths, AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, IndexStore, LedgerEntry,
-    LedgerKind, LedgerStore, Position, Rebind, Symbol, SymbolKind,
+    AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, IndexStore, LedgerEntry, LedgerKind,
+    LedgerStore, Position, Rebind, Symbol, SymbolKind, paths,
 };
 use chrono::Utc;
 
@@ -31,8 +31,12 @@ fn seed_two_symbols(engine: &Engine) -> (Symbol, Symbol) {
     let sym_a = make_symbol("sym_a", "mod.old_fn");
     let sym_b = make_symbol("sym_b", "mod.new_fn");
     let index = AsgIndexStore::new(&engine.repo);
-    index.put_symbol(&engine.ref_name, &sym_a, "test").expect("put sym_a");
-    index.put_symbol(&engine.ref_name, &sym_b, "test").expect("put sym_b");
+    index
+        .put_symbol(&engine.ref_name, &sym_a, "test")
+        .expect("put sym_a");
+    index
+        .put_symbol(&engine.ref_name, &sym_b, "test")
+        .expect("put sym_b");
     (sym_a, sym_b)
 }
 
@@ -41,10 +45,15 @@ fn append_entry(engine: &Engine, symbol_id: &str, summary: &str) -> LedgerEntry 
         symbol_id,
         LedgerKind::Decision,
         summary,
-        Author { kind: AuthorKind::Agent, id: "test-agent".to_string() },
+        Author {
+            kind: AuthorKind::Agent,
+            id: "test-agent".to_string(),
+        },
     );
     let ledger = AsgLedgerStore::new(&engine.repo);
-    ledger.append_entry(&engine.ref_name, &entry, "test").expect("append entry");
+    ledger
+        .append_entry(&engine.ref_name, &entry, "test")
+        .expect("append entry");
     entry
 }
 
@@ -61,12 +70,15 @@ fn do_rebind(engine: &Engine, from_symbol_id: &str, to_symbol_id: &str, to_qname
         by: "test-agent".to_string(),
     };
     let rebind_path = paths::rebind_path(from_symbol_id);
-    engine.repo.set_json(
-        &engine.ref_name,
-        &rebind_path,
-        &serde_json::to_value(&rebind).unwrap(),
-        CommitOptions::new("test", IntentCategory::Refine, "rebind"),
-    ).expect("write rebind record");
+    engine
+        .repo
+        .set_json(
+            &engine.ref_name,
+            &rebind_path,
+            &serde_json::to_value(&rebind).unwrap(),
+            CommitOptions::new("test", IntentCategory::Refine, "rebind"),
+        )
+        .expect("write rebind record");
 
     let ledger = AsgLedgerStore::new(&engine.repo);
     let entries = ledger
@@ -75,12 +87,15 @@ fn do_rebind(engine: &Engine, from_symbol_id: &str, to_symbol_id: &str, to_qname
     for mut entry in entries {
         entry.symbol_id = to_symbol_id.to_string();
         let new_path = paths::ledger_entry_path(to_symbol_id, &entry.entry_id);
-        engine.repo.set_json(
-            &engine.ref_name,
-            &new_path,
-            &serde_json::to_value(&entry).unwrap(),
-            CommitOptions::new("test", IntentCategory::Refine, "reparent entry"),
-        ).expect("write reparented entry");
+        engine
+            .repo
+            .set_json(
+                &engine.ref_name,
+                &new_path,
+                &serde_json::to_value(&entry).unwrap(),
+                CommitOptions::new("test", IntentCategory::Refine, "reparent entry"),
+            )
+            .expect("write reparented entry");
         let old_path = paths::ledger_entry_path(from_symbol_id, &entry.entry_id);
         let _ = engine.repo.delete(
             &engine.ref_name,
@@ -99,21 +114,30 @@ fn rebind_reparents_entries_to_new_symbol() {
     let ledger = AsgLedgerStore::new(&engine.repo);
 
     // Pre-rebind: both entries under A.
-    let before = ledger.list_entries(&engine.ref_name, &sym_a.symbol_id).expect("list before");
+    let before = ledger
+        .list_entries(&engine.ref_name, &sym_a.symbol_id)
+        .expect("list before");
     assert_eq!(before.len(), 2, "two entries under A before rebind");
 
     do_rebind(&engine, &sym_a.symbol_id, &sym_b.symbol_id, &sym_b.qname);
 
     // Post-rebind: entries under B.
-    let after_b = ledger.list_entries(&engine.ref_name, &sym_b.symbol_id).expect("list after B");
+    let after_b = ledger
+        .list_entries(&engine.ref_name, &sym_b.symbol_id)
+        .expect("list after B");
     assert_eq!(after_b.len(), 2, "two entries under B after rebind");
     let entry_ids: Vec<&str> = after_b.iter().map(|e| e.entry_id.as_str()).collect();
     assert!(entry_ids.contains(&e1.entry_id.as_str()), "e1 under B");
     assert!(entry_ids.contains(&e2.entry_id.as_str()), "e2 under B");
-    assert!(after_b.iter().all(|e| e.symbol_id == sym_b.symbol_id), "symbol_id updated");
+    assert!(
+        after_b.iter().all(|e| e.symbol_id == sym_b.symbol_id),
+        "symbol_id updated"
+    );
 
     // Old paths should be gone.
-    let after_a = ledger.list_entries(&engine.ref_name, &sym_a.symbol_id).expect("list after A");
+    let after_a = ledger
+        .list_entries(&engine.ref_name, &sym_a.symbol_id)
+        .expect("list after A");
     assert_eq!(after_a.len(), 0, "no entries under A after rebind");
 }
 
@@ -126,7 +150,8 @@ fn rebind_record_is_written_with_correct_fields() {
     do_rebind(&engine, &sym_a.symbol_id, &sym_b.symbol_id, &sym_b.qname);
 
     let rebind_path = paths::rebind_path(&sym_a.symbol_id);
-    let val = engine.repo
+    let val = engine
+        .repo
         .get_json(&engine.ref_name, &rebind_path)
         .expect("get rebind record");
     let rebind: Rebind = serde_json::from_value(val).expect("deserialize rebind");
@@ -147,12 +172,20 @@ fn rebind_with_no_entries_is_idempotent() {
     do_rebind(&engine, &sym_a.symbol_id, &sym_b.symbol_id, &sym_b.qname);
 
     let ledger = AsgLedgerStore::new(&engine.repo);
-    let entries_b = ledger.list_entries(&engine.ref_name, &sym_b.symbol_id).expect("list");
-    assert_eq!(entries_b.len(), 0, "still no entries after rebind of empty symbol");
+    let entries_b = ledger
+        .list_entries(&engine.ref_name, &sym_b.symbol_id)
+        .expect("list");
+    assert_eq!(
+        entries_b.len(),
+        0,
+        "still no entries after rebind of empty symbol"
+    );
 
     // Rebind record itself should be written.
     let rebind_path = paths::rebind_path(&sym_a.symbol_id);
-    engine.repo.get_json(&engine.ref_name, &rebind_path)
+    engine
+        .repo
+        .get_json(&engine.ref_name, &rebind_path)
         .expect("rebind record written even with no entries");
 }
 
@@ -164,13 +197,18 @@ fn rebind_to_unknown_qname_does_not_write_rebind_record() {
     let engine = Engine::open_in_memory().expect("open engine");
     let sym_a = make_symbol("sym_a", "mod.old_fn");
     let index = AsgIndexStore::new(&engine.repo);
-    index.put_symbol(&engine.ref_name, &sym_a, "test").expect("put sym_a");
+    index
+        .put_symbol(&engine.ref_name, &sym_a, "test")
+        .expect("put sym_a");
     append_entry(&engine, &sym_a.symbol_id, "entry");
 
     let missing = AsgIndexStore::new(&engine.repo)
         .get_symbol_by_qname(&engine.ref_name, "mod.nonexistent")
         .expect("lookup ok");
-    assert!(missing.is_none(), "B not in index — caller should bail before writing");
+    assert!(
+        missing.is_none(),
+        "B not in index — caller should bail before writing"
+    );
 
     // Verify no rebind record exists (we never called do_rebind).
     let rebind_path = paths::rebind_path(&sym_a.symbol_id);

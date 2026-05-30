@@ -44,7 +44,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
 use serde_json::Value;
@@ -152,11 +151,7 @@ pub struct HydrateSummary {
 /// **Scratch entries are excluded by design**: this function only walks
 /// the `effects`, `ledger`, `symbols`, and `rebinds` prefixes; the
 /// `/asd/v1/scratch/` tree is never read or written.
-pub fn sync_to_dir(
-    repo: &Repository,
-    ref_name: &str,
-    dir: &Path,
-) -> Result<SyncSummary> {
+pub fn sync_to_dir(repo: &Repository, ref_name: &str, dir: &Path) -> Result<SyncSummary> {
     let root = dir.join(SIDECAR_REL_ROOT);
     let effects_dir = root.join("effects");
     let ledger_dir = root.join("ledger");
@@ -258,11 +253,7 @@ pub fn sync_to_dir(
 ///
 /// Orphans accumulate when symbols are renamed or deleted. Run via
 /// `asd sync --prune` (also invoked by the pre-commit hook).
-pub fn prune_sidecar(
-    repo: &Repository,
-    ref_name: &str,
-    dir: &Path,
-) -> Result<usize> {
+pub fn prune_sidecar(repo: &Repository, ref_name: &str, dir: &Path) -> Result<usize> {
     let root = dir.join(SIDECAR_REL_ROOT);
     if !root.exists() {
         return Ok(0);
@@ -465,15 +456,18 @@ pub fn hydrate_from_dir(
                 .ok()
                 .and_then(|v| v.as_object().cloned())
                 .unwrap_or_default();
-            existing.into_iter().filter_map(|(lang, subtree)| {
-                subtree.as_object().cloned().map(|m| (lang, m))
-            }).collect()
+            existing
+                .into_iter()
+                .filter_map(|(lang, subtree)| subtree.as_object().cloned().map(|m| (lang, m)))
+                .collect()
         };
 
         for entry in fs::read_dir(&symbols_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if !is_json_file(&path) { continue; }
+            if !is_json_file(&path) {
+                continue;
+            }
             let text = match fs::read_to_string(&path) {
                 Ok(t) => t,
                 Err(e) => {
@@ -487,7 +481,8 @@ pub fn hydrate_from_dir(
                 Err(e) => {
                     eprintln!(
                         "asd hydrate: skipping malformed symbol {}: {}",
-                        path.display(), e
+                        path.display(),
+                        e
                     );
                     blobs_rejected += 1;
                     continue;
@@ -517,13 +512,12 @@ pub fn hydrate_from_dir(
             }
 
             let sym_val = serde_json::to_value(&sym)?;
-            let code_key = format!(
-                "{}/{}",
-                paths::clean(&sym.file),
-                sym.symbol_fp
-            );
+            let code_key = format!("{}/{}", paths::clean(&sym.file), sym.symbol_fp);
             by_qname.insert(sym.qname.clone(), sym_val.clone());
-            by_code.entry(sym.language.clone()).or_default().insert(code_key, sym_val);
+            by_code
+                .entry(sym.language.clone())
+                .or_default()
+                .insert(code_key, sym_val);
             symbols_loaded += 1;
         }
 
@@ -565,7 +559,9 @@ pub fn hydrate_from_dir(
         for entry in fs::read_dir(&effects_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if !is_json_file(&path) { continue; }
+            if !is_json_file(&path) {
+                continue;
+            }
             let text = match fs::read_to_string(&path) {
                 Ok(t) => t,
                 Err(e) => {
@@ -579,7 +575,8 @@ pub fn hydrate_from_dir(
                 Err(e) => {
                     eprintln!(
                         "asd hydrate: skipping malformed effect {}: {}",
-                        path.display(), e
+                        path.display(),
+                        e
                     );
                     blobs_rejected += 1;
                     continue;
@@ -630,7 +627,8 @@ pub fn hydrate_from_dir(
                     Err(e) => {
                         eprintln!(
                             "asd hydrate: skipping unreadable {}: {}",
-                            file_path.display(), e
+                            file_path.display(),
+                            e
                         );
                         blobs_rejected += 1;
                         continue;
@@ -641,7 +639,8 @@ pub fn hydrate_from_dir(
                     Err(e) => {
                         eprintln!(
                             "asd hydrate: skipping malformed ledger entry {}: {}",
-                            file_path.display(), e
+                            file_path.display(),
+                            e
                         );
                         blobs_rejected += 1;
                         continue;
@@ -663,7 +662,9 @@ pub fn hydrate_from_dir(
         for entry in fs::read_dir(&rebinds_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if !is_json_file(&path) { continue; }
+            if !is_json_file(&path) {
+                continue;
+            }
             let text = fs::read_to_string(&path)?;
             let rebind: Rebind = serde_json::from_str(&text)?;
             rebinds.push(rebind);
@@ -678,7 +679,10 @@ pub fn hydrate_from_dir(
             let opts = CommitOptions::new(
                 agent_id,
                 IntentCategory::Refine,
-                format!("hydrate rebind {} → {}", rebind.from_symbol_id, rebind.to_symbol_id),
+                format!(
+                    "hydrate rebind {} → {}",
+                    rebind.from_symbol_id, rebind.to_symbol_id
+                ),
             );
             repo.set_json(ref_name, &rebind_path, &val, opts)
                 .map_err(|e| AsdError::Other(e.to_string()))?;
@@ -698,7 +702,8 @@ pub fn hydrate_from_dir(
                     IntentCategory::Refine,
                     format!("reparent entry {} during rebind replay", entry.entry_id),
                 );
-                if repo.set_json(ref_name, &new_path, &entry_val, opts)
+                if repo
+                    .set_json(ref_name, &new_path, &entry_val, opts)
                     .map_err(|e| AsdError::Other(e.to_string()))
                     .is_ok()
                 {
@@ -708,11 +713,15 @@ pub fn hydrate_from_dir(
                     let idx_opts = CommitOptions::new(
                         agent_id,
                         IntentCategory::Refine,
-                        format!("ledger-idx reparent {} → {}", entry.entry_id, rebind.to_symbol_id),
+                        format!(
+                            "ledger-idx reparent {} → {}",
+                            entry.entry_id, rebind.to_symbol_id
+                        ),
                     );
                     let _ = repo.set_json(ref_name, &idx_path, &idx_val, idx_opts);
 
-                    let old_path = paths::ledger_entry_path(&rebind.from_symbol_id, &entry.entry_id);
+                    let old_path =
+                        paths::ledger_entry_path(&rebind.from_symbol_id, &entry.entry_id);
                     let opts = CommitOptions::new(
                         agent_id,
                         IntentCategory::Refine,
@@ -732,11 +741,10 @@ pub fn hydrate_from_dir(
     // symbol_id isn't present in the (now fully hydrated) index.  This
     // catches stale edges that the sidecar carried from a previous bad merge.
     // -----------------------------------------------------------------------
-    let refs_dropped =
-        drop_orphaned_edge_refs(repo, ref_name, agent_id).unwrap_or_else(|e| {
-            eprintln!("asd hydrate: edge-ref cleanup failed: {}", e);
-            0
-        });
+    let refs_dropped = drop_orphaned_edge_refs(repo, ref_name, agent_id).unwrap_or_else(|e| {
+        eprintln!("asd hydrate: edge-ref cleanup failed: {}", e);
+        0
+    });
 
     if refs_dropped > 0 {
         eprintln!(

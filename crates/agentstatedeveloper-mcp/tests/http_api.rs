@@ -15,8 +15,7 @@ use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 fn sample_db() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/sample-py-repo/.asd-state.db")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/sample-py-repo/.asd-state.db")
 }
 
 async fn router() -> axum::Router {
@@ -32,15 +31,19 @@ async fn get_body(app: axum::Router, uri: &str) -> (StatusCode, serde_json::Valu
         .unwrap();
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .unwrap_or_else(|_| serde_json::json!({"_raw": String::from_utf8_lossy(&bytes).to_string()}));
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_else(
+        |_| serde_json::json!({"_raw": String::from_utf8_lossy(&bytes).to_string()}),
+    );
     (status, value)
 }
 
 #[tokio::test]
 async fn health_endpoint() {
     if !sample_db().exists() {
-        eprintln!("skipping: {} not found — run `asd init && asd index .`", sample_db().display());
+        eprintln!(
+            "skipping: {} not found — run `asd init && asd index .`",
+            sample_db().display()
+        );
         return;
     }
     let (status, body) = get_body(router().await, "/api/v1/health").await;

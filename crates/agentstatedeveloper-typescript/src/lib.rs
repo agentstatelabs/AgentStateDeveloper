@@ -350,7 +350,9 @@ fn process_variable_declarator(
 fn method_name_text(node: Node<'_>, src: &[u8]) -> Option<String> {
     let name = node.child_by_field_name("name")?;
     match name.kind() {
-        "property_identifier" | "identifier" | "private_property_identifier" => node_text(name, src),
+        "property_identifier" | "identifier" | "private_property_identifier" => {
+            node_text(name, src)
+        }
         _ => None,
     }
 }
@@ -562,7 +564,9 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
                     }
                 }
                 if net_note.is_none() {
-                    net_note = Some(trim_note(&body[call_site.call_start..call_site.args_end + 1]));
+                    net_note = Some(trim_note(
+                        &body[call_site.call_start..call_site.args_end + 1],
+                    ));
                 }
             }
         } else if body.contains(needle) && net_note.is_none() {
@@ -651,7 +655,13 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     }
 
     // Date.now / new Date / performance.now -> TimeRead
-    let time_read_needles = ["Date.now", "new Date(", "performance.now", "Date.parse(", "Temporal.Now"];
+    let time_read_needles = [
+        "Date.now",
+        "new Date(",
+        "performance.now",
+        "Date.parse(",
+        "Temporal.Now",
+    ];
     if let Some(note) = first_match_note(body, &time_read_needles) {
         effects.push(Effect {
             effect: EffectCategory::TimeRead,
@@ -695,10 +705,9 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             for variant in &[needle.as_str(), this_needle.as_str()] {
                 for call_site in find_calls(body, variant) {
                     let args = &body[call_site.args_start..call_site.args_end];
-                    let sql = args
-                        .trim_start_matches(|c: char| {
-                            c.is_whitespace() || c == '"' || c == '\'' || c == '`'
-                        });
+                    let sql = args.trim_start_matches(|c: char| {
+                        c.is_whitespace() || c == '"' || c == '\'' || c == '`'
+                    });
                     let upper: String = sql.chars().take(16).collect::<String>().to_uppercase();
                     let is_write = upper.starts_with("INSERT")
                         || upper.starts_with("UPDATE")
@@ -711,7 +720,9 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
                     let is_read = upper.starts_with("SELECT")
                         || upper.starts_with("WITH")
                         || upper.starts_with("SHOW");
-                    let note = Some(trim_note(&body[call_site.call_start..call_site.args_end + 1]));
+                    let note = Some(trim_note(
+                        &body[call_site.call_start..call_site.args_end + 1],
+                    ));
                     if is_write && !seen_db_write {
                         effects.push(Effect {
                             effect: EffectCategory::IoDbWrite,
@@ -1029,11 +1040,7 @@ struct ImportBinding {
 /// kept as-is; the workspace lookup will filter them out.
 ///
 /// Skipped for M6: re-exports (`export { X } from 'mod'`).
-fn parse_imports(
-    source: &str,
-    file: &str,
-    parser: &mut Parser,
-) -> HashMap<String, ImportBinding> {
+fn parse_imports(source: &str, file: &str, parser: &mut Parser) -> HashMap<String, ImportBinding> {
     let mut out: HashMap<String, ImportBinding> = HashMap::new();
     let src_bytes = source.as_bytes();
     let tree = match parser.parse(src_bytes, None) {
@@ -1066,7 +1073,9 @@ fn collect_import_statement(
         Some(s) => s,
         None => return,
     };
-    let specifier = raw.trim().trim_matches(|c| c == '"' || c == '\'' || c == '`');
+    let specifier = raw
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'' || c == '`');
     let module_qname = resolve_module_specifier(specifier, file);
 
     // Find the import_clause child (if any — `import 'mod'` has none).
@@ -1394,9 +1403,15 @@ mod tests {
     #[test]
     fn module_prefix_strips_extensions_and_leading_dot_slash() {
         // src/ anchor — stable regardless of index root
-        assert_eq!(module_qname_prefix("src/components/Button.tsx"), "components.Button");
+        assert_eq!(
+            module_qname_prefix("src/components/Button.tsx"),
+            "components.Button"
+        );
         assert_eq!(module_qname_prefix("packages/ui/src/index.ts"), "ui.index");
-        assert_eq!(module_qname_prefix("packages/my-pkg/src/index.tsx"), "my_pkg.index");
+        assert_eq!(
+            module_qname_prefix("packages/my-pkg/src/index.tsx"),
+            "my_pkg.index"
+        );
         assert_eq!(module_qname_prefix("src/util.mts"), "util");
         // no src segment — full relative path (fallback)
         assert_eq!(module_qname_prefix("foo/bar.ts"), "foo.bar");

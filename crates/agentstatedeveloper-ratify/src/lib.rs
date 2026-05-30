@@ -70,7 +70,15 @@ impl<'a> LedgerStore for RatifyLedgerStore<'a> {
         message: Option<&str>,
         agent_id: &str,
     ) -> Result<ApprovalOutcome> {
-        approve_impl(self.repo, ref_name, entry_id, approver_id, approver_kind, message, agent_id)
+        approve_impl(
+            self.repo,
+            ref_name,
+            entry_id,
+            approver_id,
+            approver_kind,
+            message,
+            agent_id,
+        )
     }
 
     fn reject_entry(
@@ -82,7 +90,15 @@ impl<'a> LedgerStore for RatifyLedgerStore<'a> {
         reason: &str,
         agent_id: &str,
     ) -> Result<ReviewOutcome> {
-        reject_impl(self.repo, ref_name, entry_id, reviewer_id, reviewer_kind, reason, agent_id)
+        reject_impl(
+            self.repo,
+            ref_name,
+            entry_id,
+            reviewer_id,
+            reviewer_kind,
+            reason,
+            agent_id,
+        )
     }
 
     fn withdraw_entry(
@@ -118,7 +134,15 @@ impl RatifyOps for RatifyOpsImpl {
         message: Option<&str>,
         agent_id: &str,
     ) -> Result<ApprovalOutcome> {
-        approve_impl(repo, ref_name, entry_id, approver_id, approver_kind, message, agent_id)
+        approve_impl(
+            repo,
+            ref_name,
+            entry_id,
+            approver_id,
+            approver_kind,
+            message,
+            agent_id,
+        )
     }
 
     fn reject_entry(
@@ -131,7 +155,15 @@ impl RatifyOps for RatifyOpsImpl {
         reason: &str,
         agent_id: &str,
     ) -> Result<ReviewOutcome> {
-        reject_impl(repo, ref_name, entry_id, reviewer_id, reviewer_kind, reason, agent_id)
+        reject_impl(
+            repo,
+            ref_name,
+            entry_id,
+            reviewer_id,
+            reviewer_kind,
+            reason,
+            agent_id,
+        )
     }
 
     fn withdraw_entry(
@@ -216,16 +248,26 @@ fn approve_impl(
         .ok_or_else(|| AsdError::Other(format!("ledger entry not found: {}", entry_id)))?;
 
     if entry.tags.iter().any(|t| t == "approved") {
-        return Ok(ApprovalOutcome { entry, already_approved: true });
+        return Ok(ApprovalOutcome {
+            entry,
+            already_approved: true,
+        });
     }
-    if let Some(bad) = entry.tags.iter().find(|t| *t == "rejected" || *t == "withdrawn") {
+    if let Some(bad) = entry
+        .tags
+        .iter()
+        .find(|t| *t == "rejected" || *t == "withdrawn")
+    {
         return Err(AsdError::Other(format!(
             "entry {} is already {} and cannot be approved",
             entry_id, bad
         )));
     }
     if !entry.tags.iter().any(|t| t == "awaiting-approval") {
-        return Err(AsdError::Other(format!("entry {} is not awaiting approval", entry_id)));
+        return Err(AsdError::Other(format!(
+            "entry {} is not awaiting approval",
+            entry_id
+        )));
     }
     authorize_reviewer(&entry, approver_id, approver_kind)?;
 
@@ -237,7 +279,10 @@ fn approve_impl(
         append_to_body(&mut entry, "Approver note", approver_id, msg);
     }
     rewrite(repo, ref_name, &symbol_id, &entry, agent_id, "approve")?;
-    Ok(ApprovalOutcome { entry, already_approved: false })
+    Ok(ApprovalOutcome {
+        entry,
+        already_approved: false,
+    })
 }
 
 fn reject_impl(
@@ -253,16 +298,26 @@ fn reject_impl(
         .ok_or_else(|| AsdError::Other(format!("ledger entry not found: {}", entry_id)))?;
 
     if entry.tags.iter().any(|t| t == "rejected") {
-        return Ok(ReviewOutcome { entry, already_resolved: true });
+        return Ok(ReviewOutcome {
+            entry,
+            already_resolved: true,
+        });
     }
-    if let Some(bad) = entry.tags.iter().find(|t| *t == "approved" || *t == "withdrawn") {
+    if let Some(bad) = entry
+        .tags
+        .iter()
+        .find(|t| *t == "approved" || *t == "withdrawn")
+    {
         return Err(AsdError::Other(format!(
             "entry {} is already {} and cannot be rejected",
             entry_id, bad
         )));
     }
     if !entry.tags.iter().any(|t| t == "awaiting-approval") {
-        return Err(AsdError::Other(format!("entry {} is not awaiting approval", entry_id)));
+        return Err(AsdError::Other(format!(
+            "entry {} is not awaiting approval",
+            entry_id
+        )));
     }
     authorize_reviewer(&entry, reviewer_id, reviewer_kind)?;
     if reason.trim().is_empty() {
@@ -274,7 +329,10 @@ fn reject_impl(
     entry.tags.push(format!("rejected-at:{}", iso_now()));
     append_to_body(&mut entry, "Rejection reason", reviewer_id, reason);
     rewrite(repo, ref_name, &symbol_id, &entry, agent_id, "reject")?;
-    Ok(ReviewOutcome { entry, already_resolved: false })
+    Ok(ReviewOutcome {
+        entry,
+        already_resolved: false,
+    })
 }
 
 fn withdraw_impl(
@@ -288,16 +346,26 @@ fn withdraw_impl(
         .ok_or_else(|| AsdError::Other(format!("ledger entry not found: {}", entry_id)))?;
 
     if entry.tags.iter().any(|t| t == "withdrawn") {
-        return Ok(ReviewOutcome { entry, already_resolved: true });
+        return Ok(ReviewOutcome {
+            entry,
+            already_resolved: true,
+        });
     }
-    if let Some(bad) = entry.tags.iter().find(|t| *t == "approved" || *t == "rejected") {
+    if let Some(bad) = entry
+        .tags
+        .iter()
+        .find(|t| *t == "approved" || *t == "rejected")
+    {
         return Err(AsdError::Other(format!(
             "entry {} is already {} and cannot be withdrawn",
             entry_id, bad
         )));
     }
     if !entry.tags.iter().any(|t| t == "awaiting-approval") {
-        return Err(AsdError::Other(format!("entry {} is not awaiting approval", entry_id)));
+        return Err(AsdError::Other(format!(
+            "entry {} is not awaiting approval",
+            entry_id
+        )));
     }
     if entry.author.id != author_id {
         return Err(AsdError::Other(format!(
@@ -309,7 +377,10 @@ fn withdraw_impl(
     entry.tags.push("withdrawn".to_string());
     entry.tags.push(format!("withdrawn-at:{}", iso_now()));
     rewrite(repo, ref_name, &symbol_id, &entry, agent_id, "withdraw")?;
-    Ok(ReviewOutcome { entry, already_resolved: false })
+    Ok(ReviewOutcome {
+        entry,
+        already_resolved: false,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -386,7 +457,9 @@ fn authorize_reviewer(entry: &LedgerEntry, reviewer_id: &str, reviewer_kind: &st
     if required.is_empty() {
         return Ok(());
     }
-    let ok = required.iter().any(|r| *r == reviewer_kind || *r == reviewer_id);
+    let ok = required
+        .iter()
+        .any(|r| *r == reviewer_kind || *r == reviewer_id);
     if ok {
         Ok(())
     } else {

@@ -39,10 +39,7 @@ pub trait FeedbackStore {
 
     /// Flatten all feedback into (symbol_id, query, verdict) triples for
     /// use in `apply_feedback_adjustments`.
-    fn flat_verdicts(
-        &self,
-        ref_name: &str,
-    ) -> Result<Vec<(String, String, FeedbackVerdict)>> {
+    fn flat_verdicts(&self, ref_name: &str) -> Result<Vec<(String, String, FeedbackVerdict)>> {
         Ok(self
             .list_all(ref_name)?
             .into_iter()
@@ -84,7 +81,10 @@ impl<'a> AsgFeedbackStore<'a> {
     }
     /// Convenience: borrow the FTS connection already open in `engine`.
     pub fn from_engine(engine: &'a Engine) -> Self {
-        Self { repo: &engine.repo, fts: engine.fts.as_ref() }
+        Self {
+            repo: &engine.repo,
+            fts: engine.fts.as_ref(),
+        }
     }
 }
 
@@ -96,7 +96,11 @@ impl<'a> FeedbackStore for AsgFeedbackStore<'a> {
         let opts = CommitOptions::new(
             agent_id,
             IntentCategory::Refine,
-            format!("feedback {} for {}", entry.verdict.as_str(), entry.symbol_qname),
+            format!(
+                "feedback {} for {}",
+                entry.verdict.as_str(),
+                entry.symbol_qname
+            ),
         );
         self.repo.set_json(ref_name, &path, &value, opts)?;
         // Best-effort SQLite write-through; failures are non-fatal.
@@ -136,15 +140,11 @@ impl<'a> FeedbackStore for AsgFeedbackStore<'a> {
         // subsequent calls are fast.
         let prefix = format!("{}/feedback", paths::ASD_ROOT);
         let mut entries = Vec::new();
-        if let Ok(serde_json::Value::Object(by_symbol)) =
-            self.repo.get_tree(ref_name, &prefix)
-        {
+        if let Ok(serde_json::Value::Object(by_symbol)) = self.repo.get_tree(ref_name, &prefix) {
             for symbol_val in by_symbol.values() {
                 if let serde_json::Value::Object(symbol_entries) = symbol_val {
                     for ev in symbol_entries.values() {
-                        if let Ok(e) =
-                            serde_json::from_value::<FeedbackEntry>(ev.clone())
-                        {
+                        if let Ok(e) = serde_json::from_value::<FeedbackEntry>(ev.clone()) {
                             entries.push(e);
                         }
                     }

@@ -11,8 +11,8 @@ use agentstategraph_core::IntentCategory;
 use serde_json::json;
 
 use agentstatedeveloper_core::{
-    paths, propagate_transitive, AsgEffectStore, AsgIndexStore, Effect, EffectCategory, EffectDecl,
-    EffectStore, Engine,
+    AsgEffectStore, AsgIndexStore, Effect, EffectCategory, EffectDecl, EffectStore, Engine, paths,
+    propagate_transitive,
 };
 
 /// Write a callees array under `paths::callees_path(symbol_id)`. Mirrors
@@ -32,11 +32,7 @@ fn put_callees(engine: &Engine, symbol_id: &str, callees: &[&str]) {
         .expect("set callees");
 }
 
-fn put_simple_effect_decl(
-    engine: &Engine,
-    symbol_id: &str,
-    declared: Vec<EffectCategory>,
-) {
+fn put_simple_effect_decl(engine: &Engine, symbol_id: &str, declared: Vec<EffectCategory>) {
     let store = AsgEffectStore::new(&engine.repo);
     let decl = EffectDecl {
         symbol_id: symbol_id.to_string(),
@@ -76,16 +72,15 @@ fn propagates_transitive_effects_with_via_chains() {
     put_callees(&engine, "C", &["A", "B"]);
 
     let symbol_ids = vec!["A".to_string(), "B".to_string(), "C".to_string()];
-    let updated = propagate_transitive(
-        &index_store,
-        &effect_store,
-        &engine.ref_name,
-        &symbol_ids,
-    )
-    .expect("propagate");
+    let updated = propagate_transitive(&index_store, &effect_store, &engine.ref_name, &symbol_ids)
+        .expect("propagate");
 
     // A and C gain transitive effects; B gains none.
-    assert_eq!(updated, 2, "expected A and C to be updated, got {}", updated);
+    assert_eq!(
+        updated, 2,
+        "expected A and C to be updated, got {}",
+        updated
+    );
 
     // A: transitive should be [io.net.out via [B]].
     let a_decl = effect_store
@@ -151,13 +146,8 @@ fn propagates_transitive_effects_with_via_chains() {
     );
 
     // Re-running should be idempotent: zero further updates.
-    let again = propagate_transitive(
-        &index_store,
-        &effect_store,
-        &engine.ref_name,
-        &symbol_ids,
-    )
-    .expect("second propagate");
+    let again = propagate_transitive(&index_store, &effect_store, &engine.ref_name, &symbol_ids)
+        .expect("second propagate");
     assert_eq!(again, 0, "second run must not re-write unchanged decls");
 }
 
@@ -175,13 +165,8 @@ fn handles_cycles_without_infinite_loop() {
     put_callees(&engine, "B", &["A"]);
 
     let symbol_ids = vec!["A".to_string(), "B".to_string()];
-    let updated = propagate_transitive(
-        &index_store,
-        &effect_store,
-        &engine.ref_name,
-        &symbol_ids,
-    )
-    .expect("propagate must terminate on a cycle");
+    let updated = propagate_transitive(&index_store, &effect_store, &engine.ref_name, &symbol_ids)
+        .expect("propagate must terminate on a cycle");
 
     // Both should have been updated with at least one transitive entry.
     assert_eq!(updated, 2);

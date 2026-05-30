@@ -9,8 +9,6 @@ pub mod audit;
 pub mod brief;
 pub mod candidates;
 pub mod conclusions_export;
-pub mod prepare_change;
-pub mod recipes;
 pub mod doc_adapters;
 pub mod effects;
 pub mod engine;
@@ -21,6 +19,8 @@ pub mod index_pipeline;
 pub mod ledger;
 pub mod paths;
 pub mod policy;
+pub mod prepare_change;
+pub mod recipes;
 pub mod repair;
 pub mod schema;
 pub mod scratch;
@@ -32,16 +32,34 @@ pub mod trust;
 pub mod workflow;
 
 pub use adapter::{CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols};
-pub use index_pipeline::{CollectResult, IndexSummary, collect_source_files, run_index};
-pub use audit::{AuditEvent, AuditSink, HASH_PREFIX, NullSink, emit_audit, event_types, read_jsonl};
+pub use audit::{
+    AuditEvent, AuditSink, HASH_PREFIX, NullSink, emit_audit, event_types, read_jsonl,
+};
+pub use candidates::{
+    FeedbackImpact, FeedbackMetrics, FeedbackState, RecoverySuggestion, UncertaintyReason,
+    UncertaintyReport, apply_feedback_adjustments, apply_file_scope_feedback, build_feedback_state,
+    build_feedback_state_from_entries, compute_uncertainty, confidence_reason, confidence_scores,
+    detect_ambiguous_tokens, detect_confidence_warnings, detect_possible_misses,
+    explain_feedback_impacts, explain_match, find_candidates, glob_match, in_memory_score,
+    kind_str, load_scope_aliases, matches_any_path_glob, parse_query, query_tokens, resolve_scope,
+    result_bucket, suggest_better_queries, suggest_scoped_queries,
+};
+pub use doc_adapters::{adapt_document, is_doc_file};
 pub use effects::{AsgEffectStore, EffectStore};
 pub use engine::Engine;
 pub use error::{AsdError, Result};
+pub use feedback::{AsgFeedbackStore, FeedbackStore};
 pub use index::{AsgIndexStore, IndexStore};
-pub use ledger::{ApprovalOutcome, AsgLedgerStore, LedgerStore, RatifyOps, ReviewOutcome, detect_orphaned_entries};
+pub use index_pipeline::{CollectResult, IndexSummary, collect_source_files, run_index};
+pub use ledger::{
+    ApprovalOutcome, AsgLedgerStore, LedgerStore, RatifyOps, ReviewOutcome, detect_orphaned_entries,
+};
 pub use policy::{
     Decision, FilePolicyGate, PermissivePolicyGate, PolicyFile, PolicyGate, PolicyRule, Situation,
     actions,
+};
+pub use repair::{
+    IssueSeverity, RepairIssue, RepairReport, drop_orphaned_edge_refs, repair_asg, scan_asg,
 };
 pub use schema::{
     ASD_PATH_PREFIX, ASD_SCHEMA_VERSION, Author, AuthorKind, ConclusionClass, Effect,
@@ -50,26 +68,25 @@ pub use schema::{
     TransitiveEffect, Verification, VerificationSource, VerificationStatus,
 };
 pub use scratch::{AsgScratchStore, CleanFilter, ScratchFilter, ScratchStore};
-pub use feedback::{AsgFeedbackStore, FeedbackStore};
-pub use candidates::{
-    apply_feedback_adjustments, apply_file_scope_feedback, build_feedback_state,
-    build_feedback_state_from_entries, confidence_reason,
-    confidence_scores, compute_uncertainty, detect_ambiguous_tokens, detect_confidence_warnings,
-    detect_possible_misses, explain_match, explain_feedback_impacts, FeedbackImpact, FeedbackMetrics,
-    FeedbackState, find_candidates, glob_match, in_memory_score, kind_str, load_scope_aliases,
-    matches_any_path_glob, parse_query, query_tokens, RecoverySuggestion, resolve_scope,
-    result_bucket, suggest_better_queries, suggest_scoped_queries, UncertaintyReason, UncertaintyReport,
+pub use search_fts::{
+    AGENT_DEFAULT_BUDGET, AnnotatedOwner, CoveringTest, FileRecency, FtsFilters, FtsHit,
+    OwnerSignalSource, OwnershipSignal, ResolvedSymbol, SearchFtsDb, SymbolMeta, SymbolTier,
+    classify_layer, classify_layer_sym, derive_cold_hints, discover_symbol_ownership,
+    estimate_tokens, extract_summary, fetch_all_test_file_paths, find_covering_tests,
+    find_indexed_test_files, gather_recency, git_dirty_files, hybrid_boost, intent_focus,
+    intent_layer_order, is_stopword, load_layer_overrides, parse_intent, propose_test_path,
+    symbol_tier, test_files_for_source, trim_for_agent,
 };
-pub use repair::{IssueSeverity, RepairIssue, RepairReport, drop_orphaned_edge_refs, repair_asg, scan_asg};
-pub use search_fts::{AGENT_DEFAULT_BUDGET, AnnotatedOwner, CoveringTest, FileRecency, FtsFilters, FtsHit, OwnerSignalSource, OwnershipSignal, ResolvedSymbol, SearchFtsDb, SymbolMeta, SymbolTier, classify_layer, classify_layer_sym, derive_cold_hints, discover_symbol_ownership, estimate_tokens, extract_summary, fetch_all_test_file_paths, find_covering_tests, find_indexed_test_files, gather_recency, git_dirty_files, hybrid_boost, intent_focus, intent_layer_order, is_stopword, load_layer_overrides, parse_intent, propose_test_path, symbol_tier, test_files_for_source, trim_for_agent};
-pub use search_fts::{effect_detail_reason, format_age, stale_warning};
 pub use search_fts::{DocHit, DocKind, SearchDoc, SearchDocsDb};
-pub use doc_adapters::{adapt_document, is_doc_file};
-pub use sidecar::{hydrate_from_dir, mark_fresh_reset, prune_sidecar, sidecar_lifecycle_state, sync_to_dir, HydrateSummary, SidecarState, SyncSummary};
+pub use search_fts::{effect_detail_reason, format_age, stale_warning};
+pub use sidecar::{
+    HydrateSummary, SidecarState, SyncSummary, hydrate_from_dir, mark_fresh_reset, prune_sidecar,
+    sidecar_lifecycle_state, sync_to_dir,
+};
 pub use symbol::{canonical_symbol_id, symbol_fingerprint};
 pub use transitive::propagate_transitive;
 pub use trust::{DataQuality, TrustScore, TrustSignals, compute_trust_score};
 pub use workflow::{
-    EvidenceQuality, WorkflowSummary,
-    append_workflow_session, detect_workflow, score_evidence_quality,
+    EvidenceQuality, WorkflowSummary, append_workflow_session, detect_workflow,
+    score_evidence_quality,
 };

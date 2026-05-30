@@ -18,7 +18,7 @@ use anyhow::Result;
 use clap::{Args, Subcommand};
 use serde_json::json;
 
-use agentstatedeveloper_core::{conclusions_export, Engine};
+use agentstatedeveloper_core::{Engine, conclusions_export};
 
 use crate::config::Config;
 
@@ -49,7 +49,9 @@ fn migrate(cfg: &Config, args: MigrateArgs) -> Result<()> {
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let out_dir = args.out.unwrap_or_else(|| project_root.join(".asd/conclusions"));
+    let out_dir = args
+        .out
+        .unwrap_or_else(|| project_root.join(".asd/conclusions"));
 
     let counts = conclusions_export::export_all(&engine, &out_dir)?;
     let total_entries: usize = counts.iter().map(|(_, n, _)| n).sum();

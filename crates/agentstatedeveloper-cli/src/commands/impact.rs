@@ -95,11 +95,23 @@ pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
         paths_filter.extend(resolve_scope(scope, &cfg.db_path));
     }
     if let Some(ref paths) = args.paths {
-        paths_filter.extend(paths.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()));
+        paths_filter.extend(
+            paths
+                .split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty()),
+        );
     }
-    let exclusions: Vec<String> = args.exclude.as_deref().map(|e| {
-        e.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).collect()
-    }).unwrap_or_default();
+    let exclusions: Vec<String> = args
+        .exclude
+        .as_deref()
+        .map(|e| {
+            e.split(',')
+                .map(|t| t.trim().to_lowercase())
+                .filter(|t| !t.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
 
     let tier = symbol_tier(&symbol.file);
     let layer = classify_layer_sym(&symbol.file, &symbol.qname, tier, &layer_overrides);
@@ -136,7 +148,10 @@ pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
                 if !exclusions.is_empty() {
                     let lfile = s.file.to_lowercase();
                     let lqname = s.qname.to_lowercase();
-                    if exclusions.iter().any(|e| glob_match(e, &lfile) || lqname.contains(e.as_str())) {
+                    if exclusions
+                        .iter()
+                        .any(|e| glob_match(e, &lfile) || lqname.contains(e.as_str()))
+                    {
                         continue;
                     }
                 }

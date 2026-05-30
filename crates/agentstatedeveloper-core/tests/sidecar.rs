@@ -10,10 +10,10 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use agentstatedeveloper_core::{
-    hydrate_from_dir, paths, sync_to_dir, AsgEffectStore, AsgIndexStore, AsgLedgerStore, Author,
-    AuthorKind, Effect, EffectCategory, EffectDecl, EffectStore, Engine, IndexStore, LedgerEntry,
-    LedgerKind, LedgerStore, Position, Rebind, Symbol, SymbolKind, Verification, VerificationSource,
-    VerificationStatus, ASD_SCHEMA_VERSION,
+    ASD_SCHEMA_VERSION, AsgEffectStore, AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Effect,
+    EffectCategory, EffectDecl, EffectStore, Engine, IndexStore, LedgerEntry, LedgerKind,
+    LedgerStore, Position, Rebind, Symbol, SymbolKind, Verification, VerificationSource,
+    VerificationStatus, hydrate_from_dir, paths, sync_to_dir,
 };
 use chrono::Utc;
 
@@ -98,16 +98,21 @@ fn sync_writes_expected_files() {
     let root = tmp.join(".asd/v1");
     assert!(root.join("meta/schema-version").is_file(), "schema-version");
     assert!(
-        root.join(format!("effects/{}.json", symbol.symbol_id)).is_file(),
+        root.join(format!("effects/{}.json", symbol.symbol_id))
+            .is_file(),
         "effects file"
     );
     assert!(
-        root.join(format!("ledger/{}/{}.json", symbol.symbol_id, entry.entry_id))
-            .is_file(),
+        root.join(format!(
+            "ledger/{}/{}.json",
+            symbol.symbol_id, entry.entry_id
+        ))
+        .is_file(),
         "ledger entry file"
     );
     assert!(
-        root.join(format!("symbols/{}.json", symbol.qname)).is_file(),
+        root.join(format!("symbols/{}.json", symbol.qname))
+            .is_file(),
         "symbols file"
     );
 
@@ -201,25 +206,39 @@ fn invariant_survives_hydrate_roundtrip() {
         signature: Some("func refreshDriftPlayhead()".to_string()),
         doc: None,
     };
-    index.put_symbol(&src.ref_name, &sym, "test").expect("put symbol");
+    index
+        .put_symbol(&src.ref_name, &sym, "test")
+        .expect("put symbol");
 
     let invariant = LedgerEntry::new(
         &sym.symbol_id,
         LedgerKind::Invariant,
         "playhead must always reflect the current model state",
-        Author { kind: AuthorKind::Human, id: "craig".to_string() },
+        Author {
+            kind: AuthorKind::Human,
+            id: "craig".to_string(),
+        },
     );
-    ledger.append_entry(&src.ref_name, &invariant, "test").expect("append invariant");
+    ledger
+        .append_entry(&src.ref_name, &invariant, "test")
+        .expect("append invariant");
 
     // Sync to sidecar.
     let tmp = unique_tempdir("invariant-hydrate");
     let sync_summary = sync_to_dir(&src.repo, &src.ref_name, &tmp).expect("sync");
-    assert_eq!(sync_summary.ledger_entries_written, 1, "invariant written to sidecar");
+    assert_eq!(
+        sync_summary.ledger_entries_written, 1,
+        "invariant written to sidecar"
+    );
 
     // Hydrate into a fresh engine (simulates fresh clone).
     let dst = Engine::open_in_memory().expect("open dst");
-    let hydrate_summary = hydrate_from_dir(&dst.repo, &dst.ref_name, &tmp, "test").expect("hydrate");
-    assert_eq!(hydrate_summary.ledger_entries_loaded, 1, "invariant loaded from sidecar");
+    let hydrate_summary =
+        hydrate_from_dir(&dst.repo, &dst.ref_name, &tmp, "test").expect("hydrate");
+    assert_eq!(
+        hydrate_summary.ledger_entries_loaded, 1,
+        "invariant loaded from sidecar"
+    );
 
     // Verify the invariant is present and correct.
     let dst_ledger = AsgLedgerStore::new(&dst.repo);
@@ -228,7 +247,10 @@ fn invariant_survives_hydrate_roundtrip() {
         .expect("list entries");
     assert_eq!(entries.len(), 1, "exactly one invariant");
     assert_eq!(entries[0].kind, LedgerKind::Invariant, "kind preserved");
-    assert_eq!(entries[0].summary, "playhead must always reflect the current model state", "summary preserved");
+    assert_eq!(
+        entries[0].summary, "playhead must always reflect the current model state",
+        "summary preserved"
+    );
     assert_eq!(entries[0].entry_id, invariant.entry_id, "entry_id stable");
     assert_eq!(entries[0].author.id, "craig", "author preserved");
 }
@@ -260,12 +282,15 @@ fn write_rebind(engine: &Engine, from_id: &str, to_id: &str, to_qname: &str) {
         at: Utc::now(),
         by: "test-agent".to_string(),
     };
-    engine.repo.set_json(
-        &engine.ref_name,
-        &paths::rebind_path(from_id),
-        &serde_json::to_value(&rebind).unwrap(),
-        CommitOptions::new("test", IntentCategory::Refine, "rebind"),
-    ).expect("write rebind");
+    engine
+        .repo
+        .set_json(
+            &engine.ref_name,
+            &paths::rebind_path(from_id),
+            &serde_json::to_value(&rebind).unwrap(),
+            CommitOptions::new("test", IntentCategory::Refine, "rebind"),
+        )
+        .expect("write rebind");
 }
 
 #[test]
@@ -280,7 +305,11 @@ fn sidecar_roundtrip_with_chained_rebinds() {
     let ledger = AsgLedgerStore::new(&src.repo);
 
     // Create three symbols.
-    for (id, qname) in [("sym_a", "mod.fn_a"), ("sym_b", "mod.fn_b"), ("sym_c", "mod.fn_c")] {
+    for (id, qname) in [
+        ("sym_a", "mod.fn_a"),
+        ("sym_b", "mod.fn_b"),
+        ("sym_c", "mod.fn_c"),
+    ] {
         let sym = Symbol {
             symbol_id: id.to_string(),
             symbol_fp: format!("fp_{id}"),
@@ -293,7 +322,9 @@ fn sidecar_roundtrip_with_chained_rebinds() {
             signature: None,
             doc: None,
         };
-        index.put_symbol(&src.ref_name, &sym, "test").expect("put symbol");
+        index
+            .put_symbol(&src.ref_name, &sym, "test")
+            .expect("put symbol");
     }
 
     // Append entry under A.
@@ -301,22 +332,40 @@ fn sidecar_roundtrip_with_chained_rebinds() {
         "sym_a",
         LedgerKind::Decision,
         "original decision",
-        Author { kind: AuthorKind::Human, id: "alice".to_string() },
+        Author {
+            kind: AuthorKind::Human,
+            id: "alice".to_string(),
+        },
     );
-    ledger.append_entry(&src.ref_name, &entry, "test").expect("append entry");
+    ledger
+        .append_entry(&src.ref_name, &entry, "test")
+        .expect("append entry");
 
     // Rebind A→B: move entry to B.
     {
         use agentstategraph::CommitOptions;
         use agentstategraph_core::IntentCategory;
-        let entries = ledger.list_entries_with_superseded(&src.ref_name, "sym_a").unwrap();
+        let entries = ledger
+            .list_entries_with_superseded(&src.ref_name, "sym_a")
+            .unwrap();
         for mut e in entries {
             e.symbol_id = "sym_b".to_string();
-            src.repo.set_json(&src.ref_name, &paths::ledger_entry_path("sym_b", &e.entry_id),
-                &serde_json::to_value(&e).unwrap(),
-                CommitOptions::new("test", IntentCategory::Refine, "reparent")).unwrap();
-            let _ = src.repo.delete(&src.ref_name, &paths::ledger_entry_path("sym_a", &e.entry_id),
-                CommitOptions::new("test", IntentCategory::Refine, "delete old")).unwrap();
+            src.repo
+                .set_json(
+                    &src.ref_name,
+                    &paths::ledger_entry_path("sym_b", &e.entry_id),
+                    &serde_json::to_value(&e).unwrap(),
+                    CommitOptions::new("test", IntentCategory::Refine, "reparent"),
+                )
+                .unwrap();
+            let _ = src
+                .repo
+                .delete(
+                    &src.ref_name,
+                    &paths::ledger_entry_path("sym_a", &e.entry_id),
+                    CommitOptions::new("test", IntentCategory::Refine, "delete old"),
+                )
+                .unwrap();
         }
     }
     write_rebind(&src, "sym_a", "sym_b", "mod.fn_b");
@@ -325,15 +374,28 @@ fn sidecar_roundtrip_with_chained_rebinds() {
     {
         use agentstategraph::CommitOptions;
         use agentstategraph_core::IntentCategory;
-        let entries = ledger.list_entries_with_superseded(&src.ref_name, "sym_b").unwrap();
+        let entries = ledger
+            .list_entries_with_superseded(&src.ref_name, "sym_b")
+            .unwrap();
         entry = entries.into_iter().next().expect("entry under B");
         let mut e2 = entry.clone();
         e2.symbol_id = "sym_c".to_string();
-        src.repo.set_json(&src.ref_name, &paths::ledger_entry_path("sym_c", &e2.entry_id),
-            &serde_json::to_value(&e2).unwrap(),
-            CommitOptions::new("test", IntentCategory::Refine, "reparent")).unwrap();
-        let _ = src.repo.delete(&src.ref_name, &paths::ledger_entry_path("sym_b", &e2.entry_id),
-            CommitOptions::new("test", IntentCategory::Refine, "delete old")).unwrap();
+        src.repo
+            .set_json(
+                &src.ref_name,
+                &paths::ledger_entry_path("sym_c", &e2.entry_id),
+                &serde_json::to_value(&e2).unwrap(),
+                CommitOptions::new("test", IntentCategory::Refine, "reparent"),
+            )
+            .unwrap();
+        let _ = src
+            .repo
+            .delete(
+                &src.ref_name,
+                &paths::ledger_entry_path("sym_b", &e2.entry_id),
+                CommitOptions::new("test", IntentCategory::Refine, "delete old"),
+            )
+            .unwrap();
     }
     write_rebind(&src, "sym_b", "sym_c", "mod.fn_c");
 
@@ -341,23 +403,39 @@ fn sidecar_roundtrip_with_chained_rebinds() {
     let tmp = unique_tempdir("chained-rebind");
     let sync_summary = sync_to_dir(&src.repo, &src.ref_name, &tmp).expect("sync");
     assert_eq!(sync_summary.rebinds_synced, 2, "two rebind records synced");
-    assert!(tmp.join(".asd/v1/rebinds/sym_a.json").is_file(), "rebind A file");
-    assert!(tmp.join(".asd/v1/rebinds/sym_b.json").is_file(), "rebind B file");
+    assert!(
+        tmp.join(".asd/v1/rebinds/sym_a.json").is_file(),
+        "rebind A file"
+    );
+    assert!(
+        tmp.join(".asd/v1/rebinds/sym_b.json").is_file(),
+        "rebind B file"
+    );
 
     // Hydrate into fresh engine.
     let dst = Engine::open_in_memory().expect("open dst");
-    let hydrate_summary = hydrate_from_dir(&dst.repo, &dst.ref_name, &tmp, "test").expect("hydrate");
-    assert_eq!(hydrate_summary.rebinds_replayed, 2, "two rebind records replayed");
+    let hydrate_summary =
+        hydrate_from_dir(&dst.repo, &dst.ref_name, &tmp, "test").expect("hydrate");
+    assert_eq!(
+        hydrate_summary.rebinds_replayed, 2,
+        "two rebind records replayed"
+    );
 
     // Entry should be under C in the hydrated engine.
     let dst_ledger = AsgLedgerStore::new(&dst.repo);
-    let entries_c = dst_ledger.list_entries(&dst.ref_name, "sym_c").expect("list C");
+    let entries_c = dst_ledger
+        .list_entries(&dst.ref_name, "sym_c")
+        .expect("list C");
     assert_eq!(entries_c.len(), 1, "entry under C after hydrate");
     assert_eq!(entries_c[0].summary, "original decision");
 
     // Should be nothing under A or B.
-    let entries_a = dst_ledger.list_entries(&dst.ref_name, "sym_a").expect("list A");
-    let entries_b = dst_ledger.list_entries(&dst.ref_name, "sym_b").expect("list B");
+    let entries_a = dst_ledger
+        .list_entries(&dst.ref_name, "sym_a")
+        .expect("list A");
+    let entries_b = dst_ledger
+        .list_entries(&dst.ref_name, "sym_b")
+        .expect("list B");
     assert_eq!(entries_a.len(), 0, "no entries under A");
     assert_eq!(entries_b.len(), 0, "no entries under B");
 }

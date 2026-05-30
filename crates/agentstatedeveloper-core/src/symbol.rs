@@ -14,4 +14,3 @@ pub fn symbol_fingerprint(body: &str) -> String {
     let hash = blake3::hash(body.as_bytes());
     format!("fp_{}", &hash.to_hex()[..16])
 }
-

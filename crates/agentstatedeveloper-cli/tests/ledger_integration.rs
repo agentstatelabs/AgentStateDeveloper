@@ -34,23 +34,41 @@ fn setup(dir: &Path) {
     )
     .unwrap();
     let o = asd(dir, &["init", "--no-hooks"]);
-    assert!(o.status.success(), "init: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        o.status.success(),
+        "init: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
     let o = asd(dir, &["index", "."]);
-    assert!(o.status.success(), "index: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        o.status.success(),
+        "index: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
 }
 
 fn ledger_append(dir: &Path, qname: &str, kind: &str, summary: &str) -> String {
     let o = asd(
         dir,
         &[
-            "ledger", "append", qname,
-            "--kind", kind,
-            "--summary", summary,
-            "--author-kind", "human",
-            "--author-id", "tester@example.com",
+            "ledger",
+            "append",
+            qname,
+            "--kind",
+            kind,
+            "--summary",
+            summary,
+            "--author-kind",
+            "human",
+            "--author-id",
+            "tester@example.com",
         ],
     );
-    assert!(o.status.success(), "ledger append failed: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        o.status.success(),
+        "ledger append failed: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
     let v: serde_json::Value = serde_json::from_slice(&o.stdout).expect("parse append output");
     assert_eq!(v["status"].as_str().unwrap(), "allowed");
     v["entry_id"].as_str().unwrap().to_owned()
@@ -58,7 +76,11 @@ fn ledger_append(dir: &Path, qname: &str, kind: &str, summary: &str) -> String {
 
 fn read_ledger(dir: &Path, qname: &str) -> Vec<serde_json::Value> {
     let o = asd(dir, &["read", qname]);
-    assert!(o.status.success(), "asd read {qname}: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        o.status.success(),
+        "asd read {qname}: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
     let v: serde_json::Value = serde_json::from_slice(&o.stdout).expect("parse read output");
     v["ledger"].as_array().cloned().unwrap_or_default()
 }
@@ -74,13 +96,24 @@ fn ledger_append_appears_in_read() {
 
     let entries = read_ledger(&dir, "svc.charge");
     assert!(
-        entries.iter().any(|e| e["entry_id"].as_str() == Some(&entry_id)),
+        entries
+            .iter()
+            .any(|e| e["entry_id"].as_str() == Some(&entry_id)),
         "entry {entry_id} not found in read output; got {entries:?}"
     );
-    let entry = entries.iter().find(|e| e["entry_id"].as_str() == Some(&entry_id)).unwrap();
+    let entry = entries
+        .iter()
+        .find(|e| e["entry_id"].as_str() == Some(&entry_id))
+        .unwrap();
     assert_eq!(entry["kind"].as_str().unwrap(), "hazard");
-    assert_eq!(entry["summary"].as_str().unwrap(), "fails silently above 10000");
-    assert_eq!(entry["author"]["id"].as_str().unwrap(), "tester@example.com");
+    assert_eq!(
+        entry["summary"].as_str().unwrap(),
+        "fails silently above 10000"
+    );
+    assert_eq!(
+        entry["author"]["id"].as_str().unwrap(),
+        "tester@example.com"
+    );
 }
 
 #[test]
@@ -88,22 +121,38 @@ fn ledger_supersede_marks_old_entry() {
     let dir = unique_temp_dir("supersede");
     setup(&dir);
 
-    let old_id = ledger_append(&dir, "svc.charge", "assumption", "amount is always positive");
+    let old_id = ledger_append(
+        &dir,
+        "svc.charge",
+        "assumption",
+        "amount is always positive",
+    );
 
     let o = asd(
         &dir,
         &[
-            "ledger", "supersede", "svc.charge",
-            "--supersede", &old_id,
-            "--kind", "assumption",
-            "--summary", "amount validated upstream — safe",
+            "ledger",
+            "supersede",
+            "svc.charge",
+            "--supersede",
+            &old_id,
+            "--kind",
+            "assumption",
+            "--summary",
+            "amount validated upstream — safe",
         ],
     );
-    assert!(o.status.success(), "ledger supersede failed: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        o.status.success(),
+        "ledger supersede failed: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
     let v: serde_json::Value = serde_json::from_slice(&o.stdout).expect("parse supersede output");
     assert_eq!(v["status"].as_str().unwrap(), "superseded");
     assert!(
-        v["supersedes"].as_array().map_or(false, |a| a.iter().any(|s| s.as_str() == Some(&old_id))),
+        v["supersedes"]
+            .as_array()
+            .map_or(false, |a| a.iter().any(|s| s.as_str() == Some(&old_id))),
         "supersedes list missing old_id; got {v}"
     );
 
@@ -111,7 +160,9 @@ fn ledger_supersede_marks_old_entry() {
     let entries = read_ledger(&dir, "svc.charge");
     // New superseding entry must appear.
     assert!(
-        entries.iter().any(|e| e["entry_id"].as_str() == Some(new_id)),
+        entries
+            .iter()
+            .any(|e| e["entry_id"].as_str() == Some(new_id)),
         "new entry {new_id} missing from read output"
     );
 }
@@ -126,9 +177,20 @@ fn ledger_rebind_reparents_entries() {
 
     let o = asd(
         &dir,
-        &["ledger", "rebind", "--from", "svc.charge", "--to", "svc.refund"],
+        &[
+            "ledger",
+            "rebind",
+            "--from",
+            "svc.charge",
+            "--to",
+            "svc.refund",
+        ],
     );
-    assert!(o.status.success(), "ledger rebind failed: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        o.status.success(),
+        "ledger rebind failed: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
     let v: serde_json::Value = serde_json::from_slice(&o.stdout).expect("parse rebind output");
     assert_eq!(v["status"].as_str().unwrap(), "rebound");
     assert_eq!(v["to_qname"].as_str().unwrap(), "svc.refund");
@@ -138,7 +200,9 @@ fn ledger_rebind_reparents_entries() {
     // The old entry should now appear on the new symbol.
     let entries = read_ledger(&dir, "svc.refund");
     assert!(
-        entries.iter().any(|e| e["entry_id"].as_str() == Some(&entry_id)),
+        entries
+            .iter()
+            .any(|e| e["entry_id"].as_str() == Some(&entry_id)),
         "entry {entry_id} not found on svc.refund after rebind; entries: {entries:?}"
     );
 }
@@ -151,7 +215,13 @@ fn ledger_approve_requires_commercial() {
 
     let o = asd(
         &dir,
-        &["ledger", "approve", &entry_id, "--approver", "alice@example.com"],
+        &[
+            "ledger",
+            "approve",
+            &entry_id,
+            "--approver",
+            "alice@example.com",
+        ],
     );
     assert!(!o.status.success(), "expected approve to fail");
     let stderr = String::from_utf8_lossy(&o.stderr);
@@ -170,9 +240,13 @@ fn ledger_reject_requires_commercial() {
     let o = asd(
         &dir,
         &[
-            "ledger", "reject", &entry_id,
-            "--reviewer", "alice@example.com",
-            "--reason", "not valid",
+            "ledger",
+            "reject",
+            &entry_id,
+            "--reviewer",
+            "alice@example.com",
+            "--reason",
+            "not valid",
         ],
     );
     assert!(!o.status.success(), "expected reject to fail");
@@ -192,8 +266,11 @@ fn ledger_withdraw_requires_commercial() {
     let o = asd(
         &dir,
         &[
-            "ledger", "withdraw", &entry_id,
-            "--author-id", "tester@example.com",
+            "ledger",
+            "withdraw",
+            &entry_id,
+            "--author-id",
+            "tester@example.com",
         ],
     );
     assert!(!o.status.success(), "expected withdraw to fail");

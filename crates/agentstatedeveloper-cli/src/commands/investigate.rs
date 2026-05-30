@@ -9,20 +9,17 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
-    AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, Engine, FeedbackStore,
-    FtsFilters, IndexStore, LedgerStore, OwnershipSignal, apply_feedback_adjustments,
-    build_feedback_state_from_entries, compute_trust_score, discover_symbol_ownership, FeedbackState,
-    classify_layer_sym, compute_uncertainty,
-    confidence_scores, detect_ambiguous_tokens, detect_possible_misses, estimate_tokens,
-    explain_match, extract_summary, find_candidates, gather_recency, git_dirty_files,
-    intent_focus, intent_layer_order, load_layer_overrides, parse_intent, parse_query,
-    resolve_scope, result_bucket, stale_warning, symbol_tier, trim_for_agent,
+    AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, Engine, FeedbackState,
+    FeedbackStore, FtsFilters, IndexStore, LedgerStore, OwnershipSignal,
+    apply_feedback_adjustments, build_feedback_state_from_entries, classify_layer_sym,
+    compute_trust_score, compute_uncertainty, confidence_scores, detect_ambiguous_tokens,
+    detect_possible_misses, discover_symbol_ownership, estimate_tokens, explain_match,
+    extract_summary, find_candidates, gather_recency, git_dirty_files, intent_focus,
+    intent_layer_order, load_layer_overrides, parse_intent, parse_query, resolve_scope,
+    result_bucket, stale_warning, symbol_tier, trim_for_agent,
 };
 
-use crate::commands::{
-    context_for::assemble_symbol_context,
-    graph::build_id_map,
-};
+use crate::commands::{context_for::assemble_symbol_context, graph::build_id_map};
 use crate::config::Config;
 
 #[derive(Debug, Args)]
@@ -115,12 +112,12 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             eprintln!("{warn}");
         }
     }
-    let intent = args.intent.as_deref()
-        .and_then(parse_intent)
-        .unwrap_or("");
+    let intent = args.intent.as_deref().and_then(parse_intent).unwrap_or("");
     if args.intent.is_some() && intent.is_empty() {
-        eprintln!("asd: unknown intent {:?} — valid values: bugfix, feature, refactor, test, architecture, ui",
-            args.intent.as_deref().unwrap_or(""));
+        eprintln!(
+            "asd: unknown intent {:?} — valid values: bugfix, feature, refactor, test, architecture, ui",
+            args.intent.as_deref().unwrap_or("")
+        );
     }
     let layer_overrides = load_layer_overrides(&cfg.db_path);
     let engine = Engine::open_sqlite(&cfg.db_path)?;
@@ -131,7 +128,11 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
 
     let (tokens, mut exclusions) = parse_query(&query);
     if let Some(ref excl) = args.exclude {
-        for term in excl.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()) {
+        for term in excl
+            .split(',')
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+        {
             exclusions.push(term);
         }
     }
@@ -145,7 +146,12 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         paths_filter.extend(resolve_scope(scope, &cfg.db_path));
     }
     if let Some(ref paths) = args.paths {
-        paths_filter.extend(paths.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()));
+        paths_filter.extend(
+            paths
+                .split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty()),
+        );
     }
     let filters = FtsFilters {
         kind: args.kind.as_deref().map(|k| k.to_lowercase()),
@@ -173,12 +179,22 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     // Apply durable feedback adjustments (Useful/Noisy/WrongLayer verdicts).
     // list_all() hoisted once — reused for build_feedback_state_from_entries below.
     let feedback_store = AsgFeedbackStore::from_engine(&engine);
-    let all_fb = feedback_store.list_all(&engine.ref_name).unwrap_or_default();
-    let feedback_verdicts: Vec<(String, String, agentstatedeveloper_core::FeedbackVerdict)> = all_fb.iter()
-        .filter(|e| e.file_scope.is_none())
-        .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict))
-        .collect();
-    let feedback_metrics = apply_feedback_adjustments(&engine, &index_store, &query, &mut candidates, &feedback_verdicts);
+    let all_fb = feedback_store
+        .list_all(&engine.ref_name)
+        .unwrap_or_default();
+    let feedback_verdicts: Vec<(String, String, agentstatedeveloper_core::FeedbackVerdict)> =
+        all_fb
+            .iter()
+            .filter(|e| e.file_scope.is_none())
+            .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict))
+            .collect();
+    let feedback_metrics = apply_feedback_adjustments(
+        &engine,
+        &index_store,
+        &query,
+        &mut candidates,
+        &feedback_verdicts,
+    );
 
     // One git pass to gather recency for all candidate files (hot = 14 days).
     let recency = gather_recency(200, 14.0);
@@ -186,7 +202,8 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     // Per-file ownership cache: discover_symbol_ownership spawns git blame + git log.
     // With up to 10 candidates, many may share files — computing once per file
     // avoids up to N*2 redundant git subprocess spawns.
-    let mut ownership_cache: std::collections::HashMap<String, OwnershipSignal> = std::collections::HashMap::new();
+    let mut ownership_cache: std::collections::HashMap<String, OwnershipSignal> =
+        std::collections::HashMap::new();
 
     let mut entry_points: Vec<Value> = Vec::new();
     for (score, qname) in &candidates {
@@ -206,14 +223,9 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         let has_ledger = !ledger_entries.is_empty();
         let match_reasons = explain_match(&sym, &tokens, &ledger_entries, hot);
         // Compute ownership once per unique file; reuse for all symbols in the same file.
-        let ownership_hint = ownership_cache
-            .entry(sym.file.clone())
-            .or_insert_with(|| discover_symbol_ownership(
-                &sym.file,
-                sym.start.line,
-                sym.end.line,
-                sym.doc.as_deref(),
-            ));
+        let ownership_hint = ownership_cache.entry(sym.file.clone()).or_insert_with(|| {
+            discover_symbol_ownership(&sym.file, sym.start.line, sym.end.line, sym.doc.as_deref())
+        });
         let ctx = assemble_symbol_context(
             &engine,
             &index_store,
@@ -250,14 +262,19 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     let mut seen_invariants: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for ep in &entry_points {
-        let qname = ep.get("symbol")
+        let qname = ep
+            .get("symbol")
             .and_then(|s| s.get("qname"))
             .and_then(Value::as_str)
             .unwrap_or("");
 
         if let Some(invs) = ep.get("invariants").and_then(Value::as_array) {
             for inv in invs {
-                let key = inv.get("summary").and_then(Value::as_str).unwrap_or("").to_string();
+                let key = inv
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
                 if !key.is_empty() && seen_invariants.insert(key) {
                     let mut v = inv.clone();
                     if let Some(obj) = v.as_object_mut() {
@@ -309,14 +326,20 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     }
     // --- Staleness warnings -----------------------------------------------
     let dirty = git_dirty_files();
-    let stale_symbols: Vec<String> = entry_points.iter()
-        .filter_map(|ep| ep.get("symbol").and_then(|s| s.get("file")).and_then(Value::as_str))
+    let stale_symbols: Vec<String> = entry_points
+        .iter()
+        .filter_map(|ep| {
+            ep.get("symbol")
+                .and_then(|s| s.get("file"))
+                .and_then(Value::as_str)
+        })
         .filter(|f| dirty.contains(*f))
         .map(|s| s.to_string())
         .collect();
 
     let ambiguous_terms = detect_ambiguous_tokens(&tokens, engine.fts.as_ref(), &filters);
-    let layers_present: std::collections::HashSet<&str> = entry_points.iter()
+    let layers_present: std::collections::HashSet<&str> = entry_points
+        .iter()
         .filter_map(|ep| ep.get("layer").and_then(Value::as_str))
         .collect();
     // t-001: suppress possible-miss warnings when scope is intentionally narrowed.
@@ -330,8 +353,12 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     // Scoped suggestions (investigate doesn't compute these — pass empty slice).
     let dq_state = compute_trust_score(&cfg.db_path).data_quality.state;
     let uncertainty = compute_uncertainty(
-        &tokens, &ambiguous_terms, &possible_misses,
-        entry_points.len(), &[], engine.fts.as_ref(),
+        &tokens,
+        &ambiguous_terms,
+        &possible_misses,
+        entry_points.len(),
+        &[],
+        engine.fts.as_ref(),
         Some(dq_state.as_str()),
     );
 
@@ -339,11 +366,8 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     // --flat restores the legacy flat entry_points array.
     // Invariants/hazards surfaced first so agents see constraints before call graphs.
 
-    let feedback_state = build_feedback_state_from_entries(
-        &all_fb,
-        &query,
-        feedback_metrics.entries_applied,
-    );
+    let feedback_state =
+        build_feedback_state_from_entries(&all_fb, &query, feedback_metrics.entries_applied);
     let coverage = if !feedback_state.available {
         "none"
     } else if feedback_state.query_matches == 0 {
@@ -415,4 +439,3 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
 }
-

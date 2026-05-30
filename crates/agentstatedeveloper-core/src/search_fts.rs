@@ -50,11 +50,9 @@ use crate::schema::{EffectDecl, FeedbackEntry, FeedbackVerdict, LedgerEntry, Sym
 /// Intentionally omits: "do", "in", "go" (language keywords), "no" (boolean
 /// shorthand), "up", "down" (directional — common in audio/UI APIs).
 pub const STOPWORDS: &[&str] = &[
-    "a", "an", "and", "as", "at", "be", "but", "by", "for", "from",
-    "if",  "into", "is", "it", "nor", "not", "of", "on", "or", "so",
-    "the", "to", "via", "vs", "yet", "with", "over", "about", "between",
-    "than", "that", "this", "are", "was", "were", "has", "have", "had",
-    "its", "our",
+    "a", "an", "and", "as", "at", "be", "but", "by", "for", "from", "if", "into", "is", "it",
+    "nor", "not", "of", "on", "or", "so", "the", "to", "via", "vs", "yet", "with", "over", "about",
+    "between", "than", "that", "this", "are", "was", "were", "has", "have", "had", "its", "our",
 ];
 
 /// Returns true if the token is a stopword.
@@ -105,13 +103,25 @@ pub struct FtsHit {
 
 impl FtsHit {
     /// True if this symbol has at least one Ownership ledger entry.
-    #[inline] pub fn has_ownership(&self) -> bool { self.ledger_flags.contains("ownership") }
+    #[inline]
+    pub fn has_ownership(&self) -> bool {
+        self.ledger_flags.contains("ownership")
+    }
     /// True if this symbol has at least one Invariant ledger entry.
-    #[inline] pub fn has_invariant(&self) -> bool { self.ledger_flags.contains("invariant") }
+    #[inline]
+    pub fn has_invariant(&self) -> bool {
+        self.ledger_flags.contains("invariant")
+    }
     /// True if this symbol has at least one Hazard ledger entry.
-    #[inline] pub fn has_hazard(&self)    -> bool { self.ledger_flags.contains("hazard") }
+    #[inline]
+    pub fn has_hazard(&self) -> bool {
+        self.ledger_flags.contains("hazard")
+    }
     /// True if this symbol has any ledger entries.
-    #[inline] pub fn has_ledger(&self)    -> bool { !self.ledger_text.is_empty() }
+    #[inline]
+    pub fn has_ledger(&self) -> bool {
+        !self.ledger_text.is_empty()
+    }
 }
 
 /// Lightweight symbol metadata stored in the `asd_symbols_meta` SQLite table.
@@ -251,11 +261,10 @@ impl SearchFtsDb {
         // Any version mismatch drops and recreates — data is reproduced by next `asd index`.
         const SCHEMA_VER: i64 = 5;
 
-        let current: i64 = self.conn.query_row(
-            "SELECT version FROM asd_fts_meta LIMIT 1",
-            [],
-            |r| r.get(0),
-        ).unwrap_or(0);
+        let current: i64 = self
+            .conn
+            .query_row("SELECT version FROM asd_fts_meta LIMIT 1", [], |r| r.get(0))
+            .unwrap_or(0);
 
         if current != SCHEMA_VER {
             self.conn.execute_batch(
@@ -273,7 +282,7 @@ impl SearchFtsDb {
             "CREATE TABLE IF NOT EXISTS asd_index_meta (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            );"
+            );",
         )?;
 
         // asd_ledger_cache: write-through cache of LedgerEntry records.
@@ -291,7 +300,7 @@ impl SearchFtsDb {
                 PRIMARY KEY (entry_id, ref_name)
             );
             CREATE INDEX IF NOT EXISTS idx_asd_lc_sym
-                ON asd_ledger_cache(symbol_id, ref_name);"
+                ON asd_ledger_cache(symbol_id, ref_name);",
         )?;
 
         // asd_effects_cache: one row per (symbol_id, ref_name) — stores the
@@ -302,7 +311,7 @@ impl SearchFtsDb {
                 ref_name  TEXT NOT NULL,
                 body      TEXT NOT NULL,
                 PRIMARY KEY (symbol_id, ref_name)
-            );"
+            );",
         )?;
 
         // asd_feedback is a write-through cache of git-backed FeedbackEntry
@@ -324,7 +333,7 @@ impl SearchFtsDb {
             );
             CREATE INDEX IF NOT EXISTS idx_asd_fb_symbol  ON asd_feedback(symbol_id);
             CREATE INDEX IF NOT EXISTS idx_asd_fb_qname   ON asd_feedback(symbol_qname);
-            CREATE INDEX IF NOT EXISTS idx_asd_fb_verdict ON asd_feedback(verdict);"
+            CREATE INDEX IF NOT EXISTS idx_asd_fb_verdict ON asd_feedback(verdict);",
         )?;
 
         // asd_symbols_cache: full Symbol JSON for every indexed symbol.
@@ -353,7 +362,7 @@ impl SearchFtsDb {
                 PRIMARY KEY (symbol_id, neighbor_id, direction, ref_name)
             );
             CREATE INDEX IF NOT EXISTS idx_asd_ce_lookup
-                ON asd_call_edges(symbol_id, direction, ref_name);"
+                ON asd_call_edges(symbol_id, direction, ref_name);",
         )?;
 
         self.conn.execute_batch(&format!(
@@ -453,22 +462,28 @@ impl SearchFtsDb {
     /// Unix timestamp (seconds) of the last `rebuild()` call, or `None` if
     /// the index has never been built.
     pub fn last_indexed_at(&self) -> Option<i64> {
-        self.conn.query_row(
-            "SELECT value FROM asd_index_meta WHERE key = 'indexed_at' LIMIT 1",
-            [],
-            |r| r.get::<_, String>(0),
-        ).ok().and_then(|s| s.parse().ok())
+        self.conn
+            .query_row(
+                "SELECT value FROM asd_index_meta WHERE key = 'indexed_at' LIMIT 1",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|s| s.parse().ok())
     }
 
     /// Whether the FTS rebuild succeeded during the last `asd index` run.
     /// Returns `None` if no `mark_symbols_indexed` call has been recorded yet
     /// (pre-0.9.70 index runs or DBs that have never been indexed with this version).
     pub fn fts_last_rebuild_ok(&self) -> Option<bool> {
-        self.conn.query_row(
-            "SELECT value FROM asd_index_meta WHERE key = 'fts_last_rebuild_ok' LIMIT 1",
-            [],
-            |r| r.get::<_, String>(0),
-        ).ok().map(|s| s == "1")
+        self.conn
+            .query_row(
+                "SELECT value FROM asd_index_meta WHERE key = 'fts_last_rebuild_ok' LIMIT 1",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .map(|s| s == "1")
     }
 
     /// Record the outcome of a symbol-indexing run. Call this from
@@ -580,13 +595,11 @@ impl SearchFtsDb {
 
     /// Build the full `symbol_id → Symbol` map from `asd_symbols_cache`.
     /// Returns an empty map on any error (caller falls back to git).
-    pub fn build_id_map_cached(
-        &self,
-        ref_name: &str,
-    ) -> HashMap<String, crate::schema::Symbol> {
-        let mut stmt = match self.conn.prepare(
-            "SELECT symbol_id, symbol_json FROM asd_symbols_cache WHERE ref_name = ?1",
-        ) {
+    pub fn build_id_map_cached(&self, ref_name: &str) -> HashMap<String, crate::schema::Symbol> {
+        let mut stmt = match self
+            .conn
+            .prepare("SELECT symbol_id, symbol_json FROM asd_symbols_cache WHERE ref_name = ?1")
+        {
             Ok(s) => s,
             Err(_) => return HashMap::new(),
         };
@@ -687,7 +700,9 @@ impl SearchFtsDb {
     /// Number of rows in the FTS table (total indexed symbols).
     pub fn symbol_count(&self) -> usize {
         self.conn
-            .query_row("SELECT COUNT(*) FROM asd_search_fts", [], |r| r.get::<_, i64>(0))
+            .query_row("SELECT COUNT(*) FROM asd_search_fts", [], |r| {
+                r.get::<_, i64>(0)
+            })
             .map(|n| n as usize)
             .unwrap_or(0)
     }
@@ -706,10 +721,19 @@ impl SearchFtsDb {
             .unwrap_or(0)
     }
 
-    fn insert_symbol(&self, sym: &Symbol, ledger_text: &str, ledger_flags: &str) -> rusqlite::Result<()> {
+    fn insert_symbol(
+        &self,
+        sym: &Symbol,
+        ledger_text: &str,
+        ledger_flags: &str,
+    ) -> rusqlite::Result<()> {
         let qname_exp = expand_identifier(&sym.qname);
         let sig_orig = sym.signature.as_deref().unwrap_or("");
-        let sig_exp = if sig_orig.is_empty() { String::new() } else { expand_text(sig_orig) };
+        let sig_exp = if sig_orig.is_empty() {
+            String::new()
+        } else {
+            expand_text(sig_orig)
+        };
         let doc = sym.doc.as_deref().unwrap_or("");
         let file_exp = expand_text(&sym.file);
         let kind = format!("{:?}", sym.kind).to_lowercase();
@@ -807,28 +831,29 @@ impl SearchFtsDb {
         );
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let hits = stmt.query_map(params![match_expr], |row| {
-            let bm25_raw: f64 = row.get(11)?;
-            let sig_orig: Option<String> = row.get(6)?;
-            let tier_str: String = row.get(8).unwrap_or_default();
-            let tier: SymbolTier = tier_str.parse().unwrap_or(0);
-            Ok(FtsHit {
-                bm25_score: -bm25_raw,
-                symbol_id: row.get(0)?,
-                language: row.get(1)?,
-                kind: row.get(2)?,
-                line: row.get::<_, u32>(3).unwrap_or(0),
-                doc: row.get(4)?,
-                qname: row.get(5)?,
-                signature: sig_orig.filter(|s| !s.is_empty()),
-                file: row.get(7)?,
-                tier,
-                ledger_text:  row.get::<_, String>(9).unwrap_or_default(),
-                ledger_flags: row.get::<_, String>(10).unwrap_or_default(),
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
+        let hits = stmt
+            .query_map(params![match_expr], |row| {
+                let bm25_raw: f64 = row.get(11)?;
+                let sig_orig: Option<String> = row.get(6)?;
+                let tier_str: String = row.get(8).unwrap_or_default();
+                let tier: SymbolTier = tier_str.parse().unwrap_or(0);
+                Ok(FtsHit {
+                    bm25_score: -bm25_raw,
+                    symbol_id: row.get(0)?,
+                    language: row.get(1)?,
+                    kind: row.get(2)?,
+                    line: row.get::<_, u32>(3).unwrap_or(0),
+                    doc: row.get(4)?,
+                    qname: row.get(5)?,
+                    signature: sig_orig.filter(|s| !s.is_empty()),
+                    file: row.get(7)?,
+                    tier,
+                    ledger_text: row.get::<_, String>(9).unwrap_or_default(),
+                    ledger_flags: row.get::<_, String>(10).unwrap_or_default(),
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
 
         Ok(hits)
     }
@@ -868,8 +893,10 @@ impl SearchFtsDb {
 
         let mut stmt = self.conn.prepare(&sql)?;
         // rusqlite requires params as a slice of &dyn ToSql; build it dynamically.
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params_vec.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
         let results = stmt
             .query_map(params_refs.as_slice(), |row| {
                 let tok: String = row.get(0)?;
@@ -900,7 +927,10 @@ impl SearchFtsDb {
                       OR lower(qname_orig) LIKE ?2 \
                    LIMIT 1";
         let suffix_pattern = format!("%.{}", name_lc);
-        self.conn.query_row(sql, rusqlite::params![name_lc, suffix_pattern], |_| Ok(true))
+        self.conn
+            .query_row(sql, rusqlite::params![name_lc, suffix_pattern], |_| {
+                Ok(true)
+            })
             .unwrap_or(false)
     }
 
@@ -936,15 +966,17 @@ impl SearchFtsDb {
             Ok(s) => s,
             Err(_) => return HashMap::new(),
         };
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-            qnames.iter().map(|q| q as &dyn rusqlite::types::ToSql).collect();
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = qnames
+            .iter()
+            .map(|q| q as &dyn rusqlite::types::ToSql)
+            .collect();
         stmt.query_map(params_refs.as_slice(), |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 SymbolMeta {
                     symbol_id: row.get(1)?,
-                    file:      row.get(2)?,
-                    kind:      row.get(3)?,
+                    file: row.get(2)?,
+                    kind: row.get(3)?,
                 },
             ))
         })
@@ -977,8 +1009,7 @@ impl SearchFtsDb {
         // Build WHERE clause: ledger_flags must contain invariant or hazard,
         // AND ledger_text must contain at least one query token.
         // Both are UNINDEXED columns — regular LIKE is fine (not FTS MATCH).
-        let flag_clause =
-            "(ledger_flags LIKE '%invariant%' OR ledger_flags LIKE '%hazard%')";
+        let flag_clause = "(ledger_flags LIKE '%invariant%' OR ledger_flags LIKE '%hazard%')";
 
         // One OR clause per token: ledger_text LIKE '%token%'
         let text_clauses: Vec<String> = tokens
@@ -1043,11 +1074,13 @@ impl SearchFtsDb {
             Ok(s) => s,
             Err(_) => return HashMap::new(),
         };
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-            qnames.iter().map(|q| q as &dyn rusqlite::types::ToSql).collect();
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = qnames
+            .iter()
+            .map(|q| q as &dyn rusqlite::types::ToSql)
+            .collect();
         // Columns: 0=qname_orig (key), 1=symbol_id, 2=file_orig, 3=kind, 4=doc, 5=sig_orig
         stmt.query_map(params_refs.as_slice(), |row| {
-            let qname: String   = row.get(0)?;
+            let qname: String = row.get(0)?;
             let doc_raw: Option<String> = row.get(4)?;
             let sig_raw: Option<String> = row.get(5)?;
             Ok((
@@ -1055,9 +1088,9 @@ impl SearchFtsDb {
                 ResolvedSymbol {
                     symbol_id: row.get(1)?,
                     qname,
-                    file:      row.get(2)?,
-                    kind:      row.get(3)?,
-                    doc:       doc_raw.filter(|s| !s.is_empty()),
+                    file: row.get(2)?,
+                    kind: row.get(3)?,
+                    doc: doc_raw.filter(|s| !s.is_empty()),
                     signature: sig_raw.filter(|s| !s.is_empty()),
                 },
             ))
@@ -1086,8 +1119,10 @@ impl SearchFtsDb {
             Ok(s) => s,
             Err(_) => return HashMap::new(),
         };
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-            symbol_ids.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = symbol_ids
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
         stmt.query_map(params_refs.as_slice(), |row| {
             let sym_id: String = row.get(0)?;
             let doc_raw: Option<String> = row.get(4)?;
@@ -1096,10 +1131,10 @@ impl SearchFtsDb {
                 sym_id.clone(),
                 ResolvedSymbol {
                     symbol_id: sym_id,
-                    qname:     row.get(1)?,
-                    file:      row.get(2)?,
-                    kind:      row.get(3)?,
-                    doc:       doc_raw.filter(|s| !s.is_empty()),
+                    qname: row.get(1)?,
+                    file: row.get(2)?,
+                    kind: row.get(3)?,
+                    doc: doc_raw.filter(|s| !s.is_empty()),
                     signature: sig_raw.filter(|s| !s.is_empty()),
                 },
             ))
@@ -1165,9 +1200,7 @@ impl SearchFtsDb {
                                 .or_else(|| Some(b.clone()))
                         })
                     })
-                    .and_then(|inner| {
-                        inner.get("scope").and_then(|s| s.as_array().cloned())
-                    })
+                    .and_then(|inner| inner.get("scope").and_then(|s| s.as_array().cloned()))
                     .map(|arr| {
                         arr.into_iter()
                             .filter_map(|g| g.as_str().map(String::from))
@@ -1194,13 +1227,8 @@ impl SearchFtsDb {
     }
 
     /// Insert or replace a single ledger entry for `ref_name`.
-    pub fn upsert_ledger_entry(
-        &self,
-        entry: &LedgerEntry,
-        ref_name: &str,
-    ) -> rusqlite::Result<()> {
-        let body = serde_json::to_string(entry)
-            .unwrap_or_else(|_| "{}".to_string());
+    pub fn upsert_ledger_entry(&self, entry: &LedgerEntry, ref_name: &str) -> rusqlite::Result<()> {
+        let body = serde_json::to_string(entry).unwrap_or_else(|_| "{}".to_string());
         self.conn.execute(
             "INSERT OR REPLACE INTO asd_ledger_cache (entry_id, symbol_id, ref_name, body)
              VALUES (?1, ?2, ?3, ?4)",
@@ -1242,8 +1270,7 @@ impl SearchFtsDb {
     ) -> rusqlite::Result<()> {
         self.conn.execute_batch("BEGIN;")?;
         for (symbol_id, entry) in entries {
-            let body = serde_json::to_string(entry)
-                .unwrap_or_else(|_| "{}".to_string());
+            let body = serde_json::to_string(entry).unwrap_or_else(|_| "{}".to_string());
             if let Err(err) = self.conn.execute(
                 "INSERT OR REPLACE INTO asd_ledger_cache (entry_id, symbol_id, ref_name, body)
                  VALUES (?1, ?2, ?3, ?4)",
@@ -1278,8 +1305,7 @@ impl SearchFtsDb {
         ref_name: &str,
         decl: &EffectDecl,
     ) -> rusqlite::Result<()> {
-        let body = serde_json::to_string(decl)
-            .unwrap_or_else(|_| "{}".to_string());
+        let body = serde_json::to_string(decl).unwrap_or_else(|_| "{}".to_string());
         self.conn.execute(
             "INSERT OR REPLACE INTO asd_effects_cache (symbol_id, ref_name, body)
              VALUES (?1, ?2, ?3)",
@@ -1314,8 +1340,7 @@ impl SearchFtsDb {
     ) -> rusqlite::Result<()> {
         self.conn.execute_batch("BEGIN;")?;
         for (symbol_id, decl) in entries {
-            let body = serde_json::to_string(decl)
-                .unwrap_or_else(|_| "{}".to_string());
+            let body = serde_json::to_string(decl).unwrap_or_else(|_| "{}".to_string());
             if let Err(err) = self.conn.execute(
                 "INSERT OR REPLACE INTO asd_effects_cache (symbol_id, ref_name, body)
                  VALUES (?1, ?2, ?3)",
@@ -1336,7 +1361,9 @@ impl SearchFtsDb {
     /// Used as a guard: if 0, the caller should fall back to git.
     pub fn feedback_count(&self) -> usize {
         self.conn
-            .query_row("SELECT COUNT(*) FROM asd_feedback", [], |r| r.get::<_, i64>(0))
+            .query_row("SELECT COUNT(*) FROM asd_feedback", [], |r| {
+                r.get::<_, i64>(0)
+            })
             .unwrap_or(0) as usize
     }
 
@@ -1374,22 +1401,22 @@ impl SearchFtsDb {
         let entries = stmt
             .query_map([], |row| {
                 let verdict_str: String = row.get(4)?;
-                let verdict = FeedbackVerdict::from_str(&verdict_str)
-                    .unwrap_or(FeedbackVerdict::Useful);
+                let verdict =
+                    FeedbackVerdict::from_str(&verdict_str).unwrap_or(FeedbackVerdict::Useful);
                 let ts_str: String = row.get(6)?;
                 let created_at: DateTime<Utc> = DateTime::parse_from_rfc3339(&ts_str)
                     .map(|d| d.with_timezone(&Utc))
                     .unwrap_or_else(|_| Utc::now());
                 Ok(FeedbackEntry {
-                    entry_id:     row.get(0)?,
-                    symbol_id:    row.get(1)?,
+                    entry_id: row.get(0)?,
+                    symbol_id: row.get(1)?,
                     symbol_qname: row.get(2)?,
-                    query:        row.get(3)?,
+                    query: row.get(3)?,
                     verdict,
-                    author:       row.get(5)?,
+                    author: row.get(5)?,
                     created_at,
-                    note:         row.get(7)?,
-                    file_scope:   row.get(8)?,
+                    note: row.get(7)?,
+                    file_scope: row.get(8)?,
                 })
             })?
             .filter_map(|r| r.ok())
@@ -1466,7 +1493,7 @@ impl SearchFtsDb {
                     signature: sig_orig.filter(|s| !s.is_empty()),
                     file: row.get(7)?,
                     tier,
-                    ledger_text:  row.get::<_, String>(9).unwrap_or_default(),
+                    ledger_text: row.get::<_, String>(9).unwrap_or_default(),
                     ledger_flags: row.get::<_, String>(10).unwrap_or_default(),
                 })
             })?
@@ -1528,8 +1555,7 @@ impl SearchFtsDb {
             .join("\nUNION ALL\n");
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let mut seen_files: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut seen_files: std::collections::HashSet<String> = std::collections::HashSet::new();
         let hits: Vec<FtsHit> = stmt
             .query_map(rusqlite::params_from_iter(valid.iter()), |row| {
                 let sig_orig: Option<String> = row.get(6)?;
@@ -1583,7 +1609,8 @@ pub fn hybrid_boost(hit: &FtsHit, tokens: &[String]) -> f64 {
     }
 
     // Expand file path into whole camelCase words.
-    let path_words: Vec<String> = hit.file
+    let path_words: Vec<String> = hit
+        .file
         .split(|c: char| c == '/' || c == '\\' || c == '.')
         .filter(|s| !s.is_empty())
         .flat_map(|seg| {
@@ -1626,7 +1653,11 @@ pub fn hybrid_boost(hit: &FtsHit, tokens: &[String]) -> f64 {
                 let name_slice = &name_words[window_start..window_start + pair_len];
                 for tok_start in 0..=lower_tokens.len().saturating_sub(pair_len) {
                     let tok_slice = &lower_tokens[tok_start..tok_start + pair_len];
-                    if name_slice.iter().map(|s| s.as_str()).eq(tok_slice.iter().copied()) {
+                    if name_slice
+                        .iter()
+                        .map(|s| s.as_str())
+                        .eq(tok_slice.iter().copied())
+                    {
                         bonus = bonus.max(pair_len as f64 * 3.0);
                     }
                 }
@@ -1647,23 +1678,53 @@ pub fn hybrid_boost(hit: &FtsHit, tokens: &[String]) -> f64 {
     // anchoring a specific domain concept. "playhead" is ambiguous in this project
     // (many UI and scheduler files contain it); require a co-occurring anchor.
     const GENERIC_TOKENS: &[&str] = &[
-        "state", "update", "local", "position", "value", "data", "item",
-        "list", "info", "event", "action", "type", "mode", "flag", "current",
-        "node", "result", "status", "record", "entry", "object", "element",
-        "get", "set", "add", "remove", "reset", "apply", "build", "make",
-        "playhead", "cursor", "progress", "indicator", "tick",
+        "state",
+        "update",
+        "local",
+        "position",
+        "value",
+        "data",
+        "item",
+        "list",
+        "info",
+        "event",
+        "action",
+        "type",
+        "mode",
+        "flag",
+        "current",
+        "node",
+        "result",
+        "status",
+        "record",
+        "entry",
+        "object",
+        "element",
+        "get",
+        "set",
+        "add",
+        "remove",
+        "reset",
+        "apply",
+        "build",
+        "make",
+        "playhead",
+        "cursor",
+        "progress",
+        "indicator",
+        "tick",
     ];
-    let matched_tokens: Vec<&str> = tokens.iter()
+    let matched_tokens: Vec<&str> = tokens
+        .iter()
         .filter(|t| {
-            name_words.iter().any(|w| w == t.as_str())
-                || path_words.iter().any(|w| w == t.as_str())
+            name_words.iter().any(|w| w == t.as_str()) || path_words.iter().any(|w| w == t.as_str())
         })
         .map(|t| t.as_str())
         .collect();
     let generic_penalty = if !matched_tokens.is_empty()
         && matched_tokens.iter().all(|t| GENERIC_TOKENS.contains(t))
     {
-        -2.5  // increased from -1.5 to push generic-only matches below domain-anchored ones
+        -2.5 // increased from -1.5 to push generic-only matches below domain-anchored ones
     } else {
         0.0
     };
@@ -1759,8 +1820,13 @@ pub fn trim_for_agent(v: &serde_json::Value, max_list: usize) -> serde_json::Val
     const DROP_FIELDS: &[&str] = &["body", "doc", "tokens"];
     // Arrays to truncate to max_list.
     const TRUNCATE_ARRAYS: &[&str] = &[
-        "callers", "callees", "notes", "decisions_and_notes",
-        "proofs", "ownership", "other_ledger",
+        "callers",
+        "callees",
+        "notes",
+        "decisions_and_notes",
+        "proofs",
+        "ownership",
+        "other_ledger",
     ];
     // Arrays where we simplify each item to {qname, file} only.
     const SIMPLIFY_REFS: &[&str] = &["callers", "callees"];
@@ -1783,8 +1849,12 @@ pub fn trim_for_agent(v: &serde_json::Value, max_list: usize) -> serde_json::Val
                                     // Keep only qname + file for call graph refs.
                                     if let Value::Object(obj) = item {
                                         let mut mini = serde_json::Map::new();
-                                        if let Some(q) = obj.get("qname") { mini.insert("qname".into(), q.clone()); }
-                                        if let Some(f) = obj.get("file") { mini.insert("file".into(), f.clone()); }
+                                        if let Some(q) = obj.get("qname") {
+                                            mini.insert("qname".into(), q.clone());
+                                        }
+                                        if let Some(f) = obj.get("file") {
+                                            mini.insert("file".into(), f.clone());
+                                        }
                                         Value::Object(mini)
                                     } else {
                                         item.clone()
@@ -1798,7 +1868,10 @@ pub fn trim_for_agent(v: &serde_json::Value, max_list: usize) -> serde_json::Val
                         if truncated {
                             Value::Array({
                                 let mut s = slice;
-                                s.push(serde_json::json!(format!("... {} more", arr.len() - max_list)));
+                                s.push(serde_json::json!(format!(
+                                    "... {} more",
+                                    arr.len() - max_list
+                                )));
                                 s
                             })
                         } else {
@@ -1810,17 +1883,21 @@ pub fn trim_for_agent(v: &serde_json::Value, max_list: usize) -> serde_json::Val
                 } else if k == "recently_touched" {
                     // Cap to 3 files, each with max_list commits.
                     if let Value::Array(files) = &trimmed {
-                        let capped: Vec<Value> = files.iter().take(3).map(|file_entry| {
-                            if let Value::Object(obj) = file_entry {
-                                let mut m = obj.clone();
-                                if let Some(Value::Array(commits)) = m.get_mut("commits") {
-                                    commits.truncate(max_list);
+                        let capped: Vec<Value> = files
+                            .iter()
+                            .take(3)
+                            .map(|file_entry| {
+                                if let Value::Object(obj) = file_entry {
+                                    let mut m = obj.clone();
+                                    if let Some(Value::Array(commits)) = m.get_mut("commits") {
+                                        commits.truncate(max_list);
+                                    }
+                                    Value::Object(m)
+                                } else {
+                                    file_entry.clone()
                                 }
-                                Value::Object(m)
-                            } else {
-                                file_entry.clone()
-                            }
-                        }).collect();
+                            })
+                            .collect();
                         Value::Array(capped)
                     } else {
                         trimmed
@@ -1832,7 +1909,9 @@ pub fn trim_for_agent(v: &serde_json::Value, max_list: usize) -> serde_json::Val
             }
             Value::Object(out)
         }
-        Value::Array(arr) => Value::Array(arr.iter().map(|i| trim_for_agent(i, max_list)).collect()),
+        Value::Array(arr) => {
+            Value::Array(arr.iter().map(|i| trim_for_agent(i, max_list)).collect())
+        }
         other => other.clone(),
     }
 }
@@ -1852,12 +1931,12 @@ pub fn estimate_tokens(json: &str) -> usize {
 /// Valid values: `bugfix`, `feature`, `refactor`, `test`, `architecture`, `ui`.
 pub fn parse_intent(s: &str) -> Option<&'static str> {
     match s.to_lowercase().as_str() {
-        "bugfix"       => Some("bugfix"),
-        "feature"      => Some("feature"),
-        "refactor"     => Some("refactor"),
-        "test"         => Some("test"),
+        "bugfix" => Some("bugfix"),
+        "feature" => Some("feature"),
+        "refactor" => Some("refactor"),
+        "test" => Some("test"),
         "architecture" => Some("architecture"),
-        "ui"           => Some("ui"),
+        "ui" => Some("ui"),
         _ => None,
     }
 }
@@ -1865,13 +1944,21 @@ pub fn parse_intent(s: &str) -> Option<&'static str> {
 /// One-line agent guidance for each intent.
 pub fn intent_focus(intent: &str) -> &'static str {
     match intent {
-        "bugfix"       => "Focus: callers that may be broken, effects, invariants to preserve, affected tests.",
-        "feature"      => "Focus: callees to extend, ownership boundaries, empty extension points.",
-        "refactor"     => "Focus: callers (blast radius), invariants that must hold, ownership constraints.",
-        "test"         => "Focus: affected test symbols, effects under test, existing proof ledger entries.",
-        "architecture" => "Focus: invariants, ownership boundaries, layer grouping, cross-layer effects.",
-        "ui"           => "Focus: UI/ViewModel layers, effects that touch display state, scheduler coupling.",
-        _              => "",
+        "bugfix" => {
+            "Focus: callers that may be broken, effects, invariants to preserve, affected tests."
+        }
+        "feature" => "Focus: callees to extend, ownership boundaries, empty extension points.",
+        "refactor" => {
+            "Focus: callers (blast radius), invariants that must hold, ownership constraints."
+        }
+        "test" => {
+            "Focus: affected test symbols, effects under test, existing proof ledger entries."
+        }
+        "architecture" => {
+            "Focus: invariants, ownership boundaries, layer grouping, cross-layer effects."
+        }
+        "ui" => "Focus: UI/ViewModel layers, effects that touch display state, scheduler coupling.",
+        _ => "",
     }
 }
 
@@ -1879,11 +1966,56 @@ pub fn intent_focus(intent: &str) -> &'static str {
 /// The standard order is used for unlisted layers.
 pub fn intent_layer_order(intent: &str) -> &'static [&'static str] {
     match intent {
-        "ui"           => &["ui", "viewmodel", "scheduler", "core_model", "persistence", "utility", "tests", "other"],
-        "architecture" => &["core_model", "persistence", "scheduler", "viewmodel", "ui", "utility", "tests", "other"],
-        "bugfix"       => &["core_model", "scheduler", "persistence", "viewmodel", "ui", "tests", "utility", "other"],
-        "test"         => &["tests", "core_model", "scheduler", "persistence", "viewmodel", "ui", "utility", "other"],
-        _              => &["ui", "viewmodel", "scheduler", "core_model", "persistence", "utility", "tests", "other"],
+        "ui" => &[
+            "ui",
+            "viewmodel",
+            "scheduler",
+            "core_model",
+            "persistence",
+            "utility",
+            "tests",
+            "other",
+        ],
+        "architecture" => &[
+            "core_model",
+            "persistence",
+            "scheduler",
+            "viewmodel",
+            "ui",
+            "utility",
+            "tests",
+            "other",
+        ],
+        "bugfix" => &[
+            "core_model",
+            "scheduler",
+            "persistence",
+            "viewmodel",
+            "ui",
+            "tests",
+            "utility",
+            "other",
+        ],
+        "test" => &[
+            "tests",
+            "core_model",
+            "scheduler",
+            "persistence",
+            "viewmodel",
+            "ui",
+            "utility",
+            "other",
+        ],
+        _ => &[
+            "ui",
+            "viewmodel",
+            "scheduler",
+            "core_model",
+            "persistence",
+            "utility",
+            "tests",
+            "other",
+        ],
     }
 }
 
@@ -1910,11 +2042,15 @@ pub fn git_dirty_files() -> std::collections::HashSet<String> {
     let out = Proc::new("git")
         .args(["status", "--short", "--untracked-files=no"])
         .output();
-    let Ok(o) = out else { return std::collections::HashSet::new(); };
-    if !o.status.success() { return std::collections::HashSet::new(); }
+    let Ok(o) = out else {
+        return std::collections::HashSet::new();
+    };
+    if !o.status.success() {
+        return std::collections::HashSet::new();
+    }
     const SRC_EXTS: &[&str] = &[
-        ".swift", ".py", ".ts", ".tsx", ".js", ".rs", ".go",
-        ".kt", ".java", ".rb", ".cs", ".m", ".mm", ".cpp", ".c",
+        ".swift", ".py", ".ts", ".tsx", ".js", ".rs", ".go", ".kt", ".java", ".rb", ".cs", ".m",
+        ".mm", ".cpp", ".c",
     ];
     String::from_utf8_lossy(&o.stdout)
         .lines()
@@ -1954,7 +2090,10 @@ pub fn derive_cold_hints(qname: &str, signature: Option<&str>, doc: Option<&str>
         .unwrap_or(qname);
     let words = split_identifier_words(leaf);
     if words.len() >= 2 {
-        hints.push(format!("verify {} behavior", words.join(" ").to_lowercase()));
+        hints.push(format!(
+            "verify {} behavior",
+            words.join(" ").to_lowercase()
+        ));
     } else if words.len() == 1 && hints.is_empty() {
         hints.push(format!("verify {} is correct", words[0].to_lowercase()));
     }
@@ -1977,7 +2116,10 @@ fn split_identifier_words(s: &str) -> Vec<String> {
     let mut cur = String::new();
     for ch in s.chars() {
         if ch == '_' || ch == '-' {
-            if !cur.is_empty() { words.push(cur.clone()); cur.clear(); }
+            if !cur.is_empty() {
+                words.push(cur.clone());
+                cur.clear();
+            }
         } else if ch.is_uppercase() && !cur.is_empty() {
             words.push(cur.clone());
             cur.clear();
@@ -1986,7 +2128,9 @@ fn split_identifier_words(s: &str) -> Vec<String> {
             cur.push(ch);
         }
     }
-    if !cur.is_empty() { words.push(cur); }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
     words.into_iter().filter(|w| w.len() > 1).collect()
 }
 
@@ -2001,7 +2145,9 @@ fn extract_sig_param_names(sig: &str) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for part in inner.split(',') {
         let part = part.trim();
-        if part.is_empty() { continue; }
+        if part.is_empty() {
+            continue;
+        }
         // Take first token, strip leading `_` (Swift external labels), `&`, `mut`.
         let token = part
             .split(|c: char| c.is_whitespace() || c == ':')
@@ -2031,11 +2177,16 @@ pub fn find_indexed_test_files(db_path: &std::path::Path, source_file: &str) -> 
     if stem.is_empty() {
         return vec![];
     }
-    let Ok(db) = SearchFtsDb::open(db_path) else { return vec![]; };
+    let Ok(db) = SearchFtsDb::open(db_path) else {
+        return vec![];
+    };
     // Query unique file paths from the index that look like test files.
-    let Ok(mut stmt) = db.conn.prepare(
-        "SELECT DISTINCT file_orig FROM asd_search_fts WHERE tier = 2"
-    ) else { return vec![]; };
+    let Ok(mut stmt) = db
+        .conn
+        .prepare("SELECT DISTINCT file_orig FROM asd_search_fts WHERE tier = 2")
+    else {
+        return vec![];
+    };
     let rows: Vec<String> = stmt
         .query_map([], |r| r.get::<_, String>(0))
         .map(|iter| iter.filter_map(|r| r.ok()).collect())
@@ -2048,7 +2199,13 @@ pub fn find_indexed_test_files(db_path: &std::path::Path, source_file: &str) -> 
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_lowercase();
-            f_stem.contains(&stem) || stem.contains(f_stem.trim_end_matches("tests").trim_end_matches("test").trim_end_matches("spec"))
+            f_stem.contains(&stem)
+                || stem.contains(
+                    f_stem
+                        .trim_end_matches("tests")
+                        .trim_end_matches("test")
+                        .trim_end_matches("spec"),
+                )
         })
         .collect()
 }
@@ -2057,10 +2214,15 @@ pub fn find_indexed_test_files(db_path: &std::path::Path, source_file: &str) -> 
 /// Pass the result to [`test_files_for_source`] for per-file stem matching,
 /// avoiding repeated DB opens when processing many source files in a loop.
 pub fn fetch_all_test_file_paths(db_path: &std::path::Path) -> Vec<String> {
-    let Ok(db) = SearchFtsDb::open(db_path) else { return vec![]; };
-    let Ok(mut stmt) = db.conn.prepare(
-        "SELECT DISTINCT file_orig FROM asd_search_fts WHERE tier = 2"
-    ) else { return vec![]; };
+    let Ok(db) = SearchFtsDb::open(db_path) else {
+        return vec![];
+    };
+    let Ok(mut stmt) = db
+        .conn
+        .prepare("SELECT DISTINCT file_orig FROM asd_search_fts WHERE tier = 2")
+    else {
+        return vec![];
+    };
     stmt.query_map([], |r| r.get::<_, String>(0))
         .map(|iter| iter.filter_map(|r| r.ok()).collect())
         .unwrap_or_default()
@@ -2075,8 +2237,11 @@ pub fn test_files_for_source(all_test_files: &[String], source_file: &str) -> Ve
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_lowercase();
-    if stem.is_empty() { return vec![]; }
-    all_test_files.iter()
+    if stem.is_empty() {
+        return vec![];
+    }
+    all_test_files
+        .iter()
         .filter(|f| {
             let f_stem = std::path::Path::new(f.as_str())
                 .file_stem()
@@ -2097,7 +2262,10 @@ pub fn test_files_for_source(all_test_files: &[String], source_file: &str) -> Ve
 
 pub fn propose_test_path(source_file: &str) -> String {
     let path = std::path::Path::new(source_file);
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown");
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Unknown");
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("swift");
     // Try parallel test path by substituting common source dirs.
     let candidate = source_file
@@ -2129,7 +2297,10 @@ pub fn propose_test_path(source_file: &str) -> String {
 ///
 /// The first commit that mentions a file is its "last touched" commit.
 /// `hot_days` controls the `hot` flag (files modified within that window).
-pub fn gather_recency(scan_commits: usize, hot_days: f64) -> std::collections::HashMap<String, FileRecency> {
+pub fn gather_recency(
+    scan_commits: usize,
+    hot_days: f64,
+) -> std::collections::HashMap<String, FileRecency> {
     use std::collections::HashMap;
     use std::process::Command;
 
@@ -2142,8 +2313,12 @@ pub fn gather_recency(scan_commits: usize, hot_days: f64) -> std::collections::H
         ])
         .output();
 
-    let Ok(out) = output else { return HashMap::new() };
-    if !out.status.success() { return HashMap::new() }
+    let Ok(out) = output else {
+        return HashMap::new();
+    };
+    if !out.status.success() {
+        return HashMap::new();
+    }
 
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2294,22 +2469,36 @@ pub fn discover_symbol_ownership(
     let mut annotated: Vec<AnnotatedOwner> = Vec::new();
     // Doc owner is the strongest signal — explicit annotation by the author.
     if let Some(ref owner) = doc_owner {
-        annotated.push(AnnotatedOwner { name: owner.clone(), source: OwnerSignalSource::DocComment });
+        annotated.push(AnnotatedOwner {
+            name: owner.clone(),
+            source: OwnerSignalSource::DocComment,
+        });
     }
     // Primary blame author is high-confidence structural ownership.
     if let Some(ref author) = primary_author {
         if !annotated.iter().any(|a| &a.name == author) {
-            annotated.push(AnnotatedOwner { name: author.clone(), source: OwnerSignalSource::GitBlame });
+            annotated.push(AnnotatedOwner {
+                name: author.clone(),
+                source: OwnerSignalSource::GitBlame,
+            });
         }
     }
     // Recent committers complete the picture with lower-confidence recency signal.
     for committer in &recent_committers {
         if !annotated.iter().any(|a| &a.name == committer) {
-            annotated.push(AnnotatedOwner { name: committer.clone(), source: OwnerSignalSource::GitLog });
+            annotated.push(AnnotatedOwner {
+                name: committer.clone(),
+                source: OwnerSignalSource::GitLog,
+            });
         }
     }
 
-    OwnershipSignal { primary_author, doc_owner, recent_committers, annotated }
+    OwnershipSignal {
+        primary_author,
+        doc_owner,
+        recent_committers,
+        annotated,
+    }
 }
 
 /// A test symbol that likely covers a given impl symbol.
@@ -2330,10 +2519,7 @@ pub struct CoveringTest {
 /// 2. Test doc comment mentions the impl qname.
 ///
 /// Returns a list of `CoveringTest` with file path and exact run command.
-pub fn find_covering_tests(
-    fts: Option<&SearchFtsDb>,
-    impl_qname: &str,
-) -> Vec<CoveringTest> {
+pub fn find_covering_tests(fts: Option<&SearchFtsDb>, impl_qname: &str) -> Vec<CoveringTest> {
     let leaf = impl_qname
         .split(|c: char| c == '.' || c == ':' || c == '/')
         .last()
@@ -2342,17 +2528,24 @@ pub fn find_covering_tests(
     if leaf.is_empty() || leaf.len() < 3 {
         return vec![];
     }
-    let Some(db) = fts else { return vec![]; };
+    let Some(db) = fts else {
+        return vec![];
+    };
     // Query test-tier symbols whose qname or doc mentions the leaf name.
-    let Ok(mut stmt) = db.conn.prepare(
-        "SELECT qname_orig, file_orig, start_line FROM asd_search_fts WHERE tier = 2"
-    ) else { return vec![]; };
+    let Ok(mut stmt) = db
+        .conn
+        .prepare("SELECT qname_orig, file_orig, start_line FROM asd_search_fts WHERE tier = 2")
+    else {
+        return vec![];
+    };
     let rows: Vec<(String, String, i64)> = stmt
-        .query_map([], |r| Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, i64>(2)?,
-        )))
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })
         .map(|iter| iter.filter_map(|r| r.ok()).collect())
         .unwrap_or_default();
 
@@ -2368,7 +2561,12 @@ pub fn find_covering_tests(
         })
         .map(|(qname, file, line)| {
             let run_command = derive_test_run_command(&file, &qname);
-            CoveringTest { qname, file, line, run_command }
+            CoveringTest {
+                qname,
+                file,
+                line,
+                run_command,
+            }
         })
         .collect()
 }
@@ -2397,8 +2595,10 @@ fn derive_test_run_command(file: &str, test_qname: &str) -> String {
         }
         if d.join("package.json").exists() {
             // Prefer jest/vitest based on file extension.
-            if file.ends_with(".test.ts") || file.ends_with(".spec.ts")
-                || file.ends_with(".test.js") || file.ends_with(".spec.js")
+            if file.ends_with(".test.ts")
+                || file.ends_with(".spec.ts")
+                || file.ends_with(".test.js")
+                || file.ends_with(".spec.js")
             {
                 return format!("npx jest --testNamePattern=\"{}\"", leaf_name);
             }
@@ -2409,7 +2609,8 @@ fn derive_test_run_command(file: &str, test_qname: &str) -> String {
         }
         if d.join("go.mod").exists() {
             // Derive package from file path relative to go.mod.
-            let rel = file_path.strip_prefix(d)
+            let rel = file_path
+                .strip_prefix(d)
                 .ok()
                 .and_then(|p| p.parent())
                 .and_then(|p| p.to_str())
@@ -2457,7 +2658,9 @@ fn strip_doc_prefix(line: &str) -> &str {
     // Multi-char prefixes first.
     for prefix in &["///", "//!", "/**", "*/", "//"] {
         if let Some(rest) = s.strip_prefix(prefix) {
-            return rest.trim_start_matches([' ', '\t']).trim_end_matches([' ', '\t']);
+            return rest
+                .trim_start_matches([' ', '\t'])
+                .trim_end_matches([' ', '\t']);
         }
     }
     // Single-char: leading `*` (continuation in /** ... */), `#`, `-`
@@ -2486,10 +2689,16 @@ pub fn extract_summary(doc: Option<&str>, signature: Option<&str>) -> String {
             let end = cleaned
                 .char_indices()
                 .find_map(|(i, c)| {
-                    if matches!(c, '.' | '!' | '?') { Some(i + c.len_utf8()) } else { None }
+                    if matches!(c, '.' | '!' | '?') {
+                        Some(i + c.len_utf8())
+                    } else {
+                        None
+                    }
                 })
                 .unwrap_or(cleaned.len().min(120));
-            let sentence = cleaned[..end.min(cleaned.len())].trim().trim_end_matches(['.', '!', '?']);
+            let sentence = cleaned[..end.min(cleaned.len())]
+                .trim()
+                .trim_end_matches(['.', '!', '?']);
             if !sentence.is_empty() {
                 return sentence.to_string();
             }
@@ -2515,7 +2724,13 @@ pub fn extract_summary(doc: Option<&str>, signature: Option<&str>) -> String {
 ///        default but penalised in `hybrid_boost` so production ranks first.
 /// - `0` Production: all other source files.
 pub fn symbol_tier(file: &str) -> SymbolTier {
-    if is_test_file(file) { 2 } else if is_utility_file(file) { 1 } else { 0 }
+    if is_test_file(file) {
+        2
+    } else if is_utility_file(file) {
+        1
+    } else {
+        0
+    }
 }
 
 /// Load user-defined layer overrides from `.asd/layers.toml` next to `db_path`.
@@ -2539,11 +2754,19 @@ pub fn load_layer_overrides(db_path: &std::path::Path) -> Vec<(String, String)> 
     ];
 
     for maybe_path in candidates.iter().flatten() {
-        let Ok(text) = std::fs::read_to_string(maybe_path) else { continue };
+        let Ok(text) = std::fs::read_to_string(maybe_path) else {
+            continue;
+        };
         #[derive(serde::Deserialize)]
-        struct LayersFile { patterns: Option<toml::Table> }
-        let Ok(parsed) = toml::from_str::<LayersFile>(&text) else { continue };
-        let Some(patterns) = parsed.patterns else { continue };
+        struct LayersFile {
+            patterns: Option<toml::Table>,
+        }
+        let Ok(parsed) = toml::from_str::<LayersFile>(&text) else {
+            continue;
+        };
+        let Some(patterns) = parsed.patterns else {
+            continue;
+        };
         let pairs: Vec<(String, String)> = patterns
             .into_iter()
             .filter_map(|(k, v)| {
@@ -2585,9 +2808,17 @@ fn validate_layer_name(name: &str) -> Option<&'static str> {
 /// suffixes are matched against common patterns for each layer. The `tier`
 /// argument is used so that tier-2 (test) files always land in `"tests"` and
 /// tier-1 (utility) files always land in `"utility"` regardless of path.
-pub fn classify_layer(file: &str, tier: SymbolTier, overrides: &[(String, String)]) -> &'static str {
-    if tier == 2 { return "tests"; }
-    if tier == 1 { return "utility"; }
+pub fn classify_layer(
+    file: &str,
+    tier: SymbolTier,
+    overrides: &[(String, String)],
+) -> &'static str {
+    if tier == 2 {
+        return "tests";
+    }
+    if tier == 1 {
+        return "utility";
+    }
 
     // User-defined overrides take priority over built-in patterns.
     let lower = file.to_lowercase();
@@ -2609,14 +2840,37 @@ pub fn classify_layer(file: &str, tier: SymbolTier, overrides: &[(String, String
 
     // --- Scheduler / Engine ---
     const SCHED_DIRS: &[&str] = &[
-        "scheduler", "schedulers", "engine", "engines", "audio", "audioengine",
-        "transport", "render", "renderer", "pipeline", "worker", "workers",
-        "processing", "realtime", "dsp", "clock",
+        "scheduler",
+        "schedulers",
+        "engine",
+        "engines",
+        "audio",
+        "audioengine",
+        "transport",
+        "render",
+        "renderer",
+        "pipeline",
+        "worker",
+        "workers",
+        "processing",
+        "realtime",
+        "dsp",
+        "clock",
     ];
     const SCHED_SUFFIXES: &[&str] = &[
-        "scheduler", "engine", "transport", "renderer", "pipeline",
-        "worker", "processor", "synthesizer", "synth", "clock", "timer",
-        "compiler", "loop",
+        "scheduler",
+        "engine",
+        "transport",
+        "renderer",
+        "pipeline",
+        "worker",
+        "processor",
+        "synthesizer",
+        "synth",
+        "clock",
+        "timer",
+        "compiler",
+        "loop",
     ];
     if dirs.iter().any(|d| SCHED_DIRS.contains(d))
         || SCHED_SUFFIXES.iter().any(|s| stem.ends_with(s))
@@ -2626,13 +2880,28 @@ pub fn classify_layer(file: &str, tier: SymbolTier, overrides: &[(String, String
 
     // --- Persistence ---
     const PERSIST_DIRS: &[&str] = &[
-        "storage", "database", "db", "repository", "repositories",
-        "cache", "datastore", "persistence", "migration", "migrations",
-        "store", "dao",
+        "storage",
+        "database",
+        "db",
+        "repository",
+        "repositories",
+        "cache",
+        "datastore",
+        "persistence",
+        "migration",
+        "migrations",
+        "store",
+        "dao",
     ];
     const PERSIST_SUFFIXES: &[&str] = &[
-        "repository", "store", "database", "cache", "storage",
-        "dao", "datasource", "migration",
+        "repository",
+        "store",
+        "database",
+        "cache",
+        "storage",
+        "dao",
+        "datasource",
+        "migration",
     ];
     if dirs.iter().any(|d| PERSIST_DIRS.contains(d))
         || PERSIST_SUFFIXES.iter().any(|s| stem.ends_with(s))
@@ -2642,47 +2911,92 @@ pub fn classify_layer(file: &str, tier: SymbolTier, overrides: &[(String, String
 
     // --- ViewModel / Presenter / Controller ---
     const VM_DIRS: &[&str] = &[
-        "viewmodels", "viewmodel", "presenters", "presenter",
-        "coordinators", "coordinator", "interactors", "interactor",
-        "controllers", "controller", "states", "state", "routers", "router",
+        "viewmodels",
+        "viewmodel",
+        "presenters",
+        "presenter",
+        "coordinators",
+        "coordinator",
+        "interactors",
+        "interactor",
+        "controllers",
+        "controller",
+        "states",
+        "state",
+        "routers",
+        "router",
     ];
     const VM_SUFFIXES: &[&str] = &[
-        "viewmodel", "viewstate", "presenter", "coordinator",
-        "interactor", "statemanager", "controller", "observable",
-        "environment", "router",
+        "viewmodel",
+        "viewstate",
+        "presenter",
+        "coordinator",
+        "interactor",
+        "statemanager",
+        "controller",
+        "observable",
+        "environment",
+        "router",
     ];
-    if dirs.iter().any(|d| VM_DIRS.contains(d))
-        || VM_SUFFIXES.iter().any(|s| stem.ends_with(s))
-    {
+    if dirs.iter().any(|d| VM_DIRS.contains(d)) || VM_SUFFIXES.iter().any(|s| stem.ends_with(s)) {
         return "viewmodel";
     }
 
     // --- UI ---
     const UI_DIRS: &[&str] = &[
-        "views", "view", "screens", "screen", "pages", "page",
-        "components", "component", "widgets", "widget",
-        "cells", "viewcontrollers", "ui", "fragments",
+        "views",
+        "view",
+        "screens",
+        "screen",
+        "pages",
+        "page",
+        "components",
+        "component",
+        "widgets",
+        "widget",
+        "cells",
+        "viewcontrollers",
+        "ui",
+        "fragments",
     ];
     const UI_SUFFIXES: &[&str] = &[
-        "view", "screen", "page", "component", "widget",
-        "cell", "viewcontroller", "fragment", "layout", "button",
-        "label", "panel", "sheet", "modal", "overlay", "header", "footer",
+        "view",
+        "screen",
+        "page",
+        "component",
+        "widget",
+        "cell",
+        "viewcontroller",
+        "fragment",
+        "layout",
+        "button",
+        "label",
+        "panel",
+        "sheet",
+        "modal",
+        "overlay",
+        "header",
+        "footer",
     ];
-    if dirs.iter().any(|d| UI_DIRS.contains(d))
-        || UI_SUFFIXES.iter().any(|s| stem.ends_with(s))
-    {
+    if dirs.iter().any(|d| UI_DIRS.contains(d)) || UI_SUFFIXES.iter().any(|s| stem.ends_with(s)) {
         return "ui";
     }
 
     // --- Core Model / Domain ---
     const MODEL_DIRS: &[&str] = &[
-        "models", "model", "domain", "core", "entities", "entity",
-        "services", "service", "usecases", "usecase", "business",
-        "logic", "features", "feature",
+        "models", "model", "domain", "core", "entities", "entity", "services", "service",
+        "usecases", "usecase", "business", "logic", "features", "feature",
     ];
     const MODEL_SUFFIXES: &[&str] = &[
-        "model", "entity", "service", "usecase", "manager",
-        "handler", "factory", "builder", "validator",
+        "model",
+        "entity",
+        "service",
+        "usecase",
+        "manager",
+        "handler",
+        "factory",
+        "builder",
+        "validator",
     ];
     if dirs.iter().any(|d| MODEL_DIRS.contains(d))
         || MODEL_SUFFIXES.iter().any(|s| stem.ends_with(s))
@@ -2724,41 +3038,81 @@ pub fn classify_layer_sym(
 
     for component in &components {
         let n = component.to_lowercase();
-        if n.ends_with("viewmodel") || n.ends_with("controller") || n.ends_with("presenter")
-            || n.ends_with("coordinator") || n.ends_with("interactor") || n.ends_with("viewstate")
-            || n.ends_with("statemanager") || n.ends_with("router")
+        if n.ends_with("viewmodel")
+            || n.ends_with("controller")
+            || n.ends_with("presenter")
+            || n.ends_with("coordinator")
+            || n.ends_with("interactor")
+            || n.ends_with("viewstate")
+            || n.ends_with("statemanager")
+            || n.ends_with("router")
         {
             found_viewmodel = true;
-        } else if n.ends_with("view") || n.ends_with("screen") || n.ends_with("page")
-            || n.ends_with("cell") || n.ends_with("widget") || n.ends_with("button")
-            || n.ends_with("label") || n.ends_with("panel") || n.ends_with("viewcontroller")
-            || n.ends_with("sheet") || n.ends_with("overlay") || n.ends_with("header")
+        } else if n.ends_with("view")
+            || n.ends_with("screen")
+            || n.ends_with("page")
+            || n.ends_with("cell")
+            || n.ends_with("widget")
+            || n.ends_with("button")
+            || n.ends_with("label")
+            || n.ends_with("panel")
+            || n.ends_with("viewcontroller")
+            || n.ends_with("sheet")
+            || n.ends_with("overlay")
+            || n.ends_with("header")
         {
             found_ui = true;
-        } else if n.ends_with("scheduler") || n.ends_with("engine") || n.ends_with("compiler")
-            || n.ends_with("processor") || n.ends_with("renderer") || n.ends_with("clock")
-            || n.ends_with("timer") || n.ends_with("pipeline") || n.ends_with("worker")
-            || n.ends_with("synthesizer") || n.ends_with("transport")
+        } else if n.ends_with("scheduler")
+            || n.ends_with("engine")
+            || n.ends_with("compiler")
+            || n.ends_with("processor")
+            || n.ends_with("renderer")
+            || n.ends_with("clock")
+            || n.ends_with("timer")
+            || n.ends_with("pipeline")
+            || n.ends_with("worker")
+            || n.ends_with("synthesizer")
+            || n.ends_with("transport")
         {
             found_scheduler = true;
-        } else if n.ends_with("repository") || n.ends_with("store") || n.ends_with("cache")
-            || n.ends_with("dao") || n.ends_with("database") || n.ends_with("datasource")
+        } else if n.ends_with("repository")
+            || n.ends_with("store")
+            || n.ends_with("cache")
+            || n.ends_with("dao")
+            || n.ends_with("database")
+            || n.ends_with("datasource")
         {
             found_persistence = true;
-        } else if n.ends_with("model") || n.ends_with("entity") || n.ends_with("service")
-            || n.ends_with("manager") || n.ends_with("handler") || n.ends_with("factory")
-            || n.ends_with("validator") || n.ends_with("usecase") || n.ends_with("builder")
+        } else if n.ends_with("model")
+            || n.ends_with("entity")
+            || n.ends_with("service")
+            || n.ends_with("manager")
+            || n.ends_with("handler")
+            || n.ends_with("factory")
+            || n.ends_with("validator")
+            || n.ends_with("usecase")
+            || n.ends_with("builder")
         {
             found_core_model = true;
         }
     }
 
     // Return in priority order: most specific wins.
-    if found_viewmodel { return "viewmodel"; }
-    if found_ui { return "ui"; }
-    if found_scheduler { return "scheduler"; }
-    if found_persistence { return "persistence"; }
-    if found_core_model { return "core_model"; }
+    if found_viewmodel {
+        return "viewmodel";
+    }
+    if found_ui {
+        return "ui";
+    }
+    if found_scheduler {
+        return "scheduler";
+    }
+    if found_persistence {
+        return "persistence";
+    }
+    if found_core_model {
+        return "core_model";
+    }
     "other"
 }
 
@@ -2771,16 +3125,37 @@ fn is_utility_file(file: &str) -> bool {
 
     // Directory names that indicate non-production utility trees.
     const UTILITY_DIRS: &[&str] = &[
-        "previews", "preview", "samples", "sample", "sampledata", "examples", "example",
-        "mocks", "mock", "stubs", "stub", "fixtures", "fixture",
-        "demo", "demos", "editor", "editors", "generated", "gen",
-        "sandbox", "playground", "playgrounds",
+        "previews",
+        "preview",
+        "samples",
+        "sample",
+        "sampledata",
+        "examples",
+        "example",
+        "mocks",
+        "mock",
+        "stubs",
+        "stub",
+        "fixtures",
+        "fixture",
+        "demo",
+        "demos",
+        "editor",
+        "editors",
+        "generated",
+        "gen",
+        "sandbox",
+        "playground",
+        "playgrounds",
     ];
     // Also match compound directory names that start with a utility prefix.
     const UTILITY_PREFIXES: &[&str] = &["mock", "stub", "fake", "sample", "preview", "generated"];
-    if segments.iter().rev().skip(1).any(|s| {
-        UTILITY_DIRS.contains(s) || UTILITY_PREFIXES.iter().any(|p| s.starts_with(p))
-    }) {
+    if segments
+        .iter()
+        .rev()
+        .skip(1)
+        .any(|s| UTILITY_DIRS.contains(s) || UTILITY_PREFIXES.iter().any(|p| s.starts_with(p)))
+    {
         return true;
     }
 
@@ -2795,13 +3170,19 @@ fn is_utility_file(file: &str) -> bool {
             return true;
         }
         // Generated files: Foo.generated.swift, Foo.g.swift, FooGenerated.swift
-        if filename.contains(".generated.") || filename.contains(".g.") || filename.ends_with("generated.swift") {
+        if filename.contains(".generated.")
+            || filename.contains(".g.")
+            || filename.ends_with("generated.swift")
+        {
             return true;
         }
         // Mock/Stub/Fake: MockFoo.swift, FooMock.kt, FakeBar.ts
-        if filename.starts_with("mock") || filename.contains("_mock.")
-            || filename.starts_with("stub") || filename.contains("_stub.")
-            || filename.starts_with("fake") || filename.contains("_fake.")
+        if filename.starts_with("mock")
+            || filename.contains("_mock.")
+            || filename.starts_with("stub")
+            || filename.contains("_stub.")
+            || filename.starts_with("fake")
+            || filename.contains("_fake.")
         {
             return true;
         }
@@ -2824,7 +3205,14 @@ fn is_test_file(file: &str) -> bool {
 
     // Directory components that indicate a test tree.
     const TEST_DIRS: &[&str] = &[
-        "tests", "test", "specs", "spec", "__tests__", "__mocks__", "testing", "testcases",
+        "tests",
+        "test",
+        "specs",
+        "spec",
+        "__tests__",
+        "__mocks__",
+        "testing",
+        "testcases",
     ];
     if segments.iter().rev().skip(1).any(|s| TEST_DIRS.contains(s)) {
         return true;
@@ -2978,15 +3366,31 @@ pub struct SearchDoc {
 }
 
 impl SearchDoc {
-    pub fn new(kind: DocKind, path: impl Into<String>, span_start: Option<u32>, title: impl Into<String>, body_text: impl Into<String>) -> Self {
+    pub fn new(
+        kind: DocKind,
+        path: impl Into<String>,
+        span_start: Option<u32>,
+        title: impl Into<String>,
+        body_text: impl Into<String>,
+    ) -> Self {
         let path = path.into();
         let span_str = span_start.map(|l| l.to_string()).unwrap_or_default();
         let raw = format!("{}:{}", path, span_str);
         // Simple djb2-style deterministic id — no external dep needed.
         let mut hash: u64 = 5381;
-        for b in raw.bytes() { hash = hash.wrapping_mul(33).wrapping_add(b as u64); }
+        for b in raw.bytes() {
+            hash = hash.wrapping_mul(33).wrapping_add(b as u64);
+        }
         let doc_id = format!("doc_{:016x}", hash);
-        Self { doc_id, kind, path, span_start, title: title.into(), body_text: body_text.into(), owner_symbol_id: None }
+        Self {
+            doc_id,
+            kind,
+            path,
+            span_start,
+            title: title.into(),
+            body_text: body_text.into(),
+            owner_symbol_id: None,
+        }
     }
 }
 
@@ -2994,10 +3398,10 @@ impl SearchDoc {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocKind {
     Markdown,
-    Config,   // JSON, TOML, YAML, plist
+    Config, // JSON, TOML, YAML, plist
     Html,
     Css,
-    Manifest, // Package.swift, Cargo.toml, pubspec.yaml, package.json (as manifests)
+    Manifest,    // Package.swift, Cargo.toml, pubspec.yaml, package.json (as manifests)
     BuildScript, // Makefile, Fastfile, Podfile, Gemfile
     Other,
 }
@@ -3074,16 +3478,17 @@ impl SearchDocsDb {
     }
 
     fn ensure_schema(&self) -> rusqlite::Result<()> {
-        let current: i64 = self.conn.query_row(
-            "SELECT version FROM asd_docs_meta LIMIT 1",
-            [],
-            |r| r.get(0),
-        ).unwrap_or(0);
+        let current: i64 = self
+            .conn
+            .query_row("SELECT version FROM asd_docs_meta LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap_or(0);
 
         if current != Self::SCHEMA_VER {
             self.conn.execute_batch(
                 "DROP TABLE IF EXISTS asd_search_docs;
-                 DROP TABLE IF EXISTS asd_docs_meta;"
+                 DROP TABLE IF EXISTS asd_docs_meta;",
             )?;
         }
 
@@ -3126,7 +3531,8 @@ impl SearchDocsDb {
     }
 
     pub fn count(&self) -> rusqlite::Result<i64> {
-        self.conn.query_row("SELECT COUNT(*) FROM asd_search_docs", [], |r| r.get(0))
+        self.conn
+            .query_row("SELECT COUNT(*) FROM asd_search_docs", [], |r| r.get(0))
     }
 
     /// Full-text search over document chunks. Returns up to `limit` hits ranked by BM25.
@@ -3137,16 +3543,25 @@ impl SearchDocsDb {
         kinds: Option<&[&str]>,
     ) -> rusqlite::Result<Vec<DocHit>> {
         let filtered: Vec<&String> = tokens.iter().filter(|t| !is_stopword(t)).collect();
-        if filtered.is_empty() { return Ok(vec![]); }
-        let match_expr = filtered.iter()
+        if filtered.is_empty() {
+            return Ok(vec![]);
+        }
+        let match_expr = filtered
+            .iter()
             .map(|t| format!("\"{}\"", t.replace('"', "")))
             .collect::<Vec<_>>()
             .join(" OR ");
 
-        let kind_filter = kinds.map(|ks| {
-            let list = ks.iter().map(|k| format!("'{}'", k)).collect::<Vec<_>>().join(",");
-            format!(" AND kind IN ({})", list)
-        }).unwrap_or_default();
+        let kind_filter = kinds
+            .map(|ks| {
+                let list = ks
+                    .iter()
+                    .map(|k| format!("'{}'", k))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(" AND kind IN ({})", list)
+            })
+            .unwrap_or_default();
 
         let sql = format!(
             "SELECT doc_id, kind, path, span_start, owner_symbol_id, title, body_text,
@@ -3158,22 +3573,23 @@ impl SearchDocsDb {
         );
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let hits = stmt.query_map(params![match_expr], |row| {
-            let body: String = row.get(6)?;
-            let preview = body.chars().take(200).collect::<String>();
-            Ok(DocHit {
-                doc_id: row.get(0)?,
-                kind: row.get(1)?,
-                path: row.get(2)?,
-                span_start: row.get(3)?,
-                owner_symbol_id: row.get(4)?,
-                title: row.get(5)?,
-                preview,
-                bm25_score: row.get(7)?,
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
+        let hits = stmt
+            .query_map(params![match_expr], |row| {
+                let body: String = row.get(6)?;
+                let preview = body.chars().take(200).collect::<String>();
+                Ok(DocHit {
+                    doc_id: row.get(0)?,
+                    kind: row.get(1)?,
+                    path: row.get(2)?,
+                    span_start: row.get(3)?,
+                    owner_symbol_id: row.get(4)?,
+                    title: row.get(5)?,
+                    preview,
+                    bm25_score: row.get(7)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
         Ok(hits)
     }
 
@@ -3239,11 +3655,14 @@ mod tests {
         let fts = SearchFtsDb::open(&db_path).unwrap();
         use crate::schema::{Position, Symbol, SymbolKind};
         let sym = Symbol {
-            symbol_id: "s1".into(), symbol_fp: "fp".into(),
-            qname: "App.Foo.punchIn".into(), language: "swift".into(),
+            symbol_id: "s1".into(),
+            symbol_fp: "fp".into(),
+            qname: "App.Foo.punchIn".into(),
+            language: "swift".into(),
             kind: SymbolKind::Method,
             file: "App/Foo.swift".into(),
-            start: Position { line: 1, col: 0 }, end: Position { line: 5, col: 0 },
+            start: Position { line: 1, col: 0 },
+            end: Position { line: 5, col: 0 },
             signature: Some("func punchIn(over existingClip: Clip)".into()),
             doc: None,
         };
@@ -3251,18 +3670,32 @@ mod tests {
 
         // "over" alone is a stopword — filtered → empty tokens → no results.
         let hits = fts.search("over", &FtsFilters::default(), 10).unwrap();
-        assert!(hits.is_empty(), "'over' is a stopword, should return no hits");
+        assert!(
+            hits.is_empty(),
+            "'over' is a stopword, should return no hits"
+        );
 
         // "playhead over clips" — only "playhead" and "clips" survive filtering.
         // "punchIn(over existingClip)" has no "playhead" or "clips" → no match.
-        let hits2 = fts.search("playhead over clips", &FtsFilters::default(), 10).unwrap();
-        assert!(hits2.is_empty(), "stopword-only overlap should not match punchIn");
+        let hits2 = fts
+            .search("playhead over clips", &FtsFilters::default(), 10)
+            .unwrap();
+        assert!(
+            hits2.is_empty(),
+            "stopword-only overlap should not match punchIn"
+        );
     }
 
     #[test]
     fn split_camel_basic() {
-        assert_eq!(split_camel("refreshDriftPlayhead"), vec!["refresh", "Drift", "Playhead"]);
-        assert_eq!(split_camel("DriftSynthPool"), vec!["Drift", "Synth", "Pool"]);
+        assert_eq!(
+            split_camel("refreshDriftPlayhead"),
+            vec!["refresh", "Drift", "Playhead"]
+        );
+        assert_eq!(
+            split_camel("DriftSynthPool"),
+            vec!["Drift", "Synth", "Pool"]
+        );
         assert_eq!(split_camel("XMLParser"), vec!["XML", "Parser"]);
         assert_eq!(split_camel("simple"), vec!["simple"]);
     }
@@ -3278,7 +3711,9 @@ mod tests {
 
     #[test]
     fn is_test_file_detection() {
-        assert!(is_test_file("Packages/AudioEngine/Tests/KarplusStrongTests.swift"));
+        assert!(is_test_file(
+            "Packages/AudioEngine/Tests/KarplusStrongTests.swift"
+        ));
         assert!(is_test_file("tests/test_charge_card.py"));
         assert!(is_test_file("src/__tests__/auth.test.ts"));
         assert!(is_test_file("payments/test_stripe.py"));
@@ -3286,7 +3721,9 @@ mod tests {
         assert!(is_test_file("src/auth/auth_spec.rb"));
         assert!(!is_test_file("App/ExampleFlow/ExampleFlowApp.swift"));
         assert!(!is_test_file("src/payments/charge.py"));
-        assert!(!is_test_file("Packages/AudioEngine/Sources/KarplusStrong.swift"));
+        assert!(!is_test_file(
+            "Packages/AudioEngine/Sources/KarplusStrong.swift"
+        ));
     }
 
     #[test]
@@ -3294,11 +3731,18 @@ mod tests {
         // Production — tier 0
         assert_eq!(symbol_tier("App/ViewModel/DriftPlayheadViewModel.swift"), 0);
         assert_eq!(symbol_tier("src/payments/charge.py"), 0);
-        assert_eq!(symbol_tier("Packages/AudioEngine/Sources/KarplusStrong.swift"), 0);
+        assert_eq!(
+            symbol_tier("Packages/AudioEngine/Sources/KarplusStrong.swift"),
+            0
+        );
 
         // Utility — tier 1
         assert_eq!(symbol_tier("App/Previews/DriftView_Previews.swift"), 1);
-        assert_eq!(symbol_tier("App/ViewModel/DriftView_Previews.swift"), 1, "preview filename");
+        assert_eq!(
+            symbol_tier("App/ViewModel/DriftView_Previews.swift"),
+            1,
+            "preview filename"
+        );
         assert_eq!(symbol_tier("Mocks/MockAudioEngine.swift"), 1);
         assert_eq!(symbol_tier("App/SampleData/TimelineFixture.swift"), 1);
         assert_eq!(symbol_tier("App/Generated/Schema.generated.swift"), 1);
@@ -3317,19 +3761,30 @@ mod tests {
 
         use crate::schema::{Position, Symbol, SymbolKind};
         let make = |id: &str, qname: &str, file: &str| Symbol {
-            symbol_id: id.into(), symbol_fp: format!("fp_{id}"),
-            qname: qname.into(), language: "swift".into(),
-            kind: SymbolKind::Method, file: file.into(),
-            start: Position { line: 1, col: 0 }, end: Position { line: 5, col: 0 },
-            signature: None, doc: None,
+            symbol_id: id.into(),
+            symbol_fp: format!("fp_{id}"),
+            qname: qname.into(),
+            language: "swift".into(),
+            kind: SymbolKind::Method,
+            file: file.into(),
+            start: Position { line: 1, col: 0 },
+            end: Position { line: 5, col: 0 },
+            signature: None,
+            doc: None,
         };
 
         let prod = make("prod", "App.VM.refreshDriftPlayhead", "App/ViewModel.swift");
-        let preview = make("preview", "App.Previews.refreshDriftPlayhead", "App/Previews/DriftView_Previews.swift");
+        let preview = make(
+            "preview",
+            "App.Previews.refreshDriftPlayhead",
+            "App/Previews/DriftView_Previews.swift",
+        );
 
         fts.rebuild(&[prod, preview]).unwrap();
 
-        let hits = fts.search("refresh drift playhead", &FtsFilters::default(), 10).unwrap();
+        let hits = fts
+            .search("refresh drift playhead", &FtsFilters::default(), 10)
+            .unwrap();
         assert_eq!(hits.len(), 2, "both prod and utility included by default");
         // Production should rank first due to tier penalty on utility.
         assert_eq!(hits[0].symbol_id, "prod", "production ranks before preview");
@@ -3357,8 +3812,16 @@ mod tests {
             doc: None,
         };
 
-        let prod = make_sym("sym_prod", "App.ViewModel.refreshDriftPlayhead", "App/ViewModel.swift");
-        let test = make_sym("sym_test", "Tests.DriftTests.testRefreshPlayhead", "Tests/DriftTests.swift");
+        let prod = make_sym(
+            "sym_prod",
+            "App.ViewModel.refreshDriftPlayhead",
+            "App/ViewModel.swift",
+        );
+        let test = make_sym(
+            "sym_test",
+            "Tests.DriftTests.testRefreshPlayhead",
+            "Tests/DriftTests.swift",
+        );
 
         fts.rebuild(&[prod, test]).unwrap();
         assert!(fts.has_data());
@@ -3369,14 +3832,26 @@ mod tests {
         assert_eq!(hits[0].symbol_id, "sym_prod");
 
         // With include_tests: both returned.
-        let hits_all = fts.search("playhead", &FtsFilters { include_tests: true, ..Default::default() }, 10).unwrap();
+        let hits_all = fts
+            .search(
+                "playhead",
+                &FtsFilters {
+                    include_tests: true,
+                    ..Default::default()
+                },
+                10,
+            )
+            .unwrap();
         assert_eq!(hits_all.len(), 2, "both when include_tests");
 
         // Plan A t-006: with tests_only, just the test symbol.
         let hits_test_only = fts
             .search(
                 "playhead",
-                &FtsFilters { tests_only: true, ..Default::default() },
+                &FtsFilters {
+                    tests_only: true,
+                    ..Default::default()
+                },
                 10,
             )
             .unwrap();
@@ -3387,11 +3862,19 @@ mod tests {
         let hits_precedence = fts
             .search(
                 "playhead",
-                &FtsFilters { tests_only: true, include_tests: false, ..Default::default() },
+                &FtsFilters {
+                    tests_only: true,
+                    include_tests: false,
+                    ..Default::default()
+                },
                 10,
             )
             .unwrap();
-        assert_eq!(hits_precedence.len(), 1, "tests_only overrides include_tests=false");
+        assert_eq!(
+            hits_precedence.len(),
+            1,
+            "tests_only overrides include_tests=false"
+        );
         assert_eq!(hits_precedence[0].symbol_id, "sym_test");
     }
 
@@ -3421,17 +3904,27 @@ mod tests {
         let hits = fts.search("playhead", &FtsFilters::default(), 10).unwrap();
         assert!(!hits.is_empty(), "should find by qname fragment");
         assert_eq!(hits[0].symbol_id, "sym_abc");
-        assert_eq!(hits[0].qname, "App.ViewModel.refreshDriftPlayhead", "orig qname preserved");
+        assert_eq!(
+            hits[0].qname, "App.ViewModel.refreshDriftPlayhead",
+            "orig qname preserved"
+        );
         assert_eq!(hits[0].tier, 0, "production file should be tier 0");
 
-        let hits2 = fts.search("refresh drift", &FtsFilters::default(), 10).unwrap();
+        let hits2 = fts
+            .search("refresh drift", &FtsFilters::default(), 10)
+            .unwrap();
         assert!(!hits2.is_empty(), "should find multi-token");
 
-        let hits3 = fts.search(
-            "playhead",
-            &FtsFilters { language: Some("python".into()), ..Default::default() },
-            10,
-        ).unwrap();
+        let hits3 = fts
+            .search(
+                "playhead",
+                &FtsFilters {
+                    language: Some("python".into()),
+                    ..Default::default()
+                },
+                10,
+            )
+            .unwrap();
         assert!(hits3.is_empty(), "language filter should exclude swift");
     }
 
@@ -3439,7 +3932,12 @@ mod tests {
     fn summary_extraction() {
         // First sentence from doc.
         assert_eq!(
-            extract_summary(Some("Updates drift pad visual playhead from transport state. Called on every render tick."), None),
+            extract_summary(
+                Some(
+                    "Updates drift pad visual playhead from transport state. Called on every render tick."
+                ),
+                None
+            ),
             "Updates drift pad visual playhead from transport state"
         );
         // Doc with newline — joined, first sentence extracted.
@@ -3457,12 +3955,18 @@ mod tests {
 
         // Doc prefix stripping — Rust triple-slash.
         assert_eq!(
-            extract_summary(Some("/// Updates the drift playhead. Called each frame."), None),
+            extract_summary(
+                Some("/// Updates the drift playhead. Called each frame."),
+                None
+            ),
             "Updates the drift playhead"
         );
         // Multi-line Rust doc block.
         assert_eq!(
-            extract_summary(Some("/// Refreshes visual state.\n/// Must be called on main thread."), None),
+            extract_summary(
+                Some("/// Refreshes visual state.\n/// Must be called on main thread."),
+                None
+            ),
             "Refreshes visual state"
         );
         // JavaDoc / Swift style — trailing dot stripped.
@@ -3479,13 +3983,34 @@ mod tests {
 
     #[test]
     fn layer_classification() {
-        assert_eq!(classify_layer("App/Views/DriftPlayheadView.swift", 0, &[]), "ui");
-        assert_eq!(classify_layer("App/ViewModel/DriftPlayheadViewModel.swift", 0, &[]), "viewmodel");
-        assert_eq!(classify_layer("App/Scheduler/DriftScheduler.swift", 0, &[]), "scheduler");
-        assert_eq!(classify_layer("App/Engine/AudioEngine.swift", 0, &[]), "scheduler");
-        assert_eq!(classify_layer("App/Storage/ClipRepository.swift", 0, &[]), "persistence");
-        assert_eq!(classify_layer("App/Domain/Clip.swift", 0, &[]), "core_model");
-        assert_eq!(classify_layer("App/Previews/DriftView_Previews.swift", 1, &[]), "utility");
+        assert_eq!(
+            classify_layer("App/Views/DriftPlayheadView.swift", 0, &[]),
+            "ui"
+        );
+        assert_eq!(
+            classify_layer("App/ViewModel/DriftPlayheadViewModel.swift", 0, &[]),
+            "viewmodel"
+        );
+        assert_eq!(
+            classify_layer("App/Scheduler/DriftScheduler.swift", 0, &[]),
+            "scheduler"
+        );
+        assert_eq!(
+            classify_layer("App/Engine/AudioEngine.swift", 0, &[]),
+            "scheduler"
+        );
+        assert_eq!(
+            classify_layer("App/Storage/ClipRepository.swift", 0, &[]),
+            "persistence"
+        );
+        assert_eq!(
+            classify_layer("App/Domain/Clip.swift", 0, &[]),
+            "core_model"
+        );
+        assert_eq!(
+            classify_layer("App/Previews/DriftView_Previews.swift", 1, &[]),
+            "utility"
+        );
         assert_eq!(classify_layer("Tests/DriftTests.swift", 2, &[]), "tests");
         assert_eq!(classify_layer("App/AppDelegate.swift", 0, &[]), "other");
     }
@@ -3493,21 +4018,59 @@ mod tests {
     #[test]
     fn layer_classification_qname_fallback() {
         // File named after app, but qname carries the ViewModel suffix.
-        assert_eq!(classify_layer_sym("App/ExampleFlow.swift", "ExampleFlowViewModel", 0, &[]), "viewmodel");
-        assert_eq!(classify_layer_sym("App/ExampleFlow.swift", "ExampleFlowController", 0, &[]), "viewmodel");
-        assert_eq!(classify_layer_sym("App/ExampleFlow.swift", "DriftCompiler", 0, &[]), "scheduler");
-        assert_eq!(classify_layer_sym("App/ExampleFlow.swift", "ClipStore", 0, &[]), "persistence");
-        assert_eq!(classify_layer_sym("App/ExampleFlow.swift", "DriftEngine", 0, &[]), "scheduler");
+        assert_eq!(
+            classify_layer_sym("App/ExampleFlow.swift", "ExampleFlowViewModel", 0, &[]),
+            "viewmodel"
+        );
+        assert_eq!(
+            classify_layer_sym("App/ExampleFlow.swift", "ExampleFlowController", 0, &[]),
+            "viewmodel"
+        );
+        assert_eq!(
+            classify_layer_sym("App/ExampleFlow.swift", "DriftCompiler", 0, &[]),
+            "scheduler"
+        );
+        assert_eq!(
+            classify_layer_sym("App/ExampleFlow.swift", "ClipStore", 0, &[]),
+            "persistence"
+        );
+        assert_eq!(
+            classify_layer_sym("App/ExampleFlow.swift", "DriftEngine", 0, &[]),
+            "scheduler"
+        );
         // File-based classification still wins when it fires.
-        assert_eq!(classify_layer_sym("App/Views/DriftView.swift", "DriftViewModel", 0, &[]), "ui");
+        assert_eq!(
+            classify_layer_sym("App/Views/DriftView.swift", "DriftViewModel", 0, &[]),
+            "ui"
+        );
         // Truly unclassifiable stays other.
-        assert_eq!(classify_layer_sym("App/AppDelegate.swift", "AppDelegate", 0, &[]), "other");
+        assert_eq!(
+            classify_layer_sym("App/AppDelegate.swift", "AppDelegate", 0, &[]),
+            "other"
+        );
         // Method qnames: class component must propagate even when the method leaf doesn't match.
-        assert_eq!(classify_layer_sym("App/ExampleFlow.swift", "ExampleFlowViewModel.refreshDriftPlayhead", 0, &[]), "viewmodel");
-        assert_eq!(classify_layer_sym("App/ExampleFlow.swift", "DriftCompiler.compile", 0, &[]), "scheduler");
-        assert_eq!(classify_layer_sym("App/ExampleFlow.swift", "ClipStore.save", 0, &[]), "persistence");
+        assert_eq!(
+            classify_layer_sym(
+                "App/ExampleFlow.swift",
+                "ExampleFlowViewModel.refreshDriftPlayhead",
+                0,
+                &[]
+            ),
+            "viewmodel"
+        );
+        assert_eq!(
+            classify_layer_sym("App/ExampleFlow.swift", "DriftCompiler.compile", 0, &[]),
+            "scheduler"
+        );
+        assert_eq!(
+            classify_layer_sym("App/ExampleFlow.swift", "ClipStore.save", 0, &[]),
+            "persistence"
+        );
         // Rust-style :: separators.
-        assert_eq!(classify_layer_sym("src/drift.rs", "ExampleFlowViewModel::refresh", 0, &[]), "viewmodel");
+        assert_eq!(
+            classify_layer_sym("src/drift.rs", "ExampleFlowViewModel::refresh", 0, &[]),
+            "viewmodel"
+        );
     }
 
     #[test]
@@ -3517,8 +4080,14 @@ mod tests {
             ("custominfra".to_string(), "persistence".to_string()),
             ("bizlogic".to_string(), "core_model".to_string()),
         ];
-        assert_eq!(classify_layer("App/CustomInfra/Repo.swift", 0, &overrides), "persistence");
-        assert_eq!(classify_layer("App/BizLogic/Workflow.swift", 0, &overrides), "core_model");
+        assert_eq!(
+            classify_layer("App/CustomInfra/Repo.swift", 0, &overrides),
+            "persistence"
+        );
+        assert_eq!(
+            classify_layer("App/BizLogic/Workflow.swift", 0, &overrides),
+            "core_model"
+        );
         // Non-matching path falls through to built-in rules.
         assert_eq!(classify_layer("App/Views/Foo.swift", 0, &overrides), "ui");
     }
@@ -3538,7 +4107,8 @@ mod tests {
         std::fs::write(
             asd_dir.join("layers.toml"),
             "[patterns]\nInfra = \"persistence\"\nBusiness = \"core_model\"\n",
-        ).unwrap();
+        )
+        .unwrap();
         // load_layer_overrides takes the db_path (not the project root) and uses its parent.
         let overrides = load_layer_overrides(&tmp.path().join("asd.db"));
         assert_eq!(overrides.len(), 2);
@@ -3553,11 +4123,26 @@ mod tests {
         assert_eq!(parse_intent("ui"), Some("ui"));
         assert_eq!(parse_intent("typo"), None);
         // Each valid intent has non-empty focus guidance.
-        for i in &["bugfix", "feature", "refactor", "test", "architecture", "ui"] {
+        for i in &[
+            "bugfix",
+            "feature",
+            "refactor",
+            "test",
+            "architecture",
+            "ui",
+        ] {
             assert!(!intent_focus(i).is_empty(), "no focus for {i}");
         }
         // Layer order has 8 entries for every intent.
-        for i in &["bugfix", "feature", "refactor", "test", "architecture", "ui", ""] {
+        for i in &[
+            "bugfix",
+            "feature",
+            "refactor",
+            "test",
+            "architecture",
+            "ui",
+            "",
+        ] {
             assert_eq!(intent_layer_order(i).len(), 8);
         }
     }
@@ -3597,7 +4182,10 @@ mod tests {
                 sym_id,
                 kind,
                 "test entry",
-                Author { kind: AuthorKind::Agent, id: "t".into() },
+                Author {
+                    kind: AuthorKind::Agent,
+                    id: "t".into(),
+                },
             );
             e.role = role.map(str::to_string);
             e
@@ -3609,7 +4197,8 @@ mod tests {
             ("sym_d", LedgerKind::Constraint, Some("fast-test")),
             ("sym_e", LedgerKind::Constraint, None),
         ] {
-            fts.upsert_ledger_entry(&make(sym_id, kind, role), "main").unwrap();
+            fts.upsert_ledger_entry(&make(sym_id, kind, role), "main")
+                .unwrap();
         }
 
         let mut ids = fts.symbols_with_constraint_penalties("main").unwrap();

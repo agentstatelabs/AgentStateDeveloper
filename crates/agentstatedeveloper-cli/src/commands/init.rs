@@ -14,9 +14,9 @@ use anyhow::{Context, Result};
 use clap::Args;
 use serde_json::json;
 
+use agentstatedeveloper_core::{ASD_SCHEMA_VERSION, Engine, paths};
 use agentstategraph::CommitOptions;
 use agentstategraph_core::IntentCategory;
-use agentstatedeveloper_core::{paths, Engine, ASD_SCHEMA_VERSION};
 
 use crate::config::Config;
 
@@ -131,7 +131,9 @@ pub fn run(cfg: &Config, args: InitArgs) -> Result<()> {
         IntentCategory::Checkpoint,
         format!("stamp asd schema-version {}", ASD_SCHEMA_VERSION),
     );
-    engine.repo.set_json(&engine.ref_name, &path, &value, opts)?;
+    engine
+        .repo
+        .set_json(&engine.ref_name, &path, &value, opts)?;
 
     println!("initialized at {}", cfg.db_path.display());
 

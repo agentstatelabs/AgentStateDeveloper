@@ -38,10 +38,10 @@ impl Config {
         let db_path = explicit_db
             .or_else(|| std::env::var_os("ASD_DB").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("./.asd-state.db"));
-        let policy_path = explicit_policy
-            .or_else(|| std::env::var_os("ASD_POLICY").map(PathBuf::from));
-        let audit_log_path = explicit_audit_log
-            .or_else(|| std::env::var_os("ASD_AUDIT_LOG").map(PathBuf::from));
+        let policy_path =
+            explicit_policy.or_else(|| std::env::var_os("ASD_POLICY").map(PathBuf::from));
+        let audit_log_path =
+            explicit_audit_log.or_else(|| std::env::var_os("ASD_AUDIT_LOG").map(PathBuf::from));
         let brief = brief_flag
             || std::env::var("ASD_FORMAT")
                 .map(|v| v.eq_ignore_ascii_case("brief"))

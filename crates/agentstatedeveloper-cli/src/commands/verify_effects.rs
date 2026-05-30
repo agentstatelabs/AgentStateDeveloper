@@ -12,11 +12,11 @@ use clap::Args;
 use serde_json::json;
 
 use agentstatedeveloper_adapters::default_adapters;
-use agentstatedeveloper_core::{
-    AsgEffectStore, AsgIndexStore, EffectStore, Engine, IndexStore, ParsedSymbol,
-};
 use agentstatedeveloper_core::schema::{
     EffectCategory, EffectDecl, Mismatch, Verification, VerificationSource, VerificationStatus,
+};
+use agentstatedeveloper_core::{
+    AsgEffectStore, AsgIndexStore, EffectStore, Engine, IndexStore, ParsedSymbol,
 };
 
 use crate::config::Config;
@@ -78,8 +78,11 @@ pub fn run(cfg: &Config, args: VerifyEffectsArgs) -> Result<()> {
                     .map(|e| e.effect)
                     .collect();
 
-                let declared_cats: Vec<EffectCategory> =
-                    effect_decl.declared.iter().map(|e| e.effect.clone()).collect();
+                let declared_cats: Vec<EffectCategory> = effect_decl
+                    .declared
+                    .iter()
+                    .map(|e| e.effect.clone())
+                    .collect();
 
                 let mut mismatches: Vec<Mismatch> = Vec::new();
 
@@ -102,7 +105,9 @@ pub fn run(cfg: &Config, args: VerifyEffectsArgs) -> Result<()> {
                             kind: "inferred_not_declared".to_string(),
                             effect: cat.clone(),
                             detected_in: Some(symbol.file.clone()),
-                            note: Some("found by static checker but not in declared effects".to_string()),
+                            note: Some(
+                                "found by static checker but not in declared effects".to_string(),
+                            ),
                         });
                     }
                 }
@@ -112,7 +117,8 @@ pub fn run(cfg: &Config, args: VerifyEffectsArgs) -> Result<()> {
                 } else {
                     VerificationStatus::Mismatch
                 };
-                let inferred_strs: Vec<String> = inferred.iter().map(|e| e.as_str().to_string()).collect();
+                let inferred_strs: Vec<String> =
+                    inferred.iter().map(|e| e.as_str().to_string()).collect();
                 (status, mismatches, inferred_strs)
             }
             Err(e) => {
@@ -133,7 +139,12 @@ pub fn run(cfg: &Config, args: VerifyEffectsArgs) -> Result<()> {
 
     if args.write {
         effect_decl.verification = Some(verification);
-        effect_store.put_effects(&engine.ref_name, &effect_decl.symbol_id, &effect_decl, "asd-verify-effects")?;
+        effect_store.put_effects(
+            &engine.ref_name,
+            &effect_decl.symbol_id,
+            &effect_decl,
+            "asd-verify-effects",
+        )?;
     }
 
     let out = json!({

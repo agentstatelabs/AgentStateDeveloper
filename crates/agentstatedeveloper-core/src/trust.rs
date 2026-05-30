@@ -26,10 +26,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    Engine, AsgIndexStore, AsgLedgerStore, IndexStore, LedgerStore,
-    SearchFtsDb, SidecarState, ASD_SCHEMA_VERSION,
-    sidecar_lifecycle_state,
+    ASD_SCHEMA_VERSION, AsgIndexStore, AsgLedgerStore, Engine, IndexStore, LedgerStore,
+    SearchFtsDb, SidecarState,
     schema::{LedgerKind, Symbol},
+    sidecar_lifecycle_state,
 };
 
 // ---------------------------------------------------------------------------
@@ -151,9 +151,9 @@ pub fn compute_trust_score(db_path: &Path) -> TrustScore {
     // -----------------------------------------------------------------------
     let sidecar_state = sidecar_lifecycle_state(&project_root);
     let sidecar_key = match &sidecar_state {
-        SidecarState::Missing    => "missing",
-        SidecarState::Present    => "present",
-        SidecarState::Hydrated   => "hydrated",
+        SidecarState::Missing => "missing",
+        SidecarState::Present => "present",
+        SidecarState::Hydrated => "hydrated",
         SidecarState::FreshReset => "fresh-reset",
     };
 
@@ -417,7 +417,8 @@ fn classify_data_quality(sig: &TrustSignals, project_root: &std::path::Path) -> 
             DataQuality {
                 state: "clean_room".to_string(),
                 reason: "fresh index with sparse ledger and no prior activity — \
-                         expected after `asd init` or `git clone`".to_string(),
+                         expected after `asd init` or `git clone`"
+                    .to_string(),
                 expected_after_reset: true,
             }
         } else if sig.ledger_density == 0.0 {
@@ -426,7 +427,8 @@ fn classify_data_quality(sig: &TrustSignals, project_root: &std::path::Path) -> 
             DataQuality {
                 state: "unannotated".to_string(),
                 reason: "index built but no ledger annotations yet — \
-                         run `asd annotate-commit` or `asd task-close` to start".to_string(),
+                         run `asd annotate-commit` or `asd task-close` to start"
+                    .to_string(),
                 expected_after_reset: true,
             }
         } else {
@@ -434,7 +436,8 @@ fn classify_data_quality(sig: &TrustSignals, project_root: &std::path::Path) -> 
             DataQuality {
                 state: "degraded".to_string(),
                 reason: "sparse ledger despite prior task and probe activity — \
-                         possible state loss or DB reset".to_string(),
+                         possible state loss or DB reset"
+                    .to_string(),
                 expected_after_reset: false,
             }
         }
@@ -474,20 +477,18 @@ fn file_line_count(path: &std::path::Path) -> usize {
 /// Count source files that git reports as modified or staged (excludes untracked).
 fn count_dirty_source_files(project_root: &Path) -> usize {
     const SRC_EXTS: &[&str] = &[
-        ".swift", ".py", ".ts", ".tsx", ".js", ".rs", ".go",
-        ".kt", ".java", ".rb", ".cs", ".m", ".mm", ".cpp", ".c",
+        ".swift", ".py", ".ts", ".tsx", ".js", ".rs", ".go", ".kt", ".java", ".rb", ".cs", ".m",
+        ".mm", ".cpp", ".c",
     ];
     let out = std::process::Command::new("git")
         .args(["status", "--short", "--untracked-files=no"])
         .current_dir(project_root)
         .output();
     match out {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .filter(|l| l.len() > 3 && SRC_EXTS.iter().any(|ext| l.ends_with(ext)))
-                .count()
-        }
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter(|l| l.len() > 3 && SRC_EXTS.iter().any(|ext| l.ends_with(ext)))
+            .count(),
         _ => 0,
     }
 }
@@ -504,7 +505,9 @@ fn ledger_signals(db_path: &Path, symbol_count: u64) -> (f64, usize) {
 
     // Fast path: if the FTS index shows zero annotated symbols, skip the
     // per-symbol ledger walks entirely (unannotated / clean-room DBs).
-    let annotated = engine.fts.as_ref()
+    let annotated = engine
+        .fts
+        .as_ref()
         .map(|fts| fts.annotated_symbol_count())
         .unwrap_or(0);
     if annotated == 0 {
@@ -527,7 +530,7 @@ fn ledger_signals(db_path: &Path, symbol_count: u64) -> (f64, usize) {
             .unwrap_or_default();
         total_entries += entries.len();
         let has_ownership = entries.iter().any(|e| e.kind == LedgerKind::Ownership);
-        let has_concept   = entries.iter().any(|e| e.kind == LedgerKind::Concept);
+        let has_concept = entries.iter().any(|e| e.kind == LedgerKind::Concept);
         if has_ownership && !has_concept {
             concept_gaps += 1;
         }

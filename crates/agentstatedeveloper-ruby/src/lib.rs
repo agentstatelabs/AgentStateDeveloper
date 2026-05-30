@@ -120,7 +120,13 @@ fn make_symbol(node: Node<'_>, src: &[u8], qname: String, kind: SymbolKind) -> P
     make_symbol_sig(node, src, qname, kind, None)
 }
 
-fn make_symbol_sig(node: Node<'_>, src: &[u8], qname: String, kind: SymbolKind, signature: Option<String>) -> ParsedSymbol {
+fn make_symbol_sig(
+    node: Node<'_>,
+    src: &[u8],
+    qname: String,
+    kind: SymbolKind,
+    signature: Option<String>,
+) -> ParsedSymbol {
     ParsedSymbol {
         qname,
         kind,
@@ -140,7 +146,11 @@ fn make_symbol_sig(node: Node<'_>, src: &[u8], qname: String, kind: SymbolKind, 
 fn extract_ruby_sig(node: Node<'_>, src: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(&src[node.start_byte()..node.end_byte()]).ok()?;
     let first_line = text.lines().next()?.trim().to_string();
-    if first_line.is_empty() { None } else { Some(first_line) }
+    if first_line.is_empty() {
+        None
+    } else {
+        Some(first_line)
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -320,7 +330,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     // FS Write
     let fs_write_needles = [
         "File.write(",
-        "File.open(",  // also write mode — covered by read; separate write markers:
+        "File.open(", // also write mode — covered by read; separate write markers:
         "IO.write(",
         "FileUtils.cp(",
         "FileUtils.mv(",
@@ -840,12 +850,26 @@ module Payments
   end
 end
 "#;
-        let syms = adapter().parse_symbols("payments/payment_service.rb", src).unwrap();
+        let syms = adapter()
+            .parse_symbols("payments/payment_service.rb", src)
+            .unwrap();
         let qnames: Vec<&str> = syms.iter().map(|s| s.qname.as_str()).collect();
-        assert!(qnames.contains(&"payments.payment_service.Payments"), "{qnames:?}");
-        assert!(qnames.contains(&"payments.payment_service.Payments.PaymentService"), "{qnames:?}");
-        assert!(qnames.contains(&"payments.payment_service.Payments.PaymentService.charge"), "{qnames:?}");
-        assert!(qnames.contains(&"payments.payment_service.Payments.PaymentService.create_client"), "{qnames:?}");
+        assert!(
+            qnames.contains(&"payments.payment_service.Payments"),
+            "{qnames:?}"
+        );
+        assert!(
+            qnames.contains(&"payments.payment_service.Payments.PaymentService"),
+            "{qnames:?}"
+        );
+        assert!(
+            qnames.contains(&"payments.payment_service.Payments.PaymentService.charge"),
+            "{qnames:?}"
+        );
+        assert!(
+            qnames.contains(&"payments.payment_service.Payments.PaymentService.create_client"),
+            "{qnames:?}"
+        );
     }
 
     #[test]
@@ -900,18 +924,42 @@ class UserService
 end
 "#;
         let syms = adapter().parse_symbols("user_service.rb", src).unwrap();
-        let find = syms.iter().find(|s| s.qname.ends_with(".find_user")).unwrap();
-        let create = syms.iter().find(|s| s.qname.ends_with(".create_user")).unwrap();
+        let find = syms
+            .iter()
+            .find(|s| s.qname.ends_with(".find_user"))
+            .unwrap();
+        let create = syms
+            .iter()
+            .find(|s| s.qname.ends_with(".create_user"))
+            .unwrap();
         let find_effs = adapter().infer_effects("", find);
         let create_effs = adapter().infer_effects("", create);
-        assert!(find_effs.iter().any(|e| e.effect == EffectCategory::IoDbRead));
-        assert!(find_effs.iter().any(|e| e.effect == EffectCategory::EnvRead));
-        assert!(create_effs.iter().any(|e| e.effect == EffectCategory::IoDbWrite));
+        assert!(
+            find_effs
+                .iter()
+                .any(|e| e.effect == EffectCategory::IoDbRead)
+        );
+        assert!(
+            find_effs
+                .iter()
+                .any(|e| e.effect == EffectCategory::EnvRead)
+        );
+        assert!(
+            create_effs
+                .iter()
+                .any(|e| e.effect == EffectCategory::IoDbWrite)
+        );
 
         // Check env var extraction
-        let env_eff = find_effs.iter().find(|e| e.effect == EffectCategory::EnvRead).unwrap();
+        let env_eff = find_effs
+            .iter()
+            .find(|e| e.effect == EffectCategory::EnvRead)
+            .unwrap();
         if let Some(vars) = env_eff.qualifiers.get("vars") {
-            let vars: Vec<&str> = vars.as_array().unwrap().iter()
+            let vars: Vec<&str> = vars
+                .as_array()
+                .unwrap()
+                .iter()
                 .map(|v| v.as_str().unwrap())
                 .collect();
             assert!(vars.contains(&"DATABASE_URL"), "{vars:?}");
@@ -954,8 +1002,7 @@ end
         let syms = adapter().parse_symbols("order_service.rb", src).unwrap();
         let edges = adapter().extract_call_edges("order_service.rb", src, &syms, &ws);
         let found = edges.iter().any(|e| {
-            e.caller_qname.ends_with(".place_order")
-                && e.callee_qname.ends_with(".charge")
+            e.caller_qname.ends_with(".place_order") && e.callee_qname.ends_with(".charge")
         });
         assert!(found, "expected intra-class edge; got: {edges:?}");
     }

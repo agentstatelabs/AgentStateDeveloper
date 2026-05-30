@@ -15,12 +15,11 @@ use anyhow::Result;
 use clap::Args;
 
 use agentstatedeveloper_adapters::default_adapters;
-use agentstatedeveloper_core::{
-    collect_source_files, run_index, sync_to_dir,
-    AsgFeedbackStore, Engine, FeedbackStore,
-    paths, EffectDecl, LedgerEntry,
-};
 use agentstatedeveloper_core::search_fts::SearchFtsDb;
+use agentstatedeveloper_core::{
+    AsgFeedbackStore, EffectDecl, Engine, FeedbackStore, LedgerEntry, collect_source_files, paths,
+    run_index, sync_to_dir,
+};
 
 use crate::commands::init::find_project_root;
 use crate::config::Config;
@@ -49,7 +48,9 @@ impl IndexLog {
     fn open(verbose: bool) -> Option<Self> {
         let dir = PathBuf::from(".asd");
         std::fs::create_dir_all(&dir).ok()?;
-        std::fs::File::create(dir.join("index.log")).ok().map(|f| Self { file: f, verbose })
+        std::fs::File::create(dir.join("index.log"))
+            .ok()
+            .map(|f| Self { file: f, verbose })
     }
 
     fn line(&mut self, msg: &str) {
@@ -81,7 +82,9 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
 
     // Always print the header to stderr regardless of verbose.
     eprintln!("{}", header);
-    if let Some(l) = &mut log { l.line(&header); }
+    if let Some(l) = &mut log {
+        l.line(&header);
+    }
 
     if total == 0 {
         let msg = format!(
@@ -89,19 +92,24 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
             args.path.display()
         );
         eprintln!("{}", msg);
-        if let Some(l) = &mut log { l.line(&msg); }
+        if let Some(l) = &mut log {
+            l.line(&msg);
+        }
         log_skipped(&skipped, &mut log, true);
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "files": 0,
-            "skipped": skipped.len(),
-            "symbols": 0,
-            "effects": 0,
-            "edges": 0,
-            "intra_module_edges": 0,
-            "cross_module_edges": 0,
-            "transitive_updates": 0,
-            "orphaned_tagged": 0,
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "files": 0,
+                "skipped": skipped.len(),
+                "symbols": 0,
+                "effects": 0,
+                "edges": 0,
+                "intra_module_edges": 0,
+                "cross_module_edges": 0,
+                "transitive_updates": 0,
+                "orphaned_tagged": 0,
+            }))?
+        );
         return Ok(());
     }
 
@@ -146,7 +154,10 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
     )?;
 
     // Unwrap Arc — run_index is done, no other holders.
-    let mut log = Arc::try_unwrap(log).ok().and_then(|m| m.into_inner().ok()).flatten();
+    let mut log = Arc::try_unwrap(log)
+        .ok()
+        .and_then(|m| m.into_inner().ok())
+        .flatten();
 
     // Auto-sync sidecar so ledger/effects survive future DB rebuilds without
     // needing a manual `asd sync` call.
@@ -155,16 +166,27 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
         Ok(s) => {
             let msg = format!(
                 "Sidecar synced: {} symbol{}, {} ledger entr{}, {} effect{}.",
-                s.symbols_written, if s.symbols_written == 1 { "" } else { "s" },
-                s.ledger_entries_written, if s.ledger_entries_written == 1 { "y" } else { "ies" },
-                s.effects_written, if s.effects_written == 1 { "" } else { "s" },
+                s.symbols_written,
+                if s.symbols_written == 1 { "" } else { "s" },
+                s.ledger_entries_written,
+                if s.ledger_entries_written == 1 {
+                    "y"
+                } else {
+                    "ies"
+                },
+                s.effects_written,
+                if s.effects_written == 1 { "" } else { "s" },
             );
-            if let Some(l) = &mut log { l.line(&msg); }
+            if let Some(l) = &mut log {
+                l.line(&msg);
+            }
         }
         Err(e) => {
             let msg = format!("asd: sidecar sync skipped: {e}");
             eprintln!("{msg}");
-            if let Some(l) = &mut log { l.line(&msg); }
+            if let Some(l) = &mut log {
+                l.line(&msg);
+            }
         }
     }
 
@@ -238,20 +260,34 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
         String::new()
     };
     let doc_hint = if summary.doc_files > 0 {
-        format!(", {} doc chunk{} from {} file{}", summary.docs_indexed, if summary.docs_indexed == 1 { "" } else { "s" }, summary.doc_files, if summary.doc_files == 1 { "" } else { "s" })
-    } else { String::new() };
+        format!(
+            ", {} doc chunk{} from {} file{}",
+            summary.docs_indexed,
+            if summary.docs_indexed == 1 { "" } else { "s" },
+            summary.doc_files,
+            if summary.doc_files == 1 { "" } else { "s" }
+        )
+    } else {
+        String::new()
+    };
     let done_msg = format!(
         "Done. {} symbol{}, {} effect{}{}.{}",
-        summary.symbols, if summary.symbols == 1 { "" } else { "s" },
-        summary.effects, if summary.effects == 1 { "" } else { "s" },
+        summary.symbols,
+        if summary.symbols == 1 { "" } else { "s" },
+        summary.effects,
+        if summary.effects == 1 { "" } else { "s" },
         doc_hint,
         skipped_hint,
     );
     eprintln!("{}", done_msg);
-    if let Some(l) = &mut log { l.line(&done_msg); }
+    if let Some(l) = &mut log {
+        l.line(&done_msg);
+    }
 
     let log_note = format!("Full log: {}", log_path.display());
-    if let Some(l) = &mut log { l.line(&log_note); }
+    if let Some(l) = &mut log {
+        l.line(&log_note);
+    }
     // Only print log path hint to stderr when not verbose (verbose already showed everything).
     if !args.verbose {
         eprintln!("{}", log_note);

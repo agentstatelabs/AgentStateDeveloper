@@ -108,7 +108,12 @@ pub fn run(cfg: &Config, args: SinceArgs) -> Result<()> {
         paths_filter.extend(resolve_scope(scope, &cfg.db_path));
     }
     if let Some(ref paths) = args.paths {
-        paths_filter.extend(paths.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()));
+        paths_filter.extend(
+            paths
+                .split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty()),
+        );
     }
 
     // --- Find all indexed symbols in changed files ------------------------
@@ -144,16 +149,21 @@ pub fn run(cfg: &Config, args: SinceArgs) -> Result<()> {
 
     let mut caller_rows: Vec<Value> = Vec::new();
     let mut affected_test_rows: Vec<Value> = Vec::new();
-    let mut touched_files: Vec<(String, usize)> = changed_files.iter().map(|f| (f.clone(), 0)).collect();
+    let mut touched_files: Vec<(String, usize)> =
+        changed_files.iter().map(|f| (f.clone(), 0)).collect();
     let mut seen_files: HashSet<String> = changed_files.iter().cloned().collect();
 
     while let Some((sym_id, depth)) = queue.pop_front() {
-        if depth >= args.depth { continue; }
+        if depth >= args.depth {
+            continue;
+        }
         let neighbors = index_store
             .get_callers(&engine.ref_name, &sym_id)
             .unwrap_or_default();
         for nbr_id in neighbors {
-            if visited.contains(&nbr_id) { continue; }
+            if visited.contains(&nbr_id) {
+                continue;
+            }
             visited.insert(nbr_id.clone());
             if let Some(s) = id_map.get(&nbr_id) {
                 let tier = symbol_tier(&s.file);
@@ -216,7 +226,10 @@ pub fn run(cfg: &Config, args: SinceArgs) -> Result<()> {
         if let Ok(Some(decl)) = effect_store.get_effects(&engine.ref_name, sym_id) {
             for eff in &decl.declared {
                 let cat = format!("{:?}", eff.effect);
-                let sym_qname = id_map.get(sym_id).map(|s| s.qname.clone()).unwrap_or_default();
+                let sym_qname = id_map
+                    .get(sym_id)
+                    .map(|s| s.qname.clone())
+                    .unwrap_or_default();
                 all_effects.push(json!({ "category": cat, "source": sym_qname }));
             }
         }
@@ -228,16 +241,17 @@ pub fn run(cfg: &Config, args: SinceArgs) -> Result<()> {
 
     // --- Staleness warnings -----------------------------------------------
     let dirty = git_dirty_files();
-    let stale_symbols: Vec<&str> = changed_files.iter()
+    let stale_symbols: Vec<&str> = changed_files
+        .iter()
         .filter(|f| dirty.contains(f.as_str()))
         .map(String::as_str)
         .collect();
 
     // --- Test-gap detection -----------------------------------------------
     let test_gap = affected_test_rows.is_empty();
-    let proposed_test_path = test_gap.then(|| {
-        changed_files.first().map(|f| propose_test_path(f))
-    }).flatten();
+    let proposed_test_path = test_gap
+        .then(|| changed_files.first().map(|f| propose_test_path(f)))
+        .flatten();
 
     let focus = intent_focus(intent);
     let out = json!({

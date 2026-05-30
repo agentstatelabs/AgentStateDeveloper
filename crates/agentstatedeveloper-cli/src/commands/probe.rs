@@ -72,7 +72,9 @@ use clap::{Args, Subcommand};
 use rusqlite::{Connection, params};
 use serde_json::Value;
 
-use agentstatedeveloper_core::{FtsFilters, FtsHit, SearchFtsDb, compute_trust_score, stale_warning};
+use agentstatedeveloper_core::{
+    FtsFilters, FtsHit, SearchFtsDb, compute_trust_score, stale_warning,
+};
 
 use crate::config::Config;
 
@@ -250,9 +252,7 @@ pub fn run(cfg: &Config, cmd: ProbeCmd) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn analytics_path(cfg: &Config) -> PathBuf {
-    let db_dir = Path::new(&cfg.db_path)
-        .parent()
-        .unwrap_or(Path::new("."));
+    let db_dir = Path::new(&cfg.db_path).parent().unwrap_or(Path::new("."));
     db_dir.join(".asd").join("probe-analytics.db")
 }
 
@@ -262,7 +262,8 @@ fn open_analytics_db(path: &Path) -> rusqlite::Result<Connection> {
     }
     let conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
-    conn.execute_batch("
+    conn.execute_batch(
+        "
         CREATE TABLE IF NOT EXISTS probe_runs (
             run_id                TEXT PRIMARY KEY,
             asd_version           TEXT NOT NULL,
@@ -299,7 +300,8 @@ fn open_analytics_db(path: &Path) -> rusqlite::Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_pr_trend  ON probe_results(name, duration_ms);
         CREATE INDEX IF NOT EXISTS idx_runs_ver  ON probe_runs(asd_version);
         CREATE INDEX IF NOT EXISTS idx_runs_at   ON probe_runs(started_at);
-    ")?;
+    ",
+    )?;
     Ok(conn)
 }
 
@@ -311,7 +313,7 @@ fn scope_from_record(record: &Value) -> String {
     ) {
         (Some(n), _) => format!("name:{}", n),
         (_, Some(t)) => format!("tag:{}", t),
-        _            => "all".to_string(),
+        _ => "all".to_string(),
     }
 }
 
@@ -325,9 +327,15 @@ fn insert_run_to_analytics(conn: &Connection, record: &Value) {
 
     // Skip if already present.
     let exists: bool = conn
-        .query_row("SELECT 1 FROM probe_runs WHERE run_id=?1", params![run_id], |_| Ok(true))
+        .query_row(
+            "SELECT 1 FROM probe_runs WHERE run_id=?1",
+            params![run_id],
+            |_| Ok(true),
+        )
         .unwrap_or(false);
-    if exists { return; }
+    if exists {
+        return;
+    }
 
     let scope = scope_from_record(record);
 
@@ -339,8 +347,14 @@ fn insert_run_to_analytics(conn: &Connection, record: &Value) {
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
         params![
             run_id,
-            record.get("asd_version").and_then(Value::as_str).unwrap_or(""),
-            record.get("started_at").and_then(Value::as_str).unwrap_or(""),
+            record
+                .get("asd_version")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+            record
+                .get("started_at")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
             record.get("finished_at").and_then(Value::as_str),
             record.get("probe_file").and_then(Value::as_str),
             record.get("db_state").and_then(Value::as_str),
@@ -349,20 +363,30 @@ fn insert_run_to_analytics(conn: &Connection, record: &Value) {
             record.get("total").and_then(Value::as_i64).unwrap_or(0),
             record.get("passed").and_then(Value::as_i64).unwrap_or(0),
             record.get("failed").and_then(Value::as_i64).unwrap_or(0),
-            record.get("budget_failed").and_then(Value::as_bool).map(|b| b as i64).unwrap_or(0),
-            record.get("wall_time_ms").and_then(Value::as_i64).unwrap_or(0),
+            record
+                .get("budget_failed")
+                .and_then(Value::as_bool)
+                .map(|b| b as i64)
+                .unwrap_or(0),
+            record
+                .get("wall_time_ms")
+                .and_then(Value::as_i64)
+                .unwrap_or(0),
             record.get("worker_count").and_then(Value::as_i64),
             record.get("performance_budget_ms").and_then(Value::as_i64),
             record.get("filter_name").and_then(Value::as_str),
             record.get("filter_tag").and_then(Value::as_str),
         ],
     );
-    if res.is_err() { return; }
+    if res.is_err() {
+        return;
+    }
 
     // Insert per-probe rows from the `probes` array (present from this version onward).
     if let Some(probes) = record.get("probes").and_then(Value::as_array) {
         for p in probes {
-            let tags_str = p.get("tags")
+            let tags_str = p
+                .get("tags")
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "[]".to_string());
             let _ = conn.execute(
@@ -375,9 +399,18 @@ fn insert_run_to_analytics(conn: &Connection, record: &Value) {
                     p.get("command").and_then(Value::as_str),
                     p.get("assertion").and_then(Value::as_str),
                     tags_str,
-                    p.get("passed").and_then(Value::as_bool).map(|b| b as i64).unwrap_or(1),
-                    p.get("slow").and_then(Value::as_bool).map(|b| b as i64).unwrap_or(0),
-                    p.get("timed_out").and_then(Value::as_bool).map(|b| b as i64).unwrap_or(0),
+                    p.get("passed")
+                        .and_then(Value::as_bool)
+                        .map(|b| b as i64)
+                        .unwrap_or(1),
+                    p.get("slow")
+                        .and_then(Value::as_bool)
+                        .map(|b| b as i64)
+                        .unwrap_or(0),
+                    p.get("timed_out")
+                        .and_then(Value::as_bool)
+                        .map(|b| b as i64)
+                        .unwrap_or(0),
                     p.get("duration_ms").and_then(Value::as_i64).unwrap_or(0),
                 ],
             );
@@ -390,16 +423,12 @@ fn insert_run_to_analytics(conn: &Connection, record: &Value) {
 // ---------------------------------------------------------------------------
 
 fn probe_file_path(cfg: &Config) -> PathBuf {
-    let db_dir = Path::new(&cfg.db_path)
-        .parent()
-        .unwrap_or(Path::new("."));
+    let db_dir = Path::new(&cfg.db_path).parent().unwrap_or(Path::new("."));
     db_dir.join(".asd").join("probes.toml")
 }
 
 fn history_path(cfg: &Config) -> PathBuf {
-    let db_dir = Path::new(&cfg.db_path)
-        .parent()
-        .unwrap_or(Path::new("."));
+    let db_dir = Path::new(&cfg.db_path).parent().unwrap_or(Path::new("."));
     db_dir.join(".asd").join("probe-history.jsonl")
 }
 
@@ -417,7 +446,8 @@ fn append_history(cfg: &Config, record: &Value) {
         Err(_) => return,
     };
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut lines: Vec<String> = existing.lines()
+    let mut lines: Vec<String> = existing
+        .lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| l.to_string())
         .collect();
@@ -438,24 +468,32 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
         );
     }
 
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let pf: ProbeFile = toml::from_str(&raw)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let pf: ProbeFile =
+        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
 
-    let probes: Vec<&ProbeEntry> = pf.probe.iter()
+    let probes: Vec<&ProbeEntry> = pf
+        .probe
+        .iter()
         .filter(|p| {
             // --name: exact name match
             if let Some(ref n) = args.name {
-                if p.name != *n { return false; }
+                if p.name != *n {
+                    return false;
+                }
             }
             // --tag: probe must include this tag
             if let Some(ref t) = args.tag {
-                if !p.tags.iter().any(|tag| tag == t) { return false; }
+                if !p.tags.iter().any(|tag| tag == t) {
+                    return false;
+                }
             }
             // --filter: legacy substring match on name
             if let Some(ref f) = args.filter {
-                if !p.name.contains(f.as_str()) { return false; }
+                if !p.name.contains(f.as_str()) {
+                    return false;
+                }
             }
             true
         })
@@ -464,9 +502,15 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
     if probes.is_empty() {
         if args.name.is_some() || args.tag.is_some() || args.filter.is_some() {
             let mut reason = Vec::new();
-            if let Some(ref n) = args.name   { reason.push(format!("name={:?}", n)); }
-            if let Some(ref t) = args.tag    { reason.push(format!("tag={:?}", t)); }
-            if let Some(ref f) = args.filter { reason.push(format!("filter={:?}", f)); }
+            if let Some(ref n) = args.name {
+                reason.push(format!("name={:?}", n));
+            }
+            if let Some(ref t) = args.tag {
+                reason.push(format!("tag={:?}", t));
+            }
+            if let Some(ref f) = args.filter {
+                reason.push(format!("filter={:?}", f));
+            }
             println!("No probes matched filter(s): {}.", reason.join(", "));
         } else {
             println!("No probes to run.");
@@ -503,7 +547,8 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
             Some(_) => "stale",
         }
     };
-    let symbol_count: Option<u64> = SearchFtsDb::open(&cfg.db_path).ok()
+    let symbol_count: Option<u64> = SearchFtsDb::open(&cfg.db_path)
+        .ok()
         .map(|fts| fts.symbol_count() as u64);
     let trust = compute_trust_score(&cfg.db_path);
 
@@ -523,17 +568,26 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
     // workflow probes (command="workflow") are excluded (no JSON output to cache).
     // -------------------------------------------------------------------------
     let cacheable = |p: &&ProbeEntry| {
-        p.command != "hydrate-roundtrip" && p.command != "hydrate_roundtrip"
+        p.command != "hydrate-roundtrip"
+            && p.command != "hydrate_roundtrip"
             && p.command != "workflow"
     };
 
     // Map each probe index → its cache key (or None if non-cacheable).
-    let probe_keys: Vec<Option<String>> = probes.iter()
-        .map(|p| if cacheable(&p) { Some(command_cache_key(p, &cfg.db_path)) } else { None })
+    let probe_keys: Vec<Option<String>> = probes
+        .iter()
+        .map(|p| {
+            if cacheable(&p) {
+                Some(command_cache_key(p, &cfg.db_path))
+            } else {
+                None
+            }
+        })
         .collect();
 
     // Collect unique keys, keeping the first probe index as the representative.
-    let mut key_to_representative: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut key_to_representative: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for (i, key_opt) in probe_keys.iter().enumerate() {
         if let Some(key) = key_opt {
             key_to_representative.entry(key.clone()).or_insert(i);
@@ -544,30 +598,45 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
     let n_cacheable = probe_keys.iter().filter(|k| k.is_some()).count();
     let n_deduped = n_cacheable.saturating_sub(n_unique);
     if !args.json && n_deduped > 0 {
-        eprintln!("  {} duplicate command invocation(s) eliminated by cache ({} unique → {} probes)",
-            n_deduped, n_unique, n_cacheable);
+        eprintln!(
+            "  {} duplicate command invocation(s) eliminated by cache ({} unique → {} probes)",
+            n_deduped, n_unique, n_cacheable
+        );
     }
 
     // Execute unique commands in parallel, building the cache.
     // key → CachedOutput
     let command_cache: std::collections::HashMap<String, CachedOutput> = {
-        let unique_probes: Vec<(String, &ProbeEntry)> = key_to_representative.iter()
+        let unique_probes: Vec<(String, &ProbeEntry)> = key_to_representative
+            .iter()
             .map(|(key, &idx)| (key.clone(), probes[idx]))
             .collect();
         let mut map: std::collections::HashMap<String, CachedOutput> =
             std::collections::HashMap::with_capacity(unique_probes.len());
         std::thread::scope(|scope| {
             for chunk in unique_probes.chunks(jobs) {
-                let handles: Vec<_> = chunk.iter().map(|(key, probe)| {
-                    scope.spawn(move || (key.clone(), run_command_only(cfg, probe)))
-                }).collect();
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|(key, probe)| {
+                        scope.spawn(move || (key.clone(), run_command_only(cfg, probe)))
+                    })
+                    .collect();
                 for h in handles {
                     let (k, v) = h.join().unwrap_or_else(|_| {
-                        ("__panic__".to_string(), CachedOutput {
-                            json: None, stdout_raw: String::new(), stderr: String::new(),
-                            success: false, duration_ms: 0, timed_out: false,
-                            exec_error: Some("thread panicked during command execution".to_string()),
-                        })
+                        (
+                            "__panic__".to_string(),
+                            CachedOutput {
+                                json: None,
+                                stdout_raw: String::new(),
+                                stderr: String::new(),
+                                success: false,
+                                duration_ms: 0,
+                                timed_out: false,
+                                exec_error: Some(
+                                    "thread panicked during command execution".to_string(),
+                                ),
+                            },
+                        )
                     });
                     map.insert(k, v);
                 }
@@ -644,8 +713,13 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
                 let is_fail = result.error.is_some();
                 let is_slow = fail_slow.map_or(false, |ms| result.duration_ms > ms as u128);
                 if !show_json {
-                    let status =
-                        if is_fail { "FAIL" } else if is_slow { "SLOW" } else { "PASS" };
+                    let status = if is_fail {
+                        "FAIL"
+                    } else if is_slow {
+                        "SLOW"
+                    } else {
+                        "PASS"
+                    };
                     let ms = result.duration_ms;
                     if is_fail {
                         println!("{:<5} {} ({}ms)", status, result.name, ms);
@@ -667,7 +741,10 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
 
     // Slow violations: probes that exceeded --fail-slow threshold.
     let slow_violations: Vec<&ProbeResult> = if let Some(threshold_ms) = args.fail_slow {
-        results.iter().filter(|r| r.duration_ms > threshold_ms as u128).collect()
+        results
+            .iter()
+            .filter(|r| r.duration_ms > threshold_ms as u128)
+            .collect()
     } else {
         Vec::new()
     };
@@ -691,11 +768,15 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
     };
 
     // Top-5 slowest — full result shape, pre-sorted descending by duration_ms.
-    let mut by_duration: Vec<(usize, u128)> = results.iter().enumerate()
+    let mut by_duration: Vec<(usize, u128)> = results
+        .iter()
+        .enumerate()
         .map(|(i, r)| (i, r.duration_ms))
         .collect();
     by_duration.sort_by(|a, b| b.1.cmp(&a.1));
-    let slowest_top5: Vec<Value> = by_duration.iter().take(5)
+    let slowest_top5: Vec<Value> = by_duration
+        .iter()
+        .take(5)
         .map(|(i, _)| result_to_json(&results[*i]))
         .collect();
 
@@ -703,35 +784,42 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
     let wall_time_ms = wall_start.elapsed().as_millis();
     let finished_at = Utc::now().to_rfc3339();
     let budget_failed = !slow_violations.is_empty();
-    let slow_violation_names: Vec<&str> = slow_violations.iter()
-        .map(|r| r.name.as_str())
-        .collect();
+    let slow_violation_names: Vec<&str> = slow_violations.iter().map(|r| r.name.as_str()).collect();
 
     if args.json {
         let json_results: Vec<Value> = results.iter().map(|r| result_to_json(r)).collect();
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "asd_version": env!("CARGO_PKG_VERSION"),
-            "started_at": started_at,
-            "finished_at": finished_at,
-            "probe_file": probe_file_path(cfg),
-            "db_path": cfg.db_path,
-            "total": results.len(),
-            "passed": passed,
-            "failed": failed,
-            "budget_failed": budget_failed,
-            "wall_time_ms": wall_time_ms,
-            "worker_count": jobs,
-            "db_state": db_state,
-            "symbol_count": symbol_count,
-            "performance_budget_ms": args.fail_slow,
-            "slow_violations": slow_violation_names,
-            "slowest": slowest_top5,
-            "trust": trust.to_json(),
-            "results": json_results,
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "asd_version": env!("CARGO_PKG_VERSION"),
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "probe_file": probe_file_path(cfg),
+                "db_path": cfg.db_path,
+                "total": results.len(),
+                "passed": passed,
+                "failed": failed,
+                "budget_failed": budget_failed,
+                "wall_time_ms": wall_time_ms,
+                "worker_count": jobs,
+                "db_state": db_state,
+                "symbol_count": symbol_count,
+                "performance_budget_ms": args.fail_slow,
+                "slow_violations": slow_violation_names,
+                "slowest": slowest_top5,
+                "trust": trust.to_json(),
+                "results": json_results,
+            }))?
+        );
     } else {
-        println!("\n{} probe(s): {} passed, {} failed  [{} workers, {}ms wall]",
-            results.len(), passed, failed, jobs, wall_time_ms);
+        println!(
+            "\n{} probe(s): {} passed, {} failed  [{} workers, {}ms wall]",
+            results.len(),
+            passed,
+            failed,
+            jobs,
+            wall_time_ms
+        );
         if !slow_violations.is_empty() {
             let threshold_ms = args.fail_slow.unwrap();
             println!("SLOW violations (>{threshold_ms} ms):");
@@ -742,9 +830,11 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
         if !slowest_top5.is_empty() && results.len() > 1 {
             println!("Slowest probes:");
             for entry in &slowest_top5 {
-                println!("  {} ({}ms)",
+                println!(
+                    "  {} ({}ms)",
                     entry["name"].as_str().unwrap_or("?"),
-                    entry["duration_ms"].as_u64().unwrap_or(0));
+                    entry["duration_ms"].as_u64().unwrap_or(0)
+                );
             }
         }
     }
@@ -752,19 +842,22 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
     // Always append a compact record to probe-history.jsonl regardless of output mode.
     // Includes per-probe compact rows (no debug_payload) — canonical source of truth
     // for per-probe trend analysis.  The analytics SQLite DB mirrors this.
-    let probes_compact: Vec<Value> = results.iter().map(|r| {
-        let is_slow = fail_slow.map_or(false, |ms| r.duration_ms > ms as u128);
-        serde_json::json!({
-            "name": r.name,
-            "command": r.command,
-            "assertion": r.assertion,
-            "tags": r.tags,
-            "passed": r.error.is_none(),
-            "slow": is_slow,
-            "timed_out": r.timed_out,
-            "duration_ms": r.duration_ms,
+    let probes_compact: Vec<Value> = results
+        .iter()
+        .map(|r| {
+            let is_slow = fail_slow.map_or(false, |ms| r.duration_ms > ms as u128);
+            serde_json::json!({
+                "name": r.name,
+                "command": r.command,
+                "assertion": r.assertion,
+                "tags": r.tags,
+                "passed": r.error.is_none(),
+                "slow": is_slow,
+                "timed_out": r.timed_out,
+                "duration_ms": r.duration_ms,
+            })
         })
-    }).collect();
+        .collect();
     let history_record = serde_json::json!({
         "kind": "probe_run",
         "asd_version": env!("CARGO_PKG_VERSION"),
@@ -801,10 +894,10 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
 struct ProbeResult {
     name: String,
     command: String,
-    assertion: String,      // assertion kind, e.g. "file_not_in_key"; "" = smoke test
+    assertion: String, // assertion kind, e.g. "file_not_in_key"; "" = smoke test
     tags: Vec<String>,
     duration_ms: u128,
-    timed_out: bool,        // true if the probe was killed by a timeout (reserved; always false today)
+    timed_out: bool, // true if the probe was killed by a timeout (reserved; always false today)
     error: Option<String>,
     debug_payload: Option<Value>,
     debug_payload_summary: Option<String>,
@@ -834,7 +927,13 @@ struct CachedOutput {
 /// Probes with identical (command, args, cwd, db_path) share one subprocess run.
 fn command_cache_key(probe: &ProbeEntry, db_path: &std::path::Path) -> String {
     let cwd_part = probe.cwd.as_deref().unwrap_or("");
-    format!("{}|{}|{}|{}", probe.command, probe.args.join("\x00"), cwd_part, db_path.display())
+    format!(
+        "{}|{}|{}|{}",
+        probe.command,
+        probe.args.join("\x00"),
+        cwd_part,
+        db_path.display()
+    )
 }
 
 /// Execute the subprocess for `probe` and return a `CachedOutput`.
@@ -845,7 +944,11 @@ fn run_command_only(cfg: &Config, probe: &ProbeEntry) -> CachedOutput {
 
     let asd_bin_path: PathBuf = {
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("asd"));
-        if exe.exists() { exe } else { PathBuf::from("asd") }
+        if exe.exists() {
+            exe
+        } else {
+            PathBuf::from("asd")
+        }
     };
     let asd_bin = asd_bin_path.to_string_lossy().into_owned();
 
@@ -860,9 +963,7 @@ fn run_command_only(cfg: &Config, probe: &ProbeEntry) -> CachedOutput {
         .parent()
         .unwrap_or(std::path::Path::new("."))
         .to_path_buf();
-    let work_dir = probe.cwd.as_ref()
-        .map(PathBuf::from)
-        .unwrap_or(probe_dir);
+    let work_dir = probe.cwd.as_ref().map(PathBuf::from).unwrap_or(probe_dir);
 
     fn shell_quote_inner(s: &str) -> String {
         format!("'{}'", s.replace('\'', r"'\''"))
@@ -894,7 +995,10 @@ fn run_command_only(cfg: &Config, probe: &ProbeEntry) -> CachedOutput {
                 success: false,
                 duration_ms: start.elapsed().as_millis(),
                 timed_out: false,
-                exec_error: Some(format!("failed to execute asd ({:?}) via sh: {}", asd_bin, e)),
+                exec_error: Some(format!(
+                    "failed to execute asd ({:?}) via sh: {}",
+                    asd_bin, e
+                )),
             };
         }
     };
@@ -918,7 +1022,9 @@ fn run_command_only(cfg: &Config, probe: &ProbeEntry) -> CachedOutput {
 /// Run a probe's assertion against a pre-computed `CachedOutput`.
 /// Returns the ProbeResult without spawning any subprocess.
 fn run_assertion_against(probe: &ProbeEntry, cached: &CachedOutput) -> ProbeResult {
-    let assertion_kind = probe.assert.as_table()
+    let assertion_kind = probe
+        .assert
+        .as_table()
         .and_then(|m| m.get("kind"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
@@ -1001,7 +1107,9 @@ fn run_assertion_against(probe: &ProbeEntry, cached: &CachedOutput) -> ProbeResu
 fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
     let start = Instant::now();
     // Extract assertion kind from probe definition for result metadata.
-    let assertion_kind = probe.assert.as_table()
+    let assertion_kind = probe
+        .assert
+        .as_table()
         .and_then(|m| m.get("kind"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
@@ -1010,7 +1118,9 @@ fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
     // Special-case: hydrate-roundtrip runs an isolated in-process cycle rather
     // than spawning a subprocess. No assert block needed — pass/fail is the
     // roundtrip itself.
-    if probe.command.as_str() == "hydrate-roundtrip" || probe.command.as_str() == "hydrate_roundtrip" {
+    if probe.command.as_str() == "hydrate-roundtrip"
+        || probe.command.as_str() == "hydrate_roundtrip"
+    {
         let result = run_hydrate_roundtrip_probe(cfg);
         let duration_ms = start.elapsed().as_millis();
         return match result {
@@ -1045,7 +1155,11 @@ fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
     // where current_exe() returns a stale worktree path that no longer exists.
     let asd_bin_path: PathBuf = {
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("asd"));
-        if exe.exists() { exe } else { PathBuf::from("asd") }
+        if exe.exists() {
+            exe
+        } else {
+            PathBuf::from("asd")
+        }
     };
     // Use the string form for shell quoting.
     let asd_bin = asd_bin_path.to_string_lossy().into_owned();
@@ -1063,9 +1177,7 @@ fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
         .parent()
         .unwrap_or(Path::new("."))
         .to_path_buf();
-    let work_dir = probe.cwd.as_ref()
-        .map(PathBuf::from)
-        .unwrap_or(probe_dir);
+    let work_dir = probe.cwd.as_ref().map(PathBuf::from).unwrap_or(probe_dir);
 
     // Build the shell command string.
     // We invoke via `sh -c '...'` rather than exec-ing asd directly because on macOS
@@ -1103,7 +1215,10 @@ fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
                 tags: probe.tags.clone(),
                 duration_ms: start.elapsed().as_millis(),
                 timed_out: false,
-                error: Some(format!("failed to execute asd ({:?}) via sh: {}", asd_bin, e)),
+                error: Some(format!(
+                    "failed to execute asd ({:?}) via sh: {}",
+                    asd_bin, e
+                )),
                 debug_payload: None,
                 debug_payload_summary: None,
             };
@@ -1124,7 +1239,11 @@ fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
             tags: probe.tags.clone(),
             duration_ms,
             timed_out: false,
-            error: Some(format!("command exited with {}: {}", output.status, stderr.trim())),
+            error: Some(format!(
+                "command exited with {}: {}",
+                output.status,
+                stderr.trim()
+            )),
             debug_payload: None,
             debug_payload_summary: None,
         };
@@ -1187,20 +1306,19 @@ fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
 
 fn run_hydrate_roundtrip_probe(_cfg: &Config) -> Result<String, String> {
     use agentstatedeveloper_core::{
-        Engine, AsgIndexStore, AsgLedgerStore, IndexStore, LedgerStore,
-        hydrate_from_dir, sync_to_dir, symbol_fingerprint,
+        AsgIndexStore, AsgLedgerStore, Engine, IndexStore, LedgerStore, hydrate_from_dir,
         schema::{Author, AuthorKind, LedgerEntry, LedgerKind, Position, Symbol, SymbolKind},
+        symbol_fingerprint, sync_to_dir,
     };
 
     // Step 1 — ephemeral temp workspace (never touches the production DB).
-    let tmp = tempfile::TempDir::new()
-        .map_err(|e| format!("failed to create temp dir: {e}"))?;
+    let tmp = tempfile::TempDir::new().map_err(|e| format!("failed to create temp dir: {e}"))?;
     let db_a = tmp.path().join("roundtrip_a.db");
     let db_b = tmp.path().join("roundtrip_b.db");
 
     // Step 2 — open source engine, write a synthetic symbol + sentinel entry.
-    let engine_a = Engine::open_sqlite(&db_a)
-        .map_err(|e| format!("failed to open temp Engine A: {e}"))?;
+    let engine_a =
+        Engine::open_sqlite(&db_a).map_err(|e| format!("failed to open temp Engine A: {e}"))?;
 
     let qname = "asd::probe::roundtrip_sentinel";
     let file = "__asd_probe__/roundtrip.rs";
@@ -1217,11 +1335,15 @@ fn run_hydrate_roundtrip_probe(_cfg: &Config) -> Result<String, String> {
         signature: Some("fn roundtrip_sentinel()".to_string()),
     };
     let store_a = AsgIndexStore::from_engine(&engine_a);
-    store_a.put_symbol(&engine_a.ref_name, &sym, "asd-roundtrip-probe")
+    store_a
+        .put_symbol(&engine_a.ref_name, &sym, "asd-roundtrip-probe")
         .map_err(|e| format!("failed to write sentinel symbol: {e}"))?;
 
     let sentinel_text = "asd-hydrate-roundtrip-proof";
-    let author = Author { kind: AuthorKind::Agent, id: "asd-roundtrip-probe".to_string() };
+    let author = Author {
+        kind: AuthorKind::Agent,
+        id: "asd-roundtrip-probe".to_string(),
+    };
     let mut entry = LedgerEntry::new(
         "asd-probe-roundtrip-sym",
         LedgerKind::Decision,
@@ -1231,7 +1353,8 @@ fn run_hydrate_roundtrip_probe(_cfg: &Config) -> Result<String, String> {
     entry.tags = vec!["trust-probe".to_string(), "probe-roundtrip".to_string()];
 
     let ledger_a = AsgLedgerStore::new(&engine_a.repo);
-    ledger_a.append_entry(&engine_a.ref_name, &entry, "asd-roundtrip-probe")
+    ledger_a
+        .append_entry(&engine_a.ref_name, &entry, "asd-roundtrip-probe")
         .map_err(|e| format!("failed to write sentinel ledger entry: {e}"))?;
 
     // Step 3 — sync sidecar to temp dir (creates .asd/v1/ inside tmp).
@@ -1240,10 +1363,15 @@ fn run_hydrate_roundtrip_probe(_cfg: &Config) -> Result<String, String> {
         .map_err(|e| format!("sync_to_dir failed: {e}"))?;
 
     // Step 4 — open fresh engine B (empty DB), hydrate from the sidecar.
-    let engine_b = Engine::open_sqlite(&db_b)
-        .map_err(|e| format!("failed to open temp Engine B: {e}"))?;
-    hydrate_from_dir(&engine_b.repo, &engine_b.ref_name, sidecar_root, "asd-roundtrip-probe")
-        .map_err(|e| format!("hydrate_from_dir failed: {e}"))?;
+    let engine_b =
+        Engine::open_sqlite(&db_b).map_err(|e| format!("failed to open temp Engine B: {e}"))?;
+    hydrate_from_dir(
+        &engine_b.repo,
+        &engine_b.ref_name,
+        sidecar_root,
+        "asd-roundtrip-probe",
+    )
+    .map_err(|e| format!("hydrate_from_dir failed: {e}"))?;
 
     // Step 5 — verify the sentinel entry survived.
     let ledger_b = AsgLedgerStore::new(&engine_b.repo);
@@ -1265,7 +1393,10 @@ fn run_hydrate_roundtrip_probe(_cfg: &Config) -> Result<String, String> {
              ({} entries present: {:?})",
             sentinel_text,
             entries.len(),
-            entries.iter().map(|e| e.summary.as_str()).collect::<Vec<_>>()
+            entries
+                .iter()
+                .map(|e| e.summary.as_str())
+                .collect::<Vec<_>>()
         ))
     }
 }
@@ -1280,9 +1411,7 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         None => return Ok(()), // no assertion — probe always passes (useful as smoke test)
     };
 
-    let kind = map.get("kind")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let kind = map.get("kind").and_then(|v| v.as_str()).unwrap_or("");
 
     // Resolve a possibly dotted key path (e.g. "safe_change_recipe.reference_only") into
     // the nested Value.
@@ -1302,8 +1431,11 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
             let key = str_field(map, "key")?;
             let field = str_field(map, "field")?;
             let value = str_field(map, "value")?;
-            let arr = resolve_key(output, key).and_then(|v| v.as_array()).unwrap_or(&empty_arr);
-            let found: Vec<&str> = arr.iter()
+            let arr = resolve_key(output, key)
+                .and_then(|v| v.as_array())
+                .unwrap_or(&empty_arr);
+            let found: Vec<&str> = arr
+                .iter()
                 .filter_map(|item| item.get(field).and_then(|v| v.as_str()))
                 .filter(|s| s.contains(value))
                 .collect();
@@ -1322,15 +1454,21 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
             let key = str_field(map, "key")?;
             let field = str_field(map, "field")?;
             let value = str_field(map, "value")?;
-            let arr = resolve_key(output, key).and_then(|v| v.as_array()).unwrap_or(&empty_arr);
-            let found = arr.iter()
-                .any(|item| item.get(field)
+            let arr = resolve_key(output, key)
+                .and_then(|v| v.as_array())
+                .unwrap_or(&empty_arr);
+            let found = arr.iter().any(|item| {
+                item.get(field)
                     .and_then(|v| v.as_str())
-                    .map_or(false, |s| s.contains(value)));
+                    .map_or(false, |s| s.contains(value))
+            });
             if found {
                 Ok(())
             } else {
-                Err(format!("file_in_key: no item in {}[].{} contains {:?}", key, field, value))
+                Err(format!(
+                    "file_in_key: no item in {}[].{} contains {:?}",
+                    key, field, value
+                ))
             }
         }
 
@@ -1338,20 +1476,27 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         "qname_rank_lte" => {
             let fragment = str_field(map, "fragment")?;
             let max_rank = u64_field(map, "max_rank")?;
-            let results = output.get("results").and_then(|v| v.as_array()).unwrap_or(&empty_arr);
+            let results = output
+                .get("results")
+                .and_then(|v| v.as_array())
+                .unwrap_or(&empty_arr);
             let pos = results.iter().position(|r| {
-                r.get("qname").and_then(|v| v.as_str())
+                r.get("qname")
+                    .and_then(|v| v.as_str())
                     .map_or(false, |q| q.contains(fragment))
             });
             match pos {
                 Some(idx) if (idx as u64 + 1) <= max_rank => Ok(()),
                 Some(idx) => Err(format!(
                     "qname_rank_lte: {:?} found at rank {} (max_rank={})",
-                    fragment, idx + 1, max_rank
+                    fragment,
+                    idx + 1,
+                    max_rank
                 )),
                 None => Err(format!(
                     "qname_rank_lte: no result qname contains {:?} (checked {} results)",
-                    fragment, results.len()
+                    fragment,
+                    results.len()
                 )),
             }
         }
@@ -1359,7 +1504,10 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         // result_count_lte: len(results) ≤ max.
         "result_count_lte" => {
             let max = u64_field(map, "max")?;
-            let results = output.get("results").and_then(|v| v.as_array()).unwrap_or(&empty_arr);
+            let results = output
+                .get("results")
+                .and_then(|v| v.as_array())
+                .unwrap_or(&empty_arr);
             let n = results.len() as u64;
             if n <= max {
                 Ok(())
@@ -1373,13 +1521,22 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         "cluster_winner_kind_not" => {
             let doc_stem = str_field(map, "doc_stem")?;
             let kind_not = str_field(map, "kind_not")?;
-            let dbg = output.get("cluster_debug").and_then(|v| v.as_array()).unwrap_or(&empty_arr);
+            let dbg = output
+                .get("cluster_debug")
+                .and_then(|v| v.as_array())
+                .unwrap_or(&empty_arr);
             let entry = dbg.iter().find(|e| {
-                e.get("doc_file").and_then(|v| v.as_str())
-                    .map_or(false, |f| f.to_lowercase().contains(&doc_stem.to_lowercase()))
+                e.get("doc_file")
+                    .and_then(|v| v.as_str())
+                    .map_or(false, |f| {
+                        f.to_lowercase().contains(&doc_stem.to_lowercase())
+                    })
             });
             match entry {
-                None => Err(format!("cluster_winner_kind_not: no cluster_debug entry matches doc_stem {:?}", doc_stem)),
+                None => Err(format!(
+                    "cluster_winner_kind_not: no cluster_debug entry matches doc_stem {:?}",
+                    doc_stem
+                )),
                 Some(e) => {
                     let winner = e.get("winner_selected").unwrap_or(&Value::Null);
                     let qname = winner.get("qname").and_then(|v| v.as_str()).unwrap_or("");
@@ -1400,13 +1557,22 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         "cluster_winner_qname_contains" => {
             let doc_stem = str_field(map, "doc_stem")?;
             let fragment = str_field(map, "fragment")?;
-            let dbg = output.get("cluster_debug").and_then(|v| v.as_array()).unwrap_or(&empty_arr);
+            let dbg = output
+                .get("cluster_debug")
+                .and_then(|v| v.as_array())
+                .unwrap_or(&empty_arr);
             let entry = dbg.iter().find(|e| {
-                e.get("doc_file").and_then(|v| v.as_str())
-                    .map_or(false, |f| f.to_lowercase().contains(&doc_stem.to_lowercase()))
+                e.get("doc_file")
+                    .and_then(|v| v.as_str())
+                    .map_or(false, |f| {
+                        f.to_lowercase().contains(&doc_stem.to_lowercase())
+                    })
             });
             match entry {
-                None => Err(format!("cluster_winner_qname_contains: no cluster_debug entry matches doc_stem {:?}", doc_stem)),
+                None => Err(format!(
+                    "cluster_winner_qname_contains: no cluster_debug entry matches doc_stem {:?}",
+                    doc_stem
+                )),
                 Some(e) => {
                     let winner = e.get("winner_selected").unwrap_or(&Value::Null);
                     let qname = winner.get("qname").and_then(|v| v.as_str()).unwrap_or("");
@@ -1424,14 +1590,19 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
 
         // no_duplicate_summaries: no two suggested_entries share the same summary text.
         "no_duplicate_summaries" => {
-            let entries = output.get("suggested_entries").and_then(|v| v.as_array()).unwrap_or(&empty_arr);
-            let mut seen_global: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            let entries = output
+                .get("suggested_entries")
+                .and_then(|v| v.as_array())
+                .unwrap_or(&empty_arr);
+            let mut seen_global: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
             for e in entries {
                 if let Some(s) = e.get("summary").and_then(|v| v.as_str()) {
                     *seen_global.entry(s.to_string()).or_insert(0) += 1;
                 }
             }
-            let dups: Vec<&String> = seen_global.iter()
+            let dups: Vec<&String> = seen_global
+                .iter()
                 .filter(|(_, count)| **count > 1)
                 .map(|(s, _)| s)
                 .collect();
@@ -1448,9 +1619,14 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         // Use this to verify a known-good SOT symbol that slipped below top-5 is reported.
         "boosted_outranked_contains" => {
             let fragment = str_field(map, "fragment")?;
-            let outranked = output.get("boosted_outranked").and_then(|v| v.as_array()).unwrap_or(&empty_arr);
+            let outranked = output
+                .get("boosted_outranked")
+                .and_then(|v| v.as_array())
+                .unwrap_or(&empty_arr);
             let found = outranked.iter().any(|s| {
-                s.as_str().map_or(false, |q| q.to_lowercase().contains(&fragment.to_lowercase()))
+                s.as_str().map_or(false, |q| {
+                    q.to_lowercase().contains(&fragment.to_lowercase())
+                })
             });
             if found {
                 Ok(())
@@ -1458,7 +1634,10 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
                 Err(format!(
                     "boosted_outranked_contains: {:?} not in boosted_outranked; got {:?}",
                     fragment,
-                    outranked.iter().filter_map(|s| s.as_str()).collect::<Vec<_>>()
+                    outranked
+                        .iter()
+                        .filter_map(|s| s.as_str())
+                        .collect::<Vec<_>>()
                 ))
             }
         }
@@ -1467,15 +1646,22 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         // Use this to prove a feedback-suppressed symbol is absent from results.
         "qname_not_in_results" => {
             let fragment = str_field(map, "fragment")?;
-            let results = output.get("results").and_then(|v| v.as_array()).unwrap_or(&empty_arr);
+            let results = output
+                .get("results")
+                .and_then(|v| v.as_array())
+                .unwrap_or(&empty_arr);
             let hit = results.iter().find(|r| {
-                r.get("qname").and_then(|v| v.as_str())
-                    .map_or(false, |q| q.to_lowercase().contains(&fragment.to_lowercase()))
+                r.get("qname").and_then(|v| v.as_str()).map_or(false, |q| {
+                    q.to_lowercase().contains(&fragment.to_lowercase())
+                })
             });
             match hit {
                 Some(r) => {
                     let qname = r.get("qname").and_then(|v| v.as_str()).unwrap_or("?");
-                    Err(format!("qname_not_in_results: {:?} is present in results (expected suppressed)", qname))
+                    Err(format!(
+                        "qname_not_in_results: {:?} is present in results (expected suppressed)",
+                        qname
+                    ))
                 }
                 None => Ok(()),
             }
@@ -1484,7 +1670,10 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         // ambiguous_terms_nonempty: the query has at least one ambiguous term flagged.
         // Use this to verify broad/generic queries signal uncertainty.
         "ambiguous_terms_nonempty" => {
-            let terms = output.get("ambiguous_terms").and_then(|v| v.as_array()).unwrap_or(&empty_arr);
+            let terms = output
+                .get("ambiguous_terms")
+                .and_then(|v| v.as_array())
+                .unwrap_or(&empty_arr);
             if terms.is_empty() {
                 Err("ambiguous_terms_nonempty: ambiguous_terms is empty — query may be too specific or detection not firing".to_string())
             } else {
@@ -1495,7 +1684,10 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         // scoped_suggestions_nonempty: scoped_suggestions has at least one entry.
         // Use this to verify broad queries emit narrowing hints.
         "scoped_suggestions_nonempty" => {
-            let suggestions = output.get("scoped_suggestions").and_then(|v| v.as_array()).unwrap_or(&empty_arr);
+            let suggestions = output
+                .get("scoped_suggestions")
+                .and_then(|v| v.as_array())
+                .unwrap_or(&empty_arr);
             if suggestions.is_empty() {
                 Err("scoped_suggestions_nonempty: scoped_suggestions is empty — no narrowing hints emitted".to_string())
             } else {
@@ -1506,9 +1698,14 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         // scoped_suggestions_contains: at least one scoped suggestion contains `fragment`.
         "scoped_suggestions_contains" => {
             let fragment = str_field(map, "fragment")?;
-            let suggestions = output.get("scoped_suggestions").and_then(|v| v.as_array()).unwrap_or(&empty_arr);
+            let suggestions = output
+                .get("scoped_suggestions")
+                .and_then(|v| v.as_array())
+                .unwrap_or(&empty_arr);
             let found = suggestions.iter().any(|s| {
-                s.as_str().map_or(false, |t| t.to_lowercase().contains(&fragment.to_lowercase()))
+                s.as_str().map_or(false, |t| {
+                    t.to_lowercase().contains(&fragment.to_lowercase())
+                })
             });
             if found {
                 Ok(())
@@ -1516,7 +1713,10 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
                 Err(format!(
                     "scoped_suggestions_contains: no suggestion contains {:?}; got {:?}",
                     fragment,
-                    suggestions.iter().filter_map(|s| s.as_str()).collect::<Vec<_>>()
+                    suggestions
+                        .iter()
+                        .filter_map(|s| s.as_str())
+                        .collect::<Vec<_>>()
                 ))
             }
         }
@@ -1528,13 +1728,14 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         "uncertainty_level_lte" => {
             let max_level = str_field(map, "max_level")?;
             let level_rank = |l: &str| match l {
-                "low"      => 0u8,
-                "medium"   => 1,
-                "high"     => 2,
+                "low" => 0u8,
+                "medium" => 1,
+                "high" => 2,
                 "critical" => 3,
-                _          => 4,
+                _ => 4,
             };
-            let actual_level = output.get("uncertainty")
+            let actual_level = output
+                .get("uncertainty")
                 .and_then(|u| u.get("level"))
                 .and_then(Value::as_str)
                 .unwrap_or("low");
@@ -1553,17 +1754,21 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         // Example: { kind = "uncertainty_reason_contains", code = "ambiguous_term" }
         "uncertainty_reason_contains" => {
             let code = str_field(map, "code")?;
-            let reasons = output.get("uncertainty")
+            let reasons = output
+                .get("uncertainty")
                 .and_then(|u| u.get("reasons"))
                 .and_then(Value::as_array)
                 .unwrap_or(&empty_arr);
             let found = reasons.iter().any(|r| {
-                r.get("code").and_then(Value::as_str).map_or(false, |c| c == code)
+                r.get("code")
+                    .and_then(Value::as_str)
+                    .map_or(false, |c| c == code)
             });
             if found {
                 Ok(())
             } else {
-                let codes: Vec<&str> = reasons.iter()
+                let codes: Vec<&str> = reasons
+                    .iter()
                     .filter_map(|r| r.get("code").and_then(Value::as_str))
                     .collect();
                 Err(format!(
@@ -1578,7 +1783,8 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         // Example: { kind = "uncertainty_action_eq", action = "narrow_query" }
         "uncertainty_action_eq" => {
             let action = str_field(map, "action")?;
-            let actual = output.get("uncertainty")
+            let actual = output
+                .get("uncertainty")
                 .and_then(|u| u.get("recommended_action"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
@@ -1595,14 +1801,18 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         // recovery_suggestions_nonempty: uncertainty.recovery_suggestions is non-empty.
         // Use this to verify broad queries emit structured recovery hints.
         "recovery_suggestions_nonempty" => {
-            let suggestions = output.get("uncertainty")
+            let suggestions = output
+                .get("uncertainty")
                 .and_then(|u| u.get("recovery_suggestions"))
                 .and_then(Value::as_array)
                 .unwrap_or(&empty_arr);
             if !suggestions.is_empty() {
                 Ok(())
             } else {
-                Err("recovery_suggestions_nonempty: uncertainty.recovery_suggestions is empty".to_string())
+                Err(
+                    "recovery_suggestions_nonempty: uncertainty.recovery_suggestions is empty"
+                        .to_string(),
+                )
             }
         }
 
@@ -1610,18 +1820,21 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         // Example: { kind = "recovery_suggestion_estimated", strength = "strong" }
         "recovery_suggestion_estimated" => {
             let strength = str_field(map, "strength")?;
-            let suggestions = output.get("uncertainty")
+            let suggestions = output
+                .get("uncertainty")
                 .and_then(|u| u.get("recovery_suggestions"))
                 .and_then(Value::as_array)
                 .unwrap_or(&empty_arr);
             let found = suggestions.iter().any(|s| {
-                s.get("estimated_recovery").and_then(Value::as_str)
+                s.get("estimated_recovery")
+                    .and_then(Value::as_str)
                     .map_or(false, |e| e == strength)
             });
             if found {
                 Ok(())
             } else {
-                let found_strengths: Vec<&str> = suggestions.iter()
+                let found_strengths: Vec<&str> = suggestions
+                    .iter()
                     .filter_map(|s| s.get("estimated_recovery").and_then(Value::as_str))
                     .collect();
                 Err(format!(
@@ -1636,7 +1849,8 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         "feedback_summary_gte" => {
             let field = str_field(map, "field")?;
             let min_value = u64_field(map, "min_value")?;
-            let actual = output.get("feedback_summary")
+            let actual = output
+                .get("feedback_summary")
                 .and_then(|s| s.get(field))
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
@@ -1654,7 +1868,8 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         "feedback_summary_eq" => {
             let field = str_field(map, "field")?;
             let expected = u64_field(map, "value")?;
-            let actual = output.get("feedback_summary")
+            let actual = output
+                .get("feedback_summary")
                 .and_then(|s| s.get(field))
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
@@ -1671,12 +1886,15 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         // feedback_rules_contains: feedback_summary.rules_applied contains `rule`.
         "feedback_rules_contains" => {
             let rule = str_field(map, "rule")?;
-            let rules = output.get("feedback_summary")
+            let rules = output
+                .get("feedback_summary")
                 .and_then(|s| s.get("rules_applied"))
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            let found = rules.iter().any(|r| r.as_str().map_or(false, |s| s == rule));
+            let found = rules
+                .iter()
+                .any(|r| r.as_str().map_or(false, |s| s == rule));
             if found {
                 Ok(())
             } else {
@@ -1694,7 +1912,8 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         //          { kind = "field_gte", field = "signals.symbol_count", min_value = 100 }
         "field_gte" => {
             let field = str_field(map, "field")?;
-            let min_val: f64 = map.get("min_value")
+            let min_val: f64 = map
+                .get("min_value")
                 .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
                 .ok_or_else(|| format!("assertion missing required numeric field \"min_value\""))?;
             let actual = dot_path(output, field)
@@ -1714,7 +1933,8 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         // Example: { kind = "field_lte", field = "total_bytes", max_value = 500000 }
         "field_lte" => {
             let field = str_field(map, "field")?;
-            let max_val: f64 = map.get("max_value")
+            let max_val: f64 = map
+                .get("max_value")
                 .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
                 .ok_or_else(|| format!("assertion missing required numeric field \"max_value\""))?;
             let actual = dot_path(output, field)
@@ -1809,9 +2029,12 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         // Required: min_value (float).
         // Example: { kind = "evidence_score_gte", min_value = 0.5 }
         "evidence_score_gte" => {
-            let min_val: f64 = map.get("min_value")
+            let min_val: f64 = map
+                .get("min_value")
                 .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
-                .ok_or_else(|| "assertion missing required numeric field \"min_value\"".to_string())?;
+                .ok_or_else(|| {
+                    "assertion missing required numeric field \"min_value\"".to_string()
+                })?;
             let actual = dot_path(output, "workflow.evidence_quality.evidence_quality_score")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
@@ -1847,10 +2070,12 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         // Example: { kind = "feedback_state_eq", field = "available", value = false }
         "feedback_state_eq" => {
             let field = str_field(map, "field")?;
-            let expected = map.get("value")
+            let expected = map
+                .get("value")
                 .and_then(|v| v.as_bool())
                 .ok_or_else(|| "assertion missing required bool field \"value\"".to_string())?;
-            let actual = output.get("feedback_state")
+            let actual = output
+                .get("feedback_state")
                 .and_then(|s| s.get(field))
                 .and_then(Value::as_bool);
             match actual {
@@ -1872,7 +2097,8 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         "feedback_state_field_eq" => {
             let field = str_field(map, "field")?;
             let expected = str_field(map, "value")?;
-            let actual = output.get("feedback_state")
+            let actual = output
+                .get("feedback_state")
                 .and_then(|s| s.get(field))
                 .and_then(Value::as_str)
                 .unwrap_or("");
@@ -1891,7 +2117,8 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         // Example: { kind = "feedback_coverage_eq", value = "none" }
         "feedback_coverage_eq" => {
             let expected = str_field(map, "value")?;
-            let actual = output.get("feedback_summary")
+            let actual = output
+                .get("feedback_summary")
                 .and_then(|s| s.get("coverage"))
                 .and_then(Value::as_str)
                 .unwrap_or("none");
@@ -1909,10 +2136,12 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         // Required: expected (bool).
         // Example: { kind = "uncertainty_exact_symbol_match", expected = true }
         "uncertainty_exact_symbol_match" => {
-            let expected = map.get("expected")
+            let expected = map
+                .get("expected")
                 .and_then(|v| v.as_bool())
                 .ok_or_else(|| "assertion missing required bool field \"expected\"".to_string())?;
-            let actual = output.get("uncertainty")
+            let actual = output
+                .get("uncertainty")
                 .and_then(|u| u.get("exact_symbol_match"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
@@ -1931,7 +2160,8 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         // Example: { kind = "uncertainty_primary_source_eq", expected = "query" }
         "uncertainty_primary_source_eq" => {
             let expected = str_field(map, "expected")?;
-            let actual = output.get("uncertainty")
+            let actual = output
+                .get("uncertainty")
                 .and_then(|u| u.get("sources"))
                 .and_then(|s| s.get("primary"))
                 .and_then(Value::as_str)
@@ -1951,10 +2181,14 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         // Example: { kind = "uncertainty_source_gte", source = "query", min_value = 0.2 }
         "uncertainty_source_gte" => {
             let source = str_field(map, "source")?;
-            let min_val: f64 = map.get("min_value")
+            let min_val: f64 = map
+                .get("min_value")
                 .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
-                .ok_or_else(|| "assertion missing required numeric field \"min_value\"".to_string())?;
-            let actual = output.get("uncertainty")
+                .ok_or_else(|| {
+                    "assertion missing required numeric field \"min_value\"".to_string()
+                })?;
+            let actual = output
+                .get("uncertainty")
                 .and_then(|u| u.get("sources"))
                 .and_then(|s| s.get(source))
                 .and_then(Value::as_f64)
@@ -2029,13 +2263,20 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
                 // Empty array trivially passes (nothing to check).
                 return Ok(());
             }
-            let missing: Vec<String> = arr.iter()
+            let missing: Vec<String> = arr
+                .iter()
                 .filter_map(|item| {
-                    let present = item.get(field)
+                    let present = item
+                        .get(field)
                         .map(|v| !v.is_null() && v.as_str().map_or(true, |s| !s.is_empty()))
                         .unwrap_or(false);
                     if !present {
-                        Some(item.get("file").and_then(Value::as_str).unwrap_or("?").to_string())
+                        Some(
+                            item.get("file")
+                                .and_then(Value::as_str)
+                                .unwrap_or("?")
+                                .to_string(),
+                        )
                     } else {
                         None
                     }
@@ -2046,7 +2287,10 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
             } else {
                 Err(format!(
                     "all_items_have_field: {} items in {} missing field {:?}: {:?}",
-                    missing.len(), array_path, field, &missing[..missing.len().min(5)]
+                    missing.len(),
+                    array_path,
+                    field,
+                    &missing[..missing.len().min(5)]
                 ))
             }
         }
@@ -2083,7 +2327,9 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
                         Err(format!(
                             "file_field_contains: item {:?}.{} = {:?} does not contain {:?}",
                             item.get("file").and_then(Value::as_str).unwrap_or("?"),
-                            field, val, value_contains
+                            field,
+                            val,
+                            value_contains
                         ))
                     }
                 }
@@ -2099,7 +2345,10 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
             if present {
                 Ok(())
             } else {
-                Err(format!("json_field_present: field {:?} is absent or null", field))
+                Err(format!(
+                    "json_field_present: field {:?} is absent or null",
+                    field
+                ))
             }
         }
 
@@ -2115,10 +2364,12 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
                 match actual_int {
                     Some(a) if a == expected_int => Ok(()),
                     Some(a) => Err(format!(
-                        "json_nested_eq: {}.{} = {} (expected {})", path, "", a, expected_int
+                        "json_nested_eq: {}.{} = {} (expected {})",
+                        path, "", a, expected_int
                     )),
                     None => Err(format!(
-                        "json_nested_eq: {}: field absent or non-numeric (expected {})", path, expected_int
+                        "json_nested_eq: {}: field absent or non-numeric (expected {})",
+                        path, expected_int
                     )),
                 }
             } else if let Some(expected_str) = map.get("value").and_then(|v| v.as_str()) {
@@ -2127,7 +2378,8 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
                     Ok(())
                 } else {
                     Err(format!(
-                        "json_nested_eq: {} = {:?} (expected {:?})", path, actual_str, expected_str
+                        "json_nested_eq: {} = {:?} (expected {:?})",
+                        path, actual_str, expected_str
                     ))
                 }
             } else {
@@ -2149,7 +2401,10 @@ fn dot_path<'a>(mut val: &'a Value, path: &str) -> Option<&'a Value> {
     Some(val)
 }
 
-fn str_field<'a>(map: &'a toml::map::Map<String, toml::Value>, key: &str) -> Result<&'a str, String> {
+fn str_field<'a>(
+    map: &'a toml::map::Map<String, toml::Value>,
+    key: &str,
+) -> Result<&'a str, String> {
     map.get(key)
         .and_then(|v| v.as_str())
         .ok_or_else(|| format!("assertion missing required string field {:?}", key))
@@ -2165,7 +2420,8 @@ fn u64_field(map: &toml::map::Map<String, toml::Value>, key: &str) -> Result<u64
 fn summarize_debug_payload(json: &Value) -> Option<String> {
     // Extract the most relevant debug field for the failure summary line.
     if let Some(arr) = json.get("classification_debug").and_then(|v| v.as_array()) {
-        let rules: Vec<&str> = arr.iter()
+        let rules: Vec<&str> = arr
+            .iter()
             .filter_map(|e| e.get("rule_that_won").and_then(|v| v.as_str()))
             .collect();
         if !rules.is_empty() {
@@ -2173,7 +2429,9 @@ fn summarize_debug_payload(json: &Value) -> Option<String> {
         }
     }
     if let Some(arr) = json.get("results").and_then(|v| v.as_array()) {
-        let top3: Vec<&str> = arr.iter().take(3)
+        let top3: Vec<&str> = arr
+            .iter()
+            .take(3)
             .filter_map(|r| r.get("qname").and_then(|v| v.as_str()))
             .collect();
         if !top3.is_empty() {
@@ -2181,10 +2439,13 @@ fn summarize_debug_payload(json: &Value) -> Option<String> {
         }
     }
     if let Some(arr) = json.get("cluster_debug").and_then(|v| v.as_array()) {
-        let winners: Vec<&str> = arr.iter()
-            .filter_map(|e| e.get("winner_selected")
-                .and_then(|w| w.get("qname"))
-                .and_then(|v| v.as_str()))
+        let winners: Vec<&str> = arr
+            .iter()
+            .filter_map(|e| {
+                e.get("winner_selected")
+                    .and_then(|w| w.get("qname"))
+                    .and_then(|v| v.as_str())
+            })
             .collect();
         if !winners.is_empty() {
             return Some(format!("cluster winners: {:?}", winners));
@@ -2216,8 +2477,8 @@ fn reindex_analytics(cfg: &Config, args: ProbeReindexArgs) -> Result<()> {
         // Without --force we do incremental (INSERT OR IGNORE), which is fine.
     }
 
-    let conn = open_analytics_db(&db_path)
-        .with_context(|| format!("opening {}", db_path.display()))?;
+    let conn =
+        open_analytics_db(&db_path).with_context(|| format!("opening {}", db_path.display()))?;
 
     let raw = std::fs::read_to_string(&jsonl_path)
         .with_context(|| format!("reading {}", jsonl_path.display()))?;
@@ -2230,15 +2491,23 @@ fn reindex_analytics(cfg: &Config, args: ProbeReindexArgs) -> Result<()> {
         match serde_json::from_str::<Value>(line) {
             Ok(record) => {
                 // Check if already present before insert so we can count skips.
-                let run_id = record.get("started_at").and_then(Value::as_str).unwrap_or("");
+                let run_id = record
+                    .get("started_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
                 let already: bool = conn
-                    .query_row("SELECT 1 FROM probe_runs WHERE run_id=?1", params![run_id], |_| Ok(true))
+                    .query_row(
+                        "SELECT 1 FROM probe_runs WHERE run_id=?1",
+                        params![run_id],
+                        |_| Ok(true),
+                    )
                     .unwrap_or(false);
                 if already {
                     skipped += 1;
                     continue;
                 }
-                let probe_count = record.get("probes")
+                let probe_count = record
+                    .get("probes")
                     .and_then(Value::as_array)
                     .map(|a| a.len())
                     .unwrap_or(0);
@@ -2250,8 +2519,13 @@ fn reindex_analytics(cfg: &Config, args: ProbeReindexArgs) -> Result<()> {
         }
     }
 
-    println!("Indexed {} run(s) ({} probe rows) into {}  [{} already present, skipped]",
-        runs, probes, db_path.display(), skipped);
+    println!(
+        "Indexed {} run(s) ({} probe rows) into {}  [{} already present, skipped]",
+        runs,
+        probes,
+        db_path.display(),
+        skipped
+    );
     Ok(())
 }
 
@@ -2266,11 +2540,12 @@ fn show_history(cfg: &Config, args: ProbeHistoryArgs) -> Result<()> {
         return Ok(());
     }
 
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
 
     // Parse all non-empty lines as JSON records.
-    let mut records: Vec<Value> = raw.lines()
+    let mut records: Vec<Value> = raw
+        .lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect();
@@ -2302,40 +2577,47 @@ fn show_history(cfg: &Config, args: ProbeHistoryArgs) -> Result<()> {
     } else {
         // Summary table: version | scope | total | pass | wall_ms | budget | slowest
         // scope distinguishes full runs from filtered subsets so "fewer probes" is obvious.
-        println!("{:<10}  {:<16}  {:>5}  {:>5}  {:>10}  {:<8}  {}",
-            "version", "scope", "total", "pass", "wall_ms", "budget", "slowest");
+        println!(
+            "{:<10}  {:<16}  {:>5}  {:>5}  {:>10}  {:<8}  {}",
+            "version", "scope", "total", "pass", "wall_ms", "budget", "slowest"
+        );
         println!("{}", "-".repeat(90));
         for r in &mut window {
-            let version  = r.get("asd_version").and_then(Value::as_str).unwrap_or("?");
-            let scope    = match (
+            let version = r.get("asd_version").and_then(Value::as_str).unwrap_or("?");
+            let scope = match (
                 r.get("filter_name").and_then(Value::as_str),
                 r.get("filter_tag").and_then(Value::as_str),
             ) {
                 (Some(n), _) => format!("name:{}", n),
                 (_, Some(t)) => format!("tag:{}", t),
-                _            => "all".to_string(),
+                _ => "all".to_string(),
             };
-            let total_n  = r.get("total").and_then(Value::as_u64).unwrap_or(0);
+            let total_n = r.get("total").and_then(Value::as_u64).unwrap_or(0);
             let passed_n = r.get("passed").and_then(Value::as_u64).unwrap_or(0);
-            let wall     = r.get("wall_time_ms").and_then(Value::as_u64).unwrap_or(0);
-            let budget_ok = r.get("budget_failed").and_then(Value::as_bool)
+            let wall = r.get("wall_time_ms").and_then(Value::as_u64).unwrap_or(0);
+            let budget_ok = r
+                .get("budget_failed")
+                .and_then(Value::as_bool)
                 .map_or("—", |b| if b { "FAIL" } else { "ok" });
-            let slowest_name = r.get("slowest")
+            let slowest_name = r
+                .get("slowest")
                 .and_then(Value::as_array)
                 .and_then(|a| a.first())
                 .and_then(|s| s.get("name"))
                 .and_then(Value::as_str)
                 .unwrap_or("—");
-            let slowest_ms = r.get("slowest")
+            let slowest_ms = r
+                .get("slowest")
                 .and_then(Value::as_array)
                 .and_then(|a| a.first())
                 .and_then(|s| s.get("duration_ms"))
                 .and_then(Value::as_u64)
                 .map(|ms| format!("({}ms)", ms))
                 .unwrap_or_default();
-            println!("{:<10}  {:<16}  {:>5}  {:>5}  {:>10}  {:<8}  {} {}",
-                version, scope, total_n, passed_n, wall, budget_ok,
-                slowest_name, slowest_ms);
+            println!(
+                "{:<10}  {:<16}  {:>5}  {:>5}  {:>10}  {:<8}  {} {}",
+                version, scope, total_n, passed_n, wall, budget_ok, slowest_name, slowest_ms
+            );
         }
         println!("\n{} run(s) shown ({} total recorded)", window.len(), total);
     }
@@ -2386,29 +2668,53 @@ fn bootstrap_probes(cfg: &Config, args: ProbeBootstrapArgs) -> Result<()> {
         paths_filter: vec![],
     };
     // Try a few common structural terms to surface domain symbols.
-    let try_terms = ["manager", "service", "view", "model", "controller",
-                     "handler", "client", "engine", "store", "state",
-                     "view", "scene", "player", "editor", "session"];
+    let try_terms = [
+        "manager",
+        "service",
+        "view",
+        "model",
+        "controller",
+        "handler",
+        "client",
+        "engine",
+        "store",
+        "state",
+        "view",
+        "scene",
+        "player",
+        "editor",
+        "session",
+    ];
     let mut all_hits: Vec<_> = Vec::new();
     for term in try_terms {
         let h = fts.search(term, &filters, args.top * 2).unwrap_or_default();
         for hit in h {
-            if !all_hits.iter().any(|x: &agentstatedeveloper_core::FtsHit| x.qname == hit.qname) {
+            if !all_hits
+                .iter()
+                .any(|x: &agentstatedeveloper_core::FtsHit| x.qname == hit.qname)
+            {
                 all_hits.push(hit);
             }
         }
-        if all_hits.len() >= args.top * 3 { break; }
+        if all_hits.len() >= args.top * 3 {
+            break;
+        }
     }
 
     // Pick symbols: prefer tier-0 (domain), fall back to tier-1, skip tier-2 (tests).
-    let top_symbols: Vec<(String, String)> = all_hits.iter()
+    let top_symbols: Vec<(String, String)> = all_hits
+        .iter()
         .filter(|h| h.tier != 2u8) // skip test symbols (tier=2)
         .take(args.top)
         .filter_map(|h| {
             let qname = h.qname.clone();
             // Short name = last component after '.'
             let short = qname.rsplit('.').next().unwrap_or(&qname).to_string();
-            if short.len() >= 3 { Some((qname, short)) } else { None }
+            if short.len() >= 3 {
+                Some((qname, short))
+            } else {
+                None
+            }
         })
         .collect();
 
@@ -2443,7 +2749,9 @@ fn bootstrap_probes(cfg: &Config, args: ProbeBootstrapArgs) -> Result<()> {
     // --- Structural smoke probes -------------------------------------------
     out.push_str("# ---------------------------------------------------------------------------\n");
     out.push_str("# Structural smoke tests — always pass on a healthy indexed workspace\n");
-    out.push_str("# ---------------------------------------------------------------------------\n\n");
+    out.push_str(
+        "# ---------------------------------------------------------------------------\n\n",
+    );
 
     out.push_str("[[probe]]\n");
     out.push_str("name = \"smoke-trust-score\"\n");
@@ -2459,7 +2767,9 @@ fn bootstrap_probes(cfg: &Config, args: ProbeBootstrapArgs) -> Result<()> {
     out.push_str("tags = [\"smoke\", \"trust\"]\n");
     out.push_str("command = \"trust\"\n");
     out.push_str("args = []\n");
-    out.push_str("assert = { kind = \"field_gte\", field = \"signals.symbol_count\", min_value = 10 }\n\n");
+    out.push_str(
+        "assert = { kind = \"field_gte\", field = \"signals.symbol_count\", min_value = 10 }\n\n",
+    );
 
     out.push_str("[[probe]]\n");
     out.push_str("name = \"smoke-search-returns-results\"\n");
@@ -2468,11 +2778,14 @@ fn bootstrap_probes(cfg: &Config, args: ProbeBootstrapArgs) -> Result<()> {
     out.push_str("command = \"search\"\n");
 
     // Use the first discovered symbol's short name as the search term.
-    let first_query = top_symbols.first()
+    let first_query = top_symbols
+        .first()
         .map(|(_, s)| s.to_lowercase())
         .unwrap_or_else(|| "state".to_string());
     out.push_str(&format!("args = [\"{}\", \"--agent\"]\n", first_query));
-    out.push_str("assert = { kind = \"array_field_count_gte\", field = \"results\", min_count = 1 }\n\n");
+    out.push_str(
+        "assert = { kind = \"array_field_count_gte\", field = \"results\", min_count = 1 }\n\n",
+    );
 
     out.push_str("[[probe]]\n");
     out.push_str("name = \"smoke-feedback-state-field-present\"\n");
@@ -2485,44 +2798,72 @@ fn bootstrap_probes(cfg: &Config, args: ProbeBootstrapArgs) -> Result<()> {
     // Data quality probe — adapt to current state.
     out.push_str("[[probe]]\n");
     out.push_str("name = \"smoke-data-quality-state\"\n");
-    out.push_str(&format!("description = \"Data quality must be '{}' for this workspace state\"\n", db_state));
+    out.push_str(&format!(
+        "description = \"Data quality must be '{}' for this workspace state\"\n",
+        db_state
+    ));
     out.push_str("tags = [\"smoke\", \"trust\", \"data-quality\"]\n");
     out.push_str("command = \"trust\"\n");
     out.push_str("args = []\n");
-    out.push_str(&format!("assert = {{ kind = \"data_quality_state_eq\", expected = \"{}\" }}\n\n", db_state));
+    out.push_str(&format!(
+        "assert = {{ kind = \"data_quality_state_eq\", expected = \"{}\" }}\n\n",
+        db_state
+    ));
 
     // --- Ranking probes for discovered symbols ----------------------------
     if !top_symbols.is_empty() {
-        out.push_str("# ---------------------------------------------------------------------------\n");
+        out.push_str(
+            "# ---------------------------------------------------------------------------\n",
+        );
         out.push_str("# Symbol ranking probes — discovered from current index\n");
         out.push_str("# Edit these to match your domain's key symbols.\n");
-        out.push_str("# ---------------------------------------------------------------------------\n\n");
+        out.push_str(
+            "# ---------------------------------------------------------------------------\n\n",
+        );
 
         for (i, (qname, short)) in top_symbols.iter().enumerate() {
-            let probe_name = format!("rank-{}-top5",
-                short.to_lowercase().replace(|c: char| !c.is_alphanumeric(), "-"));
+            let probe_name = format!(
+                "rank-{}-top5",
+                short
+                    .to_lowercase()
+                    .replace(|c: char| !c.is_alphanumeric(), "-")
+            );
             let desc = format!("{} must appear in top 5 results for its own name", qname);
             out.push_str(&format!("[[probe]]\nname = {:?}\n", probe_name));
             out.push_str(&format!("description = {:?}\n", desc));
             out.push_str("tags = [\"ranking\"]\n");
             out.push_str("command = \"search\"\n");
             out.push_str(&format!("args = [{:?}, \"--agent\"]\n", short));
-            out.push_str(&format!("assert = {{ kind = \"qname_rank_lte\", fragment = {:?}, max_rank = 5 }}\n\n", qname));
-            if i >= args.top.saturating_sub(1) { break; }
+            out.push_str(&format!(
+                "assert = {{ kind = \"qname_rank_lte\", fragment = {:?}, max_rank = 5 }}\n\n",
+                qname
+            ));
+            if i >= args.top.saturating_sub(1) {
+                break;
+            }
         }
     }
 
     // --- Change-model classification smoke test ---------------------------
     if !top_symbols.is_empty() {
-        let query_term = top_symbols.first().map(|(_, s)| s.to_lowercase()).unwrap_or_default();
+        let query_term = top_symbols
+            .first()
+            .map(|(_, s)| s.to_lowercase())
+            .unwrap_or_default();
         if query_term.len() >= 3 {
-            out.push_str("# ---------------------------------------------------------------------------\n");
+            out.push_str(
+                "# ---------------------------------------------------------------------------\n",
+            );
             out.push_str("# Change-model smoke tests\n");
-            out.push_str("# ---------------------------------------------------------------------------\n\n");
+            out.push_str(
+                "# ---------------------------------------------------------------------------\n\n",
+            );
 
             out.push_str("[[probe]]\n");
             out.push_str("name = \"change-model-returns-edit-files\"\n");
-            out.push_str("description = \"prepare-change must return at least 1 likely_edit_files entry\"\n");
+            out.push_str(
+                "description = \"prepare-change must return at least 1 likely_edit_files entry\"\n",
+            );
             out.push_str("tags = [\"change-model\", \"smoke\"]\n");
             out.push_str("command = \"prepare-change\"\n");
             out.push_str(&format!("args = [{:?}, \"--agent\"]\n", query_term));
@@ -2530,7 +2871,9 @@ fn bootstrap_probes(cfg: &Config, args: ProbeBootstrapArgs) -> Result<()> {
 
             out.push_str("[[probe]]\n");
             out.push_str("name = \"change-model-edit-confidence-present\"\n");
-            out.push_str("description = \"classification_summary must include an edit_confidence field\"\n");
+            out.push_str(
+                "description = \"classification_summary must include an edit_confidence field\"\n",
+            );
             out.push_str("tags = [\"change-model\", \"smoke\"]\n");
             out.push_str("command = \"prepare-change\"\n");
             out.push_str(&format!("args = [{:?}, \"--agent\"]\n", query_term));
@@ -2548,8 +2891,15 @@ fn bootstrap_probes(cfg: &Config, args: ProbeBootstrapArgs) -> Result<()> {
 
     println!("✓ Generated {} probes.toml", path.display());
     println!("  Symbols indexed : {}", trust.signals.symbol_count);
-    println!("  Data quality    : {} ({})", db_state, trust.data_quality.reason);
-    println!("  Ranking probes  : {} (for top {} symbols)", top_symbols.len(), args.top);
+    println!(
+        "  Data quality    : {} ({})",
+        db_state, trust.data_quality.reason
+    );
+    println!(
+        "  Ranking probes  : {} (for top {} symbols)",
+        top_symbols.len(),
+        args.top
+    );
     println!("\nRun: asd probe run");
     println!("Tag subsets: asd probe run --tag smoke");
 

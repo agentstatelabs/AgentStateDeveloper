@@ -298,7 +298,9 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             qualifiers: extract_open_path(args)
                 .map(|p| json!({ "paths": [p] }))
                 .unwrap_or(serde_json::Value::Null),
-            note: Some(trim_note(&body[call_site.call_start..call_site.args_end + 1])),
+            note: Some(trim_note(
+                &body[call_site.call_start..call_site.args_end + 1],
+            )),
             ..Default::default()
         });
         if mentions_write_mode(args) {
@@ -307,7 +309,9 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
                 qualifiers: extract_open_path(args)
                     .map(|p| json!({ "paths": [p] }))
                     .unwrap_or(serde_json::Value::Null),
-                note: Some(trim_note(&body[call_site.call_start..call_site.args_end + 1])),
+                note: Some(trim_note(
+                    &body[call_site.call_start..call_site.args_end + 1],
+                )),
                 ..Default::default()
             });
         }
@@ -368,7 +372,9 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     for recv in db_receivers {
         for call_site in find_calls(body, recv) {
             let args = &body[call_site.args_start..call_site.args_end];
-            let sql = args.trim_start_matches(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == 'f' || c == 'r' || c == 'b');
+            let sql = args.trim_start_matches(|c: char| {
+                c.is_whitespace() || c == '"' || c == '\'' || c == 'f' || c == 'r' || c == 'b'
+            });
             let upper: String = sql.chars().take(16).collect::<String>().to_uppercase();
             let is_write = upper.starts_with("INSERT")
                 || upper.starts_with("UPDATE")
@@ -378,8 +384,12 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
                 || upper.starts_with("DROP")
                 || upper.starts_with("ALTER")
                 || upper.starts_with("TRUNCATE");
-            let is_read = upper.starts_with("SELECT") || upper.starts_with("WITH") || upper.starts_with("SHOW");
-            let note = Some(trim_note(&body[call_site.call_start..call_site.args_end + 1]));
+            let is_read = upper.starts_with("SELECT")
+                || upper.starts_with("WITH")
+                || upper.starts_with("SHOW");
+            let note = Some(trim_note(
+                &body[call_site.call_start..call_site.args_end + 1],
+            ));
             if is_write && !seen_db_write {
                 effects.push(Effect {
                     effect: EffectCategory::IoDbWrite,
@@ -438,7 +448,9 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
                 }
             }
             if net_note.is_none() {
-                net_note = Some(trim_note(&body[call_site.call_start..call_site.args_end + 1]));
+                net_note = Some(trim_note(
+                    &body[call_site.call_start..call_site.args_end + 1],
+                ));
             }
         }
     }
@@ -642,9 +654,7 @@ fn mentions_write_mode(args: &str) -> bool {
             }
             if j <= bytes.len() {
                 let lit = &args[start..j.min(bytes.len())];
-                if lit.len() <= 4
-                    && (lit.contains('w') || lit.contains('a') || lit.contains('x'))
-                {
+                if lit.len() <= 4 && (lit.contains('w') || lit.contains('a') || lit.contains('x')) {
                     return true;
                 }
                 i = j + 1;
@@ -963,19 +973,11 @@ fn resolve_relative_import(module_prefix: &str, raw: &str) -> Option<String> {
         }
         base.push_str(suffix);
     }
-    if base.is_empty() {
-        None
-    } else {
-        Some(base)
-    }
+    if base.is_empty() { None } else { Some(base) }
 }
 
 /// Handle `import a, b as c, d.e`.
-fn collect_import_statement(
-    node: Node<'_>,
-    src: &[u8],
-    out: &mut HashMap<String, ImportBinding>,
-) {
+fn collect_import_statement(node: Node<'_>, src: &[u8], out: &mut HashMap<String, ImportBinding>) {
     // Tree-sitter-python emits each imported name as a `name` field (which
     // may appear multiple times), each being either `dotted_name` or
     // `aliased_import`.
@@ -1321,11 +1323,20 @@ mod tests {
     #[test]
     fn module_prefix_strips_py_and_leading_dot_slash() {
         // src/ anchor — stable for PEP 517 src-layout projects
-        assert_eq!(module_qname_prefix("src/mypackage/module.py"), "mypackage.module");
+        assert_eq!(
+            module_qname_prefix("src/mypackage/module.py"),
+            "mypackage.module"
+        );
         assert_eq!(module_qname_prefix("src/utils.py"), "utils");
         // __init__.py at root of package src/ gets package-name prefix
-        assert_eq!(module_qname_prefix("packages/mypkg/src/__init__.py"), "mypkg.__init__");
-        assert_eq!(module_qname_prefix("packages/my-pkg/src/__init__.py"), "my_pkg.__init__");
+        assert_eq!(
+            module_qname_prefix("packages/mypkg/src/__init__.py"),
+            "mypkg.__init__"
+        );
+        assert_eq!(
+            module_qname_prefix("packages/my-pkg/src/__init__.py"),
+            "my_pkg.__init__"
+        );
         // no src segment — full relative path (fallback)
         assert_eq!(module_qname_prefix("foo/bar.py"), "foo.bar");
         assert_eq!(module_qname_prefix("./foo/bar.py"), "foo.bar");
@@ -1398,13 +1409,7 @@ class C:
 "#;
         let a = PythonAdapter::new();
         let syms = a.parse_symbols("m.py", src).unwrap();
-        let ws = workspace_with(&[
-            "m.helper",
-            "m.caller",
-            "m.C",
-            "m.C.__init__",
-            "m.C.m",
-        ]);
+        let ws = workspace_with(&["m.helper", "m.caller", "m.C", "m.C.__init__", "m.C.m"]);
         let edges = a.extract_call_edges("m.py", src, &syms, &ws);
         let pairs: Vec<(String, String)> = edges
             .iter()
@@ -1506,11 +1511,7 @@ def foo():
 "#;
         let a = PythonAdapter::new();
         let syms = a.parse_symbols("caller.py", src).unwrap();
-        let ws = workspace_with(&[
-            "logger.write_log",
-            "greetings.hello",
-            "caller.foo",
-        ]);
+        let ws = workspace_with(&["logger.write_log", "greetings.hello", "caller.foo"]);
         let edges = a.extract_call_edges("caller.py", src, &syms, &ws);
         let pairs: Vec<(String, String)> = edges
             .iter()
@@ -1620,10 +1621,13 @@ def foo():
         // End-to-end: a relative import + a call should produce a cross-module
         // CallEdge. This is the Crucible reproducer collapsed to a unit test.
         use crate::PythonAdapter;
-        use agentstatedeveloper_core::{LanguageAdapter, ParsedSymbol, SymbolKind, WorkspaceSymbols};
+        use agentstatedeveloper_core::{
+            LanguageAdapter, ParsedSymbol, SymbolKind, WorkspaceSymbols,
+        };
 
         let adapter = PythonAdapter::new();
-        let caller_src = "from .base import make_decision\n\ndef act():\n    return make_decision()\n";
+        let caller_src =
+            "from .base import make_decision\n\ndef act():\n    return make_decision()\n";
 
         let caller_syms = vec![ParsedSymbol {
             qname: "crucible.agents.litellm_agent.act".into(),
@@ -1638,16 +1642,20 @@ def foo():
         }];
 
         let mut workspace = WorkspaceSymbols::default();
-        workspace.qnames.insert("crucible.agents.base.make_decision".into());
         workspace
-            .kinds
-            .insert("crucible.agents.base.make_decision".into(), SymbolKind::Function);
+            .qnames
+            .insert("crucible.agents.base.make_decision".into());
+        workspace.kinds.insert(
+            "crucible.agents.base.make_decision".into(),
+            SymbolKind::Function,
+        );
         workspace
             .qnames
             .insert("crucible.agents.litellm_agent.act".into());
-        workspace
-            .kinds
-            .insert("crucible.agents.litellm_agent.act".into(), SymbolKind::Function);
+        workspace.kinds.insert(
+            "crucible.agents.litellm_agent.act".into(),
+            SymbolKind::Function,
+        );
         workspace.build_suffix_index();
 
         let edges = adapter.extract_call_edges(

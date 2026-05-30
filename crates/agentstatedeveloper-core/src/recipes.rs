@@ -216,17 +216,28 @@ mod tests {
             sym_id,
             kind,
             "test entry",
-            Author { kind: AuthorKind::Agent, id: "test".into() },
+            Author {
+                kind: AuthorKind::Agent,
+                id: "test".into(),
+            },
         );
         entry.role = role.map(str::to_string);
         entry.command = command.map(str::to_string);
-        ledger.append_entry(&engine.ref_name, &entry, "test").unwrap();
+        ledger
+            .append_entry(&engine.ref_name, &entry, "test")
+            .unwrap();
     }
 
     #[test]
     fn stale_api_constraint_yields_delete() {
         let (engine, sid) = engine_with_symbol("pkg.tests.legacy_test", "tests/legacy_test.py");
-        append(&engine, &sid, LedgerKind::Constraint, Some("stale-api"), None);
+        append(
+            &engine,
+            &sid,
+            LedgerKind::Constraint,
+            Some("stale-api"),
+            None,
+        );
         let index = AsgIndexStore::from_engine(&engine);
         let recipe = classify_test_migration(
             &engine,
@@ -256,7 +267,13 @@ mod tests {
     fn diagnostic_classification_yields_gate() {
         let (engine, sid) =
             engine_with_symbol("pkg.tests.real_file_test", "tests/real_file_test.py");
-        append(&engine, &sid, LedgerKind::Ownership, Some("diagnostic-test"), None);
+        append(
+            &engine,
+            &sid,
+            LedgerKind::Ownership,
+            Some("diagnostic-test"),
+            None,
+        );
         let index = AsgIndexStore::from_engine(&engine);
         let recipe = classify_test_migration(
             &engine,
@@ -306,8 +323,7 @@ mod tests {
 
     #[test]
     fn non_test_tier_symbols_are_skipped() {
-        let (engine, sid) =
-            engine_with_symbol("pkg.module.production_fn", "src/pkg/module.py");
+        let (engine, sid) = engine_with_symbol("pkg.module.production_fn", "src/pkg/module.py");
         append(&engine, &sid, LedgerKind::Mapping, None, None);
         let index = AsgIndexStore::from_engine(&engine);
         let recipe = classify_test_migration(

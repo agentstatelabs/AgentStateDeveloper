@@ -8,13 +8,13 @@ use std::sync::Arc;
 
 use agentstatedeveloper_core::LanguageAdapter;
 use agentstatedeveloper_csharp::CSharpAdapter;
-use agentstatedeveloper_kotlin::KotlinAdapter;
-use agentstatedeveloper_ruby::RubyAdapter;
-use agentstatedeveloper_swift::SwiftAdapter;
 use agentstatedeveloper_go::GoAdapter;
 use agentstatedeveloper_java::JavaAdapter;
+use agentstatedeveloper_kotlin::KotlinAdapter;
 use agentstatedeveloper_python::PythonAdapter;
+use agentstatedeveloper_ruby::RubyAdapter;
 use agentstatedeveloper_rust::RustAdapter;
+use agentstatedeveloper_swift::SwiftAdapter;
 use agentstatedeveloper_typescript::TypeScriptAdapter;
 
 /// Return one instance of every built-in language adapter.

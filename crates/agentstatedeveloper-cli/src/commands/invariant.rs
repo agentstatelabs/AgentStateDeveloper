@@ -148,13 +148,17 @@ fn list(cfg: &Config, args: ListArgs) -> Result<()> {
             }
         }
         rows.sort_by(|a, b| {
-            a.get("qname").and_then(serde_json::Value::as_str)
+            a.get("qname")
+                .and_then(serde_json::Value::as_str)
                 .cmp(&b.get("qname").and_then(serde_json::Value::as_str))
         });
         rows
     };
 
-    println!("{}", serde_json::to_string_pretty(&json!({ "invariants": rows }))?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({ "invariants": rows }))?
+    );
     Ok(())
 }
 

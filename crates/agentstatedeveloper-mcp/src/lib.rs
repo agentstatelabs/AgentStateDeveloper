@@ -18,6 +18,7 @@ use agentstatedeveloper_core::{
     AsdError, AsgEffectStore, AsgIndexStore, AsgLedgerStore, AuditEvent, EffectStore, Engine,
     IndexStore, LedgerStore, emit_audit, event_types,
 };
+use axum::http::HeaderValue;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -28,7 +29,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::Mutex;
-use axum::http::HeaderValue;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -163,7 +163,10 @@ struct HealthResponse {
 async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse>, ApiError> {
     let engine = state.engine.lock().await;
     let ref_name = engine.ref_name.clone();
-    let prefix = format!("{}/index/by-qname", agentstatedeveloper_core::ASD_PATH_PREFIX);
+    let prefix = format!(
+        "{}/index/by-qname",
+        agentstatedeveloper_core::ASD_PATH_PREFIX
+    );
     let symbol_count = match engine.repo.get_tree(&ref_name, &prefix) {
         Ok(serde_json::Value::Object(map)) => map.len(),
         _ => 0,
@@ -197,7 +200,10 @@ async fn list_symbols(
 ) -> Result<Json<Vec<agentstatedeveloper_core::Symbol>>, ApiError> {
     let engine = state.engine.lock().await;
     let ref_name = engine.ref_name.clone();
-    let prefix = format!("{}/index/by-qname", agentstatedeveloper_core::ASD_PATH_PREFIX);
+    let prefix = format!(
+        "{}/index/by-qname",
+        agentstatedeveloper_core::ASD_PATH_PREFIX
+    );
 
     let qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
         Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
@@ -324,7 +330,10 @@ fn resolve_symbols_by_ids(
     ids: &[String],
 ) -> agentstatedeveloper_core::Result<Vec<agentstatedeveloper_core::Symbol>> {
     let ref_name = &engine.ref_name;
-    let prefix = format!("{}/index/by-qname", agentstatedeveloper_core::ASD_PATH_PREFIX);
+    let prefix = format!(
+        "{}/index/by-qname",
+        agentstatedeveloper_core::ASD_PATH_PREFIX
+    );
     let tree = match engine.repo.get_tree(ref_name, &prefix) {
         Ok(t) => t,
         Err(_) => return Ok(Vec::new()),
@@ -380,9 +389,8 @@ async fn list_ledger(
         for (_symbol_id, symbol_bucket) in by_symbol {
             if let serde_json::Value::Object(entry_map) = symbol_bucket {
                 for (_entry_id, entry_val) in entry_map {
-                    if let Ok(e) = serde_json::from_value::<
-                        agentstatedeveloper_core::LedgerEntry,
-                    >(entry_val)
+                    if let Ok(e) =
+                        serde_json::from_value::<agentstatedeveloper_core::LedgerEntry>(entry_val)
                     {
                         entries.push(e);
                     }
@@ -480,9 +488,7 @@ async fn list_audit(
     })))
 }
 
-async fn verify_audit(
-    State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+async fn verify_audit(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
     // Chain verification is a commercial feature (Enterprise tier).
     // OSS asd-serve returns a consistent shape so the Lens can detect
     // edition and render an upgrade CTA without 500-ing.

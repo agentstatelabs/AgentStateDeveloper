@@ -34,7 +34,9 @@ fn prime_db(db_path: &std::path::Path) {
     let rel = target.strip_prefix(&sample_root).unwrap_or(&target);
     let file_str = rel.to_string_lossy().replace('\\', "/");
 
-    let parsed = adapter.parse_symbols(&file_str, &source).expect("parse_symbols");
+    let parsed = adapter
+        .parse_symbols(&file_str, &source)
+        .expect("parse_symbols");
     let index_store = AsgIndexStore::new(&engine.repo);
     for p in &parsed {
         let symbol_id = canonical_symbol_id(&p.qname, p.kind, &file_str);

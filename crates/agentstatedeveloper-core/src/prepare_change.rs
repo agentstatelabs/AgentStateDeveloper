@@ -160,10 +160,28 @@ mod tests {
         let mut out = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         push_file_score(
-            &mut out, &mut seen, &sym("a.b", "x.py"), &[], &[], 20.0, "app", None, false, 10.0,
+            &mut out,
+            &mut seen,
+            &sym("a.b", "x.py"),
+            &[],
+            &[],
+            20.0,
+            "app",
+            None,
+            false,
+            10.0,
         );
         let second = push_file_score(
-            &mut out, &mut seen, &sym("a.c", "x.py"), &[], &[], 20.0, "app", None, false, 10.0,
+            &mut out,
+            &mut seen,
+            &sym("a.c", "x.py"),
+            &[],
+            &[],
+            20.0,
+            "app",
+            None,
+            false,
+            10.0,
         );
         assert!(!second, "duplicate file must not push a second entry");
         assert_eq!(out.len(), 1);
@@ -177,7 +195,10 @@ mod tests {
             "sym_x",
             LedgerKind::Hazard,
             "watch out",
-            Author { kind: AuthorKind::Agent, id: "t".into() },
+            Author {
+                kind: AuthorKind::Agent,
+                id: "t".into(),
+            },
         );
         push_file_score(
             &mut out,

@@ -137,10 +137,12 @@ pub fn score_evidence_quality(
         .iter()
         .any(|e| e.tags.iter().any(|t| t.starts_with("commit:")));
 
-    let evidence_mentions_test = evidence_text.map(|ev| {
-        let low = ev.to_lowercase();
-        low.contains("test") || low.contains("spec") || low.contains("assert")
-    }).unwrap_or(false);
+    let evidence_mentions_test = evidence_text
+        .map(|ev| {
+            let low = ev.to_lowercase();
+            low.contains("test") || low.contains("spec") || low.contains("assert")
+        })
+        .unwrap_or(false);
 
     let has_existing_validation = pre_existing_entries
         .iter()
@@ -206,8 +208,11 @@ pub fn detect_workflow(
     }
 
     // tested: validated flag OR existing ValidationScenario.
-    let did_test = eq.proof_has_tests && (eq.proof_has_manual_validation
-        || pre_existing_entries.iter().any(|e| e.kind == LedgerKind::ValidationScenario));
+    let did_test = eq.proof_has_tests
+        && (eq.proof_has_manual_validation
+            || pre_existing_entries
+                .iter()
+                .any(|e| e.kind == LedgerKind::ValidationScenario));
     if did_test {
         steps.push("tested".to_string());
     }
@@ -217,9 +222,9 @@ pub fn detect_workflow(
 
     // Classify workflow type.
     let workflow_type = match (did_annotate, did_test) {
-        (true, true)   => "full",
-        (true, false)  => "annotate-and-close",
-        (false, true)  => "test-and-close",
+        (true, true) => "full",
+        (true, false) => "annotate-and-close",
+        (false, true) => "test-and-close",
         (false, false) => "close-only",
     };
 

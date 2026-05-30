@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::{Args, Subcommand};
 
 use agentstatedeveloper_core::{
-    recipes::classify_test_migration, AsgIndexStore, Engine, FtsFilters, SearchFtsDb,
+    AsgIndexStore, Engine, FtsFilters, SearchFtsDb, recipes::classify_test_migration,
 };
 
 use crate::config::Config;

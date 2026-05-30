@@ -6,9 +6,9 @@ use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
 
 use agentstatedeveloper_core::{
-    actions, emit_audit, event_types, paths, AsgIndexStore, AsgLedgerStore, AuditEvent, Author,
-    AuthorKind, Decision, Engine, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Rebind,
-    Situation,
+    AsgIndexStore, AsgLedgerStore, AuditEvent, Author, AuthorKind, Decision, Engine, IndexStore,
+    LedgerEntry, LedgerKind, LedgerStore, Rebind, Situation, actions, emit_audit, event_types,
+    paths,
 };
 
 use serde_json::json;
@@ -50,7 +50,6 @@ fn open_engine(cfg: &Config) -> anyhow::Result<Engine> {
 pub fn open_engine_public(cfg: &Config) -> anyhow::Result<Engine> {
     open_engine(cfg)
 }
-
 
 #[derive(Debug, Subcommand)]
 pub enum LedgerCmd {
@@ -293,8 +292,12 @@ fn approve(cfg: &Config, args: ApproveArgs) -> Result<()> {
         description: format!("ledger.approve {}", args.entry_id),
         qualifiers: json!({ "entry_id": &args.entry_id }),
     };
-    if let Decision::Deny { matched_policy, reason } =
-        engine.policy.evaluate(&situation, actions::LEDGER_APPROVE, &args.approver)?
+    if let Decision::Deny {
+        matched_policy,
+        reason,
+    } = engine
+        .policy
+        .evaluate(&situation, actions::LEDGER_APPROVE, &args.approver)?
     {
         anyhow::bail!("policy denied: {} (matched {})", reason, matched_policy);
     }
@@ -371,8 +374,12 @@ fn reject(cfg: &Config, args: RejectArgs) -> Result<()> {
         description: format!("ledger.reject {}", args.entry_id),
         qualifiers: json!({ "entry_id": &args.entry_id }),
     };
-    if let Decision::Deny { matched_policy, reason } =
-        engine.policy.evaluate(&situation, actions::LEDGER_REJECT, &args.reviewer)?
+    if let Decision::Deny {
+        matched_policy,
+        reason,
+    } = engine
+        .policy
+        .evaluate(&situation, actions::LEDGER_REJECT, &args.reviewer)?
     {
         anyhow::bail!("policy denied: {} (matched {})", reason, matched_policy);
     }
@@ -449,8 +456,12 @@ fn withdraw(cfg: &Config, args: WithdrawArgs) -> Result<()> {
         description: format!("ledger.withdraw {}", args.entry_id),
         qualifiers: json!({ "entry_id": &args.entry_id }),
     };
-    if let Decision::Deny { matched_policy, reason } =
-        engine.policy.evaluate(&situation, actions::LEDGER_WITHDRAW, &args.author_id)?
+    if let Decision::Deny {
+        matched_policy,
+        reason,
+    } = engine
+        .policy
+        .evaluate(&situation, actions::LEDGER_WITHDRAW, &args.author_id)?
     {
         anyhow::bail!("policy denied: {} (matched {})", reason, matched_policy);
     }
@@ -540,8 +551,12 @@ fn supersede(cfg: &Config, args: SupersedeArgs) -> Result<()> {
             "language": &symbol.language,
         }),
     };
-    if let Decision::Deny { matched_policy, reason } =
-        engine.policy.evaluate(&situation, actions::LEDGER_SUPERSEDE, &args.author_id)?
+    if let Decision::Deny {
+        matched_policy,
+        reason,
+    } = engine
+        .policy
+        .evaluate(&situation, actions::LEDGER_SUPERSEDE, &args.author_id)?
     {
         anyhow::bail!("policy denied: {} (matched {})", reason, matched_policy);
     }
@@ -751,8 +766,14 @@ fn rebind(cfg: &Config, args: RebindArgs) -> Result<()> {
     let situation = Situation::new("rebind symbol")
         .with_qualifier("from_symbol_id", &args.from)
         .with_qualifier("to_qname", &args.to);
-    match engine.policy.evaluate(&situation, actions::LEDGER_REBIND, &args.agent_id)? {
-        Decision::Deny { matched_policy, reason } => {
+    match engine
+        .policy
+        .evaluate(&situation, actions::LEDGER_REBIND, &args.agent_id)?
+    {
+        Decision::Deny {
+            matched_policy,
+            reason,
+        } => {
             anyhow::bail!("policy denied by {matched_policy}: {reason}");
         }
         _ => {}
@@ -762,10 +783,20 @@ fn rebind(cfg: &Config, args: RebindArgs) -> Result<()> {
     let index_store = AsgIndexStore::from_engine(&engine);
     let from_symbol = index_store
         .get_symbol_by_qname(&engine.ref_name, &args.from)?
-        .ok_or_else(|| anyhow::anyhow!("from qname not found in index: {} — run `asd index` first", args.from))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "from qname not found in index: {} — run `asd index` first",
+                args.from
+            )
+        })?;
     let new_symbol = index_store
         .get_symbol_by_qname(&engine.ref_name, &args.to)?
-        .ok_or_else(|| anyhow::anyhow!("qname not found in index: {} — run `asd index` first", args.to))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "qname not found in index: {} — run `asd index` first",
+                args.to
+            )
+        })?;
 
     if new_symbol.symbol_id == from_symbol.symbol_id {
         anyhow::bail!("from and to resolve to the same symbol_id — nothing to rebind");
@@ -787,12 +818,18 @@ fn rebind(cfg: &Config, args: RebindArgs) -> Result<()> {
     );
     engine
         .repo
-        .set_json(&engine.ref_name, &rebind_path, &serde_json::to_value(&rebind)?, opts)
+        .set_json(
+            &engine.ref_name,
+            &rebind_path,
+            &serde_json::to_value(&rebind)?,
+            opts,
+        )
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     // Re-parent all ledger entries from old symbol_id to new symbol_id.
     let ledger_store = AsgLedgerStore::from_engine(&engine);
-    let entries = ledger_store.list_entries_with_superseded(&engine.ref_name, &from_symbol.symbol_id)?;
+    let entries =
+        ledger_store.list_entries_with_superseded(&engine.ref_name, &from_symbol.symbol_id)?;
     let count = entries.len();
     for mut entry in entries {
         // Write under the new symbol_id path.
@@ -805,7 +842,12 @@ fn rebind(cfg: &Config, args: RebindArgs) -> Result<()> {
         );
         engine
             .repo
-            .set_json(&engine.ref_name, &new_path, &serde_json::to_value(&entry)?, opts)
+            .set_json(
+                &engine.ref_name,
+                &new_path,
+                &serde_json::to_value(&entry)?,
+                opts,
+            )
             .map_err(|e| anyhow::anyhow!("{}", e))?;
     }
 

@@ -28,7 +28,8 @@ pub struct WorkflowArgs {
 }
 
 pub fn run(cfg: &Config, args: WorkflowArgs) -> Result<()> {
-    let dot_asd = cfg.db_path
+    let dot_asd = cfg
+        .db_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .map(|p| p.join(".asd"))
@@ -69,16 +70,22 @@ pub fn run(cfg: &Config, args: WorkflowArgs) -> Result<()> {
     println!("{}", "-".repeat(90));
     for s in &sessions {
         let closed_at = s.get("closed_at").and_then(Value::as_str).unwrap_or("—");
-        let wf_type   = s.get("workflow_type").and_then(Value::as_str).unwrap_or("—");
-        let ev_score  = s.get("evidence_score")
+        let wf_type = s
+            .get("workflow_type")
+            .and_then(Value::as_str)
+            .unwrap_or("—");
+        let ev_score = s
+            .get("evidence_score")
             .and_then(Value::as_f64)
             .map(|f| format!("{:.2}", f))
             .unwrap_or_else(|| "—".to_string());
-        let syms      = s.get("symbols_annotated")
+        let syms = s
+            .get("symbols_annotated")
             .and_then(Value::as_u64)
             .map(|n| n.to_string())
             .unwrap_or_else(|| "—".to_string());
-        let missing   = s.get("missing_steps")
+        let missing = s
+            .get("missing_steps")
             .and_then(Value::as_array)
             .map(|arr| {
                 arr.iter()
@@ -87,10 +94,18 @@ pub fn run(cfg: &Config, args: WorkflowArgs) -> Result<()> {
                     .join(", ")
             })
             .unwrap_or_default();
-        let missing_display = if missing.is_empty() { "—".to_string() } else { missing };
+        let missing_display = if missing.is_empty() {
+            "—".to_string()
+        } else {
+            missing
+        };
 
         // Trim closed_at to a readable length.
-        let ts = if closed_at.len() > 27 { &closed_at[..27] } else { closed_at };
+        let ts = if closed_at.len() > 27 {
+            &closed_at[..27]
+        } else {
+            closed_at
+        };
         println!(
             "{:<28}  {:<22}  {:<8}  {:<6}  {}",
             ts, wf_type, ev_score, syms, missing_display

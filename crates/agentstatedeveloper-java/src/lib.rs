@@ -117,8 +117,11 @@ fn walk(
                 walk(node.child(i).unwrap(), src, scope, None, out);
             }
         }
-        "class_declaration" | "interface_declaration" | "enum_declaration"
-        | "record_declaration" | "annotation_type_declaration" => {
+        "class_declaration"
+        | "interface_declaration"
+        | "enum_declaration"
+        | "record_declaration"
+        | "annotation_type_declaration" => {
             let name = child_by_field(node, "name")
                 .map(|n| node_text(n, src))
                 .unwrap_or("");
@@ -219,14 +222,26 @@ fn extract_sig_before_brace(node: Node<'_>, src: &[u8]) -> Option<String> {
             b'"' => {
                 i += 1;
                 while i < bytes.len() {
-                    if bytes[i] == b'\\' { i += 2; continue; }
-                    if bytes[i] == b'"' { break; }
+                    if bytes[i] == b'\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'"' {
+                        break;
+                    }
                     i += 1;
                 }
             }
             b'(' | b'[' => depth += 1,
-            b')' | b']' => { if depth > 0 { depth -= 1; } }
-            b'{' if depth == 0 => { sig_end = i; break; }
+            b')' | b']' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            b'{' if depth == 0 => {
+                sig_end = i;
+                break;
+            }
             _ => {}
         }
         i += 1;
@@ -642,9 +657,7 @@ fn collect_method_calls(
             .unwrap_or("");
         if !method_name.is_empty() {
             let object_node = node.child(0);
-            let object_text = object_node
-                .map(|n| node_text(n, src))
-                .unwrap_or("");
+            let object_text = object_node.map(|n| node_text(n, src)).unwrap_or("");
 
             // Build candidate callee qname
             let callee = if object_text.is_empty() || object_text == method_name {
@@ -742,10 +755,7 @@ fn extract_call_edges_impl(
     let mut edges: HashSet<CallEdge> = HashSet::new();
 
     for sym in symbols {
-        if !matches!(
-            sym.kind,
-            SymbolKind::Function | SymbolKind::Method
-        ) {
+        if !matches!(sym.kind, SymbolKind::Function | SymbolKind::Method) {
             continue;
         }
         let src_bytes = sym.body.as_bytes();
@@ -811,18 +821,29 @@ public interface PaymentGateway {
 
 public enum Currency { USD, EUR, GBP }
 "#;
-        let syms = adapter().parse_symbols("src/PaymentService.java", src).unwrap();
+        let syms = adapter()
+            .parse_symbols("src/PaymentService.java", src)
+            .unwrap();
         let qnames: Vec<&str> = syms.iter().map(|s| s.qname.as_str()).collect();
         assert!(qnames.contains(&"com.example.PaymentService"), "{qnames:?}");
-        assert!(qnames.contains(&"com.example.PaymentService.charge"), "{qnames:?}");
-        assert!(qnames.contains(&"com.example.PaymentService.format"), "{qnames:?}");
+        assert!(
+            qnames.contains(&"com.example.PaymentService.charge"),
+            "{qnames:?}"
+        );
+        assert!(
+            qnames.contains(&"com.example.PaymentService.format"),
+            "{qnames:?}"
+        );
         assert!(qnames.contains(&"com.example.PaymentGateway"), "{qnames:?}");
         assert!(qnames.contains(&"com.example.Currency"), "{qnames:?}");
     }
 
     #[test]
     fn module_prefix_strips_package() {
-        assert_eq!(package_prefix("package com.example.payments;"), "com.example.payments");
+        assert_eq!(
+            package_prefix("package com.example.payments;"),
+            "com.example.payments"
+        );
         assert_eq!(package_prefix("// no package"), "");
         assert_eq!(package_prefix("package  org.acme ;"), "org.acme");
     }
@@ -848,10 +869,17 @@ public class Fetcher {
         assert!(cats.contains(&&EffectCategory::IoFsRead), "{cats:?}");
         assert!(cats.contains(&&EffectCategory::IoNetOut), "{cats:?}");
         // Check host extraction
-        let net = effs.iter().find(|e| e.effect == EffectCategory::IoNetOut).unwrap();
+        let net = effs
+            .iter()
+            .find(|e| e.effect == EffectCategory::IoNetOut)
+            .unwrap();
         if let Some(hosts) = net.qualifiers.get("hosts") {
-            let hosts: Vec<&str> = hosts.as_array().unwrap().iter()
-                .map(|v| v.as_str().unwrap()).collect();
+            let hosts: Vec<&str> = hosts
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
             assert!(hosts.contains(&"api.example.com"), "{hosts:?}");
         }
     }
@@ -873,8 +901,16 @@ public class UserRepo {
         let save_sym = syms.iter().find(|s| s.qname.ends_with(".save")).unwrap();
         let find_effs = adapter().infer_effects("", find_sym);
         let save_effs = adapter().infer_effects("", save_sym);
-        assert!(find_effs.iter().any(|e| e.effect == EffectCategory::IoDbRead));
-        assert!(save_effs.iter().any(|e| e.effect == EffectCategory::IoDbWrite));
+        assert!(
+            find_effs
+                .iter()
+                .any(|e| e.effect == EffectCategory::IoDbRead)
+        );
+        assert!(
+            save_effs
+                .iter()
+                .any(|e| e.effect == EffectCategory::IoDbWrite)
+        );
     }
 
     #[test]
@@ -896,10 +932,17 @@ public class Config {
         assert!(cats.contains(&&EffectCategory::EnvRead), "{cats:?}");
         assert!(cats.contains(&&EffectCategory::Log), "{cats:?}");
         // Check env var extraction
-        let env_eff = effs.iter().find(|e| e.effect == EffectCategory::EnvRead).unwrap();
+        let env_eff = effs
+            .iter()
+            .find(|e| e.effect == EffectCategory::EnvRead)
+            .unwrap();
         if let Some(vars) = env_eff.qualifiers.get("vars") {
-            let vars: Vec<&str> = vars.as_array().unwrap().iter()
-                .map(|v| v.as_str().unwrap()).collect();
+            let vars: Vec<&str> = vars
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
             assert!(vars.contains(&"APP_ENV"), "{vars:?}");
         }
     }
@@ -941,7 +984,9 @@ public class ChargeService {
             kinds: HashMap::new(),
             ..Default::default()
         };
-        let syms = adapter().parse_symbols("src/OrderService.java", src).unwrap();
+        let syms = adapter()
+            .parse_symbols("src/OrderService.java", src)
+            .unwrap();
         let edges = adapter().extract_call_edges("src/OrderService.java", src, &syms, &ws);
         // Should find a call from placeOrder to com.payments.ChargeService.charge
         let found = edges.iter().any(|e| {

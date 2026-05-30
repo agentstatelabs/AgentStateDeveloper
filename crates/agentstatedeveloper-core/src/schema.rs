@@ -310,7 +310,14 @@ pub struct Effect {
 
 impl Effect {
     pub fn new(effect: EffectCategory) -> Self {
-        Self { effect, qualifiers: serde_json::Value::Null, note: None, adapter: None, source_pattern: None, verified: None }
+        Self {
+            effect,
+            qualifiers: serde_json::Value::Null,
+            note: None,
+            adapter: None,
+            source_pattern: None,
+            verified: None,
+        }
     }
 }
 
@@ -388,7 +395,10 @@ impl EffectCategory {
     /// Used to suppress noise in `prepare_change` and `effects_of` output.
     /// Low-signal effects are only shown when they are the only effects on a symbol.
     pub fn is_low_signal(&self) -> bool {
-        matches!(self, Self::Throw | Self::Random | Self::Log | Self::Pure | Self::TimeRead | Self::TimeSleep)
+        matches!(
+            self,
+            Self::Throw | Self::Random | Self::Log | Self::Pure | Self::TimeRead | Self::TimeSleep
+        )
     }
 
     pub fn from_str(s: &str) -> Self {
@@ -652,10 +662,10 @@ impl FeedbackVerdict {
     pub fn from_str(s: &str) -> Option<Self> {
         let norm = s.trim().to_ascii_lowercase().replace('_', "-");
         match norm.as_str() {
-            "useful"          => Some(Self::Useful),
-            "noisy"           => Some(Self::Noisy),
-            "missing"         => Some(Self::Missing),
-            "wrong-layer"     => Some(Self::WrongLayer),
+            "useful" => Some(Self::Useful),
+            "noisy" => Some(Self::Noisy),
+            "missing" => Some(Self::Missing),
+            "wrong-layer" => Some(Self::WrongLayer),
             "already-covered" => Some(Self::AlreadyCovered),
             "diagnostic-only" => Some(Self::DiagnosticOnly),
             _ => None,
@@ -730,7 +740,10 @@ mod plan_b_schema_tests {
             "sym_test",
             LedgerKind::Decision,
             "some decision",
-            Author { kind: AuthorKind::Agent, id: "agent".into() },
+            Author {
+                kind: AuthorKind::Agent,
+                id: "agent".into(),
+            },
         );
         let json = serde_json::to_string(&entry).unwrap();
         assert!(!json.contains("\"role\""));
@@ -743,7 +756,10 @@ mod plan_b_schema_tests {
             "sym_test",
             LedgerKind::FollowUp,
             "SID real-file diagnostics still need migration",
-            Author { kind: AuthorKind::Human, id: "craig".into() },
+            Author {
+                kind: AuthorKind::Human,
+                id: "craig".into(),
+            },
         );
         entry.role = Some("diagnostic-test".into());
         entry.command = Some("swift test --filter SongPlayersTests".into());
@@ -795,7 +811,10 @@ mod plan_b_schema_tests {
         // Plan A DESIGN section names these exactly. Renaming requires a
         // migration; lock them down with this test.
         assert_eq!(ConclusionClass::Decisions.filename_stem(), "decisions");
-        assert_eq!(ConclusionClass::Classifications.filename_stem(), "classifications");
+        assert_eq!(
+            ConclusionClass::Classifications.filename_stem(),
+            "classifications"
+        );
         assert_eq!(ConclusionClass::Mappings.filename_stem(), "mappings");
         assert_eq!(ConclusionClass::Hazards.filename_stem(), "hazards");
         assert_eq!(ConclusionClass::Recipes.filename_stem(), "recipes");
@@ -814,8 +833,14 @@ mod plan_b_schema_tests {
         assert_eq!(RoleTag::FixturePath.as_str(), "fixture-path");
         assert_eq!(RoleTag::StaleApi.as_str(), "stale-api");
         assert_eq!(RoleTag::PackageBoundary.as_str(), "package-boundary");
-        assert_eq!(RoleTag::ReplacementCoverage.as_str(), "replacement-coverage");
-        assert_eq!(RoleTag::PerformanceCritical.as_str(), "performance-critical");
+        assert_eq!(
+            RoleTag::ReplacementCoverage.as_str(),
+            "replacement-coverage"
+        );
+        assert_eq!(
+            RoleTag::PerformanceCritical.as_str(),
+            "performance-critical"
+        );
         assert_eq!(RoleTag::AuditPending.as_str(), "audit-pending");
         assert_eq!(RoleTag::all().len(), 8);
     }
@@ -831,7 +856,10 @@ mod plan_b_schema_tests {
     fn role_tag_from_str_accepts_snake_case_and_whitespace() {
         assert_eq!(RoleTag::from_str("fast_test"), Some(RoleTag::FastTest));
         assert_eq!(RoleTag::from_str("  Stale-API  "), Some(RoleTag::StaleApi));
-        assert_eq!(RoleTag::from_str("audit_pending"), Some(RoleTag::AuditPending));
+        assert_eq!(
+            RoleTag::from_str("audit_pending"),
+            Some(RoleTag::AuditPending)
+        );
     }
 
     #[test]

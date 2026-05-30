@@ -151,10 +151,13 @@ fn walk(
 ) {
     match node.kind() {
         "function_item" => {
-            let name = node_field_text(node, "name", src)
-                .unwrap_or_else(|| "<anon>".to_string());
+            let name = node_field_text(node, "name", src).unwrap_or_else(|| "<anon>".to_string());
             let qname = build_qname(module_prefix, scope, &name);
-            let symbol_kind = if scope.last().map(|s| s.1 == ScopeKind::Impl || s.1 == ScopeKind::Trait).unwrap_or(false) {
+            let symbol_kind = if scope
+                .last()
+                .map(|s| s.1 == ScopeKind::Impl || s.1 == ScopeKind::Trait)
+                .unwrap_or(false)
+            {
                 SymbolKind::Method
             } else {
                 SymbolKind::Function
@@ -168,7 +171,13 @@ fn walk(
             let type_name = impl_type_name(node, src).unwrap_or_else(|| "<anon>".to_string());
             let qname = build_qname(module_prefix, scope, &type_name);
             // Emit the impl type as a Class symbol so the index has an entry for it.
-            out.push(make_parsed_symbol(node, src, qname, SymbolKind::Class, Some(type_name.clone())));
+            out.push(make_parsed_symbol(
+                node,
+                src,
+                qname,
+                SymbolKind::Class,
+                Some(type_name.clone()),
+            ));
             // Recurse into the impl body with the type on scope.
             let mut new_scope = scope.to_vec();
             new_scope.push((type_name, ScopeKind::Impl));
@@ -180,18 +189,35 @@ fn walk(
             }
         }
         "struct_item" | "enum_item" => {
-            let name = node_field_text(node, "name", src)
-                .unwrap_or_else(|| "<anon>".to_string());
+            let name = node_field_text(node, "name", src).unwrap_or_else(|| "<anon>".to_string());
             let qname = build_qname(module_prefix, scope, &name);
-            let signature = Some(format!("{} {name}", if node.kind() == "struct_item" { "struct" } else { "enum" }));
-            out.push(make_parsed_symbol(node, src, qname, SymbolKind::Class, signature));
+            let signature = Some(format!(
+                "{} {name}",
+                if node.kind() == "struct_item" {
+                    "struct"
+                } else {
+                    "enum"
+                }
+            ));
+            out.push(make_parsed_symbol(
+                node,
+                src,
+                qname,
+                SymbolKind::Class,
+                signature,
+            ));
             // Don't recurse — struct fields aren't callable symbols.
         }
         "trait_item" => {
-            let name = node_field_text(node, "name", src)
-                .unwrap_or_else(|| "<anon>".to_string());
+            let name = node_field_text(node, "name", src).unwrap_or_else(|| "<anon>".to_string());
             let qname = build_qname(module_prefix, scope, &name);
-            out.push(make_parsed_symbol(node, src, qname, SymbolKind::Class, Some(format!("trait {name}"))));
+            out.push(make_parsed_symbol(
+                node,
+                src,
+                qname,
+                SymbolKind::Class,
+                Some(format!("trait {name}")),
+            ));
             // Recurse to capture default method implementations.
             let mut new_scope = scope.to_vec();
             new_scope.push((name, ScopeKind::Trait));
@@ -206,8 +232,8 @@ fn walk(
             // Only recurse into inline modules (`mod foo { ... }`); skip
             // module declarations (`mod foo;`) which have no body.
             if let Some(body) = node.child_by_field_name("body") {
-                let mod_name = node_field_text(node, "name", src)
-                    .unwrap_or_else(|| "<anon>".to_string());
+                let mod_name =
+                    node_field_text(node, "name", src).unwrap_or_else(|| "<anon>".to_string());
                 let mut new_scope = scope.to_vec();
                 new_scope.push((mod_name, ScopeKind::Mod));
                 let mut cursor = body.walk();
@@ -393,13 +419,30 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     }
 
     // Database — sqlx, diesel, rusqlite, sea-orm, tokio-postgres
-    let db_read_needles = ["sqlx::query", ".fetch(", ".fetch_one(", ".fetch_all(", ".fetch_optional("];
-    let db_write_needles = ["sqlx::query", ".execute(", "diesel::insert", "diesel::update", "diesel::delete"];
+    let db_read_needles = [
+        "sqlx::query",
+        ".fetch(",
+        ".fetch_one(",
+        ".fetch_all(",
+        ".fetch_optional(",
+    ];
+    let db_write_needles = [
+        "sqlx::query",
+        ".execute(",
+        "diesel::insert",
+        "diesel::update",
+        "diesel::delete",
+    ];
     // For DB we do a simpler presence check — SQL direction is hard to infer
     // from Rust's query builder APIs without evaluating the query string.
     let db_needles = [
-        "sqlx::", "diesel::", "rusqlite::", "Connection::open(",
-        "tokio_postgres::", "sea_orm::", "rbatis::",
+        "sqlx::",
+        "diesel::",
+        "rusqlite::",
+        "Connection::open(",
+        "tokio_postgres::",
+        "sea_orm::",
+        "rbatis::",
     ];
     if let Some(note) = first_match_note(body, &db_needles) {
         // Emit both read and write conservatively unless we can see clear direction.
@@ -580,9 +623,13 @@ fn find_calls(body: &str, needle: &str) -> Vec<usize> {
 fn extract_first_string_literal(s: &str) -> Option<String> {
     let trimmed = s.trim_start();
     let bytes = trimmed.as_bytes();
-    if bytes.is_empty() { return None; }
+    if bytes.is_empty() {
+        return None;
+    }
     let q = bytes[0];
-    if q != b'"' { return None; }
+    if q != b'"' {
+        return None;
+    }
     let mut j = 1;
     let mut out = String::new();
     while j < bytes.len() {
@@ -592,7 +639,9 @@ fn extract_first_string_literal(s: &str) -> Option<String> {
             j += 2;
             continue;
         }
-        if c == q { return Some(out); }
+        if c == q {
+            return Some(out);
+        }
         out.push(c as char);
         j += 1;
     }
@@ -603,9 +652,13 @@ fn extract_url_host(s: &str) -> Option<String> {
     for scheme in ["https://", "http://"] {
         if let Some(idx) = s.find(scheme) {
             let tail = &s[idx + scheme.len()..];
-            let end = tail.find(|c: char| c == '/' || c == '"' || c == '\'' || c == ')' || c.is_whitespace()).unwrap_or(tail.len());
+            let end = tail
+                .find(|c: char| c == '/' || c == '"' || c == '\'' || c == ')' || c.is_whitespace())
+                .unwrap_or(tail.len());
             let host = &tail[..end];
-            if !host.is_empty() { return Some(host.to_string()); }
+            if !host.is_empty() {
+                return Some(host.to_string());
+            }
         }
     }
     None
@@ -661,7 +714,10 @@ fn extract_call_edges_impl(
     }
 
     let mut parser = Parser::new();
-    if parser.set_language(&tree_sitter_rust::LANGUAGE.into()).is_err() {
+    if parser
+        .set_language(&tree_sitter_rust::LANGUAGE.into())
+        .is_err()
+    {
         return Vec::new();
     }
 
@@ -694,7 +750,11 @@ fn extract_call_edges_impl(
     }
 
     let mut out: Vec<CallEdge> = edges.into_iter().collect();
-    out.sort_by(|a, b| a.caller_qname.cmp(&b.caller_qname).then_with(|| a.callee_qname.cmp(&b.callee_qname)));
+    out.sort_by(|a, b| {
+        a.caller_qname
+            .cmp(&b.caller_qname)
+            .then_with(|| a.callee_qname.cmp(&b.callee_qname))
+    });
     out
 }
 
@@ -762,16 +822,27 @@ fn collect_use_tree(
         }
         "use_as_clause" => {
             // `foo as bar` — bind `bar` to the resolved qname of `foo`.
-            let name = node.child_by_field_name("path")
+            let name = node
+                .child_by_field_name("path")
                 .and_then(|n| node_text(n, src))
                 .map(|s| s.replace("::", "."))
                 .unwrap_or_default();
-            let alias = node.child_by_field_name("alias")
+            let alias = node
+                .child_by_field_name("alias")
                 .and_then(|n| node_text(n, src))
                 .unwrap_or_default();
             if !alias.is_empty() && !name.is_empty() {
-                let qname = if prefix.is_empty() { name } else { format!("{prefix}.{name}") };
-                out.insert(alias, UseBinding { qname_prefix: qname });
+                let qname = if prefix.is_empty() {
+                    name
+                } else {
+                    format!("{prefix}.{name}")
+                };
+                out.insert(
+                    alias,
+                    UseBinding {
+                        qname_prefix: qname,
+                    },
+                );
             }
         }
         "scoped_identifier" => {
@@ -797,7 +868,12 @@ fn collect_use_tree(
                 } else {
                     format!("{prefix}.{name}")
                 };
-                out.insert(name, UseBinding { qname_prefix: qname });
+                out.insert(
+                    name,
+                    UseBinding {
+                        qname_prefix: qname,
+                    },
+                );
             }
         }
         _ => {
@@ -812,11 +888,17 @@ fn collect_use_tree(
 
 fn enclosing_type_qname(qname: &str, module_prefix: &str, known: &HashSet<&str>) -> Option<String> {
     let parts: Vec<&str> = qname.split('.').collect();
-    if parts.len() < 2 { return None; }
+    if parts.len() < 2 {
+        return None;
+    }
     for end in (1..parts.len()).rev() {
         let candidate = parts[..end].join(".");
-        if !module_prefix.is_empty() && !candidate.starts_with(module_prefix) { continue; }
-        if known.contains(candidate.as_str()) { return Some(candidate); }
+        if !module_prefix.is_empty() && !candidate.starts_with(module_prefix) {
+            continue;
+        }
+        if known.contains(candidate.as_str()) {
+            return Some(candidate);
+        }
     }
     None
 }
@@ -836,14 +918,37 @@ fn collect_calls(
 ) {
     if node.kind() == "call_expression" {
         if let Some(func) = node.child_by_field_name("function") {
-            if let Some(callee) = resolve_callee(func, src, module_prefix, by_simple, known, imports, workspace, enclosing_type) {
-                out.insert(CallEdge { caller_qname: sym.qname.clone(), callee_qname: callee });
+            if let Some(callee) = resolve_callee(
+                func,
+                src,
+                module_prefix,
+                by_simple,
+                known,
+                imports,
+                workspace,
+                enclosing_type,
+            ) {
+                out.insert(CallEdge {
+                    caller_qname: sym.qname.clone(),
+                    callee_qname: callee,
+                });
             }
         }
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_calls(child, src, sym, module_prefix, by_simple, known, imports, workspace, enclosing_type, out);
+        collect_calls(
+            child,
+            src,
+            sym,
+            module_prefix,
+            by_simple,
+            known,
+            imports,
+            workspace,
+            enclosing_type,
+            out,
+        );
     }
 }
 
@@ -862,7 +967,9 @@ fn resolve_callee(
         "identifier" => {
             let name = node_text(func, src)?;
             // Intra-module first.
-            if let Some(q) = by_simple.get(&name) { return Some(q.clone()); }
+            if let Some(q) = by_simple.get(&name) {
+                return Some(q.clone());
+            }
             // Import map.
             if let Some(binding) = imports.get(&name) {
                 if workspace.contains(&binding.qname_prefix) {
@@ -880,21 +987,31 @@ fn resolve_callee(
             if value.kind() == "self" {
                 let class = enclosing_type?;
                 let candidate = format!("{class}.{field_name}");
-                if known.contains(candidate.as_str()) { return Some(candidate); }
+                if known.contains(candidate.as_str()) {
+                    return Some(candidate);
+                }
                 return None;
             }
             if value.kind() == "identifier" {
                 let obj_name = node_text(value, src)?;
                 // Intra-module type reference: `Foo::bar` -> `mod.Foo.bar`
-                let type_qname = if module_prefix.is_empty() { obj_name.clone() } else { format!("{module_prefix}.{obj_name}") };
+                let type_qname = if module_prefix.is_empty() {
+                    obj_name.clone()
+                } else {
+                    format!("{module_prefix}.{obj_name}")
+                };
                 if known.contains(type_qname.as_str()) {
                     let candidate = format!("{type_qname}.{field_name}");
-                    if known.contains(candidate.as_str()) { return Some(candidate); }
+                    if known.contains(candidate.as_str()) {
+                        return Some(candidate);
+                    }
                 }
                 // Imported binding.
                 if let Some(binding) = imports.get(&obj_name) {
                     let candidate = format!("{}.{field_name}", binding.qname_prefix);
-                    if workspace.contains(&candidate) { return Some(candidate); }
+                    if workspace.contains(&candidate) {
+                        return Some(candidate);
+                    }
                 }
             }
             None
@@ -903,15 +1020,21 @@ fn resolve_callee(
             // `Type::associated_fn()` or `module::function()`
             let text = node_text(func, src)?.replace("::", ".");
             // Direct workspace hit.
-            if workspace.contains(&text) { return Some(text.clone()); }
+            if workspace.contains(&text) {
+                return Some(text.clone());
+            }
             // Try prefixing with module.
             if !module_prefix.is_empty() {
                 let candidate = format!("{module_prefix}.{text}");
-                if workspace.contains(&candidate) { return Some(candidate); }
+                if workspace.contains(&candidate) {
+                    return Some(candidate);
+                }
             }
             // Local simple name (last segment) in by_simple.
             let simple = text.rsplit('.').next()?;
-            if let Some(q) = by_simple.get(simple) { return Some(q.clone()); }
+            if let Some(q) = by_simple.get(simple) {
+                return Some(q.clone());
+            }
             None
         }
         _ => None,
@@ -932,7 +1055,10 @@ mod tests {
         // a nested `src/` (e.g. the crate dir) are retained as qname prefix.
         assert_eq!(module_qname_prefix("src/engine.rs"), "engine");
         assert_eq!(module_qname_prefix("crates/mylib/src/lib.rs"), "mylib.lib");
-        assert_eq!(module_qname_prefix("src/payments/charge.rs"), "payments.charge");
+        assert_eq!(
+            module_qname_prefix("src/payments/charge.rs"),
+            "payments.charge"
+        );
         // no src segment — full relative path (fallback)
         assert_eq!(module_qname_prefix("./foo/bar.rs"), "foo.bar");
         assert_eq!(module_qname_prefix("lib.rs"), "lib");
@@ -965,12 +1091,30 @@ pub enum Status { Ok, Err }
         let syms = a.parse_symbols("src/engine.rs", src).unwrap();
         let qnames: Vec<_> = syms.iter().map(|s| s.qname.clone()).collect();
         // src/ is stripped — qnames are anchored to the crate interior
-        assert!(qnames.contains(&"engine.Engine".to_string()), "got {qnames:?}");
-        assert!(qnames.contains(&"engine.Engine.open".to_string()), "got {qnames:?}");
-        assert!(qnames.contains(&"engine.Engine.run".to_string()), "got {qnames:?}");
-        assert!(qnames.contains(&"engine.top_level".to_string()), "got {qnames:?}");
-        assert!(qnames.contains(&"engine.Status".to_string()), "got {qnames:?}");
-        let open = syms.iter().find(|s| s.qname == "engine.Engine.open").unwrap();
+        assert!(
+            qnames.contains(&"engine.Engine".to_string()),
+            "got {qnames:?}"
+        );
+        assert!(
+            qnames.contains(&"engine.Engine.open".to_string()),
+            "got {qnames:?}"
+        );
+        assert!(
+            qnames.contains(&"engine.Engine.run".to_string()),
+            "got {qnames:?}"
+        );
+        assert!(
+            qnames.contains(&"engine.top_level".to_string()),
+            "got {qnames:?}"
+        );
+        assert!(
+            qnames.contains(&"engine.Status".to_string()),
+            "got {qnames:?}"
+        );
+        let open = syms
+            .iter()
+            .find(|s| s.qname == "engine.Engine.open")
+            .unwrap();
         assert_eq!(open.kind, SymbolKind::Method);
         let top = syms.iter().find(|s| s.qname == "engine.top_level").unwrap();
         assert_eq!(top.kind, SymbolKind::Function);
@@ -1016,7 +1160,13 @@ pub trait Store {
         let syms = a.parse_symbols("src/store.rs", src).unwrap();
         let qnames: Vec<_> = syms.iter().map(|s| s.qname.clone()).collect();
         // src/ is stripped
-        assert!(qnames.contains(&"store.Store".to_string()), "got {qnames:?}");
-        assert!(qnames.contains(&"store.Store.load".to_string()), "got {qnames:?}");
+        assert!(
+            qnames.contains(&"store.Store".to_string()),
+            "got {qnames:?}"
+        );
+        assert!(
+            qnames.contains(&"store.Store.load".to_string()),
+            "got {qnames:?}"
+        );
     }
 }

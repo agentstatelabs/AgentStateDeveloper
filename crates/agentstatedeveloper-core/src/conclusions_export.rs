@@ -75,7 +75,9 @@ pub fn gather_buckets(
             Ok(Some(s)) => s,
             _ => continue,
         };
-        let entries = ledger.list_entries(&ref_name, &sym.symbol_id).unwrap_or_default();
+        let entries = ledger
+            .list_entries(&ref_name, &sym.symbol_id)
+            .unwrap_or_default();
         for entry in entries {
             let class = entry.kind.conclusion_class();
             let stem = class.filename_stem();
@@ -121,9 +123,8 @@ pub fn write_jsonl(path: &Path, records: &[ExportRecord]) -> std::io::Result<u64
     }
     let mut buf = String::new();
     for rec in records {
-        let line = serde_json::to_string(rec).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })?;
+        let line = serde_json::to_string(rec)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         buf.push_str(&line);
         buf.push('\n');
     }
@@ -308,7 +309,10 @@ fn parse_author(s: &str) -> Option<Author> {
         "human" => AuthorKind::Human,
         _ => return None,
     };
-    Some(Author { kind, id: id.to_string() })
+    Some(Author {
+        kind,
+        id: id.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -320,23 +324,21 @@ mod tests {
     fn write_jsonl_is_byte_stable_across_runs() {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("decisions.jsonl");
-        let recs = vec![
-            ExportRecord {
-                id: "led_1".into(),
-                kind: "decision".into(),
-                qname: "App.A".into(),
-                file: "a.rs".into(),
-                summary: "first".into(),
-                body: None,
-                role: None,
-                command: None,
-                tags: vec![],
-                evidence: vec![],
-                supersedes: vec![],
-                author: "agent:c".into(),
-                created_at: "2026-05-19T20:00:00+00:00".into(),
-            },
-        ];
+        let recs = vec![ExportRecord {
+            id: "led_1".into(),
+            kind: "decision".into(),
+            qname: "App.A".into(),
+            file: "a.rs".into(),
+            summary: "first".into(),
+            body: None,
+            role: None,
+            command: None,
+            tags: vec![],
+            evidence: vec![],
+            supersedes: vec![],
+            author: "agent:c".into(),
+            created_at: "2026-05-19T20:00:00+00:00".into(),
+        }];
         let n1 = write_jsonl(&path, &recs).unwrap();
         let bytes1 = std::fs::read(&path).unwrap();
         let n2 = write_jsonl(&path, &recs).unwrap();
@@ -396,22 +398,25 @@ mod tests {
             signature: None,
             doc: None,
         };
-        index
-            .put_symbol(&engine.ref_name, &sym, "test")
-            .unwrap();
+        index.put_symbol(&engine.ref_name, &sym, "test").unwrap();
 
         // Seed one ledger entry exercising the new fields.
         let mut entry = LedgerEntry::new(
             &sym.symbol_id,
             LedgerKind::FollowUp,
             "diagnostics still need migration",
-            Author { kind: AuthorKind::Agent, id: "claude".into() },
+            Author {
+                kind: AuthorKind::Agent,
+                id: "claude".into(),
+            },
         );
         entry.role = Some("diagnostic-test".into());
         entry.command = Some("swift test --filter X".into());
         entry.tags = vec!["ctx:plan:p".into()];
         let original_id = entry.entry_id.clone();
-        ledger.append_entry(&engine.ref_name, &entry, "test").unwrap();
+        ledger
+            .append_entry(&engine.ref_name, &entry, "test")
+            .unwrap();
 
         // Export → import into a fresh engine that has the same symbol.
         let tmp = tempdir().unwrap();
@@ -419,9 +424,7 @@ mod tests {
 
         let engine2 = Engine::open_in_memory().unwrap();
         let index2 = AsgIndexStore::from_engine(&engine2);
-        index2
-            .put_symbol(&engine2.ref_name, &sym, "test")
-            .unwrap();
+        index2.put_symbol(&engine2.ref_name, &sym, "test").unwrap();
         let results = import_all(&engine2, tmp.path(), "test").unwrap();
 
         let total_imported: usize = results.iter().map(|r| r.imported).sum();
@@ -469,9 +472,14 @@ mod tests {
             &sym.symbol_id,
             LedgerKind::Decision,
             "x",
-            Author { kind: AuthorKind::Agent, id: "c".into() },
+            Author {
+                kind: AuthorKind::Agent,
+                id: "c".into(),
+            },
         );
-        ledger.append_entry(&engine.ref_name, &entry, "test").unwrap();
+        ledger
+            .append_entry(&engine.ref_name, &entry, "test")
+            .unwrap();
 
         let tmp = tempdir().unwrap();
         export_all(&engine, tmp.path()).unwrap();

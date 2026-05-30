@@ -130,5 +130,8 @@ fn index_typescript_sample_produces_symbols_and_cross_module_edges() {
         hit.is_some(),
         "driver.main callee ids {callee_ids:?} did not include any of {expected_any:?}",
     );
-    eprintln!("cross-module ts edge observed: driver.main -> {}", hit.unwrap());
+    eprintln!(
+        "cross-module ts edge observed: driver.main -> {}",
+        hit.unwrap()
+    );
 }

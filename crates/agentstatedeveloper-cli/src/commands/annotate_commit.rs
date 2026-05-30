@@ -40,8 +40,10 @@ fn is_doc_file(path: &str) -> bool {
     let p = Path::new(&lower);
     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
     let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    matches!(ext, "md" | "txt" | "rst" | "adoc" | "asciidoc" | "tex" | "org")
-        || name.starts_with("readme")
+    matches!(
+        ext,
+        "md" | "txt" | "rst" | "adoc" | "asciidoc" | "tex" | "org"
+    ) || name.starts_with("readme")
         || name.starts_with("changelog")
         || name.starts_with("license")
         || name.starts_with("authors")
@@ -121,7 +123,13 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
 
     // ---- Changed files ---------------------------------------------------
     let diff_out = Command::new("git")
-        .args(["diff-tree", "--no-commit-id", "-r", "--name-only", &commit_hash])
+        .args([
+            "diff-tree",
+            "--no-commit-id",
+            "-r",
+            "--name-only",
+            &commit_hash,
+        ])
         .output()
         .context("git diff-tree failed")?;
     let changed_files: Vec<String> = String::from_utf8_lossy(&diff_out.stdout)
@@ -131,7 +139,10 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
         .collect();
 
     if changed_files.is_empty() {
-        println!("{}", json!({ "commit": commit_hash, "subject": subject, "note": "no changed files detected", "suggested_entries": [] }));
+        println!(
+            "{}",
+            json!({ "commit": commit_hash, "subject": subject, "note": "no changed files detected", "suggested_entries": [] })
+        );
         return Ok(());
     }
 
@@ -147,7 +158,10 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
     let mut seen_ids: HashSet<String> = HashSet::new();
     // Borrow (not move) so all_syms stays available for the docs-only candidate scan below.
     for sym in &all_syms {
-        if changed_files.iter().any(|f| sym.file.ends_with(f.as_str()) || sym.file == *f) {
+        if changed_files
+            .iter()
+            .any(|f| sym.file.ends_with(f.as_str()) || sym.file == *f)
+        {
             if seen_ids.insert(sym.symbol_id.clone()) {
                 touched_symbols.push(sym.clone());
             }
@@ -169,23 +183,45 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
     let all_docs = !changed_files.is_empty() && changed_files.iter().all(|f| is_doc_file(f));
     if all_docs && touched_symbols.is_empty() {
         let extract_terms = |path: &str| -> Vec<String> {
-            let stem = Path::new(path).file_stem()
-                .and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+            let stem = Path::new(path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
             stem.replace(['-', '_', '.'], " ")
                 .split_whitespace()
-                .filter(|w| w.len() >= 3 && !matches!(*w,
-                    "the" | "and" | "for" | "doc" | "docs" | "readme"
-                    | "design" | "notes" | "plan" | "spec" | "guide" | "api"
-                    | "todo" | "fixme" | "draft" | "wip" | "change" | "changes"))
+                .filter(|w| {
+                    w.len() >= 3
+                        && !matches!(
+                            *w,
+                            "the"
+                                | "and"
+                                | "for"
+                                | "doc"
+                                | "docs"
+                                | "readme"
+                                | "design"
+                                | "notes"
+                                | "plan"
+                                | "spec"
+                                | "guide"
+                                | "api"
+                                | "todo"
+                                | "fixme"
+                                | "draft"
+                                | "wip"
+                                | "change"
+                                | "changes"
+                        )
+                })
                 .map(|w| w.to_string())
                 .collect()
         };
 
         // Filter non-doc candidate symbols from the already-loaded all_syms
         // (no second git tree walk needed).
-        let candidate_syms: Vec<&Symbol> = all_syms.iter()
-            .filter(|s| !is_doc_file(&s.file))
-            .collect();
+        let candidate_syms: Vec<&Symbol> =
+            all_syms.iter().filter(|s| !is_doc_file(&s.file)).collect();
 
         // Per-file pass: find the best-matching symbol for each changed doc file
         // independently. This produces one concept cluster per doc domain rather
@@ -195,21 +231,30 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
         let mut any_term_match = false;
         for doc_file in &changed_files {
             let file_terms = extract_terms(doc_file);
-            if file_terms.is_empty() { continue; }
+            if file_terms.is_empty() {
+                continue;
+            }
             // combined_score is isize so test-file symbols can receive a negative bonus.
-            let mut ranked: Vec<(isize, usize, &Symbol)> = candidate_syms.iter().copied()
+            let mut ranked: Vec<(isize, usize, &Symbol)> = candidate_syms
+                .iter()
+                .copied()
                 .map(|s| {
                     let haystack = format!("{} {}", s.qname.to_lowercase(), s.file.to_lowercase());
-                    let term_score = file_terms.iter().filter(|t| haystack.contains(t.as_str())).count();
+                    let term_score = file_terms
+                        .iter()
+                        .filter(|t| haystack.contains(t.as_str()))
+                        .count();
                     let fl = s.file.to_lowercase();
-                    let is_test_file = fl.contains("/test") || fl.contains("/tests/")
-                        || fl.contains("/spec") || fl.ends_with("tests.swift");
+                    let is_test_file = fl.contains("/test")
+                        || fl.contains("/tests/")
+                        || fl.contains("/spec")
+                        || fl.ends_with("tests.swift");
                     let kind_bonus: isize = if is_test_file {
-                        -2  // loses to any non-test class with equal term match
+                        -2 // loses to any non-test class with equal term match
                     } else {
                         match kind_str(&s.kind) {
-                            "module" | "class" | "struct" | "enum" | "trait"
-                            | "type" | "interface" | "protocol" | "namespace" => 2,
+                            "module" | "class" | "struct" | "enum" | "trait" | "type"
+                            | "interface" | "protocol" | "namespace" => 2,
                             _ => 0,
                         }
                     };
@@ -219,61 +264,79 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
                     // over symbols that merely match a term in their class name.
                     let dir_seg_bonus: isize = {
                         let p = Path::new(&s.file);
-                        let dirs: Vec<String> = p.parent()
+                        let dirs: Vec<String> = p
+                            .parent()
                             .map(|parent| {
-                                parent.components()
+                                parent
+                                    .components()
                                     .filter_map(|c| c.as_os_str().to_str())
                                     .map(|seg| seg.to_lowercase())
                                     .collect()
                             })
                             .unwrap_or_default();
-                        file_terms.iter()
+                        file_terms
+                            .iter()
                             .filter(|t| dirs.iter().any(|d| d.contains(t.as_str())))
                             .count() as isize
                     };
-                    ((term_score as isize) * 2 + kind_bonus + dir_seg_bonus, term_score, s)
+                    (
+                        (term_score as isize) * 2 + kind_bonus + dir_seg_bonus,
+                        term_score,
+                        s,
+                    )
                 })
                 .filter(|(_, ts, _)| *ts >= 1)
                 .collect();
             ranked.sort_by(|a, b| b.0.cmp(&a.0));
             let best = ranked.first().copied();
             if args.debug_clusters {
-                let top5: Vec<Value> = ranked.iter().take(5).map(|(combined, ts, s)| {
-                    let k = kind_str(&s.kind);
-                    let fl = s.file.to_lowercase();
-                    let is_test = fl.contains("/test") || fl.contains("/tests/")
-                        || fl.contains("/spec") || fl.ends_with("tests.swift");
-                    let kb: isize = if is_test { -2 } else {
-                        match k {
-                            "module" | "class" | "struct" | "enum" | "trait"
-                            | "type" | "interface" | "protocol" | "namespace" => 2,
-                            _ => 0,
-                        }
-                    };
-                    let dsb: isize = {
-                        let p = Path::new(&s.file);
-                        let dirs: Vec<String> = p.parent()
-                            .map(|parent| {
-                                parent.components()
-                                    .filter_map(|c| c.as_os_str().to_str())
-                                    .map(|seg| seg.to_lowercase())
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        file_terms.iter()
-                            .filter(|t| dirs.iter().any(|d| d.contains(t.as_str())))
-                            .count() as isize
-                    };
-                    json!({
-                        "qname": s.qname,
-                        "file": s.file,
-                        "kind": k,
-                        "kind_bonus": kb,
-                        "dir_seg_bonus": dsb,
-                        "term_score": ts,
-                        "combined_score": combined,
+                let top5: Vec<Value> = ranked
+                    .iter()
+                    .take(5)
+                    .map(|(combined, ts, s)| {
+                        let k = kind_str(&s.kind);
+                        let fl = s.file.to_lowercase();
+                        let is_test = fl.contains("/test")
+                            || fl.contains("/tests/")
+                            || fl.contains("/spec")
+                            || fl.ends_with("tests.swift");
+                        let kb: isize = if is_test {
+                            -2
+                        } else {
+                            match k {
+                                "module" | "class" | "struct" | "enum" | "trait" | "type"
+                                | "interface" | "protocol" | "namespace" => 2,
+                                _ => 0,
+                            }
+                        };
+                        let dsb: isize = {
+                            let p = Path::new(&s.file);
+                            let dirs: Vec<String> = p
+                                .parent()
+                                .map(|parent| {
+                                    parent
+                                        .components()
+                                        .filter_map(|c| c.as_os_str().to_str())
+                                        .map(|seg| seg.to_lowercase())
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            file_terms
+                                .iter()
+                                .filter(|t| dirs.iter().any(|d| d.contains(t.as_str())))
+                                .count() as isize
+                        };
+                        json!({
+                            "qname": s.qname,
+                            "file": s.file,
+                            "kind": k,
+                            "kind_bonus": kb,
+                            "dir_seg_bonus": dsb,
+                            "term_score": ts,
+                            "combined_score": combined,
+                        })
                     })
-                }).collect();
+                    .collect();
                 let winner_info: Value = if let Some((_, ts, sym)) = best {
                     let confidence = ts as f64 / file_terms.len().max(1) as f64;
                     json!({
@@ -298,8 +361,10 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
             if let Some((_, term_score, sym)) = best {
                 any_term_match = true;
                 let confidence = term_score as f64 / file_terms.len().max(1) as f64;
-                let doc_name = Path::new(doc_file).file_stem()
-                    .and_then(|s| s.to_str()).unwrap_or(doc_file);
+                let doc_name = Path::new(doc_file)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(doc_file);
                 let concept = format!("documentation: {}", doc_name.replace(['-', '_'], " "));
                 cluster_meta.insert(sym.symbol_id.clone(), (concept, confidence));
                 if seen_ids.insert(sym.symbol_id.clone()) {
@@ -310,14 +375,18 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
 
         // Fallback: no term matches found — use directory heuristics across all docs combined.
         if !any_term_match {
-            let doc_dirs: Vec<&str> = changed_files.iter()
+            let doc_dirs: Vec<&str> = changed_files
+                .iter()
                 .filter_map(|f| Path::new(f).parent()?.to_str())
                 .collect();
-            let mut dir_scored: Vec<(usize, &Symbol)> = candidate_syms.iter().copied()
+            let mut dir_scored: Vec<(usize, &Symbol)> = candidate_syms
+                .iter()
+                .copied()
                 .map(|s| {
-                    let score = doc_dirs.iter().filter(|d| {
-                        !d.is_empty() && **d != "." && s.file.contains(**d)
-                    }).count();
+                    let score = doc_dirs
+                        .iter()
+                        .filter(|d| !d.is_empty() && **d != "." && s.file.contains(**d))
+                        .count();
                     (score, s)
                 })
                 .collect();
@@ -330,8 +399,11 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
         }
 
         if !args.quiet {
-            eprintln!("asd: docs-only commit — {} domain cluster(s) identified across {} doc file(s)",
-                touched_symbols.len(), changed_files.len());
+            eprintln!(
+                "asd: docs-only commit — {} domain cluster(s) identified across {} doc file(s)",
+                touched_symbols.len(),
+                changed_files.len()
+            );
         }
     }
 
@@ -347,8 +419,15 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
     // Docs-only commits: subject becomes a Concept entry (documentation, not code decision).
     // Code commits: subject becomes a Decision.
     if !subject.is_empty() {
-        let subject_kind = if all_docs { LedgerKind::Concept } else { LedgerKind::Decision };
-        annotations.push(Annotation { kind: subject_kind, summary: subject.clone() });
+        let subject_kind = if all_docs {
+            LedgerKind::Concept
+        } else {
+            LedgerKind::Decision
+        };
+        annotations.push(Annotation {
+            kind: subject_kind,
+            summary: subject.clone(),
+        });
     }
     // Note: for docs-only commits, per-cluster concept annotations are stored in
     // `cluster_meta` (built in the docs-only path above) rather than the global
@@ -358,7 +437,9 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
     // Parse body lines for structured annotations.
     for line in full_body.lines() {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
 
         let (kind, text) = if let Some(rest) = line.strip_prefix("invariant:") {
             (LedgerKind::Invariant, rest.trim())
@@ -379,21 +460,35 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
         };
 
         if !text.is_empty() {
-            annotations.push(Annotation { kind, summary: text.to_string() });
+            annotations.push(Annotation {
+                kind,
+                summary: text.to_string(),
+            });
         }
     }
 
     // ---- CTX provenance tags (t-001) -------------------------------------
-    let ctx_plan = args.ctx_plan.clone()
+    let ctx_plan = args
+        .ctx_plan
+        .clone()
         .or_else(|| std::env::var("CTXONE_PLAN").ok())
         .unwrap_or_default();
-    let ctx_task = args.ctx_task.clone()
+    let ctx_task = args
+        .ctx_task
+        .clone()
         .or_else(|| std::env::var("CTXONE_TASK").ok())
         .unwrap_or_default();
     let mut ctx_tags: Vec<String> = Vec::new();
-    if !ctx_plan.is_empty() { ctx_tags.push(format!("ctx:plan:{}", ctx_plan)); }
-    if !ctx_task.is_empty() { ctx_tags.push(format!("ctx:task:{}", ctx_task)); }
-    ctx_tags.push(format!("commit:{}", &commit_hash[..8.min(commit_hash.len())]));
+    if !ctx_plan.is_empty() {
+        ctx_tags.push(format!("ctx:plan:{}", ctx_plan));
+    }
+    if !ctx_task.is_empty() {
+        ctx_tags.push(format!("ctx:task:{}", ctx_task));
+    }
+    ctx_tags.push(format!(
+        "commit:{}",
+        &commit_hash[..8.min(commit_hash.len())]
+    ));
 
     // ---- Determine author ------------------------------------------------
     let author_id = args.author.clone().unwrap_or_else(|| {
@@ -406,7 +501,10 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
             .trim()
             .to_string()
     });
-    let author = Author { kind: AuthorKind::Human, id: author_id };
+    let author = Author {
+        kind: AuthorKind::Human,
+        id: author_id,
+    };
 
     // ---- Build suggested entries -----------------------------------------
     let mut suggested: Vec<Value> = Vec::new();
@@ -416,8 +514,14 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
         // For docs-only commits, inject the per-cluster concept annotation
         // before the global annotations so the concept is recorded first.
         let cluster_anns: Vec<Annotation> = if all_docs {
-            cluster_meta.get(&sym.symbol_id)
-                .map(|(concept, _)| vec![Annotation { kind: LedgerKind::Concept, summary: concept.clone() }])
+            cluster_meta
+                .get(&sym.symbol_id)
+                .map(|(concept, _)| {
+                    vec![Annotation {
+                        kind: LedgerKind::Concept,
+                        summary: concept.clone(),
+                    }]
+                })
                 .unwrap_or_default()
         } else {
             vec![]
@@ -426,8 +530,13 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
         // Concept entries from the global annotations list (the subject line) so
         // we don't emit both "documentation: X" and "Define X scope" for the same symbol.
         let has_cluster = !cluster_anns.is_empty();
-        let all_anns: Vec<&Annotation> = cluster_anns.iter()
-            .chain(annotations.iter().filter(|a| !(has_cluster && a.kind == LedgerKind::Concept)))
+        let all_anns: Vec<&Annotation> = cluster_anns
+            .iter()
+            .chain(
+                annotations
+                    .iter()
+                    .filter(|a| !(has_cluster && a.kind == LedgerKind::Concept)),
+            )
             .collect();
         let cluster_confidence = cluster_meta.get(&sym.symbol_id).map(|(_, c)| *c);
 
@@ -439,7 +548,9 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
             let already_exists = existing.iter().any(|e| {
                 e.kind == ann.kind && e.summary.to_lowercase() == ann.summary.to_lowercase()
             });
-            if already_exists { continue; }
+            if already_exists {
+                continue;
+            }
 
             let entry_val = json!({
                 "symbol": sym.qname,

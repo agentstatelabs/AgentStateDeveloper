@@ -14,8 +14,8 @@ use clap::{Parser, Subcommand};
 
 use agentstatedeveloper_core::{AuditSink, RatifyOps};
 
-pub mod config;
 pub mod commands;
+pub mod config;
 
 pub use config::Config;
 

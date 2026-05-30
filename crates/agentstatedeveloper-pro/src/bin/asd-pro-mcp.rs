@@ -27,9 +27,8 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let db_path = PathBuf::from(
-        std::env::var("ASD_DB").unwrap_or_else(|_| "./.asd-state.db".to_string()),
-    );
+    let db_path =
+        PathBuf::from(std::env::var("ASD_DB").unwrap_or_else(|_| "./.asd-state.db".to_string()));
 
     tracing::info!(?db_path, "starting asd-pro-mcp stdio server");
 

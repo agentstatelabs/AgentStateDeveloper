@@ -18,9 +18,18 @@ struct Tool {
 }
 
 const TOOLS: &[Tool] = &[
-    Tool { name: "claude-code",    config_path_fn: claude_code_config_path },
-    Tool { name: "claude-desktop", config_path_fn: claude_desktop_config_path },
-    Tool { name: "cursor",         config_path_fn: cursor_config_path },
+    Tool {
+        name: "claude-code",
+        config_path_fn: claude_code_config_path,
+    },
+    Tool {
+        name: "claude-desktop",
+        config_path_fn: claude_desktop_config_path,
+    },
+    Tool {
+        name: "cursor",
+        config_path_fn: cursor_config_path,
+    },
 ];
 
 fn home() -> Option<PathBuf> {
@@ -121,10 +130,13 @@ fn find_asd_mcp() -> Option<PathBuf> {
 }
 
 fn which_asd_mcp() -> Option<PathBuf> {
-    std::env::var_os("PATH")?.to_string_lossy().split(':').find_map(|dir| {
-        let p = PathBuf::from(dir).join("asd-mcp");
-        p.exists().then_some(p)
-    })
+    std::env::var_os("PATH")?
+        .to_string_lossy()
+        .split(':')
+        .find_map(|dir| {
+            let p = PathBuf::from(dir).join("asd-mcp");
+            p.exists().then_some(p)
+        })
 }
 
 fn resolve_db(override_db: Option<PathBuf>) -> Result<PathBuf> {
@@ -151,10 +163,8 @@ fn read_config(path: &Path) -> Result<serde_json::Value> {
     if !path.exists() {
         return Ok(serde_json::json!({}));
     }
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
-    serde_json::from_str(&raw)
-        .with_context(|| format!("parse JSON in {}", path.display()))
+    let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("parse JSON in {}", path.display()))
 }
 
 /// Write a JSON config file, creating parent directories as needed.
@@ -164,8 +174,7 @@ fn write_config(path: &Path, value: &serde_json::Value) -> Result<()> {
             .with_context(|| format!("create dirs for {}", path.display()))?;
     }
     let out = serde_json::to_string_pretty(value)?;
-    std::fs::write(path, out)
-        .with_context(|| format!("write {}", path.display()))
+    std::fs::write(path, out).with_context(|| format!("write {}", path.display()))
 }
 
 fn mcp_entry(asd_mcp_bin: &Path, db_path: &Path) -> serde_json::Value {
@@ -179,9 +188,10 @@ fn mcp_entry(asd_mcp_bin: &Path, db_path: &Path) -> serde_json::Value {
 }
 
 fn tools_to_process(tool_filter: Option<&str>) -> Vec<&'static Tool> {
-    TOOLS.iter().filter(|t| {
-        tool_filter.map_or(true, |f| t.name == f)
-    }).collect()
+    TOOLS
+        .iter()
+        .filter(|t| tool_filter.map_or(true, |f| t.name == f))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -200,14 +210,19 @@ fn install(args: InstallArgs) -> Result<()> {
     let tools = tools_to_process(args.tool.as_deref());
 
     if tools.is_empty() {
-        anyhow::bail!("unknown tool {:?}; valid: claude-code, claude-desktop, cursor", args.tool);
+        anyhow::bail!(
+            "unknown tool {:?}; valid: claude-code, claude-desktop, cursor",
+            args.tool
+        );
     }
 
     let entry = mcp_entry(&asd_mcp, &db_path);
     let mut installed = 0usize;
 
     for tool in &tools {
-        let Some(cfg_path) = (tool.config_path_fn)() else { continue; };
+        let Some(cfg_path) = (tool.config_path_fn)() else {
+            continue;
+        };
 
         let mut cfg = read_config(&cfg_path)?;
         let servers = cfg
@@ -217,7 +232,8 @@ fn install(args: InstallArgs) -> Result<()> {
             .or_insert_with(|| serde_json::json!({}));
 
         let already = servers.get("asd").is_some();
-        servers.as_object_mut()
+        servers
+            .as_object_mut()
             .context("mcpServers is not an object")?
             .insert("asd".to_string(), entry.clone());
 
@@ -258,14 +274,21 @@ fn uninstall(args: UninstallArgs) -> Result<()> {
     let tools = tools_to_process(args.tool.as_deref());
 
     if tools.is_empty() {
-        anyhow::bail!("unknown tool {:?}; valid: claude-code, claude-desktop, cursor", args.tool);
+        anyhow::bail!(
+            "unknown tool {:?}; valid: claude-code, claude-desktop, cursor",
+            args.tool
+        );
     }
 
     let mut removed = 0usize;
 
     for tool in &tools {
-        let Some(cfg_path) = (tool.config_path_fn)() else { continue; };
-        if !cfg_path.exists() { continue; }
+        let Some(cfg_path) = (tool.config_path_fn)() else {
+            continue;
+        };
+        if !cfg_path.exists() {
+            continue;
+        }
 
         let mut cfg = read_config(&cfg_path)?;
         let was_present = cfg
@@ -298,10 +321,14 @@ fn uninstall(args: UninstallArgs) -> Result<()> {
 fn status() -> Result<()> {
     let bin = find_asd_mcp();
 
-    eprintln!("asd-mcp binary: {}", match &bin {
-        Some(p) => p.to_string_lossy().into_owned(),
-        None => "NOT FOUND — install with: cargo install --path crates/agentstatedeveloper-mcp".to_string(),
-    });
+    eprintln!(
+        "asd-mcp binary: {}",
+        match &bin {
+            Some(p) => p.to_string_lossy().into_owned(),
+            None => "NOT FOUND — install with: cargo install --path crates/agentstatedeveloper-mcp"
+                .to_string(),
+        }
+    );
     eprintln!();
 
     for tool in TOOLS {
@@ -311,7 +338,11 @@ fn status() -> Result<()> {
         };
 
         if !cfg_path.exists() {
-            eprintln!("  ✗ {}  config not found: {}", tool.name, cfg_path.display());
+            eprintln!(
+                "  ✗ {}  config not found: {}",
+                tool.name,
+                cfg_path.display()
+            );
             continue;
         }
 
@@ -321,11 +352,19 @@ fn status() -> Result<()> {
         match entry {
             Some(e) => {
                 let cmd = e.get("command").and_then(|v| v.as_str()).unwrap_or("?");
-                let db  = e.get("env").and_then(|v| v.get("ASD_DB")).and_then(|v| v.as_str()).unwrap_or("?");
+                let db = e
+                    .get("env")
+                    .and_then(|v| v.get("ASD_DB"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
                 eprintln!("  ✓ {}  command={}  ASD_DB={}", tool.name, cmd, db);
             }
             None => {
-                eprintln!("  ✗ {}  not registered  ({})", tool.name, cfg_path.display());
+                eprintln!(
+                    "  ✗ {}  not registered  ({})",
+                    tool.name,
+                    cfg_path.display()
+                );
             }
         }
     }

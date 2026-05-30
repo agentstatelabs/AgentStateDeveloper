@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 
-use agentstatedeveloper_core::{read_jsonl, AuditEvent};
+use agentstatedeveloper_core::{AuditEvent, read_jsonl};
 
 use crate::config::Config;
 
@@ -86,8 +86,7 @@ fn tail(cfg: &Config, args: TailArgs) -> Result<()> {
             )
         })?;
 
-    let events = read_jsonl(path)
-        .with_context(|| format!("read audit log {}", path.display()))?;
+    let events = read_jsonl(path).with_context(|| format!("read audit log {}", path.display()))?;
 
     // Apply `since` cursor first (drop up to and including the matching id).
     let start_idx = match args.since {

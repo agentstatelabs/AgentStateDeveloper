@@ -32,9 +32,8 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let db_path = PathBuf::from(
-        std::env::var("ASD_DB").unwrap_or_else(|_| "./.asd-state.db".to_string()),
-    );
+    let db_path =
+        PathBuf::from(std::env::var("ASD_DB").unwrap_or_else(|_| "./.asd-state.db".to_string()));
 
     tracing::info!(?db_path, "starting asd-mcp stdio server");
 
@@ -45,18 +44,19 @@ async fn main() -> Result<()> {
     // a configured-but-silent permissive gate.
     if let Ok(policy_path) = std::env::var("ASD_POLICY") {
         let path = PathBuf::from(&policy_path);
-        engine
-            .load_policy_file(&path)
-            .with_context(|| format!("failed to load ASD_POLICY policy file at {}", path.display()))?;
+        engine.load_policy_file(&path).with_context(|| {
+            format!(
+                "failed to load ASD_POLICY policy file at {}",
+                path.display()
+            )
+        })?;
         tracing::info!(policy = %path.display(), "loaded ASD policy file");
     }
 
     // ASD_AUDIT_LOG is recognized for read-only tailing of logs
     // produced by asd-pro. OSS asd-mcp does not write new chain-signed
     // events — the engine stays on NullSink.
-    let audit_log_path: Option<PathBuf> = std::env::var("ASD_AUDIT_LOG")
-        .ok()
-        .map(PathBuf::from);
+    let audit_log_path: Option<PathBuf> = std::env::var("ASD_AUDIT_LOG").ok().map(PathBuf::from);
     if audit_log_path.is_some() {
         tracing::warn!(
             "ASD_AUDIT_LOG set but asd-mcp is OSS — no new events \

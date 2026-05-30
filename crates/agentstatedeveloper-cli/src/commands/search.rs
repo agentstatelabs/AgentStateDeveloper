@@ -8,18 +8,16 @@ use anyhow::Result;
 use clap::Args;
 
 use agentstatedeveloper_core::{
-    AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore,
-    EffectStore, Engine, FeedbackStore, FeedbackVerdict, FtsFilters, IndexStore,
-    LedgerStore, SearchDocsDb, SearchFtsDb,
-    apply_feedback_adjustments, apply_file_scope_feedback, build_feedback_state_from_entries,
-    classify_layer_sym,
-    compute_trust_score, confidence_reason, compute_uncertainty, FeedbackMetrics, FeedbackState,
-    confidence_scores, detect_ambiguous_tokens, detect_confidence_warnings, detect_possible_misses,
-    effect_detail_reason, estimate_tokens, explain_match, explain_feedback_impacts, extract_summary,
-    gather_recency, hybrid_boost, in_memory_score,
-    intent_focus, kind_str, load_layer_overrides, parse_intent, parse_query, resolve_scope,
-    result_bucket, stale_warning, suggest_better_queries, suggest_scoped_queries, symbol_tier,
-    trim_for_agent,
+    AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine,
+    FeedbackMetrics, FeedbackState, FeedbackStore, FeedbackVerdict, FtsFilters, IndexStore,
+    LedgerStore, SearchDocsDb, SearchFtsDb, apply_feedback_adjustments, apply_file_scope_feedback,
+    build_feedback_state_from_entries, classify_layer_sym, compute_trust_score,
+    compute_uncertainty, confidence_reason, confidence_scores, detect_ambiguous_tokens,
+    detect_confidence_warnings, detect_possible_misses, effect_detail_reason, estimate_tokens,
+    explain_feedback_impacts, explain_match, extract_summary, gather_recency, hybrid_boost,
+    in_memory_score, intent_focus, kind_str, load_layer_overrides, parse_intent, parse_query,
+    resolve_scope, result_bucket, stale_warning, suggest_better_queries, suggest_scoped_queries,
+    symbol_tier, trim_for_agent,
 };
 
 use crate::config::Config;
@@ -137,7 +135,11 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
 
     let (tokens_from_query, mut inline_exclusions) = parse_query(&args.query);
     if let Some(ref excl) = args.exclude {
-        for term in excl.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()) {
+        for term in excl
+            .split(',')
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+        {
             inline_exclusions.push(term);
         }
     }
@@ -146,7 +148,12 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         paths_filter.extend(resolve_scope(scope, &cfg.db_path));
     }
     if let Some(ref paths) = args.paths {
-        paths_filter.extend(paths.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()));
+        paths_filter.extend(
+            paths
+                .split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty()),
+        );
     }
     let filters = FtsFilters {
         kind: args.kind.as_deref().map(|k| k.to_lowercase()),
@@ -169,7 +176,9 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
     };
 
     // --- FTS path ---
-    let fts_result = if args.docs_only { None } else {
+    let fts_result = if args.docs_only {
+        None
+    } else {
         SearchFtsDb::open(&cfg.db_path)
             .ok()
             .filter(|fts| fts.has_data())
@@ -185,20 +194,38 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
 
         // Hybrid reranking: BM25 + path/name boost + ledger boost + ownership anchor boost.
         // Also track which symbols received a SOT boost (for boosted-but-outranked report).
-        let mut sot_boosted_qnames: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut sot_boosted_qnames: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         // Per-result boost breakdown (populated when --debug-boosts is set).
         let mut boost_debug: std::collections::HashMap<String, serde_json::Value> =
             std::collections::HashMap::new();
         const GENERIC_BOOST_SKIP: &[&str] = &[
-            "state", "update", "position", "value", "cursor", "progress",
-            "indicator", "status", "mode", "flag", "current", "local",
-            "playhead", "tick", "item", "data", "info", "manager",
+            "state",
+            "update",
+            "position",
+            "value",
+            "cursor",
+            "progress",
+            "indicator",
+            "status",
+            "mode",
+            "flag",
+            "current",
+            "local",
+            "playhead",
+            "tick",
+            "item",
+            "data",
+            "info",
+            "manager",
         ];
         // M59: ledger_cache is now lazily populated at display time only (top ~20 results).
         // Scoring uses denormalized ledger_text/ledger_flags from FTS rows — no list_entries
         // calls during the hot scoring loop (was N=80 calls, now 0).
-        let mut ledger_cache: std::collections::HashMap<String, Vec<agentstatedeveloper_core::LedgerEntry>> =
-            std::collections::HashMap::new();
+        let mut ledger_cache: std::collections::HashMap<
+            String,
+            Vec<agentstatedeveloper_core::LedgerEntry>,
+        > = std::collections::HashMap::new();
         // has_ledger_ids: symbol_ids with any ledger entries — populated from FTS fields.
         let mut has_ledger_ids: std::collections::HashSet<String> =
             std::collections::HashSet::new();
@@ -210,10 +237,14 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 let ledger_boost = if hit.ledger_text.is_empty() {
                     0.0
                 } else {
-                    tokens.iter().filter(|t| hit.ledger_text.contains(t.as_str())).count() as f64
+                    tokens
+                        .iter()
+                        .filter(|t| hit.ledger_text.contains(t.as_str()))
+                        .count() as f64
                 };
                 let haystack = format!("{} {}", hit.qname.to_lowercase(), hit.file.to_lowercase());
-                let domain_overlap = tokens.iter()
+                let domain_overlap = tokens
+                    .iter()
                     .filter(|t| !GENERIC_BOOST_SKIP.contains(&t.as_str()))
                     .filter(|t| haystack.contains(t.as_str()))
                     .count();
@@ -222,10 +253,16 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 if hit.has_ledger() {
                     has_ledger_ids.insert(hit.symbol_id.clone());
                 }
-                let is_state_holder = matches!(hit.kind.as_str(), "class" | "struct" | "type" | "enum")
-                    && !has_ownership && !has_invariant
-                    && !tokens.iter().any(|t| matches!(t.as_str(),
-                        "state" | "model" | "type" | "class" | "struct" | "enum" | "schema"));
+                let is_state_holder =
+                    matches!(hit.kind.as_str(), "class" | "struct" | "type" | "enum")
+                        && !has_ownership
+                        && !has_invariant
+                        && !tokens.iter().any(|t| {
+                            matches!(
+                                t.as_str(),
+                                "state" | "model" | "type" | "class" | "struct" | "enum" | "schema"
+                            )
+                        });
                 let state_penalty = if is_state_holder { -0.8 } else { 0.0 };
                 let sot_boost = if has_ownership && domain_overlap >= 2 {
                     5.0
@@ -240,15 +277,18 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 };
                 let total = hit.bm25_score + hybrid + ledger_boost + sot_boost + state_penalty;
                 if args.debug_boosts {
-                    boost_debug.insert(hit.qname.clone(), serde_json::json!({
-                        "bm25": hit.bm25_score,
-                        "hybrid_boost": hybrid,
-                        "ledger_boost": ledger_boost,
-                        "sot_boost": sot_boost,
-                        "state_penalty": state_penalty,
-                        "domain_overlap": domain_overlap,
-                        "total": total,
-                    }));
+                    boost_debug.insert(
+                        hit.qname.clone(),
+                        serde_json::json!({
+                            "bm25": hit.bm25_score,
+                            "hybrid_boost": hybrid,
+                            "ledger_boost": ledger_boost,
+                            "sot_boost": sot_boost,
+                            "state_penalty": state_penalty,
+                            "domain_overlap": domain_overlap,
+                            "total": total,
+                        }),
+                    );
                 }
                 tmp.push((total, hit));
             }
@@ -270,22 +310,29 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         {
             let idx = AsgIndexStore::from_engine(&engine);
             if !all_feedback.is_empty() {
-                let fb_tuples: Vec<_> = all_feedback.iter()
+                let fb_tuples: Vec<_> = all_feedback
+                    .iter()
                     .filter(|e| e.file_scope.is_none())
                     .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict))
                     .collect();
-                let fs_tuples: Vec<_> = all_feedback.iter()
-                    .filter_map(|e| e.file_scope.as_ref().map(|g| (g.clone(), e.verdict, e.query.clone())))
+                let fs_tuples: Vec<_> = all_feedback
+                    .iter()
+                    .filter_map(|e| {
+                        e.file_scope
+                            .as_ref()
+                            .map(|g| (g.clone(), e.verdict, e.query.clone()))
+                    })
                     .collect();
-                let mut adj: Vec<(f64, String)> = scored.iter()
-                    .map(|(s, h)| (*s, h.qname.clone()))
-                    .collect();
-                feedback_metrics = apply_feedback_adjustments(&engine, &idx, &args.query, &mut adj, &fb_tuples);
+                let mut adj: Vec<(f64, String)> =
+                    scored.iter().map(|(s, h)| (*s, h.qname.clone())).collect();
+                feedback_metrics =
+                    apply_feedback_adjustments(&engine, &idx, &args.query, &mut adj, &fb_tuples);
                 apply_file_scope_feedback(&engine, &idx, &args.query, &mut adj, &fs_tuples);
                 // Collect suppressed qnames before consuming adj.
                 let surviving: std::collections::HashSet<&str> =
                     adj.iter().map(|(_, q)| q.as_str()).collect();
-                feedback_suppressed_detail = scored.iter()
+                feedback_suppressed_detail = scored
+                    .iter()
                     .map(|(_, h)| h.qname.clone())
                     .filter(|q| !surviving.contains(q.as_str()))
                     .collect();
@@ -300,8 +347,11 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             }
         }
 
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.1.qname.cmp(&b.1.qname)));
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.qname.cmp(&b.1.qname))
+        });
         scored.truncate(args.limit);
 
         if scored.is_empty() {
@@ -323,85 +373,107 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             // hoisted all_feedback — no extra list_all() call here.
             // explain_feedback_impacts does a full symbol-tree scan when noisy symbols exist;
             // calling it per-result meant 20 full tree scans. One batch call eliminates that.
-            let all_result_qnames: Vec<String> = scored.iter().map(|(_, h)| h.qname.clone()).collect();
+            let all_result_qnames: Vec<String> =
+                scored.iter().map(|(_, h)| h.qname.clone()).collect();
             let all_feedback_impacts = explain_feedback_impacts(
-                &engine, &AsgIndexStore::from_engine(&engine),
-                &args.query, &all_result_qnames, &all_feedback,
+                &engine,
+                &AsgIndexStore::from_engine(&engine),
+                &args.query,
+                &all_result_qnames,
+                &all_feedback,
             );
 
-            let mut layers_present: std::collections::HashSet<&str> = std::collections::HashSet::new();
-            let results: Vec<serde_json::Value> = scored.iter().zip(confidences.iter()).map(|((score, hit), conf)| {
-                let rec = recency.get(&hit.file);
-                let is_hot = rec.map(|r| r.hot).unwrap_or(false);
-                let tier = symbol_tier(&hit.file);
-                let layer = classify_layer_sym(&hit.file, &hit.qname, tier, &layer_overrides);
-                layers_present.insert(Box::leak(layer.to_string().into_boxed_str()));
-                // M59: lazy-load ledger entries at display time (top N only).
-                // Scoring no longer populates ledger_cache; we do it here on demand.
-                if !ledger_cache.contains_key(&hit.symbol_id) {
-                    if let Ok(entries) = ledger_store.list_entries(&engine.ref_name, &hit.symbol_id) {
-                        ledger_cache.insert(hit.symbol_id.clone(), entries);
+            let mut layers_present: std::collections::HashSet<&str> =
+                std::collections::HashSet::new();
+            let results: Vec<serde_json::Value> = scored
+                .iter()
+                .zip(confidences.iter())
+                .map(|((score, hit), conf)| {
+                    let rec = recency.get(&hit.file);
+                    let is_hot = rec.map(|r| r.hot).unwrap_or(false);
+                    let tier = symbol_tier(&hit.file);
+                    let layer = classify_layer_sym(&hit.file, &hit.qname, tier, &layer_overrides);
+                    layers_present.insert(Box::leak(layer.to_string().into_boxed_str()));
+                    // M59: lazy-load ledger entries at display time (top N only).
+                    // Scoring no longer populates ledger_cache; we do it here on demand.
+                    if !ledger_cache.contains_key(&hit.symbol_id) {
+                        if let Ok(entries) =
+                            ledger_store.list_entries(&engine.ref_name, &hit.symbol_id)
+                        {
+                            ledger_cache.insert(hit.symbol_id.clone(), entries);
+                        }
                     }
-                }
-                let ledger_entries = ledger_cache.get(&hit.symbol_id)
-                    .cloned()
-                    .unwrap_or_default();
-                // Use has_ledger_ids (from FTS fields) as authoritative source;
-                // fall back to cache for completeness.
-                let has_ledger = has_ledger_ids.contains(&hit.symbol_id) || !ledger_entries.is_empty();
-                let match_reasons = if let Ok(Some(sym)) = index_store.get_symbol_by_qname(&engine.ref_name, &hit.qname) {
-                    explain_match(&sym, &tokens, &ledger_entries, is_hot)
-                } else {
-                    vec![]
-                };
-                let bucket = result_bucket(&hit.file, &match_reasons, has_ledger, is_hot);
-                let conf_reason = confidence_reason(&match_reasons, has_ledger, is_hot);
-                // Check for an active useful feedback verdict (these survive filtering).
-                // Uses the hoisted all_feedback — no extra git read per result.
-                let fb_status = {
-                    let q = args.query.to_lowercase();
-                    all_feedback.iter().find(|e| {
-                        e.symbol_id == hit.symbol_id
-                            && (e.query.is_empty()
-                                || q.contains(e.query.as_str())
-                                || e.query.contains(q.as_str()))
-                    }).map(|e| e.verdict.as_str().to_string())
-                };
-                // feedback_rule: look up from the pre-computed impact map (no extra git reads).
-                let feedback_rule: Option<serde_json::Value> = all_feedback_impacts.get(&hit.qname)
-                    .map(|imp| serde_json::json!({
-                        "verdict": imp.verdict,
-                        "matched_query": imp.matched_query,
-                        "author": imp.author,
-                    }));
-                // effect_detail: one-line reason for effect verification state.
-                let effect_detail = {
-                    let decl = effect_store.get_effects(&engine.ref_name, &hit.symbol_id)
-                        .ok()
-                        .flatten();
-                    effect_detail_reason(decl.as_ref())
-                };
-                let mut result_val = serde_json::json!({
-                    "score": score, "confidence": conf, "bucket": bucket,
-                    "confidence_reason": conf_reason,
-                    "qname": hit.qname, "kind": hit.kind,
-                    "file": hit.file, "line": hit.line, "layer": layer,
-                    "summary": extract_summary(hit.doc.as_deref(), hit.signature.as_deref()),
-                    "last_touched_days": rec.and_then(|r| r.last_touched_days),
-                    "hot": is_hot,
-                    "match_reasons": match_reasons,
-                    "feedback_status": fb_status,
-                    "feedback_rule": feedback_rule,
-                    "effect_detail": effect_detail,
-                });
-                if args.debug_boosts {
-                    if let Some(dbg) = boost_debug.get(&hit.qname) {
-                        result_val["boost_debug"] = dbg.clone();
+                    let ledger_entries = ledger_cache
+                        .get(&hit.symbol_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    // Use has_ledger_ids (from FTS fields) as authoritative source;
+                    // fall back to cache for completeness.
+                    let has_ledger =
+                        has_ledger_ids.contains(&hit.symbol_id) || !ledger_entries.is_empty();
+                    let match_reasons = if let Ok(Some(sym)) =
+                        index_store.get_symbol_by_qname(&engine.ref_name, &hit.qname)
+                    {
+                        explain_match(&sym, &tokens, &ledger_entries, is_hot)
+                    } else {
+                        vec![]
+                    };
+                    let bucket = result_bucket(&hit.file, &match_reasons, has_ledger, is_hot);
+                    let conf_reason = confidence_reason(&match_reasons, has_ledger, is_hot);
+                    // Check for an active useful feedback verdict (these survive filtering).
+                    // Uses the hoisted all_feedback — no extra git read per result.
+                    let fb_status = {
+                        let q = args.query.to_lowercase();
+                        all_feedback
+                            .iter()
+                            .find(|e| {
+                                e.symbol_id == hit.symbol_id
+                                    && (e.query.is_empty()
+                                        || q.contains(e.query.as_str())
+                                        || e.query.contains(q.as_str()))
+                            })
+                            .map(|e| e.verdict.as_str().to_string())
+                    };
+                    // feedback_rule: look up from the pre-computed impact map (no extra git reads).
+                    let feedback_rule: Option<serde_json::Value> =
+                        all_feedback_impacts.get(&hit.qname).map(|imp| {
+                            serde_json::json!({
+                                "verdict": imp.verdict,
+                                "matched_query": imp.matched_query,
+                                "author": imp.author,
+                            })
+                        });
+                    // effect_detail: one-line reason for effect verification state.
+                    let effect_detail = {
+                        let decl = effect_store
+                            .get_effects(&engine.ref_name, &hit.symbol_id)
+                            .ok()
+                            .flatten();
+                        effect_detail_reason(decl.as_ref())
+                    };
+                    let mut result_val = serde_json::json!({
+                        "score": score, "confidence": conf, "bucket": bucket,
+                        "confidence_reason": conf_reason,
+                        "qname": hit.qname, "kind": hit.kind,
+                        "file": hit.file, "line": hit.line, "layer": layer,
+                        "summary": extract_summary(hit.doc.as_deref(), hit.signature.as_deref()),
+                        "last_touched_days": rec.and_then(|r| r.last_touched_days),
+                        "hot": is_hot,
+                        "match_reasons": match_reasons,
+                        "feedback_status": fb_status,
+                        "feedback_rule": feedback_rule,
+                        "effect_detail": effect_detail,
+                    });
+                    if args.debug_boosts {
+                        if let Some(dbg) = boost_debug.get(&hit.qname) {
+                            result_val["boost_debug"] = dbg.clone();
+                        }
                     }
-                }
-                result_val
-            }).collect();
-            let scope_narrowed = !filters.paths_filter.is_empty() || !filters.exclude_terms.is_empty();
+                    result_val
+                })
+                .collect();
+            let scope_narrowed =
+                !filters.paths_filter.is_empty() || !filters.exclude_terms.is_empty();
             let possible_misses = if scope_narrowed {
                 vec![]
             } else {
@@ -409,14 +481,20 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             };
             // t-003: typed confidence warnings (ambiguous vs sparse).
             let confidence_warnings = detect_confidence_warnings(
-                &tokens, results.len(), &ambiguous_terms, engine.fts.as_ref(),
+                &tokens,
+                results.len(),
+                &ambiguous_terms,
+                engine.fts.as_ref(),
             );
             // t-004/t-005: query improvement suggestions.
-            let query_suggestions = if scope_narrowed { vec![] } else {
+            let query_suggestions = if scope_narrowed {
+                vec![]
+            } else {
                 suggest_better_queries(&tokens, &args.query)
             };
             // t-004: scoped query suggestions using co-occurring tokens from top results.
-            let top_qnames: Vec<String> = results.iter()
+            let top_qnames: Vec<String> = results
+                .iter()
                 .take(5)
                 .filter_map(|r| r["qname"].as_str().map(|s| s.to_string()))
                 .collect();
@@ -425,28 +503,33 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             } else {
                 suggest_scoped_queries(&tokens, &ambiguous_terms, &top_qnames)
             };
-            let doc_results: Vec<serde_json::Value> = doc_hits.iter().map(|h| {
-                serde_json::json!({
-                    "source": "document",
-                    "score": h.bm25_score,
-                    "kind": h.kind,
-                    "path": h.path,
-                    "line": h.span_start,
-                    "title": h.title,
-                    "preview": h.preview,
-                    "owner_symbol_id": h.owner_symbol_id,
+            let doc_results: Vec<serde_json::Value> = doc_hits
+                .iter()
+                .map(|h| {
+                    serde_json::json!({
+                        "source": "document",
+                        "score": h.bm25_score,
+                        "kind": h.kind,
+                        "path": h.path,
+                        "line": h.span_start,
+                        "title": h.title,
+                        "preview": h.preview,
+                        "owner_symbol_id": h.owner_symbol_id,
+                    })
                 })
-            }).collect();
+                .collect();
             // boosted_outranked: SOT symbols that got a boost but ranked below position 5
             // or didn't make results at all. Useful for diagnosing cases where an SOT
             // symbol should have surfaced higher — the probe harness can assert these
             // are reported when a known-good symbol slips past the top cut.
             const OUTRANKED_THRESHOLD: usize = 5;
-            let result_positions: std::collections::HashMap<&str, usize> = results.iter()
+            let result_positions: std::collections::HashMap<&str, usize> = results
+                .iter()
                 .enumerate()
                 .filter_map(|(i, r)| r["qname"].as_str().map(|q| (q, i + 1)))
                 .collect();
-            let boosted_outranked: Vec<&str> = sot_boosted_qnames.iter()
+            let boosted_outranked: Vec<&str> = sot_boosted_qnames
+                .iter()
                 .map(|s| s.as_str())
                 .filter(|q| match result_positions.get(*q) {
                     Some(&rank) => rank > OUTRANKED_THRESHOLD,
@@ -456,13 +539,19 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
 
             // Use hoisted dq_state_str — avoids re-opening sidecar/DB for trust data.
             let uncertainty = compute_uncertainty(
-                &tokens, &ambiguous_terms, &possible_misses,
-                results.len(), &scoped_suggestions, engine.fts.as_ref(),
+                &tokens,
+                &ambiguous_terms,
+                &possible_misses,
+                results.len(),
+                &scoped_suggestions,
+                engine.fts.as_ref(),
                 Some(dq_state_str.as_str()),
             );
             // Use hoisted all_feedback — avoids a second list_all() call.
             let feedback_state = build_feedback_state_from_entries(
-                &all_feedback, &args.query, feedback_metrics.entries_applied,
+                &all_feedback,
+                &args.query,
+                feedback_metrics.entries_applied,
             );
             let raw = serde_json::json!({
                 "query": args.query,
@@ -507,8 +596,13 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&out)?);
         } else {
             // t-005: show query suggestions before results.
-            let scope_narrowed_term = !filters.paths_filter.is_empty() || !filters.exclude_terms.is_empty();
-            let q_suggestions = if scope_narrowed_term { vec![] } else { suggest_better_queries(&tokens, &args.query) };
+            let scope_narrowed_term =
+                !filters.paths_filter.is_empty() || !filters.exclude_terms.is_empty();
+            let q_suggestions = if scope_narrowed_term {
+                vec![]
+            } else {
+                suggest_better_queries(&tokens, &args.query)
+            };
             for s in &q_suggestions {
                 eprintln!("asd: {}", s);
             }
@@ -542,21 +636,30 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 // M59: lazy-load ledger entries for display (only called for top N shown results).
                 let conf = confidences.get(idx).copied().unwrap_or(0.5);
                 if !ledger_cache.contains_key(&hit.symbol_id) {
-                    if let Ok(entries) = ledger_store.list_entries(&engine.ref_name, &hit.symbol_id) {
+                    if let Ok(entries) = ledger_store.list_entries(&engine.ref_name, &hit.symbol_id)
+                    {
                         ledger_cache.insert(hit.symbol_id.clone(), entries);
                     }
                 }
-                let cached_entries = ledger_cache.get(&hit.symbol_id)
+                let cached_entries = ledger_cache
+                    .get(&hit.symbol_id)
                     .cloned()
                     .unwrap_or_default();
-                let (bucket, conf_reason_str, match_reasons_disp) = if let Ok(Some(sym)) = index_store.get_symbol_by_qname(&engine.ref_name, &hit.qname) {
-                    let has_ledger = has_ledger_ids.contains(&hit.symbol_id) || !cached_entries.is_empty();
+                let (bucket, conf_reason_str, match_reasons_disp) = if let Ok(Some(sym)) =
+                    index_store.get_symbol_by_qname(&engine.ref_name, &hit.qname)
+                {
+                    let has_ledger =
+                        has_ledger_ids.contains(&hit.symbol_id) || !cached_entries.is_empty();
                     let reasons = explain_match(&sym, &tokens, &cached_entries, is_hot);
                     let b = result_bucket(&hit.file, &reasons, has_ledger, is_hot);
                     let cr = confidence_reason(&reasons, has_ledger, is_hot);
                     (b, cr, reasons)
                 } else {
-                    ("noisy", "weak: low-signal indirect match".to_string(), vec![])
+                    (
+                        "noisy",
+                        "weak: low-signal indirect match".to_string(),
+                        vec![],
+                    )
                 };
                 // Cap confidence display when query is all-generic (avoids "[relevant 100%]"
                 // on matches that only hit generic tokens with no domain anchor).
@@ -571,13 +674,25 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 let conf_tag = format!(" [{} {:.0}%]", display_bucket, display_conf * 100.0);
                 println!(
                     "[{:.1}] {} {}{}{}{}{} ({}:{})",
-                    score, hit.kind, hit.qname, hot_tag, fb_tag, conf_tag, age_tag, hit.file, hit.line
+                    score,
+                    hit.kind,
+                    hit.qname,
+                    hot_tag,
+                    fb_tag,
+                    conf_tag,
+                    age_tag,
+                    hit.file,
+                    hit.line
                 );
                 if let Some(sig) = &hit.signature {
-                    if !sig.is_empty() { println!("       sig: {}", sig); }
+                    if !sig.is_empty() {
+                        println!("       sig: {}", sig);
+                    }
                 }
                 let summary = extract_summary(hit.doc.as_deref(), hit.signature.as_deref());
-                if !summary.is_empty() { println!("       {}", summary); }
+                if !summary.is_empty() {
+                    println!("       {}", summary);
+                }
                 if args.explain {
                     println!(
                         "       confidence: {:.0}%  {} ({})",
@@ -605,12 +720,18 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 }
             }
             if feedback_metrics.suppressed > 0 {
-                eprintln!("asd: {} result(s) suppressed by feedback (use `asd feedback list` to review)", feedback_metrics.suppressed);
+                eprintln!(
+                    "asd: {} result(s) suppressed by feedback (use `asd feedback list` to review)",
+                    feedback_metrics.suppressed
+                );
             }
             // Try-narrowing suggestion: when ambiguous terms dominate, suggest scoped queries.
             if !ambiguous_terms.is_empty() {
-                let top_qnames: Vec<String> = scored.iter().take(5)
-                    .map(|(_, h)| h.qname.clone()).collect();
+                let top_qnames: Vec<String> = scored
+                    .iter()
+                    .take(5)
+                    .map(|(_, h)| h.qname.clone())
+                    .collect();
                 let narrowing = suggest_scoped_queries(&tokens, &ambiguous_terms, &top_qnames);
                 if !narrowing.is_empty() {
                     eprintln!("asd: try narrowing with: {}", narrowing.join(", "));
@@ -622,8 +743,15 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 for h in &doc_hits {
                     let line_tag = h.span_start.map(|l| format!(":{l}")).unwrap_or_default();
                     println!("[{:.1}] {} {}{}", h.bm25_score, h.kind, h.path, line_tag);
-                    if !h.title.is_empty() { println!("       {}", h.title); }
-                    if !h.preview.is_empty() { println!("       {}", &h.preview.chars().take(120).collect::<String>()); }
+                    if !h.title.is_empty() {
+                        println!("       {}", h.title);
+                    }
+                    if !h.preview.is_empty() {
+                        println!(
+                            "       {}",
+                            &h.preview.chars().take(120).collect::<String>()
+                        );
+                    }
                 }
             }
         }
@@ -631,7 +759,9 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
     }
 
     // --- Fallback: in-memory O(N) scoring ---
-    eprintln!("asd: FTS index not populated — falling back to in-memory search (run `asd index` to enable fast search)");
+    eprintln!(
+        "asd: FTS index not populated — falling back to in-memory search (run `asd index` to enable fast search)"
+    );
 
     let tokens = tokens_from_query;
     if tokens.is_empty() {
@@ -659,10 +789,14 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
 
         if let Some(ref k) = kind_filter {
             let sym_kind = kind_str(&sym.kind);
-            if sym_kind != k.as_str() { continue; }
+            if sym_kind != k.as_str() {
+                continue;
+            }
         }
         if let Some(lang) = lang_filter {
-            if sym.language != lang { continue; }
+            if sym.language != lang {
+                continue;
+            }
         }
 
         let score = in_memory_score(&sym, &tokens, &ledger_store, &engine);
@@ -677,14 +811,21 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         let idx = AsgIndexStore::from_engine(&engine);
         let fb = &all_feedback;
         if !fb.is_empty() {
-            let fb_tuples: Vec<_> = fb.iter()
+            let fb_tuples: Vec<_> = fb
+                .iter()
                 .filter(|e| e.file_scope.is_none())
                 .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict))
                 .collect();
-            let fs_tuples: Vec<_> = fb.iter()
-                .filter_map(|e| e.file_scope.as_ref().map(|g| (g.clone(), e.verdict, e.query.clone())))
+            let fs_tuples: Vec<_> = fb
+                .iter()
+                .filter_map(|e| {
+                    e.file_scope
+                        .as_ref()
+                        .map(|g| (g.clone(), e.verdict, e.query.clone()))
+                })
                 .collect();
-            let mut adj: Vec<(f64, String)> = scored.iter()
+            let mut adj: Vec<(f64, String)> = scored
+                .iter()
                 .map(|(s, sym)| (*s as f64, sym.qname.clone()))
                 .collect();
             let _ = apply_feedback_adjustments(&engine, &idx, &args.query, &mut adj, &fb_tuples);
@@ -707,7 +848,9 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         let kind = kind_str(&sym.kind);
         println!("[{:3}] {} {} ({})", score, kind, sym.qname, sym.file);
         if let Some(sig) = sym.signature.as_deref() {
-            if !sig.is_empty() { println!("       sig: {}", sig); }
+            if !sig.is_empty() {
+                println!("       sig: {}", sig);
+            }
         }
         let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
         if !summary.is_empty() {
@@ -730,4 +873,3 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
-

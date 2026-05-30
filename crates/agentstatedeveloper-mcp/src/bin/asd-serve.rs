@@ -28,9 +28,8 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let db_path = PathBuf::from(
-        std::env::var("ASD_DB").unwrap_or_else(|_| "./.asd-state.db".to_string()),
-    );
+    let db_path =
+        PathBuf::from(std::env::var("ASD_DB").unwrap_or_else(|_| "./.asd-state.db".to_string()));
     let addr = std::env::var("ASD_SERVE_ADDR").unwrap_or_else(|_| "0.0.0.0:4120".to_string());
     let lens_dir = std::env::var("ASD_LENS_DIR").ok().map(PathBuf::from);
     let cors_permissive = std::env::var("ASD_CORS_PERMISSIVE")
@@ -45,9 +44,7 @@ async fn main() -> Result<()> {
     // ASD_AUDIT_LOG is recognized for read-only /audit tailing so OSS
     // `asd-serve` can display logs produced by asd-pro. Writing new
     // chained events requires asd-pro.
-    let audit_log_path: Option<PathBuf> = std::env::var("ASD_AUDIT_LOG")
-        .ok()
-        .map(PathBuf::from);
+    let audit_log_path: Option<PathBuf> = std::env::var("ASD_AUDIT_LOG").ok().map(PathBuf::from);
     if audit_log_path.is_some() {
         tracing::warn!(
             "ASD_AUDIT_LOG set but asd-serve is OSS — no new events \
