@@ -5,6 +5,90 @@ Versions use semantic versioning; each milestone increments by 0.0.5.
 
 ---
 
+## [1.0.23] — 2026-06-02 — Plan G complete (agent-thinking layer)
+
+ASD now persists the agent's *thinking* — speculation, mental models,
+failed attempts, open questions — so a fresh session resumes with
+the expensive understanding it would otherwise re-derive. Auto-surfaced
+in `prepare_change` / `context_for` as `prior_thinking`.
+
+### What's new
+
+- **Four new ledger kinds** — `Hypothesis` (uses `confidence`),
+  `MentalModel` (body carries `symbols[]` + `name`), `FailedAttempt`
+  (body: `tried` / `because`), `OpenQuestion`. Routed through a 7th
+  `ConclusionClass::Thinking` bucket in the sidecar. (t-002)
+- **`asd think <verb>`** — five subcommands (`speculate`, `model`,
+  `failed`, `question`, `list`). Entry IDs are deterministic blake3
+  of `(intent, qname, content)` so re-running the initial-read prompt
+  overwrites rather than duplicates. Mirror MCP tools:
+  `think_speculate` / `think_model` / `think_failed` / `think_question`
+  / `think_list`. (t-003)
+- **Initial-read prompt template** — `docs/initial-read-prompt.md`. A
+  7-section guide the agent reads and acts against the indexed project,
+  writing back via the `asd think *` commands. ASD doesn't make LLM
+  calls; the template is the contract. (t-004)
+- **`asd think bootstrap [--check]`** — guided entry point that prints
+  the prompt path + starter checklist + write-back command reference.
+  With `--check`, scans existing thinking entries and reports gaps
+  (e.g. "no MentalModel yet"). Supports `--json` for MCP. (t-005)
+- **`prior_thinking` auto-surface** — both `prepare_change` and
+  `context_for` now embed a compact `prior_thinking` projection of
+  the relevant symbols' thinking entries. Hypotheses below
+  `DEFAULT_CONFIDENCE_FLOOR = 0.3` are excluded; nothing surfaces when
+  no thinking exists. (t-006)
+- **`ctx:task:<id>` provenance auto-tag** — every `asd think *` write
+  (CLI and MCP) stamps the active CTX task id when set, matching the
+  trail Plan E added for map/ledger writes. (t-007)
+
+### Plan F follow-ups bundled in
+
+- **`Move` recipe action** revived for the test-migration recipe, with
+  `migrate_stale_tests()` reading `Mapping` bodies for move targets.
+- **MCP `AsgEffectStore` construction** fixed (struct literal → `::new`).
+- **`read_active_task_scope_from(env_raw, db_parent)`** extracted so
+  parallel tests can pass explicit env strings instead of mutating the
+  process env.
+
+### Adoption (worked example)
+
+```sh
+# 1. Seed the project graph.
+asd reindex
+
+# 2. Print the prompt template path + checklist.
+asd think bootstrap
+
+# 3. Read docs/initial-read-prompt.md, then record findings:
+asd think model audio-pipeline \
+    --symbols pkg.mixer.Mixer,pkg.io.Input,pkg.io.Output \
+    --summary "input → mix → output, single-threaded"
+asd think speculate pkg.mixer.Mixer --conf 0.7 \
+    --summary "buffer size 4096 chosen for ~93ms latency at 44.1kHz"
+asd think question pkg.mixer.Mixer --q "what does the 4096 constant mean?"
+asd think failed pkg.io.Output --tried "ring-buffer cache" \
+    --because "broke under reload — state leaked across sessions"
+
+# 4. Confirm coverage; --check reports remaining gaps.
+asd think bootstrap --check
+
+# 5. Subsequent prepare-change / context-for calls now embed:
+#     prior_thinking: { hypotheses, mental_models, failed_attempts, open_questions }
+```
+
+### Plumbing
+
+- `core::thinking::gather_prior_thinking(engine, qnames, min_confidence)`
+  single-sources the `prior_thinking` shape. 7 unit tests cover the
+  null case, surfacing, confidence-floor exclusion, mental_model /
+  failed_attempt body parsing, and the non-thinking-kinds exclusion.
+- 4 CLI tests cover the `ctx:task:<id>` resolver (env JSON, file
+  fallback, env-wins-over-file, both-absent).
+- New MCP regression test `plan_g_think_tools_are_registered` proves
+  the 5 tool routes are wired.
+
+---
+
 ## [0.9.99] — 2026-05-20 — Plan C complete (semantic-layer moat)
 
 The defining-feature release. Plan A built trust, Plan B built durable
