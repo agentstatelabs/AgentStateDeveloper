@@ -1100,8 +1100,23 @@ struct ImportBinding {
 /// - Plan D t-004: relative imports (`from . import x`, `from .foo import y`,
 ///   `from ..pkg import z`) — resolved against `module_prefix`.
 ///
+/// - Plan L t-004: imports nested inside function bodies, class
+///   bodies, and conditional blocks (`if TYPE_CHECKING:`, `try: …
+///   except ImportError: …`) are also collected and merged into the
+///   same flat map.
+///
 /// Skips:
 /// - `from foo import *` — can't statically resolve members.
+///
+/// Nested-import scoping policy: we deliberately use a single flat
+/// map rather than per-function scoping. Real Python code rarely
+/// shadows module-scope imports inside a function under the same
+/// local name; when it does (typically `try/except ImportError`
+/// fallbacks), either branch resolving to the same prefix is the
+/// behavior callers want. The trade-off: a function that genuinely
+/// imports a different module under a colliding name would resolve
+/// to whichever was inserted last. Acceptable for the call-edge
+/// signal we're building.
 fn parse_imports(
     source: &str,
     parser: &mut Parser,
@@ -1113,21 +1128,41 @@ fn parse_imports(
         Some(t) => t,
         None => return out,
     };
-    let root = tree.root_node();
-    // Only iterate direct children of the module node — we deliberately do
-    // NOT follow imports inside function bodies or conditional blocks, which
-    // would complicate per-callee scoping. Top-level only.
-    let mut cursor = root.walk();
-    for child in root.children(&mut cursor) {
-        match child.kind() {
-            "import_statement" => collect_import_statement(child, src_bytes, &mut out),
-            "import_from_statement" => {
-                collect_import_from_statement(child, src_bytes, module_prefix, &mut out)
-            }
-            _ => {}
-        }
-    }
+    walk_imports(tree.root_node(), src_bytes, module_prefix, &mut out);
     out
+}
+
+/// Plan L t-004: recursively walk the tree picking up every
+/// `import_statement` / `import_from_statement` node — module-scope
+/// AND nested. Skipping non-import nodes is implicit; we just
+/// recurse into every child and dispatch on `kind()`.
+///
+/// We don't prune at function/class boundaries on purpose: a
+/// `if TYPE_CHECKING:` block sits at module scope, a body import
+/// sits inside a function, a `try: import cPickle / except: import
+/// pickle` sits inside a `try_statement`. Recursing everywhere
+/// catches all three with one walk.
+fn walk_imports(
+    node: Node<'_>,
+    src: &[u8],
+    module_prefix: &str,
+    out: &mut HashMap<String, ImportBinding>,
+) {
+    match node.kind() {
+        "import_statement" => {
+            collect_import_statement(node, src, out);
+            return;
+        }
+        "import_from_statement" => {
+            collect_import_from_statement(node, src, module_prefix, out);
+            return;
+        }
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_imports(child, src, module_prefix, out);
+    }
 }
 
 /// Plan D t-004: resolve a relative-import dot prefix against the importing
@@ -1911,6 +1946,175 @@ def foo():
     fn relative_escaping_workspace_returns_none() {
         // Two dots when we only have one segment to drop.
         assert!(super::resolve_relative_import("crucible", "..foo").is_none());
+    }
+
+    // ---- Plan L t-004: nested-import resolution -----------------------
+
+    #[test]
+    fn extract_call_edges_resolves_function_body_import() {
+        // `def f(): import requests; requests.get(...)` — the import
+        // lives inside the function body, not at module scope. The
+        // walker must descend into the body and pick it up.
+        use crate::PythonAdapter;
+        use agentstatedeveloper_core::{
+            LanguageAdapter, ParsedSymbol, SymbolKind, WorkspaceSymbols,
+        };
+
+        let adapter = PythonAdapter::new();
+        let src = "def f():\n    from pkg.util import helper\n    return helper()\n";
+
+        let syms = vec![ParsedSymbol {
+            qname: "app.main.f".into(),
+            kind: SymbolKind::Function,
+            start_line: 1,
+            start_col: 0,
+            end_line: 3,
+            end_col: 22,
+            signature: Some("def f()".into()),
+            body: src.into(),
+            doc: None,
+        }];
+
+        let mut ws = WorkspaceSymbols::default();
+        ws.qnames.insert("pkg.util.helper".into());
+        ws.kinds
+            .insert("pkg.util.helper".into(), SymbolKind::Function);
+        ws.qnames.insert("app.main.f".into());
+        ws.kinds.insert("app.main.f".into(), SymbolKind::Function);
+        ws.build_suffix_index();
+
+        let edges = adapter.extract_call_edges("app/main.py", src, &syms, &ws);
+        assert!(
+            edges.iter().any(|e| e.callee_qname == "pkg.util.helper"),
+            "function-body import must produce cross-module edge; got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn extract_call_edges_resolves_if_typechecking_import() {
+        // Imports inside `if TYPE_CHECKING:` blocks should also be
+        // collected — the walker doesn't prune on conditional nodes.
+        use crate::PythonAdapter;
+        use agentstatedeveloper_core::{
+            LanguageAdapter, ParsedSymbol, SymbolKind, WorkspaceSymbols,
+        };
+
+        let adapter = PythonAdapter::new();
+        let src = "from typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    from pkg.api import Client\n\ndef use():\n    return Client()\n";
+
+        let syms = vec![ParsedSymbol {
+            qname: "app.main.use".into(),
+            kind: SymbolKind::Function,
+            start_line: 6,
+            start_col: 0,
+            end_line: 7,
+            end_col: 20,
+            signature: Some("def use()".into()),
+            body: src.into(),
+            doc: None,
+        }];
+
+        let mut ws = WorkspaceSymbols::default();
+        ws.qnames.insert("pkg.api.Client".into());
+        ws.kinds
+            .insert("pkg.api.Client".into(), SymbolKind::Class);
+        ws.qnames.insert("app.main.use".into());
+        ws.kinds.insert("app.main.use".into(), SymbolKind::Function);
+        ws.build_suffix_index();
+
+        let edges = adapter.extract_call_edges("app/main.py", src, &syms, &ws);
+        assert!(
+            edges.iter().any(|e| e.callee_qname == "pkg.api.Client"),
+            "if TYPE_CHECKING import must resolve; got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn extract_call_edges_resolves_try_except_import() {
+        // `try: import cPickle as pickle / except: import pickle` —
+        // the try-block import lives inside a `try_statement`. Walker
+        // must descend.
+        use crate::PythonAdapter;
+        use agentstatedeveloper_core::{
+            LanguageAdapter, ParsedSymbol, SymbolKind, WorkspaceSymbols,
+        };
+
+        let adapter = PythonAdapter::new();
+        let src = "try:\n    from pkg.fast import loader\nexcept ImportError:\n    from pkg.slow import loader\n\ndef boot():\n    return loader()\n";
+
+        let syms = vec![ParsedSymbol {
+            qname: "app.main.boot".into(),
+            kind: SymbolKind::Function,
+            start_line: 6,
+            start_col: 0,
+            end_line: 7,
+            end_col: 20,
+            signature: Some("def boot()".into()),
+            body: src.into(),
+            doc: None,
+        }];
+
+        let mut ws = WorkspaceSymbols::default();
+        ws.qnames.insert("pkg.fast.loader".into());
+        ws.kinds
+            .insert("pkg.fast.loader".into(), SymbolKind::Function);
+        ws.qnames.insert("pkg.slow.loader".into());
+        ws.kinds
+            .insert("pkg.slow.loader".into(), SymbolKind::Function);
+        ws.qnames.insert("app.main.boot".into());
+        ws.kinds
+            .insert("app.main.boot".into(), SymbolKind::Function);
+        ws.build_suffix_index();
+
+        let edges = adapter.extract_call_edges("app/main.py", src, &syms, &ws);
+        // Either branch's resolution is acceptable — both are real
+        // bindings in the same module. We just need at least one.
+        let resolved = edges.iter().any(|e| {
+            e.callee_qname == "pkg.fast.loader" || e.callee_qname == "pkg.slow.loader"
+        });
+        assert!(
+            resolved,
+            "try/except import must resolve to one of the branches; got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn module_scope_imports_still_resolve_after_nested_walker() {
+        // Regression guard: the recursive walker must not break the
+        // already-working module-scope case.
+        use crate::PythonAdapter;
+        use agentstatedeveloper_core::{
+            LanguageAdapter, ParsedSymbol, SymbolKind, WorkspaceSymbols,
+        };
+
+        let adapter = PythonAdapter::new();
+        let src = "from pkg.util import helper\n\ndef f():\n    return helper()\n";
+
+        let syms = vec![ParsedSymbol {
+            qname: "app.main.f".into(),
+            kind: SymbolKind::Function,
+            start_line: 3,
+            start_col: 0,
+            end_line: 4,
+            end_col: 22,
+            signature: Some("def f()".into()),
+            body: src.into(),
+            doc: None,
+        }];
+
+        let mut ws = WorkspaceSymbols::default();
+        ws.qnames.insert("pkg.util.helper".into());
+        ws.kinds
+            .insert("pkg.util.helper".into(), SymbolKind::Function);
+        ws.qnames.insert("app.main.f".into());
+        ws.kinds.insert("app.main.f".into(), SymbolKind::Function);
+        ws.build_suffix_index();
+
+        let edges = adapter.extract_call_edges("app/main.py", src, &syms, &ws);
+        assert!(
+            edges.iter().any(|e| e.callee_qname == "pkg.util.helper"),
+            "module-scope import must still resolve; got {edges:?}"
+        );
     }
 
     #[test]
