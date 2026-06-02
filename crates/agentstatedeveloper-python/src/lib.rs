@@ -290,8 +290,18 @@ fn extract_class_signature(node: Node<'_>, src: &[u8], name: &str) -> Option<Str
 fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     let mut effects: Vec<Effect> = Vec::new();
 
+    // Plan L t-002: detection runs on a copy with comments + string
+    // literals masked to spaces, so an effect-like substring inside a
+    // `# os.open(…)` comment or a `"os.open(…)"` literal no longer
+    // produces a false-positive inference. We preserve byte length so
+    // all the existing offset-based slicing (`&body[args_start..]`,
+    // notes, path extraction) continues to read from the original
+    // source — the mask only suppresses *matches*, not data.
+    let masked = mask_comments_and_literals(body);
+    let scan = masked.as_str();
+
     // open(...) -> IoFsRead (+ IoFsWrite when mode contains 'w' or 'a')
-    for call_site in find_calls(body, "open(") {
+    for call_site in find_calls(scan, "open(") {
         let args = &body[call_site.args_start..call_site.args_end];
         effects.push(Effect {
             effect: EffectCategory::IoFsRead,
@@ -344,8 +354,8 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
         "logger.critical",
         "logger.exception",
     ];
-    if log_needles.iter().any(|n| body.contains(n)) {
-        let note = first_matching_line(body, &log_needles);
+    if log_needles.iter().any(|n| scan.contains(n)) {
+        let note = first_matching_line(scan, body, &log_needles);
         effects.push(Effect {
             effect: EffectCategory::Log,
             qualifiers: serde_json::Value::Null,
@@ -370,7 +380,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     let mut seen_db_read = false;
     let mut seen_db_write = false;
     for recv in db_receivers {
-        for call_site in find_calls(body, recv) {
+        for call_site in find_calls(scan, recv) {
             let args = &body[call_site.args_start..call_site.args_end];
             let sql = args.trim_start_matches(|c: char| {
                 c.is_whitespace() || c == '"' || c == '\'' || c == 'f' || c == 'r' || c == 'b'
@@ -426,11 +436,11 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
         }
     }
     // .commit() implies a preceding write
-    if !seen_db_write && (body.contains(".commit()") || body.contains("conn.commit")) {
+    if !seen_db_write && (scan.contains(".commit()") || scan.contains("conn.commit")) {
         effects.push(Effect {
             effect: EffectCategory::IoDbWrite,
             qualifiers: serde_json::Value::Null,
-            note: first_matching_line(body, &[".commit()", "conn.commit"]),
+            note: first_matching_line(scan, body, &[".commit()", "conn.commit"]),
             ..Default::default()
         });
     }
@@ -440,7 +450,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     let mut net_hosts: Vec<String> = Vec::new();
     let mut net_note: Option<String> = None;
     for prefix in net_prefixes {
-        for call_site in find_calls(body, prefix) {
+        for call_site in find_calls(scan, prefix) {
             let args = &body[call_site.args_start..call_site.args_end];
             if let Some(host) = extract_url_host(args) {
                 if !net_hosts.contains(&host) {
@@ -470,7 +480,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
 
     // subprocess.* / os.system / os.exec* -> ProcSpawn
     let proc_patterns = ["subprocess.", "os.system(", "os.exec"];
-    if let Some(note) = first_match_note(body, &proc_patterns) {
+    if let Some(note) = first_match_note(scan, body, &proc_patterns) {
         effects.push(Effect {
             effect: EffectCategory::ProcSpawn,
             qualifiers: serde_json::Value::Null,
@@ -481,9 +491,9 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
 
     // os.environ / os.getenv -> EnvRead
     let env_patterns = ["os.environ", "os.getenv"];
-    if let Some(note) = first_match_note(body, &env_patterns) {
+    if let Some(note) = first_match_note(scan, body, &env_patterns) {
         let mut vars: Vec<String> = Vec::new();
-        for call_site in find_calls(body, "os.getenv(") {
+        for call_site in find_calls(scan, "os.getenv(") {
             let args = &body[call_site.args_start..call_site.args_end];
             if let Some(v) = extract_first_string_literal(args) {
                 if !vars.contains(&v) {
@@ -505,7 +515,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     }
 
     // time.sleep -> TimeSleep
-    if let Some(note) = first_match_note(body, &["time.sleep"]) {
+    if let Some(note) = first_match_note(scan, body, &["time.sleep"]) {
         effects.push(Effect {
             effect: EffectCategory::TimeSleep,
             qualifiers: serde_json::Value::Null,
@@ -523,7 +533,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
         "datetime.utcnow",
         "datetime.today",
     ];
-    if let Some(note) = first_match_note(body, &time_read_patterns) {
+    if let Some(note) = first_match_note(scan, body, &time_read_patterns) {
         effects.push(Effect {
             effect: EffectCategory::TimeRead,
             qualifiers: serde_json::Value::Null,
@@ -534,7 +544,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
 
     // random.* / secrets.* -> Random
     let random_patterns = ["random.", "secrets.", "os.urandom("];
-    if let Some(note) = first_match_note(body, &random_patterns) {
+    if let Some(note) = first_match_note(scan, body, &random_patterns) {
         effects.push(Effect {
             effect: EffectCategory::Random,
             qualifiers: serde_json::Value::Null,
@@ -544,8 +554,8 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     }
 
     // `raise ` statement -> Throw
-    if has_raise_statement(body) {
-        let note = first_matching_line(body, &["raise "]);
+    if has_raise_statement(scan) {
+        let note = first_matching_line(scan, body, &["raise "]);
         effects.push(Effect {
             effect: EffectCategory::Throw,
             qualifiers: serde_json::Value::Null,
@@ -745,23 +755,31 @@ fn trim_note(s: &str) -> String {
     }
 }
 
-/// Return the first line of `body` that contains any of `needles`.
-fn first_matching_line(body: &str, needles: &[&str]) -> Option<String> {
-    for line in body.lines() {
+/// Plan L t-002: scan `scan` for a match (so comments / string literals
+/// previously masked to spaces don't trigger), but return the matching
+/// line from `body` so the note reflects the real source text. `scan`
+/// and `body` MUST be the same byte length and split into the same
+/// line count for the alignment to hold.
+fn first_matching_line(scan: &str, body: &str, needles: &[&str]) -> Option<String> {
+    for (i, scan_line) in scan.lines().enumerate() {
         for n in needles {
-            if line.contains(n) {
-                return Some(line.trim().to_string());
+            if scan_line.contains(n) {
+                return body
+                    .lines()
+                    .nth(i)
+                    .map(|l| l.trim().to_string());
             }
         }
     }
     None
 }
 
-/// Check each needle; return the first matching line as a note.
-fn first_match_note(body: &str, needles: &[&str]) -> Option<String> {
+/// Check each needle against the masked `scan`; return the first
+/// matching line from the real `body` as a note.
+fn first_match_note(scan: &str, body: &str, needles: &[&str]) -> Option<String> {
     for n in needles {
-        if body.contains(n) {
-            return first_matching_line(body, needles);
+        if scan.contains(n) {
+            return first_matching_line(scan, body, needles);
         }
     }
     None
@@ -769,14 +787,179 @@ fn first_match_note(body: &str, needles: &[&str]) -> Option<String> {
 
 /// Detect a `raise` statement (not `raises` in a docstring or attribute).
 /// We check for `raise ` preceded by start-of-line or whitespace.
-fn has_raise_statement(body: &str) -> bool {
-    for line in body.lines() {
+/// Operates on the masked `scan` so a `raise` inside a comment or
+/// string literal doesn't trip the detector.
+fn has_raise_statement(scan: &str) -> bool {
+    for line in scan.lines() {
         let trimmed = line.trim_start();
         if trimmed.starts_with("raise ") || trimmed == "raise" {
             return true;
         }
     }
     false
+}
+
+/// Plan L t-002: walk Python source and replace bytes inside `#`
+/// line comments and string literals (single/double/triple, with
+/// optional `r` / `b` / `f` prefixes) with ASCII space. Newlines and
+/// every other byte stay where they are, so the output has the same
+/// byte length AND the same line split as the input. Callers can
+/// detect call patterns against the masked output and use byte
+/// offsets to extract real text from the original body.
+///
+/// Limitations:
+/// - F-string interpolations inside `f"{expr}"` are masked along
+///   with the rest of the literal. An effect inside an f-string
+///   interpolation will be missed. Acceptable trade — the bug being
+///   fixed is comments and plain strings producing false positives;
+///   under-detecting f-string interpolations is conservative.
+/// - Raw strings (`r"..."`) are masked normally; backslashes don't
+///   escape the closing quote.
+fn mask_comments_and_literals(body: &str) -> String {
+    let bytes = body.as_bytes();
+    let mut out: Vec<u8> = bytes.to_vec();
+    let n = bytes.len();
+    let mut i = 0;
+    while i < n {
+        let c = bytes[i];
+        // Line comment: `#` to end-of-line, but not inside an f-string
+        // (we're not in a string here because we'd have entered the
+        // literal branch below).
+        if c == b'#' {
+            let mut j = i;
+            while j < n && bytes[j] != b'\n' {
+                out[j] = b' ';
+                j += 1;
+            }
+            i = j;
+            continue;
+        }
+        // String literal start. Optional prefix: r/R/b/B/f/F (and
+        // combinations like rb, fr, Rb…). The prefix bytes themselves
+        // are NOT masked — they're identifiers as far as effect
+        // detection is concerned, and erasing them could turn
+        // `rb"…"` into `  "…"` which still parses as a literal but
+        // changes column counts in error paths. Leave the prefix,
+        // mask the literal body.
+        let quote_start = find_quote_after_optional_prefix(bytes, i);
+        if let Some(qi) = quote_start {
+            let q = bytes[qi];
+            // Triple quote?
+            let triple = qi + 2 < n && bytes[qi + 1] == q && bytes[qi + 2] == q;
+            let (literal_start, end_pos) = if triple {
+                let inner_start = qi + 3;
+                let end = find_triple_close(bytes, inner_start, q);
+                (inner_start, end)
+            } else {
+                let inner_start = qi + 1;
+                let end = find_single_close(bytes, inner_start, q);
+                (inner_start, end)
+            };
+            // Mask the literal body (between the open and close
+            // quotes). Quotes themselves stay so paren-matching and
+            // any human-eyeballing of the masked source still reads.
+            for k in literal_start..end_pos.min(n) {
+                if out[k] != b'\n' {
+                    out[k] = b' ';
+                }
+            }
+            // Advance past the closing quote(s).
+            i = end_pos + if triple { 3 } else { 1 };
+            continue;
+        }
+        i += 1;
+    }
+    // Safety: byte length must be preserved for offset-based slicing
+    // upstream. `out` was built from `bytes.to_vec()` and only mutated
+    // in place, so length is identical to `body.len()`. The mutations
+    // only ever swap a byte for ASCII space (0x20) or leave it alone,
+    // both of which keep the buffer valid UTF-8.
+    debug_assert_eq!(out.len(), bytes.len());
+    String::from_utf8(out).unwrap_or_else(|_| body.to_string())
+}
+
+/// Skip optional Python string prefix bytes (`r`, `R`, `b`, `B`, `f`,
+/// `F`, in 1- or 2-char combinations like `rb`/`Rb`/`fr`) starting at
+/// `i`, returning the index of the opening quote if found. Only
+/// activates when `bytes[i]` is one of the prefix bytes AND a quote
+/// follows within two bytes — otherwise the caller's `i` is on a
+/// normal identifier byte and we return None.
+fn find_quote_after_optional_prefix(bytes: &[u8], i: usize) -> Option<usize> {
+    let n = bytes.len();
+    if i >= n {
+        return None;
+    }
+    let c = bytes[i];
+    if c == b'"' || c == b'\'' {
+        return Some(i);
+    }
+    let is_prefix = |b: u8| matches!(b, b'r' | b'R' | b'b' | b'B' | b'f' | b'F');
+    if !is_prefix(c) {
+        return None;
+    }
+    // The byte before `i` must NOT be an identifier byte — otherwise
+    // we're in the middle of a word like `_renderRequest`, not at a
+    // string prefix. Treat any ASCII alphanumeric or underscore as
+    // identifier-continuing.
+    if i > 0 {
+        let prev = bytes[i - 1];
+        if prev.is_ascii_alphanumeric() || prev == b'_' {
+            return None;
+        }
+    }
+    // 1-char prefix: `r"…"`
+    if i + 1 < n && (bytes[i + 1] == b'"' || bytes[i + 1] == b'\'') {
+        return Some(i + 1);
+    }
+    // 2-char prefix: `rb"…"` / `fr"…"` / etc.
+    if i + 2 < n && is_prefix(bytes[i + 1]) && (bytes[i + 2] == b'"' || bytes[i + 2] == b'\'') {
+        return Some(i + 2);
+    }
+    None
+}
+
+/// Find the closing single-quote `q` starting from `start`. Honors
+/// backslash escapes. Returns the index of the closing quote, or
+/// `bytes.len()` if no close found (treat as "string runs to EOF").
+/// A bare newline closes a non-triple string in Python — we honor
+/// that so an unterminated literal doesn't mask the rest of the file.
+fn find_single_close(bytes: &[u8], start: usize, q: u8) -> usize {
+    let n = bytes.len();
+    let mut j = start;
+    while j < n {
+        let b = bytes[j];
+        if b == b'\\' {
+            j += 2;
+            continue;
+        }
+        if b == b'\n' {
+            return j; // unterminated; stop at newline
+        }
+        if b == q {
+            return j;
+        }
+        j += 1;
+    }
+    n
+}
+
+/// Find the closing `qqq` triple-quote sequence starting from `start`.
+/// Returns the index of the FIRST quote in the closing triple, or
+/// `bytes.len()` if the literal runs to EOF.
+fn find_triple_close(bytes: &[u8], start: usize, q: u8) -> usize {
+    let n = bytes.len();
+    let mut j = start;
+    while j + 2 < n {
+        if bytes[j] == b'\\' {
+            j += 2;
+            continue;
+        }
+        if bytes[j] == q && bytes[j + 1] == q && bytes[j + 2] == q {
+            return j;
+        }
+        j += 1;
+    }
+    n
 }
 
 // -----------------------------------------------------------------------------
@@ -1378,6 +1561,120 @@ mod tests {
     fn empty_when_no_patterns() {
         let body = "def f(x):\n    return x + 1\n";
         assert!(infer_effects_from_body(body).is_empty());
+    }
+
+    // ----- Plan L t-002: comment + string-literal false-positive guards -----
+
+    #[test]
+    fn comment_mentioning_open_does_not_infer_fs_effects() {
+        // `open(` appears only in a comment; we must NOT infer fs.read.
+        let body = "def f(x):\n    # consider open('/tmp/x') for cache\n    return x\n";
+        let effects = infer_effects_from_body(body);
+        let cats: Vec<_> = effects.iter().map(|e| e.effect.clone()).collect();
+        assert!(
+            !cats.contains(&EffectCategory::IoFsRead),
+            "open() in a comment must not infer IoFsRead; got {cats:?}"
+        );
+    }
+
+    #[test]
+    fn string_literal_mentioning_open_does_not_infer_fs_effects() {
+        // `open(` only inside a string literal — no real call.
+        let body = "def f():\n    msg = 'use open(path) to load'\n    return msg\n";
+        let effects = infer_effects_from_body(body);
+        assert!(
+            effects.is_empty(),
+            "open() inside a string literal must not infer any effect; got {effects:?}"
+        );
+    }
+
+    #[test]
+    fn triple_string_docstring_mentioning_requests_does_not_infer_net() {
+        // A docstring describing what `requests.get` would do — must
+        // not infer IoNetOut.
+        let body = r#"def f():
+    """Pretend we call requests.get('https://example.com') here.
+
+    But we don't actually.
+    """
+    return 42
+"#;
+        let effects = infer_effects_from_body(body);
+        let cats: Vec<_> = effects.iter().map(|e| e.effect.clone()).collect();
+        assert!(
+            !cats.contains(&EffectCategory::IoNetOut),
+            "requests.* in a docstring must not infer IoNetOut; got {cats:?}"
+        );
+    }
+
+    #[test]
+    fn real_open_still_fires_when_comment_also_mentions_it() {
+        // The masking must not suppress a real call site that sits
+        // next to a comment containing the same pattern.
+        let body = "def f():\n    # open('/tmp/a') would also work\n    open('/tmp/b')\n";
+        let effects = infer_effects_from_body(body);
+        let cats: Vec<_> = effects.iter().map(|e| e.effect.clone()).collect();
+        assert!(
+            cats.contains(&EffectCategory::IoFsRead),
+            "real open() must still infer IoFsRead even when a comment also mentions it; got {cats:?}"
+        );
+    }
+
+    #[test]
+    fn raise_inside_string_literal_does_not_infer_throw() {
+        let body = "def f():\n    msg = 'do not raise here'\n    return msg\n";
+        let effects = infer_effects_from_body(body);
+        let cats: Vec<_> = effects.iter().map(|e| e.effect.clone()).collect();
+        assert!(
+            !cats.contains(&EffectCategory::Throw),
+            "raise inside a string literal must not infer Throw; got {cats:?}"
+        );
+    }
+
+    #[test]
+    fn mask_preserves_byte_length_and_line_count() {
+        // The downstream offset-based slicing relies on masked + body
+        // being the same byte length AND splitting into the same lines.
+        let body = "x = 'open(\"a\")'  # open(\"b\")\ny = 1\n";
+        let masked = mask_comments_and_literals(body);
+        assert_eq!(
+            masked.len(),
+            body.len(),
+            "mask must preserve byte length"
+        );
+        assert_eq!(
+            masked.lines().count(),
+            body.lines().count(),
+            "mask must preserve line count"
+        );
+        // Spot check: `open(` inside the literal AND the comment must
+        // be erased from the masked view.
+        assert!(
+            !masked.contains("open("),
+            "masked source must not contain `open(` from literal or comment"
+        );
+    }
+
+    #[test]
+    fn mask_leaves_identifier_chars_alone() {
+        // `request_open` is an identifier, not a string prefix —
+        // masking must not eat the `r` thinking it's `r"…"`.
+        let body = "request_open = 1\n";
+        let masked = mask_comments_and_literals(body);
+        assert_eq!(
+            masked, body,
+            "no comments/literals here; masked must equal original"
+        );
+    }
+
+    #[test]
+    fn mask_handles_raw_and_byte_string_prefixes() {
+        let body = "x = r\"open('/tmp/a')\"\ny = b'open(\"b\")'\nz = rb\"open(\"c\")\"\n";
+        let effects = infer_effects_from_body(body);
+        assert!(
+            effects.is_empty(),
+            "raw/byte/raw-byte literals must mask their contents; got {effects:?}"
+        );
     }
 
     /// Build a WorkspaceSymbols with just a set of qnames (kinds defaulted
