@@ -835,3 +835,369 @@ Acceptance: ExampleFlow queries that previously surfaced
 `AudioEngine` files for `SongPlayers` test work no longer do, because
 the relevant Constraint actively demotes them.
 
+
+---
+
+## Plan H — Plan F revival (3 dormant tasks made actionable)
+
+The three Plan F tasks that landed in "dormant — waiting on external
+signal" status. Reframed here with concrete trigger conditions and
+acceptance gates so they're picked up the moment the signal arrives
+rather than sitting in DEFERRED limbo forever.
+
+### t-001 — Index-time denorm of penalty tuple
+
+**Status:** dormant. **Trigger:** measurable perf regression on
+penalty application (>20ms per query on ExampleProj DB) OR ledger row
+count > 50k.
+
+Today `apply_constraint_penalties` does a per-candidate ledger walk.
+Once denorm helps, materialize `(symbol_id, penalty_score, penalty_role)`
+into `asd_symbols_meta` at index time, and have penalty application
+read the table instead.
+
+**Acceptance:** bench harness in `crates/agentstatedeveloper-cli/
+benches/penalty.rs`; ExampleProj DB query latency drops by ≥30% on
+queries that hit ≥100 candidates.
+
+### t-003 — Crucible re-run validation
+
+**Status:** dormant. **Trigger:** next Crucible-style real-work
+session by Craig (use of `asd prepare-change` on Crucible repo with
+seeded ledger).
+
+Re-run the M20 Crucible field test against current 1.0.23 (was
+0.9.19 then). Verify the 5 noted improvements still hold; capture
+new gaps in `MEMORY/project_crucible_followup.md`.
+
+**Acceptance:** memory file written; any new pain becomes Plan J
+tasks (not new code in this task).
+
+### t-004 — ExampleFlow sidecar-size validation
+
+**Status:** dormant. **Trigger:** new ExampleFlow repo state
+captured (post-Plan G writes for thinking entries).
+
+The Plan B promise was 75 MB → 500 KB sidecar. Verify the promise
+still holds with Plan G's 4 new LedgerKinds + Plan E's
+`asd_symbols_meta`. Add a probe to `tools/sidecar-size-check.sh`.
+
+**Acceptance:** `du -sb .asd/conclusions/` on ExampleFlow < 1 MB.
+Probe wired into CI as a soft gate (warns on regression, doesn't
+fail).
+
+### t-005 — Full prepare_change orchestration extract
+
+**Status:** dormant. **Trigger:** the next feature that requires
+parallel edits to both CLI `commands/prepare_change.rs` and MCP
+`mcp_server.rs::prepare_change` handler.
+
+Today both call sites duplicate the orchestration (file scoring,
+recipe assembly, brief gating). Extract into `core::prepare_change::
+orchestrate(engine, params) -> Value`. Both surfaces become thin
+adapters.
+
+**Acceptance:** CLI + MCP handlers each shrink by ≥70%; identical
+JSON output verified by golden test against a fixed seed.
+
+---
+
+## Plan I — DEFERRED.md backlog cleanup (exhaustive)
+
+Every entry in DEFERRED.md gets a task. Some are real shippable work;
+some are doc refreshes; some are explicit "still deferred, keep
+deferred" decisions documented for the next maintainer. The intent
+isn't to ship all of these — it's to convert the backlog from
+"things I'd want to remember" into "things with a known disposition."
+
+### t-001 — Refresh DEFERRED.md against current reality
+
+Audit every entry; mark resolved items, update stale claims (the
+languages line says "Python only" when 10 adapters now ship; the
+`.asd/` sidecar entry says "never implemented" but Plan A shipped
+it). Reset "Last synced" stamp.
+
+### Tracer
+
+- **t-002** — Document async/await coverage limits in tracer + a
+  `--no-trace-async` flag that errors loudly instead of silently
+  missing.
+- **t-003** — Multi-thread tracer: install `sys.settrace` on every
+  thread spawned during a `--with-threads` run. Acceptance: tracer
+  catches effects from a `Thread.start()` body.
+- **t-004** — Subprocess child instrumentation: emit a `proc.spawn`
+  enrichment record carrying the child PID + cmdline so external
+  audit can correlate. Deferred until needed; document as such.
+
+### Static effect inference (Python)
+
+- **t-005** — Strip comments + string literals before substring
+  match. Acceptance: a function with `# os.open` in a comment no
+  longer infers `fs.read`.
+- **t-006** — Proper SQL classifier for `.execute()` — use
+  `sqlparse` (already-pulled dep) or a tiny CTE-aware tokenizer.
+
+### Call graph (Python)
+
+- **t-007** — Resolve `from foo import *` via FTS lookup of foo's
+  exports.
+- **t-008** — Relative imports (`from . import x`, `from ..pkg`).
+- **t-009** — Function-body imports.
+- **t-010** — Module-scope call sites (top-level work).
+- **t-011** — Multi-segment module imports (`import foo.bar.baz`).
+- **t-012** — Document dynamic-dispatch as permanently out-of-scope;
+  add a callsite note when the indexer sees `getattr(...)` patterns
+  to warn the agent.
+
+### Policy
+
+- **t-013** — Build `agentstategraph-policy` properly (replace
+  interim `FilePolicyGate`).
+- **t-014** — Selector DSL: paths, timestamps, qualifiers. Migrate
+  existing rules.
+- **t-015** — Hot-reload via inotify/kqueue.
+- **t-016** — Policy coverage over `asd trace` ingest.
+- **t-017** — Policy coverage over `asd index` writes.
+- **t-018** — Policy coverage over merge surface (when merge ships).
+- **t-019** — Policy coverage over rename.
+
+### Ratification (M9 gaps)
+
+- **t-020** — `asd ledger reject <entry>` action.
+- **t-021** — `asd ledger revoke <entry>` for approved entries.
+- **t-022** — Approval rationale: `--message` on approve + an
+  `approval-note:<text>` first-class field.
+- **t-023** — Cryptographic signing of approvals (ed25519). Ship
+  behind `--require-signed` flag.
+- **t-024** — `asd ledger supersede <old> <new>` surface across
+  CLI / MCP / HTTP (schema already supports it).
+
+### HTTP / MCP
+
+- **t-025** — Reverse `symbol_id → qname` index (drop O(N) scan).
+- **t-026** — `ledger_find` pagination + composite index by
+  `(symbol_id, kind, created_at)`.
+- **t-027** — API-key auth on HTTP + MCP. Enforce by default; the
+  `--insecure-localhost` flag opts out.
+- **t-028** — `health.symbol_count` reports total artifact count
+  (symbols + ledger entries + effects), not just indexed-qnames.
+
+### Lens UI
+
+- **t-029** — Reject + withdraw-approval buttons (pairs with t-020 /
+  t-021).
+- **t-030** — Cross-module graph visualization (render edges as a
+  graph, not a flat list).
+- **t-031** — Effect-distribution overview route (top-N by blast
+  radius).
+- **t-032** — `effect_declare` UI (so humans can edit effects
+  without raw MCP calls).
+- **t-033** — Policy authoring UI (POLICY_V1 proposal/ratify UX).
+- **t-034** — "Who approved what, when" timeline view.
+
+### Languages
+
+- **t-035** — Refresh DEFERRED's languages line (it's wrong — 10
+  adapters ship). Rolled into t-001.
+
+### Enterprise scaffolding
+
+- **t-036** — Registry server (cross-machine authoring-history pull).
+- **t-037** — SIEM/Splunk/Datadog audit export connectors.
+- **t-038** — Enterprise SSO/RBAC on symbols / ledger / policies.
+- **t-039** — Admin UI for multi-tenant scoping.
+- **t-040** — Postgres multi-tenant exercised end-to-end.
+
+### Miscellaneous
+
+- **t-041** — `asd index` summary reports dropped call edges
+  (unresolved callees count + sample).
+- **t-042** — Trace entries carry per-call duration + call-depth.
+- **t-043** — Disk schema migration tool (`/asd/v1/` → `/asd/v2/`).
+- **t-044** — Audit log rotation + retention policy.
+- **t-045** — Real-time audit streaming (replace `since:<event_id>`
+  polling).
+- **t-046** — Lens verify-badge UI (backend works, not surfaced).
+
+### OSS / commercial
+
+- **t-047** — License-key / billing enforcement on `asd-pro` (M17
+  t-013). Deferred until paying customers exist; track here so it
+  doesn't fall through.
+
+### Working-style (meta)
+
+- **t-048** — Sandbox allowlist policy for sub-agents: relax
+  `cargo` / `npm` permission so agents can self-verify; document
+  what's safe to allow.
+
+### Implementation order
+
+t-001 (refresh DEFERRED) first — gives accurate context for the rest.
+Then ratification cluster (t-020 → t-024) since it's the closest to
+shippable. Then Python call-graph cluster (t-007 → t-012). Everything
+else is opportunistic.
+
+---
+
+## Plan J — Field-eval wishlist consolidation (M20–M27)
+
+Every M20–M25 field-evaluation memory flagged real pain that never
+became a plan. Pull each one into an actionable task here. Many will
+slot into existing surfaces (search, prepare-change, feedback);
+some need new code.
+
+### From M20
+
+- **t-001** — Invariants surfacing in `prepare_change` for symbols
+  that have invariants on a *caller*, not just the symbol itself.
+  (Field note: "invariants are silently dropped when you query the
+  callee.")
+- **t-002** — Test-gap detection: when `prepare_change` finds an
+  impl with no test in `affected_tests`, surface a "missing test"
+  warning in `safe_change_recipe.manually_validate`.
+
+### From M21
+
+- **t-003** — `ExampleFlowViewModel "other"` mis-bucketing fix in
+  `file_role` classifier. Add a `viewmodel/` path pattern.
+- **t-004** — Broad-search miss diagnosis: when `search` returns
+  <3 hits, run a fallback that drops `intent_focus` and
+  re-scores; surface "broadened search because…" in the response.
+- **t-005** — Symbol-count mismatch between `asd status` (canonical)
+  and `asd health` (artifact count). Reconcile.
+
+### From M22
+
+- **t-006** — View file discovery — already partially landed in M28
+  (+2.0 boost for view/viewmodel on view queries). Field-test
+  whether the boost is enough or needs to be promoted into
+  `file_role = "view"` as its own bucket.
+- **t-007** — Precise test suggestions: when `proposed_test_path`
+  fires, also emit a stub of the recommended `def test_X()` body
+  shape (per language adapter).
+- **t-008** — Live hydrate regression test: `asd hydrate --verify`
+  on a real-world sidecar in CI to catch round-trip drift.
+
+### From M23
+
+- **t-009** — qname collision fix: when two symbols share a qname
+  across language adapters (e.g. `pkg.Model` in both Python and
+  Swift), prefer the one matching the query's language hint.
+
+### From M24
+
+- **t-010** — Ledger-anchor regression test on `find_candidates`
+  (the M24 work added anchoring; lock the behavior in CI).
+
+### From M25 (most urgent — Craig's real-work notes)
+
+- **t-011** — Scoping / exclusion polish: per-query negative globs
+  (`--exclude 'tests/**'`), language exclusions
+  (`--exclude-lang swift`), named exclude sets in `.asd/scopes.toml`.
+- **t-012** — Why-this-result explanations: a per-hit `why[]` array
+  on every search/investigate response listing the signals that
+  pushed it up the ranking (`+intent_focus`, `+ownership_boost`,
+  `−wrong_layer_penalty`).
+- **t-013** — More test-scenario coverage: extend
+  `validation_scenarios` to surface on `impact` (not just
+  `context_for`).
+- **t-014** — False-positive feedback handling: `asd feedback mark
+  --verdict false-positive` already exists but doesn't decay over
+  time. Add a `--ttl` so old verdicts auto-expire after N days.
+
+### From M26 (uncertainty model rollout)
+
+- **t-015** — Calibrate confidence buckets against ExampleProj golden
+  set: are `strong / medium / weak` thresholds accurate? Run probe.
+
+### From M27 (feedback loop rollout)
+
+- **t-016** — Feedback decay: `Useful +1.5` boosts stay forever.
+  Add half-life so a verdict 6 months old has less ranking weight
+  than yesterday's.
+
+### Implementation order
+
+M25 cluster first (t-011 → t-014) — they're current pain, not
+historical. Then test-related items (t-002 / t-007 / t-013). Then
+the rest opportunistically.
+
+
+---
+
+## Plan K — sidecar canonicalization
+
+**The principle (single rule that decides everything):**
+
+> The sidecar carries **judgment** — anything an agent or human had
+> to decide, classify, hypothesize, approve, or otherwise commit
+> mental effort to. Anything mechanically derivable from source
+> stays in the regenerable SQLite cache and is `.gitignore`d.
+
+**The onboarding story this enables (north star):**
+
+A new developer clones the repo. Their agent reads `.asd/conclusions/
+*.jsonl` directly as context — the prior team's judgment, mental
+models, decisions, hazards, hypotheses. The agent now has the
+expensive-to-rederive knowledge. They run `asd onboard` (or `asd
+init && asd index . && asd hydrate`), which rebuilds the mechanical
+layer from source. They're caught up — no apprenticeship, no
+re-derivation, no `.md` plan rot. The agent comes online inheriting
+the prior agent's understanding.
+
+For this story to work the sidecar must:
+1. Be readable as plain JSONL by any agent without ASD installed
+   (no opaque blob, no symbol_id-only references the reader can't
+   resolve).
+2. Stay compact enough that reading it doesn't blow the agent's
+   context window (per-shard target: ≤ 200 KB on ExampleFlow-scale
+   projects).
+3. Survive concurrent edits without spurious conflicts (judgment
+   conflicts are meaningful and worth surfacing; ordering noise
+   isn't).
+
+### Task table
+
+| # | Task | Why | Acceptance |
+|---|---|---|---|
+| t-001 | Sort-on-write inside each `.jsonl` shard | Highest-leverage conflict reduction. Two devs writing to the same class no longer produce a textual conflict per entry; git's line merger handles independent insertions. | `asd sync` produces byte-identical output regardless of write order. Test: insert entries in two orders, hash the file, assert equal. |
+| t-002 | Effect sync filter: only `source != StaticInference` ships | Statically-inferred effects regenerate from `asd index`. Shipping them = committable noise that re-diffs on every reindex. | `examples/sample-py-repo`: post-sync sidecar contains zero effect entries with `source: "static_inference"`. |
+| t-003 | Confidence-floor filter in sync (Plan G thinking) | Low-confidence speculation is closer to scratch than to durable judgment. Keep it locally for `asd think list`; don't ship the noise. | `asd think speculate --conf 0.1 …` writes to ledger; subsequent `asd sync` does NOT include that entry in `.asd/conclusions/thinking.jsonl`. |
+| t-004 | Self-describing entries (no `symbol_id`-only references) | Agent reading the sidecar without a hydrated index must still understand what each entry is about. Today `symbol_id` is a blake3 hash — opaque without the index. | Every emitted entry carries `qname`, `kind`, `summary`, and (where present) inlined body fields. Agent can grep `.asd/conclusions/` for a qname and find every relevant entry. |
+| t-005 | `asd onboard` one-shot for new clones | Today's boot order is `init → index → hydrate`. A new dev shouldn't have to know that. One command, right order, idempotent. | `asd onboard` on a fresh clone: installs hooks, indexes the project, hydrates committed sidecar into SQLite. Re-running is a no-op. CHANGELOG entry documents the onboarding story. |
+| t-006 | `asd think bootstrap --existing` mode | When sidecar already has thinking entries (new dev joining a project that's already been mapped), bootstrap should *summarize what's there* instead of pushing the agent through the initial-read prompt again. | Detects ≥1 MentalModel or ≥3 Hypotheses in the ledger → prints a "Inherited thinking from prior session(s)" summary block before the checklist. With `--check`, distinguishes "you" gaps from "team" gaps. |
+| t-007 | Optional per-package sharding under `.asd/config.toml` | One-shard-per-class is fine for ExampleFlow; monorepos with two teams editing the same class will see false conflicts. Opt-in finer granularity. | `.asd/config.toml` key `sidecar.shard_by = "package"` produces `.asd/conclusions/decisions/<package-key>.jsonl`. Default unchanged. `asd hydrate` reads either layout transparently. |
+| t-008 | `asd sync --check-budget` + CI gate | "Compact" becomes enforced, not aspirational. Pairs with Plan H t-004 (ExampleFlow size validation). | Threshold configurable in `.asd/config.toml` (default 1 MB total, 200 KB per shard). Exits non-zero when exceeded. CI surfaces as a soft gate (warns, doesn't fail) with `--soft`. |
+| t-009 | Audit & purge `.asd/v1/` legacy | Plan A layout still mentioned in DESIGN.md; need to confirm nothing writes there now, and that `asd init` doesn't recreate it. Drop dead code if any. | `git grep "asd/v1"` returns only documentation or migration references; no live write path. `sidecar.rs` no longer has `v1` branches except in `migrate`. |
+| t-010 | Document the principle in `DESIGN.md` + emit lint warning on violations | The principle is only useful if new code respects it. A future contributor adding a new LedgerKind or artifact needs a single rule to test against. | New `DESIGN.md` section "Sidecar inclusion rule" with the boundary table from this plan. `asd repair` learns to detect & warn on regenerable artifacts that leaked into `.asd/conclusions/`. |
+
+### Implementation order
+
+t-009 first (audit reality before changing it). Then t-001 (sort) and
+t-002 (effect filter) — biggest immediate wins, no schema impact.
+Then t-004 (self-describing entries — needed for the onboarding
+story to work). Then t-005 + t-006 (onboarding surface). Then t-003,
+t-007, t-008. t-010 lands last as the canonical documentation of
+what shipped.
+
+### Acceptance — the onboarding scenario as the integration test
+
+End-to-end test in `crates/agentstatedeveloper-cli/tests/
+plan_k_onboard.rs`:
+
+1. Set up a fixture repo with committed `.asd/conclusions/*.jsonl`
+   containing 1 MentalModel, 3 Hypotheses (conf ≥ 0.3), 2 Decisions,
+   1 KnownBug.
+2. Simulate a "fresh clone" (wipe `.asd/cache/` and SQLite).
+3. Run `asd onboard`.
+4. Assert: `asd think bootstrap --existing` reports the inherited
+   thinking. `asd context-for <qname>` returns the seeded
+   `prior_thinking`. `asd impact <qname>` includes the seeded
+   `KnownBug` in hazards.
+5. The agent reading the raw sidecar (no ASD process) can answer
+   "what does this project's prior team think the architecture is?"
+   from `.asd/conclusions/thinking.jsonl` alone.
+
+When all five hold, the onboarding north star is real.
+
