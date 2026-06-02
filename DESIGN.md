@@ -708,6 +708,119 @@ Concept ledger entries. The output rides Plan B's conclusions export
 into committed JSONL so the next clone gets the same project mental
 model without re-running `asd map`.
 
+## Plan G — agent thinking layer (in design)
+
+Plan G captures the LLM's *thinking*, not just its conclusions. The
+existing ledger covers what was decided (Decision/Constraint/Rationale)
+and what's classified (Ownership/Concept/Mapping). It does not capture:
+
+- **Hypotheses** — "I think X causes Y, confidence 0.6, evidence so far"
+- **Mental models** — "the audio pipeline flows input → preprocess → mix"
+  spanning multiple symbols
+- **Failed attempts** — "I tried approach X; failed because Y; pivoting"
+- **Open questions** — "what does magic constant 4096 actually mean?"
+
+Without these, every new session re-derives the same understanding the
+last session built. Plan G makes that thinking durable.
+
+### Schema delta (t-002)
+
+Four new `LedgerKind` variants:
+
+| Variant | Notes |
+|---|---|
+| `Hypothesis` | uses existing `LedgerEntry.confidence: Option<f64>` (0.0–1.0). Plain `summary` is the claim; `body` MAY carry evidence anchors. |
+| `MentalModel` | multi-symbol structural model. `body` JSON: `{"symbols": ["q1","q2"], "diagram": "optional ascii"}`. `summary` names the model. |
+| `FailedAttempt` | negative evidence. `body` JSON: `{"tried": "X", "because": "Y"}`. Anchor on the symbol the attempt targeted. |
+| `OpenQuestion` | known unknown blocking confident action. `summary` is the question; `body` MAY hold partial findings. |
+
+New `ConclusionClass::Thinking` so the export pipeline buckets these
+into `.asd/conclusions/thinking.jsonl` — visible to humans, round-trippable
+via Plan B import.
+
+Confidence threshold (`prior_thinking` surfacing): default 0.3 — anything
+lower is too speculative to surface unprompted. Override via env or flag
+(future).
+
+### Write surface (t-003)
+
+```sh
+asd think speculate <qname> --conf 0.65 --summary "X causes Y because Z"
+asd think model "audio-pipeline" --symbols pkg.a,pkg.b,pkg.c --summary "input → mix → out"
+asd think failed <qname> --tried "rebind to symbol_id" --because "ledger had stale id"
+asd think question <qname> --q "what does magic 4096 mean here?"
+asd think list [--kind hypothesis] [--symbol q]
+```
+
+MCP equivalents: `think_speculate / think_model / think_failed /
+think_question / think_list`.
+
+Entry IDs are deterministic blake3 of `intent + content` so re-running
+the initial-read bootstrap doesn't duplicate.
+
+### Initial-read prompt (t-004)
+
+Ships as `docs/initial-read-prompt.md`. Agent reads the prompt → runs
+their own LLM evaluation against the indexed codebase → writes results
+back via the commands above. ASD doesn't make LLM calls; it provides
+the structure and the writeback surface.
+
+Prompt sections:
+1. Architecture — subsystems and how they connect
+2. Hot spots — files likely touched often
+3. Implicit constraints — invariants not written down
+4. Open questions — magic numbers, unexplained patterns
+5. Hypotheses with confidence levels
+6. Failed-path warnings
+
+Worked example: a real evaluation of `examples/sample-py-repo`.
+
+### Bootstrap entry point (t-005)
+
+`asd think bootstrap` prints the prompt path + a starter checklist of
+commands the agent will run. `--check` scans existing thinking entries
+and reports gaps (no hypotheses yet, no mental model named X).
+
+### Auto-surface in prepare-change + context-for (t-006)
+
+Both handlers emit a new `prior_thinking` JSON section:
+
+```json
+{
+  "prior_thinking": {
+    "hypotheses": [{"summary":"…","confidence":0.7,"qname":"…"}],
+    "mental_models": [{"name":"…","symbols":[…]}],
+    "open_questions": [{"q":"…","qname":"…"}],
+    "failed_attempts": [{"tried":"…","because":"…","qname":"…"}]
+  }
+}
+```
+
+Hypotheses below `confidence < 0.3` excluded by default. `--no-thinking`
+opts out for callers that don't want the noise.
+
+### ctx:task auto-tagging (t-007)
+
+Every `asd think *` write picks up `CTX_ACTIVE_TASK.task_id` (same
+helper as Plan E t-011) and appends `ctx:task:<id>` + `source:asd-think`
+tags. Lets future queries filter "show me everything I was thinking on
+task T-027".
+
+### Acceptance (t-008)
+
+End-to-end fixture test: seed → `asd prepare-change` returns
+`prior_thinking` with the seeded entries. Worked example in
+`docs/initial-read-prompt.md` evaluates `examples/sample-py-repo`.
+CHANGELOG entry documenting the commands + LedgerKind delta + new
+response field.
+
+### Implementation order
+
+t-001 (this doc) → t-002 (schema delta) → t-004 (prompt template, can
+run parallel) → t-003 (CLI/MCP surface) → t-006 (auto-surface) →
+t-005 (bootstrap entry point) → t-007 (provenance tags) → t-008
+(acceptance).
+
 ### Acceptance probes (t-008)
 
 Add to `examples/exampleflow-probes.toml`:

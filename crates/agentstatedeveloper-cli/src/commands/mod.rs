@@ -29,6 +29,7 @@ pub mod scorecard;
 pub mod scratch;
 pub mod search;
 pub mod sidecar;
+pub mod think;
 pub mod since;
 pub mod status;
 pub mod sync;

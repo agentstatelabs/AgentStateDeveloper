@@ -34,7 +34,7 @@ use agentstatedeveloper_core::{
     intent_layer_order, kind_str, load_layer_overrides, load_scope_aliases, parse_intent,
     parse_query, paths, propose_test_path, recipes, resolve_scope, result_bucket,
     score_evidence_quality, sidecar_lifecycle_state, stale_warning, suggest_better_queries,
-    suggest_scoped_queries, symbol_tier, trim_for_agent,
+    suggest_scoped_queries, symbol_tier, thinking, trim_for_agent,
 };
 
 /// The AgentStateDeveloper MCP server.
@@ -148,6 +148,47 @@ pub struct RecipeClassifyTestMigrationParams {
 
 fn default_recipe_limit() -> u32 {
     50
+}
+
+// -- Plan G t-003: agent-thinking write surface ------------------------------
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ThinkSpeculateParams {
+    pub qname: String,
+    /// Confidence in [0.0, 1.0]. Below 0.3 is excluded from prior_thinking
+    /// auto-surface by default.
+    pub confidence: f64,
+    pub summary: String,
+    pub body: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ThinkModelParams {
+    pub name: String,
+    /// Comma-separated qnames the model spans (first is anchor).
+    pub symbols: String,
+    pub summary: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ThinkFailedParams {
+    pub qname: String,
+    pub tried: String,
+    pub because: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ThinkQuestionParams {
+    pub qname: String,
+    pub question: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ThinkListParams {
+    /// Filter to one thinking kind: hypothesis | mental_model |
+    /// failed_attempt | open_question.
+    pub kind: Option<String>,
+    pub symbol: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1308,13 +1349,19 @@ impl AsdMcpServer {
         }
 
         let total: usize = buckets.values().map(|v| v.len()).sum();
-        serde_json::to_string(&serde_json::json!({
+        let full = serde_json::json!({
             "class": target_class.map(|c| c.filename_stem()),
             "symbol": p.symbol,
             "total": total,
             "buckets": buckets,
-        }))
-        .unwrap_or_else(|_| "{}".to_string())
+        });
+        // Plan F t-006: brief mode drops symbol_id + null role/command/tags.
+        let out = if brief::brief_from_env() {
+            brief::brief_conclusions_list(&full)
+        } else {
+            full
+        };
+        serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
     }
 
     #[tool(
@@ -1429,6 +1476,266 @@ impl AsdMcpServer {
         };
 
         let recipe = recipes::classify_test_migration(&engine, &index, &candidate_qnames, &p.query);
+        serde_json::to_string(&recipe).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    // -- Plan G t-003: agent-thinking handlers -----------------------------
+
+    #[tool(
+        description = "Plan G t-003: record a Hypothesis (speculation with confidence in [0.0, 1.0]). Below 0.3 is excluded from prepare-change/context-for prior_thinking by default. Idempotent — same (qname, summary) re-records over the previous entry. (CLI: `asd think speculate`.)"
+    )]
+    async fn think_speculate(&self, params: Parameters<ThinkSpeculateParams>) -> String {
+        let p = params.0;
+        if !(0.0..=1.0).contains(&p.confidence) {
+            return err_json(&format!("confidence must be in [0.0, 1.0]; got {}", p.confidence));
+        }
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let index = AsgIndexStore::from_engine(&engine);
+        let sym = match index.get_symbol_by_qname(&ref_name, &p.qname) {
+            Ok(Some(s)) => s,
+            Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
+            Err(e) => return err_json(&e.to_string()),
+        };
+        let ledger = AsgLedgerStore::from_engine(&engine);
+        let mut entry = LedgerEntry::new(
+            &sym.symbol_id,
+            LedgerKind::Hypothesis,
+            &p.summary,
+            Author { kind: AuthorKind::Agent, id: "asd-mcp".into() },
+        );
+        entry.entry_id = think_det_id("hypothesis", &p.qname, &p.summary);
+        entry.confidence = Some(p.confidence);
+        entry.body = p.body;
+        think_push_provenance_tags(&self.db_path, &mut entry.tags);
+        match ledger.append_entry(&ref_name, &entry, "asd-mcp") {
+            Ok(()) => serde_json::to_string(&serde_json::json!({
+                "ok": true, "kind": "hypothesis", "qname": p.qname,
+                "confidence": p.confidence, "entry_id": entry.entry_id,
+            })).unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Plan G t-003: record a MentalModel (multi-symbol structural understanding). Anchored on the FIRST symbol in `symbols`. Body carries the full symbols[] list. Idempotent by (name, summary). (CLI: `asd think model`.)"
+    )]
+    async fn think_model(&self, params: Parameters<ThinkModelParams>) -> String {
+        let p = params.0;
+        let symbols: Vec<String> = p
+            .symbols
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if symbols.is_empty() {
+            return err_json("symbols must list at least one qname (comma-separated)");
+        }
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let index = AsgIndexStore::from_engine(&engine);
+        let sym = match index.get_symbol_by_qname(&ref_name, &symbols[0]) {
+            Ok(Some(s)) => s,
+            Ok(None) => return err_json(&format!("symbol not found: {}", symbols[0])),
+            Err(e) => return err_json(&e.to_string()),
+        };
+        let ledger = AsgLedgerStore::from_engine(&engine);
+        let body = serde_json::json!({ "symbols": &symbols, "name": &p.name }).to_string();
+        let mut entry = LedgerEntry::new(
+            &sym.symbol_id,
+            LedgerKind::MentalModel,
+            format!("{}: {}", p.name, p.summary),
+            Author { kind: AuthorKind::Agent, id: "asd-mcp".into() },
+        );
+        entry.entry_id = think_det_id("model", &p.name, &p.summary);
+        entry.body = Some(body);
+        think_push_provenance_tags(&self.db_path, &mut entry.tags);
+        match ledger.append_entry(&ref_name, &entry, "asd-mcp") {
+            Ok(()) => serde_json::to_string(&serde_json::json!({
+                "ok": true, "kind": "mental_model", "name": p.name,
+                "symbols": symbols, "entry_id": entry.entry_id,
+            })).unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Plan G t-003: record a FailedAttempt (negative evidence — what was tried + why it didn't work). Saves the next session from re-treading. Idempotent by (qname, tried). (CLI: `asd think failed`.)"
+    )]
+    async fn think_failed(&self, params: Parameters<ThinkFailedParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let index = AsgIndexStore::from_engine(&engine);
+        let sym = match index.get_symbol_by_qname(&ref_name, &p.qname) {
+            Ok(Some(s)) => s,
+            Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
+            Err(e) => return err_json(&e.to_string()),
+        };
+        let ledger = AsgLedgerStore::from_engine(&engine);
+        let body = serde_json::json!({ "tried": &p.tried, "because": &p.because }).to_string();
+        let mut entry = LedgerEntry::new(
+            &sym.symbol_id,
+            LedgerKind::FailedAttempt,
+            format!("failed: {} — because {}", p.tried, p.because),
+            Author { kind: AuthorKind::Agent, id: "asd-mcp".into() },
+        );
+        entry.entry_id = think_det_id("failed", &p.qname, &p.tried);
+        entry.body = Some(body);
+        think_push_provenance_tags(&self.db_path, &mut entry.tags);
+        match ledger.append_entry(&ref_name, &entry, "asd-mcp") {
+            Ok(()) => serde_json::to_string(&serde_json::json!({
+                "ok": true, "kind": "failed_attempt", "qname": p.qname,
+                "entry_id": entry.entry_id,
+            })).unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Plan G t-003: record an OpenQuestion (known unknown blocking confident action). Be generous — every question recorded is one the next session doesn't have to re-ask. Idempotent by (qname, question). (CLI: `asd think question`.)"
+    )]
+    async fn think_question(&self, params: Parameters<ThinkQuestionParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let index = AsgIndexStore::from_engine(&engine);
+        let sym = match index.get_symbol_by_qname(&ref_name, &p.qname) {
+            Ok(Some(s)) => s,
+            Ok(None) => return err_json(&format!("symbol not found: {}", p.qname)),
+            Err(e) => return err_json(&e.to_string()),
+        };
+        let ledger = AsgLedgerStore::from_engine(&engine);
+        let mut entry = LedgerEntry::new(
+            &sym.symbol_id,
+            LedgerKind::OpenQuestion,
+            &p.question,
+            Author { kind: AuthorKind::Agent, id: "asd-mcp".into() },
+        );
+        entry.entry_id = think_det_id("question", &p.qname, &p.question);
+        think_push_provenance_tags(&self.db_path, &mut entry.tags);
+        match ledger.append_entry(&ref_name, &entry, "asd-mcp") {
+            Ok(()) => serde_json::to_string(&serde_json::json!({
+                "ok": true, "kind": "open_question", "qname": p.qname,
+                "entry_id": entry.entry_id,
+            })).unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Plan G t-003: list captured thinking entries (Hypothesis/MentalModel/FailedAttempt/OpenQuestion). Optional kind filter: hypothesis | mental_model | failed_attempt | open_question. (CLI: `asd think list`.)"
+    )]
+    async fn think_list(&self, params: Parameters<ThinkListParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let index = AsgIndexStore::from_engine(&engine);
+        let ledger = AsgLedgerStore::from_engine(&engine);
+
+        let kind_filter: Option<LedgerKind> = p.kind.as_deref().and_then(|s| match s {
+            "hypothesis" => Some(LedgerKind::Hypothesis),
+            "mental_model" => Some(LedgerKind::MentalModel),
+            "failed_attempt" => Some(LedgerKind::FailedAttempt),
+            "open_question" => Some(LedgerKind::OpenQuestion),
+            _ => None,
+        });
+        if p.kind.is_some() && kind_filter.is_none() {
+            return err_json(
+                "unknown kind; valid: hypothesis, mental_model, failed_attempt, open_question",
+            );
+        }
+
+        let symbol_ids: Vec<(String, String)> = if let Some(qname) = p.symbol.as_deref() {
+            match index.get_symbol_by_qname(&ref_name, qname) {
+                Ok(Some(s)) => vec![(s.symbol_id, s.qname)],
+                _ => return err_json(&format!("symbol not found: {qname}")),
+            }
+        } else {
+            let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+            let tree = engine
+                .repo
+                .get_tree(&ref_name, &prefix)
+                .unwrap_or(serde_json::Value::Null);
+            let qnames: Vec<String> = match tree {
+                serde_json::Value::Object(m) => m.keys().cloned().collect(),
+                _ => Vec::new(),
+            };
+            let mut out = Vec::new();
+            for qn in qnames {
+                if let Ok(Some(s)) = index.get_symbol_by_qname(&ref_name, &qn) {
+                    out.push((s.symbol_id, s.qname));
+                }
+            }
+            out
+        };
+
+        let mut entries = Vec::new();
+        for (sid, qname) in &symbol_ids {
+            let les = ledger.list_entries(&ref_name, sid).unwrap_or_default();
+            for entry in les {
+                if entry.kind.conclusion_class() != ConclusionClass::Thinking {
+                    continue;
+                }
+                if let Some(filter) = kind_filter {
+                    if entry.kind != filter {
+                        continue;
+                    }
+                }
+                entries.push(serde_json::json!({
+                    "entry_id": entry.entry_id,
+                    "kind": entry.kind.as_str(),
+                    "qname": qname,
+                    "summary": entry.summary,
+                    "confidence": entry.confidence,
+                    "body": entry.body,
+                    "tags": entry.tags,
+                    "created_at": entry.created_at,
+                }));
+            }
+        }
+
+        serde_json::to_string(&serde_json::json!({
+            "total": entries.len(),
+            "kind_filter": p.kind,
+            "symbol_filter": p.symbol,
+            "entries": entries,
+        }))
+        .unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[tool(
+        description = "Plan F t-002: build a migration plan for stale test files. Returns the same shape as recipe_classify_test_migration but adds a Move action when a Mapping ledger entry carries a `move_to` path in its body. Otherwise falls back to the classify decision tree. (CLI: `asd recipe migrate-stale-tests`.)"
+    )]
+    async fn recipe_migrate_stale_tests(
+        &self,
+        params: Parameters<RecipeClassifyTestMigrationParams>,
+    ) -> String {
+        let p = params.0;
+        let db_path = self.db_path.clone();
+        let engine = self.engine.lock().await;
+        let index = AsgIndexStore::from_engine(&engine);
+
+        let fts = SearchFtsDb::open(&db_path).ok();
+        let candidate_qnames: Vec<String> = if let Some(fts) = fts {
+            let filters = FtsFilters {
+                kind: None,
+                language: None,
+                include_tests: true,
+                tests_only: true,
+                exclude_terms: vec![],
+                paths_filter: vec![],
+            };
+            fts.search(&p.query, &filters, p.limit as usize)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|h| h.qname)
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let recipe = recipes::migrate_stale_tests(&engine, &index, &candidate_qnames, &p.query);
         serde_json::to_string(&recipe).unwrap_or_else(|_| "{}".to_string())
     }
 
@@ -1752,7 +2059,7 @@ impl AsdMcpServer {
             .collect();
         let ambiguous_terms = detect_ambiguous_tokens(&tokens, engine.fts.as_ref(), &filters);
         let possible_misses = detect_possible_misses(&p.query, &layers_present, entry_points.len());
-        serde_json::to_string(&serde_json::json!({
+        let full = serde_json::json!({
             "query": p.query,
             "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
             "focus": if focus.is_empty() { serde_json::Value::Null } else { serde_json::json!(focus) },
@@ -1762,7 +2069,14 @@ impl AsdMcpServer {
             "invariants": all_invariants,
             "hazards": all_hazards,
             "by_layer": by_layer,
-        })).unwrap_or_else(|_| "{}".to_string())
+        });
+        // Plan F t-006: brief flattens by_layer to a compact entry_points list.
+        let out = if brief::brief_from_env() {
+            brief::brief_investigate(&full)
+        } else {
+            full
+        };
+        serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
     }
 
     #[tool(
@@ -3675,7 +3989,25 @@ impl AsdMcpServer {
         let ambiguous_terms = detect_ambiguous_tokens(&tokens, engine.fts.as_ref(), &filters);
         let possible_misses =
             detect_possible_misses(&p.description, &layers_present_pc, file_scores.len());
-        serde_json::to_string(&serde_json::json!({
+        // Plan G t-006: surface captured thinking on the symbols that
+        // matter for this query. Pull top_symbol off each likely_edit_files
+        // entry; gather_prior_thinking walks the ledger and projects to the
+        // compact `prior_thinking` shape (or Value::Null if nothing to surface).
+        let thinking_qnames: Vec<String> = likely_edit_files
+            .iter()
+            .filter_map(|f| {
+                f.get("top_symbol")
+                    .and_then(serde_json::Value::as_str)
+                    .map(String::from)
+            })
+            .collect();
+        let prior_thinking = thinking::gather_prior_thinking(
+            &engine,
+            &thinking_qnames,
+            thinking::DEFAULT_CONFIDENCE_FLOOR,
+        );
+
+        let full = serde_json::json!({
             "description": p.description,
             "task_context": p.task_context,
             "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
@@ -3695,12 +4027,22 @@ impl AsdMcpServer {
             "scenario_tests": scenario_tests,
             "effects_summary": effects_summary,
             "recently_touched": recently_touched,
+            "prior_thinking": prior_thinking,
             "stale": stale_warning(&db_path, 3600),
             "confidence": {
                 "strong": "orientation across layers (app/engine/UI/persistence) for a feature-level change description",
                 "weak": "narrow bug-fix work — verify each suggested file with `references` or `read` before editing; broad descriptions can surface unrelated files",
             },
-        })).unwrap_or_else(|_| "{}".to_string())
+        });
+        // Plan F t-006: brief drops by_layer / recently_touched / scenario_tests
+        // / suggested_test_coverage / effects_summary and trims likely_edit_files
+        // to {file, why, top_symbol, layer}.
+        let out = if brief::brief_from_env() {
+            brief::brief_prepare_change(&full)
+        } else {
+            full
+        };
+        serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
     }
 
     #[tool(
@@ -5299,11 +5641,38 @@ impl AsdMcpServer {
             symbols_out.push(sym_ctx);
         }
 
-        let out = serde_json::json!({
-            "query": p.qnames,
-            "count": symbols_out.len(),
-            "symbols": symbols_out,
-        });
+        // Plan G t-006: surface captured thinking across the requested qnames.
+        // p.qnames is a comma-separated String per the existing API.
+        let qnames_vec: Vec<String> = p
+            .qnames
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let prior_thinking = thinking::gather_prior_thinking(
+            &engine,
+            &qnames_vec,
+            thinking::DEFAULT_CONFIDENCE_FLOOR,
+        );
+
+        // Plan F t-006: brief projects each per-symbol context down to the
+        // compact shape (symbol{qname,file,signature,doc} + capped callers/
+        // callees + effects categories + ledger_count). The outer envelope
+        // stays the same.
+        let symbols_projected: Vec<serde_json::Value> = if brief::brief_from_env() {
+            symbols_out.iter().map(brief::brief_context_for).collect()
+        } else {
+            symbols_out
+        };
+
+        let mut out_map = serde_json::Map::new();
+        out_map.insert("query".into(), serde_json::json!(p.qnames));
+        out_map.insert("count".into(), serde_json::json!(symbols_projected.len()));
+        out_map.insert("symbols".into(), serde_json::json!(symbols_projected));
+        if !prior_thinking.is_null() {
+            out_map.insert("prior_thinking".into(), prior_thinking);
+        }
+        let out = serde_json::Value::Object(out_map);
 
         let mut output = serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string());
         if let Some(max_chars) = budget_chars {
@@ -6398,6 +6767,46 @@ fn err_json(msg: &str) -> String {
         .unwrap_or_else(|_| "{\"error\":\"unknown\"}".to_string())
 }
 
+/// Plan G t-003: deterministic ledger entry id for `asd think` writes so
+/// re-running the initial-read prompt overwrites rather than duplicates.
+/// Mirror of the CLI helper in commands/think.rs.
+fn think_det_id(intent: &str, qname: &str, content: &str) -> String {
+    let key = format!("think:{intent}:{qname}:{content}");
+    let h = blake3::hash(key.as_bytes()).to_hex();
+    let short: String = h.chars().take(24).collect();
+    format!("led_think_{short}")
+}
+
+/// Plan G t-007: read the active CTX task id (env `CTX_ACTIVE_TASK`
+/// JSON `{"task_id": "..."}`, fallback `.asd/cache/active-task.json`
+/// under the DB parent). Mirrors the CLI helper so MCP-driven writes
+/// inherit the same `ctx:task:<id>` provenance trail.
+fn think_active_ctx_task_tag(db_path: &std::path::Path) -> Option<String> {
+    let env_raw = std::env::var("CTX_ACTIVE_TASK").ok();
+    let db_parent = db_path.parent();
+    let raw = match env_raw {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            let p = db_parent?.join(".asd").join("cache").join("active-task.json");
+            std::fs::read_to_string(p).ok()?
+        }
+    };
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let id = v.get("task_id")?.as_str()?;
+    Some(format!("ctx:task:{id}"))
+}
+
+/// Stamp every `think_*` write with `source:asd-think` and (when set)
+/// the active `ctx:task:<id>` tag.
+fn think_push_provenance_tags(db_path: &std::path::Path, tags: &mut Vec<String>) {
+    tags.push("source:asd-think".into());
+    if let Some(t) = think_active_ctx_task_tag(db_path) {
+        tags.push(t);
+    }
+}
+
+
+
 fn parse_ledger_kind(s: &str) -> Result<LedgerKind, String> {
     match s.to_lowercase().as_str() {
         "decision" => Ok(LedgerKind::Decision),
@@ -6634,6 +7043,33 @@ mod tool_name_regression {
             AsdMcpServer::tool_router().has_route("recipe_classify_test_migration"),
             "expected `recipe_classify_test_migration` MCP tool to be registered"
         );
+    }
+
+    #[test]
+    fn recipe_migrate_stale_tests_tool_is_registered() {
+        // Plan F t-002: second recipe, adds Move action.
+        assert!(
+            AsdMcpServer::tool_router().has_route("recipe_migrate_stale_tests"),
+            "expected `recipe_migrate_stale_tests` MCP tool to be registered"
+        );
+    }
+
+    #[test]
+    fn plan_g_think_tools_are_registered() {
+        // Plan G t-003: agent-thinking write surface.
+        let router = AsdMcpServer::tool_router();
+        for name in [
+            "think_speculate",
+            "think_model",
+            "think_failed",
+            "think_question",
+            "think_list",
+        ] {
+            assert!(
+                router.has_route(name),
+                "expected `{name}` MCP tool to be registered"
+            );
+        }
     }
 
     #[test]

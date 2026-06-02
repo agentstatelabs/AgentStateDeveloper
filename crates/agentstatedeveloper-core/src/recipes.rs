@@ -38,13 +38,16 @@ pub struct RecipeAction {
 
 /// Action kinds emitted by recipes. Each value corresponds to a branch
 /// in some recipe's `pick_action`-style decision tree. Variants are added
-/// only when at least one decision tree emits them — Plan E t-003 dropped
-/// the unused `Move` variant; a future `migrate-stale-tests` recipe
-/// (Plan F t-002) will re-add it with the body field needed to specify
-/// the destination path.
+/// only when at least one decision tree actually emits them.
+///
+/// Plan F t-002: `Move` re-added for the `migrate_stale_tests` recipe,
+/// which reads `move_to` out of a Mapping entry's body JSON to specify
+/// the destination path. Emitted only by that recipe, not by
+/// `classify_test_migration`.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionKind {
+    Move,
     Delete,
     Run,
     Gate,
@@ -170,13 +173,90 @@ fn pick_action(
     }
 }
 
+/// Plan F t-002 — `migrate-stale-tests` recipe. Extends
+/// `classify_test_migration` with a Move action: when a Mapping entry's
+/// body carries `move_to: "<destination/path>"`, the test file is
+/// emitted as Move with that path in `command`. Otherwise falls back to
+/// the same decision tree as classify_test_migration so callers get one
+/// unified plan.
+///
+/// Body schema for Mapping entries this recipe consumes:
+/// ```json
+/// {"from_qname": "pkg.legacy_test", "to_qname": "pkg.modern_test",
+///  "move_to": "tests/modern/foo_test.py"}
+/// ```
+/// Plain `to_qname` (no `move_to`) keeps the t-004 KeepAsCovered behavior.
+pub fn migrate_stale_tests(
+    engine: &Engine,
+    index_store: &AsgIndexStore,
+    candidate_qnames: &[String],
+    query: &str,
+) -> Recipe {
+    let ledger_store = AsgLedgerStore::from_engine(engine);
+    let mut actions: Vec<RecipeAction> = Vec::new();
+
+    for qname in candidate_qnames {
+        let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+            Ok(Some(s)) => s,
+            _ => continue,
+        };
+        if symbol_tier(&sym.file) != 2 {
+            continue;
+        }
+        let entries = ledger_store
+            .list_entries(&engine.ref_name, &sym.symbol_id)
+            .unwrap_or_default();
+
+        // First match wins. Move takes precedence over KeepAsCovered
+        // when a Mapping entry has both — the move_to is the operational
+        // instruction; the to_qname is just provenance.
+        if let Some(move_to) = entries.iter().find_map(|e| {
+            if !matches!(e.kind, LedgerKind::Mapping) {
+                return None;
+            }
+            mapping_move_to(e.body.as_deref())
+        }) {
+            actions.push(RecipeAction {
+                kind: ActionKind::Move,
+                file: sym.file.clone(),
+                qname: sym.qname.clone(),
+                reason: format!("mapping says move to {move_to}"),
+                command: Some(move_to),
+                role: None,
+            });
+            continue;
+        }
+        // Otherwise reuse the classify_test_migration decision tree —
+        // single source of truth for the remaining branches.
+        actions.push(pick_action(&entries, sym.file.clone(), sym.qname.clone()));
+    }
+
+    actions.sort_by_key(|a| action_sort_key(a.kind));
+
+    Recipe {
+        intent: "migrate-stale-tests".to_string(),
+        query: query.to_string(),
+        actions,
+    }
+}
+
+/// Parse `move_to` out of a Mapping entry's body JSON. Returns None on
+/// missing body, non-JSON, or missing move_to field — caller falls back
+/// to the KeepAsCovered branch.
+fn mapping_move_to(body: Option<&str>) -> Option<String> {
+    let raw = body?;
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    v.get("move_to")?.as_str().map(|s| s.to_string())
+}
+
 fn action_sort_key(kind: ActionKind) -> u8 {
     match kind {
         ActionKind::Delete => 0,
-        ActionKind::Gate => 1,
-        ActionKind::Run => 2,
-        ActionKind::KeepAsCovered => 3,
-        ActionKind::Review => 4,
+        ActionKind::Move => 1,
+        ActionKind::Gate => 2,
+        ActionKind::Run => 3,
+        ActionKind::KeepAsCovered => 4,
+        ActionKind::Review => 5,
     }
 }
 
@@ -337,5 +417,115 @@ mod tests {
             0,
             "production-tier symbols must not appear in a test-migration recipe"
         );
+    }
+
+    // -- Plan F t-002: migrate_stale_tests recipe ---------------------------
+
+    fn append_mapping_with_body(engine: &Engine, sym_id: &str, body: &str) {
+        let ledger = AsgLedgerStore::from_engine(engine);
+        let mut entry = LedgerEntry::new(
+            sym_id,
+            LedgerKind::Mapping,
+            "mapping with body",
+            Author { kind: AuthorKind::Agent, id: "test".into() },
+        );
+        entry.body = Some(body.to_string());
+        ledger.append_entry(&engine.ref_name, &entry, "test").unwrap();
+    }
+
+    #[test]
+    fn mapping_move_to_parses_body_field() {
+        assert_eq!(
+            super::mapping_move_to(Some(r#"{"move_to":"tests/modern/foo.py"}"#)),
+            Some("tests/modern/foo.py".to_string())
+        );
+    }
+
+    #[test]
+    fn mapping_move_to_returns_none_when_missing() {
+        assert_eq!(super::mapping_move_to(None), None);
+        assert_eq!(super::mapping_move_to(Some("plain text")), None);
+        assert_eq!(super::mapping_move_to(Some(r#"{"to_qname":"x"}"#)), None);
+    }
+
+    #[test]
+    fn migrate_stale_tests_emits_move_when_mapping_has_move_to() {
+        let (engine, sid) =
+            engine_with_symbol("pkg.tests.legacy_test", "tests/legacy_test.py");
+        append_mapping_with_body(
+            &engine,
+            &sid,
+            r#"{"from_qname":"pkg.tests.legacy_test","to_qname":"pkg.tests.modern_test","move_to":"tests/modern/foo_test.py"}"#,
+        );
+        let index = AsgIndexStore::from_engine(&engine);
+        let recipe = super::migrate_stale_tests(
+            &engine,
+            &index,
+            &["pkg.tests.legacy_test".to_string()],
+            "migrate stale tests",
+        );
+        assert_eq!(recipe.intent, "migrate-stale-tests");
+        assert_eq!(recipe.actions.len(), 1);
+        assert_eq!(recipe.actions[0].kind, ActionKind::Move);
+        assert_eq!(
+            recipe.actions[0].command.as_deref(),
+            Some("tests/modern/foo_test.py")
+        );
+    }
+
+    #[test]
+    fn migrate_stale_tests_falls_back_to_classify_decision_tree() {
+        // A Mapping entry without move_to should fall back to
+        // KeepAsCovered, matching classify_test_migration.
+        let (engine, sid) =
+            engine_with_symbol("pkg.tests.covered_test", "tests/covered_test.py");
+        append_mapping_with_body(
+            &engine,
+            &sid,
+            r#"{"from_qname":"pkg.tests.covered_test","to_qname":"pkg.tests.new"}"#,
+        );
+        let index = AsgIndexStore::from_engine(&engine);
+        let recipe = super::migrate_stale_tests(
+            &engine,
+            &index,
+            &["pkg.tests.covered_test".to_string()],
+            "migrate stale tests",
+        );
+        assert_eq!(recipe.actions[0].kind, ActionKind::KeepAsCovered);
+    }
+
+    #[test]
+    fn migrate_stale_tests_routes_stale_api_constraint_to_delete() {
+        // Inherits the Delete branch from pick_action.
+        let (engine, sid) =
+            engine_with_symbol("pkg.tests.legacy", "tests/legacy_test.py");
+        append(&engine, &sid, LedgerKind::Constraint, Some("stale-api"), None);
+        let index = AsgIndexStore::from_engine(&engine);
+        let recipe = super::migrate_stale_tests(
+            &engine,
+            &index,
+            &["pkg.tests.legacy".to_string()],
+            "migrate stale tests",
+        );
+        assert_eq!(recipe.actions[0].kind, ActionKind::Delete);
+    }
+
+    #[test]
+    fn migrate_stale_tests_skips_non_test_tier() {
+        let (engine, sid) =
+            engine_with_symbol("pkg.module.production_fn", "src/pkg/module.py");
+        append_mapping_with_body(
+            &engine,
+            &sid,
+            r#"{"move_to":"src/new.py"}"#,
+        );
+        let index = AsgIndexStore::from_engine(&engine);
+        let recipe = super::migrate_stale_tests(
+            &engine,
+            &index,
+            &["pkg.module.production_fn".to_string()],
+            "migrate",
+        );
+        assert_eq!(recipe.actions.len(), 0);
     }
 }
