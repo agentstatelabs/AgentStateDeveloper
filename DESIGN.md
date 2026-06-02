@@ -1201,3 +1201,81 @@ plan_k_onboard.rs`:
 
 When all five hold, the onboarding north star is real.
 
+
+---
+
+## Plan L — execution slice from Plan I
+
+Plan I enumerated 48 deferred items. Most are intentionally cut from
+near-term work (enterprise scaffolding without customers, policy
+work gated on POLICY_V1, Lens redesign, perf-at-scale we don't
+have). This plan is the 10-task subset that's **pressing, bounded,
+and self-contained** today.
+
+Plan I stays as the canonical backlog (so nothing's lost). Plan L
+is what we actually burn through.
+
+### Task table
+
+| # | Plan I | Title | Theme | Effort |
+|---|---|---|---|---|
+| t-001 | I/t-001 | Refresh DEFERRED.md against reality | Doc accuracy | XS |
+| t-002 | I/t-005 | Strip comments + string literals before static effect inference | Python accuracy | S |
+| t-003 | I/t-008 | Resolve relative imports (`from . import x`, `from ..pkg`) | Python accuracy | M |
+| t-004 | I/t-009 | Resolve function-body / conditional imports | Python accuracy | M |
+| t-005 | I/t-012 | Document dynamic-dispatch as out-of-scope + `getattr` callsite warning | Python accuracy | S |
+| t-006 | I/t-041 | `asd index` summary reports dropped (unresolved) call edges | Diagnostic | S |
+| t-007 | I/t-020 | `asd ledger reject <entry>` action | Ratification | S |
+| t-008 | I/t-022 | Approval rationale: `--message` on approve + first-class `approval_note` field | Ratification | XS |
+| t-009 | I/t-024 | `asd ledger supersede <old> <new>` surface across CLI / MCP / HTTP | Ratification | M |
+| t-010 | I/t-028 | `health.symbol_count` reports total artifact count | Diagnostic | XS |
+
+### Wave ordering
+
+**Wave 1 — Baseline (1 task)**
+- t-001: Refresh DEFERRED.md. Lands first so subsequent waves have
+  accurate context. Resolved items get archived; stale claims (the
+  "Python only" languages line; the ".asd/ sidecar never
+  implemented" line) get corrected; new "Last synced" stamp.
+
+**Wave 2 — Python accuracy cluster (5 tasks)**
+- t-002 → t-006. All sit in `agentstatedeveloper-python` and
+  `agentstatedeveloper-core/effects`. Shared test fixture work pays
+  off across all five.
+- Order within wave: t-005 (cheap doc + warning) → t-006
+  (diagnostic surface) → t-002 (effect false-positive fix) → t-003
+  (relative imports) → t-004 (function-body imports). Easier to
+  harder.
+
+**Wave 3 — Ratification surface completion (3 tasks)**
+- t-007 → t-009. All sit in `core::ledger` + matching CLI / MCP /
+  HTTP surfaces. Coherent: today you can append + approve; after
+  this wave you can also reject, annotate, and supersede.
+- Order: t-008 (`--message` is the foundation — supersede and
+  reject can both use the same rationale field) → t-007 (reject) →
+  t-009 (supersede surface).
+
+**Wave 4 — Diagnostic accuracy (1 task)**
+- t-010: standalone cleanup. Land last; or land opportunistically
+  alongside any wave touching `core::health`.
+
+### Acceptance per task
+
+| # | Acceptance |
+|---|---|
+| t-001 | DEFERRED.md "Last synced" updated; every entry has correct disposition (resolved / still-deferred / superseded). No factually wrong claims remain. |
+| t-002 | Python fixture: function body `# os.open(...)` in a comment no longer infers `fs.read`. Existing inference tests still pass. |
+| t-003 | Python fixture: `from . import sibling` + `from ..pkg import x` produce call edges. Both single-dot and double-dot covered. |
+| t-004 | Python fixture: a function with a body-local `import requests` produces a `net.out` effect on that function. |
+| t-005 | DESIGN.md gains a "Python adapter — known limits" section listing dynamic-dispatch patterns. `asd index` emits one `dynamic-dispatch-warning` line per `getattr(<obj>, …)` pattern at module load. |
+| t-006 | `asd index .` final summary line includes `dropped_call_edges: <N>` and `sample_unresolved: [...]` (top 3). Same field surfaces in MCP `health` response. |
+| t-007 | `asd ledger reject <entry-id> --reason "..."` rejects an awaiting entry. Status flips to `Rejected`; tag `rejected-by:<author>` + `reject-reason:<text>` appended. MCP `ledger_reject` mirrors. |
+| t-008 | `asd ledger approve <entry-id> --message "looks correct"` writes `approval_note` field on the entry. CLI `asd ledger get` displays it. Both CLI and MCP surfaces accept the flag. |
+| t-009 | `asd ledger supersede <old-id> <new-id>` writes `supersedes: [old-id]` on the new entry + marks old as `Superseded`. Available in CLI, MCP, HTTP. Schema already exists; this is surface only. |
+| t-010 | `asd health` JSON `symbol_count` returns `{symbols: N, ledger_entries: M, effects: K}` instead of the bare integer. Backward compat: bare `symbol_count` field keeps working, new fields added. |
+
+### Implementation order across waves
+
+Wave 1 → Wave 2 → Wave 3 → Wave 4. Each task within a wave gets its
+own commit + version bump (1.0.25 → 1.0.34 if we ship all ten).
+
