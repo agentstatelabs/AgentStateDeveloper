@@ -1,9 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 32" height="28">
-  <rect x="0" y="4" width="22" height="22" rx="3" fill="#f97316"/>
-  <text x="11" y="19" text-anchor="middle"
-    font-family="ui-monospace,SF Mono,Consolas,monospace"
-    font-size="11" font-weight="800" fill="#000000">asd</text>
-  <text x="30" y="22"
-    font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif"
-    font-size="14" font-weight="700" fill="#ffffff">AgentStateDeveloper</text>
-</svg>
