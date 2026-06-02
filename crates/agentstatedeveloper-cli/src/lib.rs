@@ -184,6 +184,12 @@ pub enum Command {
     /// with role tags so the next session inherits the mental model.
     Map(commands::map::MapArgs),
 
+    /// Plan G t-003: capture agent thinking. Subcommands: speculate
+    /// (Hypothesis), model (MentalModel), failed (FailedAttempt),
+    /// question (OpenQuestion), list. See docs/initial-read-prompt.md.
+    #[command(subcommand)]
+    Think(commands::think::ThinkCmd),
+
     /// Sidecar utilities. `migrate` flips a repo from the legacy `.asd/v1/`
     /// layout (Plan A) to the compact `.asd/conclusions/` layout (Plan B).
     #[command(subcommand)]
@@ -299,6 +305,7 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Conclusions(cmd) => conclusions::run(cfg, cmd),
         Command::Recipe(cmd) => recipe::run(cfg, cmd),
         Command::Map(args) => map::run(cfg, args),
+        Command::Think(cmd) => think::run(cfg, cmd),
         Command::Sidecar(cmd) => sidecar::run(cfg, cmd),
         Command::Investigate(args) => investigate::run(cfg, args),
         Command::Status(args) => status::run(cfg, args),
