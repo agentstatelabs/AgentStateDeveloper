@@ -33,6 +33,20 @@ pub enum ThinkCmd {
     Question(QuestionArgs),
     /// List captured thinking entries.
     List(ListArgs),
+    /// Print the initial-read prompt path + starter checklist.
+    /// With --check, scans existing thinking entries and reports gaps.
+    Bootstrap(BootstrapArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct BootstrapArgs {
+    /// Scan existing thinking entries and report gaps instead of
+    /// printing the starter checklist verbatim.
+    #[arg(long)]
+    pub check: bool,
+    /// Emit JSON instead of human-readable text.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -109,7 +123,152 @@ pub fn run(cfg: &Config, cmd: ThinkCmd) -> Result<()> {
         ThinkCmd::Failed(a) => run_failed(cfg, a),
         ThinkCmd::Question(a) => run_question(cfg, a),
         ThinkCmd::List(a) => run_list(cfg, a),
+        ThinkCmd::Bootstrap(a) => run_bootstrap(cfg, a),
     }
+}
+
+/// Scan all thinking entries currently in the ledger and bucket them
+/// by kind. Used by `bootstrap --check` to report what's missing.
+fn count_thinking(cfg: &Config) -> Result<(usize, usize, usize, usize)> {
+    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let index = AsgIndexStore::from_engine(&engine);
+    let ledger = AsgLedgerStore::from_engine(&engine);
+    let ref_name = engine.ref_name.clone();
+    let prefix = format!(
+        "{}/index/by-qname",
+        agentstatedeveloper_core::ASD_PATH_PREFIX
+    );
+    let tree = engine
+        .repo
+        .get_tree(&ref_name, &prefix)
+        .unwrap_or(serde_json::Value::Null);
+    let qnames: Vec<String> = match tree {
+        serde_json::Value::Object(m) => m.keys().cloned().collect(),
+        _ => Vec::new(),
+    };
+    let (mut h, mut m, mut f, mut q) = (0, 0, 0, 0);
+    for qn in qnames {
+        let sym = match index.get_symbol_by_qname(&ref_name, &qn)? {
+            Some(s) => s,
+            None => continue,
+        };
+        let entries = ledger
+            .list_entries(&ref_name, &sym.symbol_id)
+            .unwrap_or_default();
+        for e in entries {
+            match e.kind {
+                LedgerKind::Hypothesis => h += 1,
+                LedgerKind::MentalModel => m += 1,
+                LedgerKind::FailedAttempt => f += 1,
+                LedgerKind::OpenQuestion => q += 1,
+                _ => {}
+            }
+        }
+    }
+    Ok((h, m, f, q))
+}
+
+fn run_bootstrap(cfg: &Config, args: BootstrapArgs) -> Result<()> {
+    let prompt_path = "docs/initial-read-prompt.md";
+    if args.check {
+        let (h, m, f, q) = count_thinking(cfg)?;
+        let mut gaps: Vec<&str> = Vec::new();
+        if m == 0 {
+            gaps.push("no MentalModel yet — describe the top-level architecture with `asd think model`");
+        }
+        if h == 0 {
+            gaps.push("no Hypothesis yet — record at least one speculation with `asd think speculate`");
+        }
+        if q == 0 {
+            gaps.push("no OpenQuestion yet — record known unknowns with `asd think question`");
+        }
+        if f == 0 {
+            gaps.push("no FailedAttempt yet — once a dead end appears, capture with `asd think failed`");
+        }
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "ok": true,
+                    "prompt_path": prompt_path,
+                    "counts": {
+                        "hypothesis": h, "mental_model": m,
+                        "failed_attempt": f, "open_question": q,
+                    },
+                    "gaps": gaps,
+                }))?
+            );
+        } else {
+            println!("# asd think bootstrap --check");
+            println!();
+            println!("prompt: {prompt_path}");
+            println!();
+            println!("counts:");
+            println!("  hypothesis     : {h}");
+            println!("  mental_model   : {m}");
+            println!("  failed_attempt : {f}");
+            println!("  open_question  : {q}");
+            println!();
+            if gaps.is_empty() {
+                println!("gaps: none — every thinking bucket has at least one entry.");
+            } else {
+                println!("gaps:");
+                for g in &gaps {
+                    println!("  - {g}");
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    // Default mode: print prompt path + starter checklist.
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "ok": true,
+                "prompt_path": prompt_path,
+                "checklist": [
+                    "Read the prompt at docs/initial-read-prompt.md",
+                    "Run `asd reindex` so the project graph is current",
+                    "Capture at least one MentalModel for the top-level architecture",
+                    "Capture Hypotheses for hot files with confidence in [0.0, 1.0]",
+                    "Record OpenQuestions for known unknowns",
+                    "Record FailedAttempts as dead ends emerge",
+                    "Re-run `asd think bootstrap --check` to confirm coverage",
+                ],
+                "commands": {
+                    "model": "asd think model <NAME> --symbols a.b,c.d --summary \"...\"",
+                    "speculate": "asd think speculate <QNAME> --conf 0.6 --summary \"...\"",
+                    "question": "asd think question <QNAME> --q \"...\"",
+                    "failed": "asd think failed <QNAME> --tried \"...\" --because \"...\"",
+                    "list": "asd think list [--kind hypothesis|model|failed|question]",
+                },
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("# asd think bootstrap");
+    println!();
+    println!("Prompt template: {prompt_path}");
+    println!();
+    println!("Starter checklist:");
+    println!("  1. Read the prompt at {prompt_path}");
+    println!("  2. Run `asd reindex` so the project graph is current");
+    println!("  3. Capture at least one MentalModel for the top-level architecture");
+    println!("  4. Capture Hypotheses for hot files with confidence in [0.0, 1.0]");
+    println!("  5. Record OpenQuestions for known unknowns");
+    println!("  6. Record FailedAttempts as dead ends emerge");
+    println!("  7. Re-run `asd think bootstrap --check` to confirm coverage");
+    println!();
+    println!("Write-back commands:");
+    println!("  asd think model   <NAME>  --symbols a.b,c.d --summary \"...\"");
+    println!("  asd think speculate <QN>  --conf 0.6        --summary \"...\"");
+    println!("  asd think question  <QN>  --q \"...\"");
+    println!("  asd think failed    <QN>  --tried \"...\" --because \"...\"");
+    println!("  asd think list      [--kind hypothesis|model|failed|question]");
+    Ok(())
 }
 
 fn open_with_symbol(cfg: &Config, qname: &str) -> Result<(Engine, String)> {
