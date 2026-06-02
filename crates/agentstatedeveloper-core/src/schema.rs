@@ -106,6 +106,27 @@ pub enum LedgerKind {
     /// `command` field on LedgerEntry may carry the closing command; the
     /// `external_task_id` evidence variant carries the task pointer.
     FollowUp,
+    /// Plan G t-002: a speculative claim with confidence. Uses the
+    /// existing `LedgerEntry.confidence: Option<f64>` (0.0-1.0). Promoted
+    /// to Decision once validated. Distinct from Assumption: Assumption
+    /// = "we proceed as if true"; Hypothesis = "I suspect, evidence
+    /// pending".
+    Hypothesis,
+    /// Plan G t-002: multi-symbol structural understanding ("the audio
+    /// pipeline flows input → mix → out"). Body MAY carry JSON
+    /// `{"symbols": [qname...], "diagram": "..."}`. Distinct from
+    /// Concept (single domain entity) — MentalModel spans symbols.
+    MentalModel,
+    /// Plan G t-002: negative evidence. "I tried X; failed because Y;
+    /// pivoting to Z." Body MAY carry JSON `{"tried": "...", "because":
+    /// "..."}`. Saves the next session from re-treading the same path.
+    FailedAttempt,
+    /// Plan G t-002: a known unknown blocking confident action. "What
+    /// does this magic constant 4096 mean? Need to ask before
+    /// changing." Summary is the question; body MAY hold partial
+    /// findings. Distinct from FollowUp: FollowUp is "do X under task
+    /// T-024"; OpenQuestion is "what does this mean?".
+    OpenQuestion,
 }
 
 impl LedgerKind {
@@ -122,13 +143,21 @@ impl LedgerKind {
             Hazard | KnownBug => ConclusionClass::Hazards,
             ValidationScenario | Proof => ConclusionClass::Recipes,
             FollowUp => ConclusionClass::FollowUps,
+            // Plan G t-002: thinking kinds bucket into a new
+            // .asd/conclusions/thinking.jsonl file.
+            Hypothesis | MentalModel | FailedAttempt | OpenQuestion => {
+                ConclusionClass::Thinking
+            }
         }
     }
 }
 
-/// The six conclusion-class buckets that drive `.asd/conclusions/*.jsonl`
+/// The conclusion-class buckets that drive `.asd/conclusions/*.jsonl`
 /// export and the Plan B sidecar redesign. Each class corresponds to one
 /// JSONL file; LedgerKind variants are bucketed via `conclusion_class()`.
+///
+/// Plan G t-002 added `Thinking` as the 7th class (Hypothesis,
+/// MentalModel, FailedAttempt, OpenQuestion).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConclusionClass {
     Decisions,
@@ -137,6 +166,7 @@ pub enum ConclusionClass {
     Hazards,
     Recipes,
     FollowUps,
+    Thinking,
 }
 
 /// Plan C t-002: first-class role-tag vocabulary. The optional
@@ -236,10 +266,11 @@ impl ConclusionClass {
             Self::Hazards => "hazards",
             Self::Recipes => "recipes",
             Self::FollowUps => "followups",
+            Self::Thinking => "thinking",
         }
     }
 
-    /// All six classes in stable order — used by export to walk buckets.
+    /// All classes in stable order — used by export to walk buckets.
     pub fn all() -> &'static [ConclusionClass] {
         &[
             Self::Decisions,
@@ -248,6 +279,7 @@ impl ConclusionClass {
             Self::Hazards,
             Self::Recipes,
             Self::FollowUps,
+            Self::Thinking,
         ]
     }
 }
@@ -514,6 +546,10 @@ impl LedgerKind {
             LedgerKind::Concept => "concept",
             LedgerKind::Mapping => "mapping",
             LedgerKind::FollowUp => "follow_up",
+            LedgerKind::Hypothesis => "hypothesis",
+            LedgerKind::MentalModel => "mental_model",
+            LedgerKind::FailedAttempt => "failed_attempt",
+            LedgerKind::OpenQuestion => "open_question",
         }
     }
 }
@@ -792,15 +828,62 @@ mod plan_b_schema_tests {
 
     #[test]
     fn conclusion_class_filename_stems_match_design() {
-        // Plan A DESIGN section names these exactly. Renaming requires a
-        // migration; lock them down with this test.
+        // Plan A/B/G DESIGN sections name these exactly. Renaming requires
+        // a migration; lock them down with this test.
         assert_eq!(ConclusionClass::Decisions.filename_stem(), "decisions");
         assert_eq!(ConclusionClass::Classifications.filename_stem(), "classifications");
         assert_eq!(ConclusionClass::Mappings.filename_stem(), "mappings");
         assert_eq!(ConclusionClass::Hazards.filename_stem(), "hazards");
         assert_eq!(ConclusionClass::Recipes.filename_stem(), "recipes");
         assert_eq!(ConclusionClass::FollowUps.filename_stem(), "followups");
-        assert_eq!(ConclusionClass::all().len(), 6);
+        // Plan G t-002: thinking-class bucket.
+        assert_eq!(ConclusionClass::Thinking.filename_stem(), "thinking");
+        assert_eq!(ConclusionClass::all().len(), 7);
+    }
+
+    #[test]
+    fn plan_g_thinking_kinds_bucket_to_thinking_class() {
+        // Lock the t-002 bucketing decision: all 4 thinking-kinds land
+        // in ConclusionClass::Thinking, not in Classifications or
+        // FollowUps. Failing this means the export pipeline would write
+        // them to the wrong .asd/conclusions/*.jsonl file.
+        for kind in [
+            LedgerKind::Hypothesis,
+            LedgerKind::MentalModel,
+            LedgerKind::FailedAttempt,
+            LedgerKind::OpenQuestion,
+        ] {
+            assert_eq!(
+                kind.conclusion_class(),
+                ConclusionClass::Thinking,
+                "kind {:?} must bucket to Thinking",
+                kind
+            );
+        }
+    }
+
+    #[test]
+    fn plan_g_thinking_kinds_wire_strings_match_design() {
+        assert_eq!(LedgerKind::Hypothesis.as_str(), "hypothesis");
+        assert_eq!(LedgerKind::MentalModel.as_str(), "mental_model");
+        assert_eq!(LedgerKind::FailedAttempt.as_str(), "failed_attempt");
+        assert_eq!(LedgerKind::OpenQuestion.as_str(), "open_question");
+    }
+
+    #[test]
+    fn plan_g_thinking_kinds_serde_round_trip() {
+        use serde_json::json;
+        for kind in [
+            LedgerKind::Hypothesis,
+            LedgerKind::MentalModel,
+            LedgerKind::FailedAttempt,
+            LedgerKind::OpenQuestion,
+        ] {
+            let v = serde_json::to_value(kind).unwrap();
+            assert_eq!(v, json!(kind.as_str()));
+            let back: LedgerKind = serde_json::from_value(v).unwrap();
+            assert_eq!(back, kind);
+        }
     }
 
     // -- Plan C t-002: RoleTag vocabulary lock-down -------------------------
