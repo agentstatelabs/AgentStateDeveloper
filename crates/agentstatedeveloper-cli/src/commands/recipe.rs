@@ -6,7 +6,8 @@ use anyhow::Result;
 use clap::{Args, Subcommand};
 
 use agentstatedeveloper_core::{
-    recipes::classify_test_migration, AsgIndexStore, Engine, FtsFilters, SearchFtsDb,
+    recipes::{classify_test_migration, migrate_stale_tests},
+    AsgIndexStore, Engine, FtsFilters, SearchFtsDb,
 };
 
 use crate::config::Config;
@@ -18,6 +19,13 @@ pub enum RecipeCmd {
     /// role-tagged ledger entries.
     #[command(name = "classify-test-migration")]
     ClassifyTestMigration(ClassifyArgs),
+
+    /// Plan F t-002: build a migration plan for stale test files. Adds
+    /// the Move action when a Mapping ledger entry carries a `move_to`
+    /// path in its body; otherwise falls back to the classify
+    /// decision tree.
+    #[command(name = "migrate-stale-tests")]
+    MigrateStaleTests(ClassifyArgs),
 }
 
 #[derive(Debug, Args)]
@@ -33,16 +41,34 @@ pub struct ClassifyArgs {
 
 pub fn run(cfg: &Config, cmd: RecipeCmd) -> Result<()> {
     match cmd {
-        RecipeCmd::ClassifyTestMigration(args) => classify(cfg, args),
+        RecipeCmd::ClassifyTestMigration(args) => {
+            run_recipe(cfg, args, |e, i, q, query| {
+                classify_test_migration(e, i, q, query)
+            })
+        }
+        RecipeCmd::MigrateStaleTests(args) => {
+            run_recipe(cfg, args, |e, i, q, query| {
+                migrate_stale_tests(e, i, q, query)
+            })
+        }
     }
 }
 
-fn classify(cfg: &Config, args: ClassifyArgs) -> Result<()> {
+/// Shared candidate-resolution + dispatch shell for every test-recipe.
+/// New recipes just pass a different builder closure.
+fn run_recipe<F>(cfg: &Config, args: ClassifyArgs, build: F) -> Result<()>
+where
+    F: FnOnce(
+        &Engine,
+        &AsgIndexStore,
+        &[String],
+        &str,
+    ) -> agentstatedeveloper_core::recipes::Recipe,
+{
     let query = args.query.join(" ");
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let index = AsgIndexStore::from_engine(&engine);
 
-    // Use the FTS index to find test-tier candidates that match the query.
     let fts = SearchFtsDb::open(&cfg.db_path).ok();
     let candidate_qnames: Vec<String> = if let Some(fts) = fts {
         let filters = FtsFilters {
@@ -62,7 +88,7 @@ fn classify(cfg: &Config, args: ClassifyArgs) -> Result<()> {
         Vec::new()
     };
 
-    let recipe = classify_test_migration(&engine, &index, &candidate_qnames, &query);
+    let recipe = build(&engine, &index, &candidate_qnames, &query);
     println!("{}", serde_json::to_string_pretty(&recipe)?);
     Ok(())
 }

@@ -1348,6 +1348,41 @@ impl AsdMcpServer {
     }
 
     #[tool(
+        description = "Plan F t-002: build a migration plan for stale test files. Returns the same shape as recipe_classify_test_migration but adds a Move action when a Mapping ledger entry carries a `move_to` path in its body. Otherwise falls back to the classify decision tree. (CLI: `asd recipe migrate-stale-tests`.)"
+    )]
+    async fn recipe_migrate_stale_tests(
+        &self,
+        params: Parameters<RecipeClassifyTestMigrationParams>,
+    ) -> String {
+        let p = params.0;
+        let db_path = self.db_path.clone();
+        let engine = self.engine.lock().await;
+        let index = AsgIndexStore::from_engine(&engine);
+
+        let fts = SearchFtsDb::open(&db_path).ok();
+        let candidate_qnames: Vec<String> = if let Some(fts) = fts {
+            let filters = FtsFilters {
+                kind: None,
+                language: None,
+                include_tests: true,
+                tests_only: true,
+                exclude_terms: vec![],
+                paths_filter: vec![],
+            };
+            fts.search(&p.query, &filters, p.limit as usize)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|h| h.qname)
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let recipe = recipes::migrate_stale_tests(&engine, &index, &candidate_qnames, &p.query);
+        serde_json::to_string(&recipe).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[tool(
         description = "Exact-symbol references with rg parity. Returns the canonical definition(s) from the ASD index plus every literal text occurrence in the worktree via `rg --fixed-strings --word-regexp`. Use this when you want complete, predictable matches for a concrete identifier (no tokenization, no BM25). Requires `rg` on PATH. (CLI: `asd references`.)"
     )]
     async fn references(&self, params: Parameters<ReferencesParams>) -> String {
@@ -5819,6 +5854,15 @@ mod tool_name_regression {
         assert!(
             AsdMcpServer::tool_router().has_route("recipe_classify_test_migration"),
             "expected `recipe_classify_test_migration` MCP tool to be registered"
+        );
+    }
+
+    #[test]
+    fn recipe_migrate_stale_tests_tool_is_registered() {
+        // Plan F t-002: second recipe, adds Move action.
+        assert!(
+            AsdMcpServer::tool_router().has_route("recipe_migrate_stale_tests"),
+            "expected `recipe_migrate_stale_tests` MCP tool to be registered"
         );
     }
 
