@@ -114,6 +114,17 @@ impl WorkspaceSymbols {
     }
 }
 
+/// Plan L t-005: one dynamic-dispatch call site detected by an adapter.
+/// `pattern` is a short label (`getattr` / `callback-arg` / `metaclass`);
+/// `snippet` is the source line trimmed for display in CLI warnings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynamicDispatchHint {
+    pub file: String,
+    pub line: u32,
+    pub pattern: String,
+    pub snippet: String,
+}
+
 /// Language-specific parsing + effect inference. Implementations live in
 /// sibling crates: `agentstatedeveloper-python`, `-typescript`, etc.
 pub trait LanguageAdapter: Send + Sync {
@@ -133,6 +144,20 @@ pub trait LanguageAdapter: Send + Sync {
     /// Heuristic effect inference for a symbol. Returns an empty Vec when
     /// the adapter has no opinion (author must declare explicitly).
     fn infer_effects(&self, source: &str, symbol: &ParsedSymbol) -> Vec<Effect>;
+
+    /// Plan L t-005: report dynamic-dispatch sites in the file's source.
+    /// These are call patterns the static call-graph walker can't resolve
+    /// (e.g. `getattr(obj, attr_name)(args)`, callback-by-argument,
+    /// metaclass tricks). Returning a non-empty list signals to the
+    /// indexer that some call paths in this file won't show up in the
+    /// graph; the indexer surfaces a one-line warning so agents/humans
+    /// know the missing edges aren't a bug, they're a known limit.
+    ///
+    /// Default: empty. Adapters with no dynamic-dispatch story return
+    /// nothing.
+    fn scan_dynamic_dispatch(&self, _file: &str, _source: &str) -> Vec<DynamicDispatchHint> {
+        Vec::new()
+    }
 
     /// Extract call edges from a file's parsed symbols. Returned pairs are
     /// (caller_qname, callee_qname). The adapter is free to use heuristics;

@@ -32,7 +32,7 @@ pub mod transitive;
 pub mod trust;
 pub mod workflow;
 
-pub use adapter::{CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols};
+pub use adapter::{CallEdge, DynamicDispatchHint, LanguageAdapter, ParsedSymbol, WorkspaceSymbols};
 pub use audit::{
     AuditEvent, AuditSink, HASH_PREFIX, NullSink, emit_audit, event_types, read_jsonl,
 };

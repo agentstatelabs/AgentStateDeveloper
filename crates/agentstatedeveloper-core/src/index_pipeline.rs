@@ -72,6 +72,13 @@ pub struct IndexSummary {
     pub doc_files: usize,
     /// Total document chunks indexed into asd_search_docs.
     pub docs_indexed: usize,
+    /// Plan L t-005: dynamic-dispatch sites detected by adapters
+    /// (`getattr(obj, x)(…)`, `__getattr__`, etc.). These are call
+    /// patterns the static walker can't resolve into edges; surfaced
+    /// so agents/humans know the missing edges are by design.
+    pub dynamic_dispatch_sites: usize,
+    /// Top dynamic-dispatch hits, capped at 5 for display.
+    pub dynamic_dispatch_samples: Vec<crate::adapter::DynamicDispatchHint>,
 }
 
 /// Result of collecting source files under a path.
@@ -173,6 +180,8 @@ pub fn run_index(
     }
     let mut file_ctxs: Vec<FileCtx> = Vec::with_capacity(files.len());
     let mut indexed_symbols: Vec<Symbol> = Vec::new();
+    // Plan L t-005: aggregate dynamic-dispatch hints across all files.
+    let mut all_dynamic_dispatch: Vec<crate::adapter::DynamicDispatchHint> = Vec::new();
 
     for (idx, (file, adapter)) in files.iter().enumerate() {
         if let Some(cb) = progress {
@@ -185,6 +194,11 @@ pub fn run_index(
 
         let mut parsed = adapter.parse_symbols(&file_str, &source)?;
         disambiguated_count += disambiguate_qnames(&mut parsed);
+
+        // Plan L t-005: detect dynamic-dispatch sites the call-graph
+        // walker can't resolve. Default impl returns empty, so this
+        // is a no-op for adapters without a story.
+        all_dynamic_dispatch.extend(adapter.scan_dynamic_dispatch(&file_str, &source));
 
         for p in &parsed {
             let symbol_id = canonical_symbol_id(&p.qname, p.kind, &file_str);
@@ -636,6 +650,12 @@ pub fn run_index(
         top_collisions,
         doc_files: doc_files_count,
         docs_indexed: docs_indexed_count,
+        dynamic_dispatch_sites: all_dynamic_dispatch.len(),
+        dynamic_dispatch_samples: {
+            let mut v = all_dynamic_dispatch;
+            v.truncate(5);
+            v
+        },
     })
 }
 

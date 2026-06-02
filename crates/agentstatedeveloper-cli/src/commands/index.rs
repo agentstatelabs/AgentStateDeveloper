@@ -284,6 +284,37 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
         l.line(&done_msg);
     }
 
+    // Plan L t-005: surface dynamic-dispatch warnings so agents know
+    // which call paths the static walker couldn't resolve.
+    if summary.dynamic_dispatch_sites > 0 {
+        let warn_header = format!(
+            "Note: {} dynamic-dispatch site{} detected (calls the static walker can't resolve into edges).",
+            summary.dynamic_dispatch_sites,
+            if summary.dynamic_dispatch_sites == 1 { "" } else { "s" }
+        );
+        eprintln!("{}", warn_header);
+        if let Some(l) = &mut log {
+            l.line(&warn_header);
+        }
+        for h in &summary.dynamic_dispatch_samples {
+            let line = format!("  {}:{} [{}] {}", h.file, h.line, h.pattern, h.snippet);
+            eprintln!("{}", line);
+            if let Some(l) = &mut log {
+                l.line(&line);
+            }
+        }
+        if summary.dynamic_dispatch_sites > summary.dynamic_dispatch_samples.len() {
+            let more = format!(
+                "  …and {} more",
+                summary.dynamic_dispatch_sites - summary.dynamic_dispatch_samples.len()
+            );
+            eprintln!("{}", more);
+            if let Some(l) = &mut log {
+                l.line(&more);
+            }
+        }
+    }
+
     let log_note = format!("Full log: {}", log_path.display());
     if let Some(l) = &mut log {
         l.line(&log_note);
@@ -310,6 +341,12 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
             "docs_indexed": summary.docs_indexed,
             "cross_file_collisions": summary.top_collisions.iter().map(|(q, f1, f2)| {
                 serde_json::json!({ "qname": q, "first": f1, "second": f2 })
+            }).collect::<Vec<_>>(),
+            "dynamic_dispatch_sites": summary.dynamic_dispatch_sites,
+            "dynamic_dispatch_samples": summary.dynamic_dispatch_samples.iter().map(|h| {
+                serde_json::json!({
+                    "file": h.file, "line": h.line, "pattern": h.pattern, "snippet": h.snippet,
+                })
             }).collect::<Vec<_>>(),
         }))?
     );

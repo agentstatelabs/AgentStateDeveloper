@@ -1279,3 +1279,50 @@ is what we actually burn through.
 Wave 1 → Wave 2 → Wave 3 → Wave 4. Each task within a wave gets its
 own commit + version bump (1.0.25 → 1.0.34 if we ship all ten).
 
+
+---
+
+## Python adapter — known limits
+
+Things the Python adapter intentionally does not resolve in the call
+graph. Listed here so agents/humans treat missing edges as known
+rather than as bugs. The `asd index` summary surfaces a one-line
+warning per detected dynamic-dispatch site (Plan L t-005).
+
+### Dynamic dispatch (out-of-scope by design)
+
+- **`getattr(obj, name)(args)`** — runtime attribute lookup feeding
+  a call. The callee name isn't known until execution. Surfaced by
+  the indexer when detected.
+- **`getattr(obj, name)` without trailing `(...)`** — a read, not a
+  dispatch. Resolved by the property/attribute pass; not flagged.
+- **`__getattr__` / `__getattribute__` method definitions** — the
+  class promises to resolve unknown attributes at runtime. Any call
+  to an attribute not statically defined on the class may dispatch
+  through this hook. Surfaced by the indexer.
+- **Callback-by-argument** — `def run(callback): callback()`. The
+  callee is whatever's passed in at the call site. Not flagged
+  individually (would noise up the warning stream); covered by the
+  "anything that takes a callable parameter" disclaimer.
+- **Computed method dispatch via dictionaries** — `handlers[kind]()`.
+  Same shape as callback-by-argument.
+- **Metaclasses / dynamic class generation** — `type(name, bases,
+  body)` and friends. Out-of-scope; modules built this way won't
+  appear in the index at all.
+
+### Star imports (out-of-scope until needed)
+
+- **`from foo import *`** — would require fetching `foo`'s exports
+  via FTS and binding each one. Skipped today (Plan I t-007 holds
+  the option to do this if it becomes a pain point).
+
+### Static effect inference (caveats)
+
+- **F-string interpolation contents** are masked along with the
+  literal (Plan L t-002). An effect inside `f"{requests.get(url)}"`
+  won't be inferred. Conservative trade — false-negatives over
+  false-positives.
+- **SQL classification on `.execute(...)`** uses a prefix match.
+  CTEs (`WITH …`) classify as `IoDbRead` (correct for SELECT-with-
+  CTE, wrong for INSERT-with-CTE). Plan I t-006 has the upgrade.
+

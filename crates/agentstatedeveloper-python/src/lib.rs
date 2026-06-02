@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use agentstatedeveloper_core::adapter::{
-    CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols,
+    CallEdge, DynamicDispatchHint, LanguageAdapter, ParsedSymbol, WorkspaceSymbols,
 };
 use agentstatedeveloper_core::error::{AsdError, Result};
 use agentstatedeveloper_core::schema::{Effect, EffectCategory, SymbolKind};
@@ -63,6 +63,10 @@ impl LanguageAdapter for PythonAdapter {
         workspace: &WorkspaceSymbols,
     ) -> Vec<CallEdge> {
         extract_call_edges_impl(file, source, symbols, workspace)
+    }
+
+    fn scan_dynamic_dispatch(&self, file: &str, source: &str) -> Vec<DynamicDispatchHint> {
+        scan_dynamic_dispatch_in_python(file, source)
     }
 }
 
@@ -797,6 +801,93 @@ fn has_raise_statement(scan: &str) -> bool {
         }
     }
     false
+}
+
+/// Plan L t-005: scan Python source for call patterns the static
+/// call-graph walker can't resolve. Returns one hint per detected
+/// site so the indexer can surface a warning. The patterns we
+/// flag are deliberately conservative — only the ones that are
+/// unambiguously dynamic dispatch:
+///
+/// - `getattr(obj, "name")(args)` and `getattr(obj, name_var)(args)`
+///   — runtime attribute lookup feeding a call.
+/// - `__getattr__` / `__getattribute__` method definitions — the
+///   class promises to resolve unknown attributes at runtime.
+///
+/// We deliberately do NOT flag plain `getattr(obj, "name")` (no
+/// trailing call) — that's a read, not a dispatch, and gets
+/// resolved by the property/attribute pass.
+///
+/// Detection runs against the masked source (Plan L t-002) so a
+/// `# getattr(...)` in a comment doesn't generate a phantom warning.
+pub fn scan_dynamic_dispatch_in_python(file: &str, source: &str) -> Vec<DynamicDispatchHint> {
+    let masked = mask_comments_and_literals(source);
+    let mut hints = Vec::new();
+    let bytes = masked.as_bytes();
+    let body = source.as_bytes();
+    let mut line_starts: Vec<usize> = vec![0];
+    for (i, b) in body.iter().enumerate() {
+        if *b == b'\n' {
+            line_starts.push(i + 1);
+        }
+    }
+    let line_of = |off: usize| -> u32 {
+        match line_starts.binary_search(&off) {
+            Ok(i) => i as u32 + 1,
+            Err(i) => i.max(1) as u32,
+        }
+    };
+    let snippet_at = |off: usize| -> String {
+        let line_idx = line_of(off).saturating_sub(1) as usize;
+        let start = line_starts.get(line_idx).copied().unwrap_or(0);
+        let end = line_starts
+            .get(line_idx + 1)
+            .copied()
+            .unwrap_or(body.len())
+            .saturating_sub(1);
+        std::str::from_utf8(&body[start..end])
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
+
+    // Pattern 1: getattr(obj, …)(…)  — the trailing `(` after the
+    // outer `)` is the giveaway. We use find_calls + check the byte
+    // right after args_end.
+    for site in find_calls(&masked, "getattr(") {
+        // Peek past the closing `)` for an opening `(` (allowing
+        // whitespace / chained attribute reads in between is more
+        // ambitious — for v1 we require an immediate call).
+        let mut j = site.args_end + 1;
+        while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+            j += 1;
+        }
+        if j < bytes.len() && bytes[j] == b'(' {
+            hints.push(DynamicDispatchHint {
+                file: file.to_string(),
+                line: line_of(site.call_start),
+                pattern: "getattr".into(),
+                snippet: snippet_at(site.call_start),
+            });
+        }
+    }
+
+    // Pattern 2: `def __getattr__(self, …)` / `def __getattribute__(…)`
+    // method definitions. Scan line by line; `mask_comments_and_literals`
+    // preserves line splits so offsets align.
+    for (i, line) in masked.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("def __getattr__(") || trimmed.starts_with("def __getattribute__(") {
+            let off = line_starts.get(i).copied().unwrap_or(0);
+            hints.push(DynamicDispatchHint {
+                file: file.to_string(),
+                line: (i + 1) as u32,
+                pattern: "__getattr__".into(),
+                snippet: snippet_at(off),
+            });
+        }
+    }
+
+    hints
 }
 
 /// Plan L t-002: walk Python source and replace bytes inside `#`
@@ -1946,6 +2037,66 @@ def foo():
     fn relative_escaping_workspace_returns_none() {
         // Two dots when we only have one segment to drop.
         assert!(super::resolve_relative_import("crucible", "..foo").is_none());
+    }
+
+    // ---- Plan L t-005: dynamic-dispatch scanner -----------------------
+
+    #[test]
+    fn detects_getattr_call_pattern() {
+        let src = "def dispatch(obj, name):\n    return getattr(obj, name)(42)\n";
+        let hints = scan_dynamic_dispatch_in_python("app/dispatch.py", src);
+        assert_eq!(hints.len(), 1, "expected 1 getattr hint; got {hints:?}");
+        assert_eq!(hints[0].pattern, "getattr");
+        assert_eq!(hints[0].line, 2);
+        assert!(hints[0].snippet.contains("getattr(obj, name)(42)"));
+    }
+
+    #[test]
+    fn getattr_without_trailing_call_is_not_flagged() {
+        // A bare attribute read — not a dispatch — should NOT warn.
+        let src = "def read(obj, name):\n    return getattr(obj, name, None)\n";
+        let hints = scan_dynamic_dispatch_in_python("app/read.py", src);
+        assert!(
+            hints.is_empty(),
+            "bare getattr (no trailing call) must not be flagged; got {hints:?}"
+        );
+    }
+
+    #[test]
+    fn detects_getattr_with_string_arg_then_call() {
+        let src = "def go(obj):\n    return getattr(obj, 'method')(1, 2)\n";
+        let hints = scan_dynamic_dispatch_in_python("app/go.py", src);
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].pattern, "getattr");
+    }
+
+    #[test]
+    fn detects_dunder_getattr_method_definition() {
+        let src = "class Proxy:\n    def __getattr__(self, name):\n        return self._lookup(name)\n";
+        let hints = scan_dynamic_dispatch_in_python("app/proxy.py", src);
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].pattern, "__getattr__");
+        assert_eq!(hints[0].line, 2);
+    }
+
+    #[test]
+    fn detects_dunder_getattribute_method_definition() {
+        let src = "class Strict:\n    def __getattribute__(self, name):\n        return super().__getattribute__(name)\n";
+        let hints = scan_dynamic_dispatch_in_python("app/strict.py", src);
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].pattern, "__getattr__");
+    }
+
+    #[test]
+    fn getattr_inside_comment_or_string_is_masked() {
+        // The scanner runs on masked source — a getattr in a comment
+        // or string literal must NOT produce a warning.
+        let src = "def f(obj):\n    # consider getattr(obj, 'x')(1) here\n    msg = 'use getattr(obj, x)(args) at runtime'\n    return msg\n";
+        let hints = scan_dynamic_dispatch_in_python("app/f.py", src);
+        assert!(
+            hints.is_empty(),
+            "getattr inside comment/string must not be flagged; got {hints:?}"
+        );
     }
 
     // ---- Plan L t-004: nested-import resolution -----------------------
