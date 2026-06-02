@@ -294,6 +294,46 @@ fn det_id(intent: &str, qname: &str, content: &str) -> String {
     format!("led_think_{short}")
 }
 
+/// Plan G t-007: read the active CTX task id from `CTX_ACTIVE_TASK`
+/// env var (JSON: `{"task_id": "..."}`) with a fallback to the
+/// `.asd/cache/active-task.json` file under the DB parent. Returns
+/// `None` when neither source is set — callers should skip the tag
+/// in that case.
+///
+/// Mirrors the helper in `commands::map`; kept local so think.rs
+/// stays self-contained.
+fn read_active_ctx_task_id_from(
+    env_raw: Option<&str>,
+    db_parent: Option<&std::path::Path>,
+) -> Option<String> {
+    let raw = match env_raw {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            let p = db_parent?.join(".asd").join("cache").join("active-task.json");
+            std::fs::read_to_string(p).ok()?
+        }
+    };
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v.get("task_id")?.as_str().map(String::from)
+}
+
+fn active_ctx_task_tag(cfg: &Config) -> Option<String> {
+    let env_raw = std::env::var("CTX_ACTIVE_TASK").ok();
+    let db_parent = std::path::Path::new(&cfg.db_path).parent();
+    read_active_ctx_task_id_from(env_raw.as_deref(), db_parent)
+        .map(|id| format!("ctx:task:{id}"))
+}
+
+/// Append `source:asd-think` and (when set) `ctx:task:<id>` to an
+/// entry's tag list. Called by every `asd think *` writer so Plan G
+/// entries inherit the same provenance trail Plan E added for map/ledger.
+fn push_provenance_tags(cfg: &Config, tags: &mut Vec<String>) {
+    tags.push("source:asd-think".into());
+    if let Some(t) = active_ctx_task_tag(cfg) {
+        tags.push(t);
+    }
+}
+
 fn run_speculate(cfg: &Config, args: SpeculateArgs) -> Result<()> {
     if !(0.0..=1.0).contains(&args.conf) {
         bail!("--conf must be in [0.0, 1.0]; got {}", args.conf);
@@ -309,7 +349,7 @@ fn run_speculate(cfg: &Config, args: SpeculateArgs) -> Result<()> {
     entry.entry_id = det_id("hypothesis", &args.qname, &args.summary);
     entry.confidence = Some(args.conf);
     entry.body = args.body;
-    entry.tags.push("source:asd-think".into());
+    push_provenance_tags(cfg, &mut entry.tags);
     ledger.append_entry(&engine.ref_name, &entry, &cfg.agent_id)?;
     println!(
         "{}",
@@ -344,7 +384,7 @@ fn run_model(cfg: &Config, args: ModelArgs) -> Result<()> {
     );
     entry.entry_id = det_id("model", &args.name, &args.summary);
     entry.body = Some(body);
-    entry.tags.push("source:asd-think".into());
+    push_provenance_tags(cfg, &mut entry.tags);
     ledger.append_entry(&engine.ref_name, &entry, &cfg.agent_id)?;
     println!(
         "{}",
@@ -368,7 +408,7 @@ fn run_failed(cfg: &Config, args: FailedArgs) -> Result<()> {
     );
     entry.entry_id = det_id("failed", &args.qname, &args.tried);
     entry.body = Some(body);
-    entry.tags.push("source:asd-think".into());
+    push_provenance_tags(cfg, &mut entry.tags);
     ledger.append_entry(&engine.ref_name, &entry, &cfg.agent_id)?;
     println!(
         "{}",
@@ -390,7 +430,7 @@ fn run_question(cfg: &Config, args: QuestionArgs) -> Result<()> {
         agent_author(cfg),
     );
     entry.entry_id = det_id("question", &args.qname, &args.question);
-    entry.tags.push("source:asd-think".into());
+    push_provenance_tags(cfg, &mut entry.tags);
     ledger.append_entry(&engine.ref_name, &entry, &cfg.agent_id)?;
     println!(
         "{}",
@@ -478,4 +518,56 @@ fn run_list(cfg: &Config, args: ListArgs) -> Result<()> {
         }))?
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ctx_task_id_extracted_from_env_json() {
+        let id = read_active_ctx_task_id_from(
+            Some(r#"{"task_id":"plan-g-005"}"#),
+            None,
+        );
+        assert_eq!(id.as_deref(), Some("plan-g-005"));
+    }
+
+    #[test]
+    fn ctx_task_id_returns_none_when_env_empty_and_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(read_active_ctx_task_id_from(None, Some(tmp.path())), None);
+        assert_eq!(read_active_ctx_task_id_from(Some(""), Some(tmp.path())), None);
+    }
+
+    #[test]
+    fn ctx_task_id_falls_back_to_active_task_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join(".asd").join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(
+            cache.join("active-task.json"),
+            r#"{"task_id":"file-task"}"#,
+        )
+        .unwrap();
+        let id = read_active_ctx_task_id_from(None, Some(tmp.path()));
+        assert_eq!(id.as_deref(), Some("file-task"));
+    }
+
+    #[test]
+    fn ctx_task_id_env_wins_over_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join(".asd").join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(
+            cache.join("active-task.json"),
+            r#"{"task_id":"file-task"}"#,
+        )
+        .unwrap();
+        let id = read_active_ctx_task_id_from(
+            Some(r#"{"task_id":"env-task"}"#),
+            Some(tmp.path()),
+        );
+        assert_eq!(id.as_deref(), Some("env-task"));
+    }
 }

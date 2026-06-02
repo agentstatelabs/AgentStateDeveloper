@@ -1423,7 +1423,7 @@ impl AsdMcpServer {
         entry.entry_id = think_det_id("hypothesis", &p.qname, &p.summary);
         entry.confidence = Some(p.confidence);
         entry.body = p.body;
-        entry.tags.push("source:asd-think".into());
+        think_push_provenance_tags(&self.db_path, &mut entry.tags);
         match ledger.append_entry(&ref_name, &entry, "asd-mcp") {
             Ok(()) => serde_json::to_string(&serde_json::json!({
                 "ok": true, "kind": "hypothesis", "qname": p.qname,
@@ -1465,7 +1465,7 @@ impl AsdMcpServer {
         );
         entry.entry_id = think_det_id("model", &p.name, &p.summary);
         entry.body = Some(body);
-        entry.tags.push("source:asd-think".into());
+        think_push_provenance_tags(&self.db_path, &mut entry.tags);
         match ledger.append_entry(&ref_name, &entry, "asd-mcp") {
             Ok(()) => serde_json::to_string(&serde_json::json!({
                 "ok": true, "kind": "mental_model", "name": p.name,
@@ -1498,7 +1498,7 @@ impl AsdMcpServer {
         );
         entry.entry_id = think_det_id("failed", &p.qname, &p.tried);
         entry.body = Some(body);
-        entry.tags.push("source:asd-think".into());
+        think_push_provenance_tags(&self.db_path, &mut entry.tags);
         match ledger.append_entry(&ref_name, &entry, "asd-mcp") {
             Ok(()) => serde_json::to_string(&serde_json::json!({
                 "ok": true, "kind": "failed_attempt", "qname": p.qname,
@@ -1529,7 +1529,7 @@ impl AsdMcpServer {
             Author { kind: AuthorKind::Agent, id: "asd-mcp".into() },
         );
         entry.entry_id = think_det_id("question", &p.qname, &p.question);
-        entry.tags.push("source:asd-think".into());
+        think_push_provenance_tags(&self.db_path, &mut entry.tags);
         match ledger.append_entry(&ref_name, &entry, "asd-mcp") {
             Ok(()) => serde_json::to_string(&serde_json::json!({
                 "ok": true, "kind": "open_question", "qname": p.qname,
@@ -5962,6 +5962,34 @@ fn think_det_id(intent: &str, qname: &str, content: &str) -> String {
     let h = blake3::hash(key.as_bytes()).to_hex();
     let short: String = h.chars().take(24).collect();
     format!("led_think_{short}")
+}
+
+/// Plan G t-007: read the active CTX task id (env `CTX_ACTIVE_TASK`
+/// JSON `{"task_id": "..."}`, fallback `.asd/cache/active-task.json`
+/// under the DB parent). Mirrors the CLI helper so MCP-driven writes
+/// inherit the same `ctx:task:<id>` provenance trail.
+fn think_active_ctx_task_tag(db_path: &std::path::Path) -> Option<String> {
+    let env_raw = std::env::var("CTX_ACTIVE_TASK").ok();
+    let db_parent = db_path.parent();
+    let raw = match env_raw {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            let p = db_parent?.join(".asd").join("cache").join("active-task.json");
+            std::fs::read_to_string(p).ok()?
+        }
+    };
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let id = v.get("task_id")?.as_str()?;
+    Some(format!("ctx:task:{id}"))
+}
+
+/// Stamp every `think_*` write with `source:asd-think` and (when set)
+/// the active `ctx:task:<id>` tag.
+fn think_push_provenance_tags(db_path: &std::path::Path, tags: &mut Vec<String>) {
+    tags.push("source:asd-think".into());
+    if let Some(t) = think_active_ctx_task_tag(db_path) {
+        tags.push(t);
+    }
 }
 
 
