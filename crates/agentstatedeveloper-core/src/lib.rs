@@ -11,6 +11,7 @@ pub mod candidates;
 pub mod conclusions_export;
 pub mod prepare_change;
 pub mod recipes;
+pub mod thinking;
 pub mod doc_adapters;
 pub mod effects;
 pub mod engine;

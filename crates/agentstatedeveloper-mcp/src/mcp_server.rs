@@ -17,8 +17,9 @@ use tokio::sync::Mutex;
 
 use agentstatedeveloper_adapters::default_adapters;
 use agentstatedeveloper_core::{
-    brief, conclusions_export, load_scope_aliases, recipes, stale_warning, ConclusionClass,
-    ASD_PATH_PREFIX, AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore,
+    brief, conclusions_export, load_scope_aliases, recipes, stale_warning, thinking,
+    ConclusionClass, ASD_PATH_PREFIX, AsgEffectStore, AsgFeedbackStore, AsgIndexStore,
+    AsgLedgerStore,
     AsgScratchStore, AuditEvent, Author, AuthorKind, CleanFilter, Decision, Effect, EffectCategory,
     EffectDecl, EffectStore, Engine, FeedbackEntry, FeedbackStore, FeedbackVerdict, FtsFilters,
     IndexStore, LedgerEntry, LedgerKind, LedgerStore, Mismatch, ParsedSymbol, Rebind, ScratchEntry,
@@ -3748,6 +3749,20 @@ impl AsdMcpServer {
             .collect();
         let ambiguous_terms = detect_ambiguous_tokens(&tokens, engine.fts.as_ref(), &filters);
         let possible_misses = detect_possible_misses(&p.description, &layers_present_pc, file_scores.len());
+        // Plan G t-006: surface captured thinking on the symbols that
+        // matter for this query. Pull top_symbol off each likely_edit_files
+        // entry; gather_prior_thinking walks the ledger and projects to the
+        // compact `prior_thinking` shape (or Value::Null if nothing to surface).
+        let thinking_qnames: Vec<String> = likely_edit_files
+            .iter()
+            .filter_map(|f| f.get("top_symbol").and_then(serde_json::Value::as_str).map(String::from))
+            .collect();
+        let prior_thinking = thinking::gather_prior_thinking(
+            &engine,
+            &thinking_qnames,
+            thinking::DEFAULT_CONFIDENCE_FLOOR,
+        );
+
         let full = serde_json::json!({
             "description": p.description,
             "task_context": p.task_context,
@@ -3768,6 +3783,7 @@ impl AsdMcpServer {
             "scenario_tests": scenario_tests,
             "effects_summary": effects_summary,
             "recently_touched": recently_touched,
+            "prior_thinking": prior_thinking,
             "stale": stale_warning(&db_path, 3600),
             "confidence": {
                 "strong": "orientation across layers (app/engine/UI/persistence) for a feature-level change description",
@@ -5063,6 +5079,20 @@ impl AsdMcpServer {
             symbols_out.push(sym_ctx);
         }
 
+        // Plan G t-006: surface captured thinking across the requested qnames.
+        // p.qnames is a comma-separated String per the existing API.
+        let qnames_vec: Vec<String> = p
+            .qnames
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let prior_thinking = thinking::gather_prior_thinking(
+            &engine,
+            &qnames_vec,
+            thinking::DEFAULT_CONFIDENCE_FLOOR,
+        );
+
         // Plan F t-006: brief projects each per-symbol context down to the
         // compact shape (symbol{qname,file,signature,doc} + capped callers/
         // callees + effects categories + ledger_count). The outer envelope
@@ -5073,11 +5103,14 @@ impl AsdMcpServer {
             symbols_out
         };
 
-        let out = serde_json::json!({
-            "query": p.qnames,
-            "count": symbols_projected.len(),
-            "symbols": symbols_projected,
-        });
+        let mut out_map = serde_json::Map::new();
+        out_map.insert("query".into(), serde_json::json!(p.qnames));
+        out_map.insert("count".into(), serde_json::json!(symbols_projected.len()));
+        out_map.insert("symbols".into(), serde_json::json!(symbols_projected));
+        if !prior_thinking.is_null() {
+            out_map.insert("prior_thinking".into(), prior_thinking);
+        }
+        let out = serde_json::Value::Object(out_map);
 
         let mut output = serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string());
         if let Some(max_chars) = budget_chars {

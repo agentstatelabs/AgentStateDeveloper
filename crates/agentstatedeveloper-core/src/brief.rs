@@ -211,7 +211,7 @@ pub fn brief_prepare_change(full: &Value) -> Value {
             .collect();
         out.insert("likely_edit_files".into(), json!(compact));
     }
-    for k in ["safe_change_recipe", "design_invariants", "known_hazards"] {
+    for k in ["safe_change_recipe", "design_invariants", "known_hazards", "prior_thinking"] {
         if let Some(v) = full.get(k) {
             let nonempty = v.as_array().map(|a| !a.is_empty()).unwrap_or(false)
                 || v.as_object().map(|o| !o.is_empty()).unwrap_or(false);
