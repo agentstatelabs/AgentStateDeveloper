@@ -66,8 +66,12 @@ M5 scope exclusions, current dispositions:
 
 - **DEFERRED (Plan I t-007)** — `from foo import *`. Needs FTS lookup
   of foo's exports; bigger than the other call-graph fixes.
-- **PLANNED (Plan L t-003)** — Relative imports (`from . import x`,
-  `from ..pkg import y`).
+- **RESOLVED — Relative imports** (`from . import x`, `from ..pkg
+  import y`) shipped in Plan D t-004 via `resolve_relative_import` +
+  `collect_import_from_statement::relative_import` branch. The Plan
+  L t-001 refresh inherited the stale "PLANNED" wording without
+  verifying; closed retroactively under Plan L t-003 with an added
+  end-to-end double-dot regression test.
 - **PLANNED (Plan L t-004)** — Function-body / conditional imports.
 - **DEFERRED (Plan I t-010)** — Module-scope call sites. Rare in
   production Python; sample `_driver.py` demonstrates the

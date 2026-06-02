@@ -1914,6 +1914,65 @@ def foo():
     }
 
     #[test]
+    fn extract_call_edges_resolves_double_dot_relative_import() {
+        // Plan L t-003 acceptance gate: the double-dot case
+        // (`from ..pkg import x`) was tested in isolation
+        // (`relative_double_dot_goes_up_one_more`) but never end-to-end.
+        // This locks in the full pipeline behavior so future refactors
+        // can't silently regress on the two-dot case.
+        use crate::PythonAdapter;
+        use agentstatedeveloper_core::{
+            LanguageAdapter, ParsedSymbol, SymbolKind, WorkspaceSymbols,
+        };
+
+        let adapter = PythonAdapter::new();
+        // crucible.agents.litellm_agent imports from crucible.util
+        // (two dots up: agents → crucible, then .util).
+        let caller_src =
+            "from ..util import helper\n\ndef act():\n    return helper()\n";
+
+        let caller_syms = vec![ParsedSymbol {
+            qname: "crucible.agents.litellm_agent.act".into(),
+            kind: SymbolKind::Function,
+            start_line: 3,
+            start_col: 0,
+            end_line: 4,
+            end_col: 22,
+            signature: Some("def act()".into()),
+            body: caller_src.into(),
+            doc: None,
+        }];
+
+        let mut workspace = WorkspaceSymbols::default();
+        workspace.qnames.insert("crucible.util.helper".into());
+        workspace
+            .kinds
+            .insert("crucible.util.helper".into(), SymbolKind::Function);
+        workspace
+            .qnames
+            .insert("crucible.agents.litellm_agent.act".into());
+        workspace.kinds.insert(
+            "crucible.agents.litellm_agent.act".into(),
+            SymbolKind::Function,
+        );
+        workspace.build_suffix_index();
+
+        let edges = adapter.extract_call_edges(
+            "crucible/agents/litellm_agent.py",
+            caller_src,
+            &caller_syms,
+            &workspace,
+        );
+
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.callee_qname == "crucible.util.helper"),
+            "expected double-dot relative import to produce cross-module edge to crucible.util.helper; got {edges:?}"
+        );
+    }
+
+    #[test]
     fn extract_call_edges_resolves_relative_import_to_cross_module() {
         // End-to-end: a relative import + a call should produce a cross-module
         // CallEdge. This is the Crucible reproducer collapsed to a unit test.

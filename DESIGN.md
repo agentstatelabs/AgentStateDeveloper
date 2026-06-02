@@ -1221,7 +1221,7 @@ is what we actually burn through.
 |---|---|---|---|---|
 | t-001 | I/t-001 | Refresh DEFERRED.md against reality | Doc accuracy | XS |
 | t-002 | I/t-005 | Strip comments + string literals before static effect inference | Python accuracy | S |
-| t-003 | I/t-008 | Resolve relative imports (`from . import x`, `from ..pkg`) | Python accuracy | M |
+| t-003 | I/t-008 | Resolve relative imports (`from . import x`, `from ..pkg`) — **already done in Plan D t-004**; closed with double-dot end-to-end regression test | Python accuracy | XS |
 | t-004 | I/t-009 | Resolve function-body / conditional imports | Python accuracy | M |
 | t-005 | I/t-012 | Document dynamic-dispatch as out-of-scope + `getattr` callsite warning | Python accuracy | S |
 | t-006 | I/t-041 | `asd index` summary reports dropped (unresolved) call edges | Diagnostic | S |
