@@ -1219,13 +1219,19 @@ impl AsdMcpServer {
         }
 
         let total: usize = buckets.values().map(|v| v.len()).sum();
-        serde_json::to_string(&serde_json::json!({
+        let full = serde_json::json!({
             "class": target_class.map(|c| c.filename_stem()),
             "symbol": p.symbol,
             "total": total,
             "buckets": buckets,
-        }))
-        .unwrap_or_else(|_| "{}".to_string())
+        });
+        // Plan F t-006: brief mode drops symbol_id + null role/command/tags.
+        let out = if brief::brief_from_env() {
+            brief::brief_conclusions_list(&full)
+        } else {
+            full
+        };
+        serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
     }
 
     #[tool(
@@ -1660,7 +1666,7 @@ impl AsdMcpServer {
             .collect();
         let ambiguous_terms = detect_ambiguous_tokens(&tokens, engine.fts.as_ref(), &filters);
         let possible_misses = detect_possible_misses(&p.query, &layers_present, entry_points.len());
-        serde_json::to_string(&serde_json::json!({
+        let full = serde_json::json!({
             "query": p.query,
             "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
             "focus": if focus.is_empty() { serde_json::Value::Null } else { serde_json::json!(focus) },
@@ -1670,7 +1676,14 @@ impl AsdMcpServer {
             "invariants": all_invariants,
             "hazards": all_hazards,
             "by_layer": by_layer,
-        })).unwrap_or_else(|_| "{}".to_string())
+        });
+        // Plan F t-006: brief flattens by_layer to a compact entry_points list.
+        let out = if brief::brief_from_env() {
+            brief::brief_investigate(&full)
+        } else {
+            full
+        };
+        serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
     }
 
     #[tool(
@@ -3469,7 +3482,7 @@ impl AsdMcpServer {
             .collect();
         let ambiguous_terms = detect_ambiguous_tokens(&tokens, engine.fts.as_ref(), &filters);
         let possible_misses = detect_possible_misses(&p.description, &layers_present_pc, file_scores.len());
-        serde_json::to_string(&serde_json::json!({
+        let full = serde_json::json!({
             "description": p.description,
             "task_context": p.task_context,
             "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
@@ -3494,7 +3507,16 @@ impl AsdMcpServer {
                 "strong": "orientation across layers (app/engine/UI/persistence) for a feature-level change description",
                 "weak": "narrow bug-fix work — verify each suggested file with `references` or `read` before editing; broad descriptions can surface unrelated files",
             },
-        })).unwrap_or_else(|_| "{}".to_string())
+        });
+        // Plan F t-006: brief drops by_layer / recently_touched / scenario_tests
+        // / suggested_test_coverage / effects_summary and trims likely_edit_files
+        // to {file, why, top_symbol, layer}.
+        let out = if brief::brief_from_env() {
+            brief::brief_prepare_change(&full)
+        } else {
+            full
+        };
+        serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
     }
 
     #[tool(
@@ -4775,10 +4797,20 @@ impl AsdMcpServer {
             symbols_out.push(sym_ctx);
         }
 
+        // Plan F t-006: brief projects each per-symbol context down to the
+        // compact shape (symbol{qname,file,signature,doc} + capped callers/
+        // callees + effects categories + ledger_count). The outer envelope
+        // stays the same.
+        let symbols_projected: Vec<serde_json::Value> = if brief::brief_from_env() {
+            symbols_out.iter().map(brief::brief_context_for).collect()
+        } else {
+            symbols_out
+        };
+
         let out = serde_json::json!({
             "query": p.qnames,
-            "count": symbols_out.len(),
-            "symbols": symbols_out,
+            "count": symbols_projected.len(),
+            "symbols": symbols_projected,
         });
 
         let mut output = serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string());
