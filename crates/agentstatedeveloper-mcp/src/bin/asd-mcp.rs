@@ -33,12 +33,13 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let db_path = match std::env::var("ASD_DB") {
-        Ok(p) if !p.is_empty() => PathBuf::from(p),
-        _ => resolve_db_from_registry()?,
+    let (db_path, track_registry) = match std::env::var("ASD_DB") {
+        // Explicit ASD_DB pins this process to one db; do not follow the registry.
+        Ok(p) if !p.is_empty() => (PathBuf::from(p), false),
+        _ => (resolve_db_from_registry()?, true),
     };
 
-    tracing::info!(?db_path, "starting asd-mcp stdio server");
+    tracing::info!(?db_path, track_registry, "starting asd-mcp stdio server");
 
     let mut engine = Engine::open_sqlite(&db_path)
         .with_context(|| format!("failed to open ASD db at {}", db_path.display()))?;
@@ -70,7 +71,12 @@ async fn main() -> Result<()> {
 
     let shared = Arc::new(Mutex::new(engine));
 
-    let server = AsdMcpServer::with_audit_log(shared, db_path.clone(), audit_log_path);
+    let server = AsdMcpServer::with_registry_tracking(
+        shared,
+        db_path.clone(),
+        audit_log_path,
+        track_registry,
+    );
     let service = server
         .serve(rmcp::transport::stdio())
         .await
