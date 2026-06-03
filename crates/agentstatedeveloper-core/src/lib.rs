@@ -47,7 +47,8 @@ pub use candidates::{
     build_feedback_state_from_entries, compute_uncertainty, confidence_reason, confidence_scores,
     detect_ambiguous_tokens, detect_confidence_warnings, detect_possible_misses,
     explain_feedback_impacts, explain_match, find_candidates, glob_match, in_memory_score,
-    kind_str, load_scope_aliases, matches_any_path_glob, parse_query, query_tokens, resolve_scope,
+    kind_str, load_exclude_sets, load_scope_aliases, matches_any_path_glob, parse_query,
+    query_tokens, resolve_exclude_set, resolve_scope,
     result_bucket, suggest_better_queries, suggest_scoped_queries,
 };
 pub use doc_adapters::{adapt_document, is_doc_file};

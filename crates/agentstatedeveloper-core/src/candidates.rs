@@ -246,6 +246,67 @@ pub fn resolve_scope(scope: &str, db_path: &Path) -> Vec<String> {
         .unwrap_or_else(|| vec![scope.to_string()])
 }
 
+/// Plan J t-011: load named exclude sets from `.asd/scopes.toml`.
+///
+/// Format (sits alongside the bare-key scope aliases):
+/// ```toml
+/// # bare entries remain positive scope aliases (load_scope_aliases)
+/// drift-pad = ["App/**/DriftPad*"]
+///
+/// # new: exclude sets keyed under a dedicated table
+/// [exclude_sets]
+/// tests = ["**/test_*.py", "tests/**", "**/*_test.go"]
+/// generated = ["**/generated/**", "**/*_pb2.py"]
+/// ```
+///
+/// `--exclude-set tests` on the CLI expands to those globs and merges
+/// into `FtsFilters::exclude_paths`. Returns an empty map when no
+/// `[exclude_sets]` table is present (or when the file is missing).
+pub fn load_exclude_sets(db_path: &Path) -> HashMap<String, Vec<String>> {
+    let scopes_path = db_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("scopes.toml");
+    let contents = match std::fs::read_to_string(&scopes_path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    let table: toml::Table = match toml::from_str(&contents) {
+        Ok(t) => t,
+        Err(_) => return HashMap::new(),
+    };
+    let excl = match table.get("exclude_sets") {
+        Some(toml::Value::Table(t)) => t.clone(),
+        _ => return HashMap::new(),
+    };
+    excl.into_iter()
+        .filter_map(|(k, v)| {
+            let globs = match v {
+                toml::Value::Array(arr) => arr
+                    .into_iter()
+                    .filter_map(|v| {
+                        if let toml::Value::String(s) = v {
+                            Some(s)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect(),
+                toml::Value::String(s) => vec![s],
+                _ => return None,
+            };
+            Some((k, globs))
+        })
+        .collect()
+}
+
+/// Resolve a `--exclude-set` name to negative path globs. Unknown
+/// names return an empty list rather than treating the name as a glob
+/// (avoids silently turning a typo into a path filter).
+pub fn resolve_exclude_set(name: &str, db_path: &Path) -> Vec<String> {
+    load_exclude_sets(db_path).remove(name).unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
 // Path filter
 // ---------------------------------------------------------------------------
@@ -276,6 +337,75 @@ fn apply_paths_filter(
                 _ => true,
             }
         }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Negative-path filter (Plan J t-011)
+// ---------------------------------------------------------------------------
+
+/// Drop candidates whose file matches ANY of the exclude globs.
+/// No-op when `exclude_paths` is empty.
+fn apply_exclude_paths_filter(
+    engine: &Engine,
+    index_store: &AsgIndexStore,
+    fts: Option<&SearchFtsDb>,
+    exclude_paths: &[String],
+    scored: &mut Vec<(f64, String)>,
+) {
+    if exclude_paths.is_empty() {
+        return;
+    }
+    let qname_strs: Vec<&str> = scored.iter().map(|(_, q)| q.as_str()).collect();
+    let resolved = fts
+        .map(|f| f.resolve_qnames_bulk(&qname_strs))
+        .unwrap_or_default();
+    scored.retain(|(_, qname)| {
+        let file = if let Some(rsym) = resolved.get(qname.as_str()) {
+            rsym.file.clone()
+        } else {
+            match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+                Ok(Some(sym)) => sym.file,
+                _ => return true, // can't resolve → keep (conservative)
+            }
+        };
+        !matches_any_path_glob(exclude_paths, &file)
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Negative-language filter (Plan J t-011)
+// ---------------------------------------------------------------------------
+
+/// Drop candidates whose `language` (case-insensitive) is in the list.
+/// No-op when `exclude_languages` is empty.
+///
+/// `ResolvedSymbol` (the FTS bulk-resolve return) doesn't carry the
+/// language field, so this filter falls through to index_store lookup
+/// per candidate. Acceptable because: (a) exclude_languages is
+/// typically empty, (b) when set, it's usually filtering OUT a large
+/// chunk so the lookup cost amortizes against the smaller post-filter
+/// set the rest of the pipeline processes.
+fn apply_exclude_languages_filter(
+    engine: &Engine,
+    index_store: &AsgIndexStore,
+    _fts: Option<&SearchFtsDb>,
+    exclude_languages: &[String],
+    scored: &mut Vec<(f64, String)>,
+) {
+    if exclude_languages.is_empty() {
+        return;
+    }
+    let lower: Vec<String> = exclude_languages
+        .iter()
+        .map(|s| s.to_lowercase())
+        .collect();
+    scored.retain(|(_, qname)| {
+        let lang = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+            Ok(Some(sym)) => sym.language.to_lowercase(),
+            _ => return true, // can't resolve → keep (conservative)
+        };
+        !lower.iter().any(|excl| excl == &lang)
     });
 }
 
@@ -619,6 +749,21 @@ pub fn find_candidates(
             index_store,
             fts,
             &filters.exclude_terms,
+            &mut scored,
+        );
+        // Plan J t-011: negative globs + language exclusions.
+        apply_exclude_paths_filter(
+            engine,
+            index_store,
+            fts,
+            &filters.exclude_paths,
+            &mut scored,
+        );
+        apply_exclude_languages_filter(
+            engine,
+            index_store,
+            fts,
+            &filters.exclude_languages,
             &mut scored,
         );
 
@@ -3061,5 +3206,117 @@ mod plan_c_t003_tests {
         let n = super::apply_constraint_penalties(&engine, &index, &mut scored);
         assert_eq!(n, 1);
         assert_eq!(scored[0].0, f64::NEG_INFINITY);
+    }
+}
+
+#[cfg(test)]
+mod plan_j_t011_exclude_sets_tests {
+    //! Plan J t-011: `[exclude_sets]` table parsing in `.asd/scopes.toml`
+    //! and `resolve_exclude_set` lookups.
+
+    use super::{load_exclude_sets, matches_any_path_glob, resolve_exclude_set};
+    use std::path::PathBuf;
+
+    fn write_scopes_toml(dir: &std::path::Path, body: &str) {
+        // load_exclude_sets reads `<db_parent>/scopes.toml` — NOT
+        // under `.asd/`. The loader was designed before `.asd/` was
+        // standardized; the existing path is load-bearing. Mirror it.
+        std::fs::write(dir.join("scopes.toml"), body).unwrap();
+    }
+
+    fn db_path_in(dir: &std::path::Path) -> PathBuf {
+        // `<dir>/.asd-state.db` → parent is `<dir>` → loader joins
+        // `scopes.toml` → reads `<dir>/scopes.toml`.
+        dir.join(".asd-state.db")
+    }
+
+    #[test]
+    fn returns_empty_when_no_exclude_sets_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_scopes_toml(
+            tmp.path(),
+            "drift-pad = [\"App/**/DriftPad*\"]\n",
+        );
+        let map = load_exclude_sets(&db_path_in(tmp.path()));
+        assert!(
+            map.is_empty(),
+            "no [exclude_sets] table should yield empty map; got {map:?}"
+        );
+    }
+
+    #[test]
+    fn reads_named_exclude_sets() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_scopes_toml(
+            tmp.path(),
+            "[exclude_sets]\n\
+             tests = [\"**/test_*.py\", \"tests/**\"]\n\
+             generated = [\"**/generated/**\"]\n",
+        );
+        let map = load_exclude_sets(&db_path_in(tmp.path()));
+        assert_eq!(map.len(), 2);
+        assert_eq!(
+            map.get("tests").map(|v| v.len()),
+            Some(2),
+            "tests must have 2 globs; got {:?}",
+            map.get("tests")
+        );
+        assert_eq!(
+            map.get("generated").map(|v| v.len()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn resolve_unknown_returns_empty_not_treated_as_glob() {
+        // Unlike --scope (which falls back to treating the name as a
+        // glob), --exclude-set on an unknown name returns [] so a typo
+        // can't silently morph into a path filter.
+        let tmp = tempfile::tempdir().unwrap();
+        write_scopes_toml(
+            tmp.path(),
+            "[exclude_sets]\ntests = [\"tests/**\"]\n",
+        );
+        let globs = resolve_exclude_set("nonexistent", &db_path_in(tmp.path()));
+        assert!(
+            globs.is_empty(),
+            "unknown exclude-set name must return empty, not the literal name; got {globs:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_known_returns_globs() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_scopes_toml(
+            tmp.path(),
+            "[exclude_sets]\ntests = [\"tests/**\", \"**/test_*.py\"]\n",
+        );
+        let globs = resolve_exclude_set("tests", &db_path_in(tmp.path()));
+        assert_eq!(globs.len(), 2);
+        // Sanity: these globs actually exclude the kinds of files we expect.
+        assert!(matches_any_path_glob(&globs, "tests/foo.py"));
+        assert!(matches_any_path_glob(&globs, "src/test_widget.py"));
+        assert!(!matches_any_path_glob(&globs, "src/widget.py"));
+    }
+
+    #[test]
+    fn coexists_with_bare_scope_aliases() {
+        // The two namespaces (bare keys = scope aliases, [exclude_sets]
+        // table = exclude sets) must not interfere.
+        let tmp = tempfile::tempdir().unwrap();
+        write_scopes_toml(
+            tmp.path(),
+            "drift-pad = [\"App/**/DriftPad*\"]\n\
+             \n[exclude_sets]\n\
+             tests = [\"tests/**\"]\n",
+        );
+        let aliases = super::load_scope_aliases(&db_path_in(tmp.path()));
+        let excl = load_exclude_sets(&db_path_in(tmp.path()));
+        assert_eq!(aliases.get("drift-pad").map(|v| v.len()), Some(1));
+        assert_eq!(excl.get("tests").map(|v| v.len()), Some(1));
+        // Cross-namespace: a bare alias is NOT an exclude set and
+        // vice-versa.
+        assert!(!aliases.contains_key("tests"));
+        assert!(!excl.contains_key("drift-pad"));
     }
 }

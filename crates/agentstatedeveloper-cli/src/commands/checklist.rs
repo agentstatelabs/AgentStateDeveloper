@@ -165,7 +165,8 @@ pub fn run(cfg: &Config, args: ChecklistArgs) -> Result<()> {
         tests_only: false,
         exclude_terms: exclusions,
         paths_filter,
-    };
+        exclude_paths: Vec::new(),
+        exclude_languages: Vec::new(),    };
 
     let mut candidates = find_candidates(
         &engine,

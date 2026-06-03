@@ -1064,7 +1064,8 @@ impl AsdMcpServer {
             tests_only: p.tests_only,
             exclude_terms: exclusions.clone(),
             paths_filter,
-        };
+            exclude_paths: Vec::new(),
+            exclude_languages: Vec::new(),        };
 
         // --- FTS path ---
         let fts_result = SearchFtsDb::open(&db_path)
@@ -1535,7 +1536,8 @@ impl AsdMcpServer {
                 tests_only: true,
                 exclude_terms: vec![],
                 paths_filter: vec![],
-            };
+                exclude_paths: vec![],
+                exclude_languages: vec![],            };
             fts.search(&p.query, &filters, p.limit as usize)
                 .unwrap_or_default()
                 .into_iter()
@@ -1795,7 +1797,8 @@ impl AsdMcpServer {
                 tests_only: true,
                 exclude_terms: vec![],
                 paths_filter: vec![],
-            };
+                exclude_paths: vec![],
+                exclude_languages: vec![],            };
             fts.search(&p.query, &filters, p.limit as usize)
                 .unwrap_or_default()
                 .into_iter()
@@ -1949,7 +1952,8 @@ impl AsdMcpServer {
             tests_only: false,
             exclude_terms: exclusions,
             paths_filter,
-        };
+            exclude_paths: Vec::new(),
+            exclude_languages: Vec::new(),        };
 
         let index = AsgIndexStore::from_engine(&engine);
         let ledger_store = AsgLedgerStore::from_engine(&engine);
@@ -3681,7 +3685,8 @@ impl AsdMcpServer {
             tests_only: false,
             exclude_terms: exclusions,
             paths_filter,
-        };
+            exclude_paths: Vec::new(),
+            exclude_languages: Vec::new(),        };
 
         let index = AsgIndexStore::from_engine(&engine);
         let ledger_store = AsgLedgerStore::from_engine(&engine);
@@ -4162,7 +4167,8 @@ impl AsdMcpServer {
             tests_only: false,
             exclude_terms: exclusions,
             paths_filter,
-        };
+            exclude_paths: Vec::new(),
+            exclude_languages: Vec::new(),        };
 
         let index = AsgIndexStore::from_engine(&engine);
         let ledger_store = AsgLedgerStore::from_engine(&engine);
@@ -5125,6 +5131,8 @@ impl AsdMcpServer {
             tests_only: false,
             exclude_terms: inline_exclusions.clone(),
             paths_filter: paths_filter.clone(),
+            exclude_paths: vec![],
+            exclude_languages: vec![],
         };
 
         let doc_hits: Vec<serde_json::Value> = if !p.symbols_only {

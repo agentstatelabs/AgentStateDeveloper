@@ -160,7 +160,8 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         tests_only: false,
         exclude_terms: exclusions,
         paths_filter,
-    };
+        exclude_paths: Vec::new(),
+        exclude_languages: Vec::new(),    };
 
     // Each entry_point candidate: (combined_score, symbol_id, qname)
     // We resolve full Symbol via index_store for context assembly.

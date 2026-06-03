@@ -87,6 +87,26 @@ pub struct SearchArgs {
     #[arg(long)]
     pub scope: Option<String>,
 
+    /// Plan J t-011: drop results whose file matches any of these glob
+    /// patterns. Comma-separated, e.g. `--exclude-path 'tests/**,**/generated/**'`.
+    /// Patterns use `*` (within a segment) and `**` (any segments) —
+    /// same syntax as `--paths`.
+    #[arg(long)]
+    pub exclude_path: Option<String>,
+
+    /// Plan J t-011: drop results whose symbol language is in this list.
+    /// Comma-separated, e.g. `--exclude-lang 'swift,kotlin'`. Useful in
+    /// polyglot monorepos for queries like "auth flow" where the same
+    /// concept lives in multiple stacks and only one is in scope.
+    #[arg(long)]
+    pub exclude_lang: Option<String>,
+
+    /// Plan J t-011: named exclude set from `.asd/scopes.toml`
+    /// `[exclude_sets]` table, e.g. `--exclude-set tests`. Expanded to
+    /// the path globs defined there and merged into `--exclude-path`.
+    #[arg(long)]
+    pub exclude_set: Option<String>,
+
     /// Print match reasons for each result (which token matched which field,
     /// ledger involvement). Implied by --agent; this shows it in terminal output.
     #[arg(long)]
@@ -155,6 +175,31 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 .filter(|p| !p.is_empty()),
         );
     }
+    // Plan J t-011: negative-glob, language-exclude, exclude-set
+    // resolution. All three are additive: --exclude-set expands into
+    // --exclude-path globs, then both stack with --exclude-lang.
+    let mut exclude_paths: Vec<String> = Vec::new();
+    if let Some(ref s) = args.exclude_set {
+        exclude_paths.extend(
+            agentstatedeveloper_core::resolve_exclude_set(s, &cfg.db_path),
+        );
+    }
+    if let Some(ref s) = args.exclude_path {
+        exclude_paths.extend(
+            s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()),
+        );
+    }
+    let exclude_languages: Vec<String> = args
+        .exclude_lang
+        .as_deref()
+        .map(|s| {
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
     let filters = FtsFilters {
         kind: args.kind.as_deref().map(|k| k.to_lowercase()),
         language: args.language.as_deref().map(|l| l.to_lowercase()),
@@ -162,6 +207,8 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         tests_only: args.tests_only,
         exclude_terms: inline_exclusions,
         paths_filter,
+        exclude_paths,
+        exclude_languages,
     };
 
     // --- Document hits (broad corpus) ---

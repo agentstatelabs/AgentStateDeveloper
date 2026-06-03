@@ -173,6 +173,17 @@ pub struct FtsFilters {
     /// When non-empty, only symbols whose file matches at least one pattern
     /// are kept. Patterns use `*` (within a segment) and `**` (any segments).
     pub paths_filter: Vec<String>,
+    /// Plan J t-011: glob patterns to DROP. Inverse of `paths_filter` —
+    /// any candidate whose file matches one of these patterns is removed.
+    /// Stacks on top of `exclude_terms`: terms are substring matches over
+    /// qname/file/doc/sig; these are glob matches over file paths only.
+    pub exclude_paths: Vec<String>,
+    /// Plan J t-011: language tags to drop (e.g. "swift", "python").
+    /// Compared case-insensitively to the resolved symbol's `language`.
+    /// Useful in polyglot monorepos for queries like "auth flow" where
+    /// the same concept lives in both the iOS and backend codebases and
+    /// only one is in scope.
+    pub exclude_languages: Vec<String>,
 }
 
 /// Helper: build the SQL clause that handles the tri-state test filter.

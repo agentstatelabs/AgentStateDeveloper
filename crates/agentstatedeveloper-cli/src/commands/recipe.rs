@@ -78,7 +78,8 @@ where
             tests_only: true,
             exclude_terms: vec![],
             paths_filter: vec![],
-        };
+            exclude_paths: vec![],
+            exclude_languages: vec![],        };
         fts.search(&query, &filters, args.limit)
             .unwrap_or_default()
             .into_iter()

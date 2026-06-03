@@ -183,7 +183,8 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         tests_only: false,
         exclude_terms: exclusions,
         paths_filter,
-    };
+        exclude_paths: Vec::new(),
+        exclude_languages: Vec::new(),    };
 
     let mut candidates = find_candidates(
         &engine,
@@ -687,6 +688,8 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             include_tests: filters.include_tests,
             exclude_terms: filters.exclude_terms.clone(),
             paths_filter: vec![], // no path filter
+            exclude_paths: filters.exclude_paths.clone(),
+            exclude_languages: filters.exclude_languages.clone(),
         };
         let unscoped_hits = SearchFtsDb::open(&cfg.db_path)
             .ok()

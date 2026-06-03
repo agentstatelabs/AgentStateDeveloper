@@ -2666,7 +2666,8 @@ fn bootstrap_probes(cfg: &Config, args: ProbeBootstrapArgs) -> Result<()> {
         tests_only: false,
         exclude_terms: vec![],
         paths_filter: vec![],
-    };
+        exclude_paths: vec![],
+        exclude_languages: vec![],    };
     // Try a few common structural terms to surface domain symbols.
     let try_terms = [
         "manager",
