@@ -10,6 +10,11 @@ build/
 target/
 examples/sample-py-repo/.asd-state.db
 .asd-state.db
+# SQLite WAL mode auxiliary files — never commit, regenerated on db open.
+.asd-state.db-shm
+.asd-state.db-wal
+**/.asd-state.db-shm
+**/.asd-state.db-wal
 # Plan A t-003: the .asd/v1/ sidecar is a derived cache (tens of MB on real
 # projects) and is regenerable from source via `asd index .`. It stays local
 # until Plan B ships a compact, committable conclusions schema.

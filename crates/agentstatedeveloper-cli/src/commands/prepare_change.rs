@@ -1065,6 +1065,30 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             "raw": format!("verify {} effect", cat),
         }));
     }
+    // Plan J t-002: surface test-gap warning directly inside the
+    // safe_change_recipe so an agent reading only the recipe gets
+    // the signal — without having to cross-reference the top-level
+    // `test_gap` field. Suggests the proposed_test_path target when
+    // we have one.
+    if test_gap {
+        let top_impl_source = file_scores
+            .first()
+            .map(|(_, f, _, _, _, _, _)| f.as_str())
+            .unwrap_or("");
+        let suggestion = proposed_test_path
+            .as_deref()
+            .unwrap_or("(no proposed path; see proposed_test_path)");
+        recipe_manually_validate.push(json!({
+            "source": top_impl_source,
+            "kind": "missing_test",
+            "step": format!(
+                "No test currently exercises this change set. Add a test \
+                 covering the planned edit; suggested target: {suggestion}"
+            ),
+            "expected": "A new (or extended) test that exercises the changed code path and fails before the edit, passes after.",
+            "raw": "test_gap: affected_tests is empty",
+        }));
+    }
     // Always compute classification_debug — used for classification_summary rollup
     // even when --debug-classification is not set.  The full array is only emitted
     // in the JSON when --debug-classification is explicitly requested.

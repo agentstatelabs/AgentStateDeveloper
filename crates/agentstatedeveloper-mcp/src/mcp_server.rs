@@ -4052,6 +4052,23 @@ impl AsdMcpServer {
             );
             recipe_manually_validate.push(serde_json::json!({ "scenario": desc, "source": eff["source"], "kind": "effect_check" }));
         }
+        // Plan J t-002: when no affected tests exist, prepend a
+        // missing_test item to the recipe so an agent reading only
+        // the recipe sees the gap (without having to cross-reference
+        // top-level `test_gap` field).
+        if test_gap {
+            let suggestion = proposed_test_path
+                .as_deref()
+                .unwrap_or("(no proposed path; see proposed_test_path)");
+            recipe_manually_validate.push(serde_json::json!({
+                "scenario": format!(
+                    "No test currently exercises this change set. Add a test \
+                     covering the planned edit; suggested target: {suggestion}"
+                ),
+                "source": "test_gap",
+                "kind": "missing_test",
+            }));
+        }
         let safe_change_recipe = serde_json::json!({
             "inspect": recipe_inspect,
             "preserve": recipe_preserve,
