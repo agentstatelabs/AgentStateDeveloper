@@ -38,10 +38,15 @@ use agentstatedeveloper_core::{
 };
 
 /// The AgentStateDeveloper MCP server.
+///
+/// `db_path` is stored inside an `Arc<RwLock<PathBuf>>` so the registry
+/// watcher (see [`AsdMcpServer::with_registry_tracking`]) can swap it in
+/// place when the user runs `asd repo use <other>`.  Reads are sync and
+/// fast — we never hold the guard across `.await`.
 #[derive(Clone)]
 pub struct AsdMcpServer {
     engine: Arc<Mutex<Engine>>,
-    db_path: PathBuf,
+    db_path: Arc<std::sync::RwLock<PathBuf>>,
     audit_log_path: Option<PathBuf>,
     tool_router: ToolRouter<Self>,
 }
@@ -831,10 +836,40 @@ impl AsdMcpServer {
     ) -> Self {
         Self {
             engine,
-            db_path,
+            db_path: Arc::new(std::sync::RwLock::new(db_path)),
             audit_log_path,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Build the server and spawn a background watcher on the shared registry
+    /// at `~/.config/asd/repos.toml`. When the active repo changes, the
+    /// watcher opens the new db and atomically swaps both the underlying
+    /// `Engine` and `db_path` so subsequent tool calls hit the new repo
+    /// without restarting the process.
+    ///
+    /// Pass `false` for `track_registry` when the caller fixed the db
+    /// explicitly (e.g. `ASD_DB=...`) — in that case the user opted out of
+    /// follow-the-active-repo behavior and we leave the engine alone.
+    pub fn with_registry_tracking(
+        engine: Arc<Mutex<Engine>>,
+        db_path: PathBuf,
+        audit_log_path: Option<PathBuf>,
+        track_registry: bool,
+    ) -> Self {
+        let s = Self::with_audit_log(engine, db_path, audit_log_path);
+        if track_registry {
+            spawn_registry_watcher(s.engine.clone(), s.db_path.clone());
+        }
+        s
+    }
+
+    /// Clone of the currently-open db path. Cheap (one std::RwLock read + clone).
+    pub fn db_path(&self) -> PathBuf {
+        self.db_path
+            .read()
+            .expect("db_path lock poisoned")
+            .clone()
     }
 
     // -- Read tools --
@@ -850,10 +885,10 @@ impl AsdMcpServer {
             Ok(serde_json::Value::Object(map)) => map.len(),
             _ => 0,
         };
-        let db_path = self
-            .db_path
+        let raw_db_path = self.db_path();
+        let db_path = raw_db_path
             .canonicalize()
-            .unwrap_or_else(|_| self.db_path.clone())
+            .unwrap_or(raw_db_path)
             .to_string_lossy()
             .to_string();
         let ledger_prefix = format!("{}/ledger", ASD_PATH_PREFIX);
@@ -898,7 +933,7 @@ impl AsdMcpServer {
             Ok(serde_json::Value::Object(map)) => map.len(),
             _ => 0,
         };
-        let stale = stale_warning(&self.db_path, 3600);
+        let stale = stale_warning(&self.db_path(), 3600);
         let payload = serde_json::json!({
             "status": "ok",
             "db_path": db_path,
@@ -989,7 +1024,7 @@ impl AsdMcpServer {
     )]
     async fn code_search(&self, params: Parameters<CodeSearchParams>) -> String {
         let p = params.0;
-        let db_path = self.db_path.clone();
+        let db_path = self.db_path();
         let layer_overrides = load_layer_overrides(&db_path);
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
@@ -1275,7 +1310,7 @@ impl AsdMcpServer {
     )]
     async fn scopes_list(&self) -> String {
         let engine = self.engine.lock().await;
-        let db_path = self.db_path.clone();
+        let db_path = self.db_path();
         drop(engine);
         let aliases = load_scope_aliases(&db_path);
         let scopes_file = db_path
@@ -1404,7 +1439,7 @@ impl AsdMcpServer {
     )]
     async fn conclusions_export(&self, params: Parameters<ConclusionsExportParams>) -> String {
         let p = params.0;
-        let db_path = self.db_path.clone();
+        let db_path = self.db_path();
         let engine = self.engine.lock().await;
 
         let out_dir: std::path::PathBuf =
@@ -1442,7 +1477,7 @@ impl AsdMcpServer {
     )]
     async fn conclusions_import(&self, params: Parameters<ConclusionsImportParams>) -> String {
         let p = params.0;
-        let db_path = self.db_path.clone();
+        let db_path = self.db_path();
         let engine = self.engine.lock().await;
 
         let in_dir: std::path::PathBuf =
@@ -1486,7 +1521,7 @@ impl AsdMcpServer {
         params: Parameters<RecipeClassifyTestMigrationParams>,
     ) -> String {
         let p = params.0;
-        let db_path = self.db_path.clone();
+        let db_path = self.db_path();
         let engine = self.engine.lock().await;
         let index = AsgIndexStore::from_engine(&engine);
 
@@ -1542,7 +1577,7 @@ impl AsdMcpServer {
         entry.entry_id = think_det_id("hypothesis", &p.qname, &p.summary);
         entry.confidence = Some(p.confidence);
         entry.body = p.body;
-        think_push_provenance_tags(&self.db_path, &mut entry.tags);
+        think_push_provenance_tags(&self.db_path(), &mut entry.tags);
         match ledger.append_entry(&ref_name, &entry, "asd-mcp") {
             Ok(()) => serde_json::to_string(&serde_json::json!({
                 "ok": true, "kind": "hypothesis", "qname": p.qname,
@@ -1584,7 +1619,7 @@ impl AsdMcpServer {
         );
         entry.entry_id = think_det_id("model", &p.name, &p.summary);
         entry.body = Some(body);
-        think_push_provenance_tags(&self.db_path, &mut entry.tags);
+        think_push_provenance_tags(&self.db_path(), &mut entry.tags);
         match ledger.append_entry(&ref_name, &entry, "asd-mcp") {
             Ok(()) => serde_json::to_string(&serde_json::json!({
                 "ok": true, "kind": "mental_model", "name": p.name,
@@ -1617,7 +1652,7 @@ impl AsdMcpServer {
         );
         entry.entry_id = think_det_id("failed", &p.qname, &p.tried);
         entry.body = Some(body);
-        think_push_provenance_tags(&self.db_path, &mut entry.tags);
+        think_push_provenance_tags(&self.db_path(), &mut entry.tags);
         match ledger.append_entry(&ref_name, &entry, "asd-mcp") {
             Ok(()) => serde_json::to_string(&serde_json::json!({
                 "ok": true, "kind": "failed_attempt", "qname": p.qname,
@@ -1648,7 +1683,7 @@ impl AsdMcpServer {
             Author { kind: AuthorKind::Agent, id: "asd-mcp".into() },
         );
         entry.entry_id = think_det_id("question", &p.qname, &p.question);
-        think_push_provenance_tags(&self.db_path, &mut entry.tags);
+        think_push_provenance_tags(&self.db_path(), &mut entry.tags);
         match ledger.append_entry(&ref_name, &entry, "asd-mcp") {
             Ok(()) => serde_json::to_string(&serde_json::json!({
                 "ok": true, "kind": "open_question", "qname": p.qname,
@@ -1747,7 +1782,7 @@ impl AsdMcpServer {
         params: Parameters<RecipeClassifyTestMigrationParams>,
     ) -> String {
         let p = params.0;
-        let db_path = self.db_path.clone();
+        let db_path = self.db_path();
         let engine = self.engine.lock().await;
         let index = AsgIndexStore::from_engine(&engine);
 
@@ -1834,7 +1869,7 @@ impl AsdMcpServer {
             Err(e) => (Vec::new(), format!("error: {e}")),
         };
 
-        let stale = stale_warning(&self.db_path, 3600);
+        let stale = stale_warning(&self.db_path(), 3600);
         // Plan D t-007: brief mode drops the confidence + scan metadata
         // and projects definitions through brief_symbol so each is the
         // compact 4-field shape.
@@ -1874,7 +1909,7 @@ impl AsdMcpServer {
     async fn investigate(&self, params: Parameters<InvestigateParams>) -> String {
         let p = params.0;
         let intent = p.intent.as_deref().and_then(parse_intent).unwrap_or("");
-        let db_path = self.db_path.clone();
+        let db_path = self.db_path();
         let layer_overrides = load_layer_overrides(&db_path);
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
@@ -3120,7 +3155,7 @@ impl AsdMcpServer {
             Some(engine.audit.as_ref()),
             None,
             None,
-            Some(&self.db_path),
+            Some(&self.db_path()),
         ) {
             Ok(s) => serde_json::json!({
                 "path": p.path,
@@ -3595,7 +3630,7 @@ impl AsdMcpServer {
     async fn prepare_change(&self, params: Parameters<PrepareChangeParams>) -> String {
         let p = params.0;
         let intent = p.intent.as_deref().and_then(parse_intent).unwrap_or("");
-        let db_path = self.db_path.clone();
+        let db_path = self.db_path();
         let layer_overrides = load_layer_overrides(&db_path);
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
@@ -4086,7 +4121,7 @@ impl AsdMcpServer {
     async fn checklist(&self, params: Parameters<ChecklistParams>) -> String {
         let p = params.0;
         let intent = p.intent.as_deref().and_then(parse_intent).unwrap_or("");
-        let db_path = self.db_path.clone();
+        let db_path = self.db_path();
         let layer_overrides = load_layer_overrides(&db_path);
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
@@ -4409,7 +4444,7 @@ impl AsdMcpServer {
     )]
     async fn impact(&self, params: Parameters<ImpactParams>) -> String {
         let p = params.0;
-        let db_path = self.db_path.clone();
+        let db_path = self.db_path();
         let layer_overrides = load_layer_overrides(&db_path);
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
@@ -4561,7 +4596,7 @@ impl AsdMcpServer {
     )]
     async fn since(&self, params: Parameters<SinceParams>) -> String {
         let p = params.0;
-        let db_path = self.db_path.clone();
+        let db_path = self.db_path();
         let layer_overrides = load_layer_overrides(&db_path);
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
@@ -4737,7 +4772,7 @@ impl AsdMcpServer {
     )]
     async fn invariant_add(&self, params: Parameters<InvariantAddParams>) -> String {
         let p = params.0;
-        let Ok(engine) = Engine::open_sqlite(&self.db_path) else {
+        let Ok(engine) = Engine::open_sqlite(&self.db_path()) else {
             return err_json("failed to open database");
         };
         let index_store = AsgIndexStore::from_engine(&engine);
@@ -4773,7 +4808,7 @@ impl AsdMcpServer {
     )]
     async fn invariant_list(&self, params: Parameters<InvariantListParams>) -> String {
         let p = params.0;
-        let Ok(engine) = Engine::open_sqlite(&self.db_path) else {
+        let Ok(engine) = Engine::open_sqlite(&self.db_path()) else {
             return err_json("failed to open database");
         };
         let ledger_store = AsgLedgerStore::from_engine(&engine);
@@ -5038,7 +5073,7 @@ impl AsdMcpServer {
     )]
     async fn search(&self, params: Parameters<SearchParams>) -> String {
         let p = params.0;
-        let db_path = self.db_path.clone();
+        let db_path = self.db_path();
         let layer_overrides = load_layer_overrides(&db_path);
         let intent = p.intent.as_deref().and_then(parse_intent).unwrap_or("");
         let engine = self.engine.lock().await;
@@ -5736,7 +5771,7 @@ impl AsdMcpServer {
     )]
     async fn task_close(&self, params: Parameters<TaskCloseParams>) -> String {
         let p = params.0;
-        let db_path = self.db_path.clone();
+        let db_path = self.db_path();
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
         let index_store = AsgIndexStore::from_engine(&engine);
@@ -6069,7 +6104,7 @@ impl AsdMcpServer {
     )]
     async fn status(&self, params: Parameters<StatusParams>) -> String {
         let p = params.0;
-        let db_path = self.db_path.clone();
+        let db_path = self.db_path();
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
 
@@ -6200,7 +6235,7 @@ impl AsdMcpServer {
     )]
     async fn scorecard(&self, params: Parameters<ScorecardParams>) -> String {
         let p = params.0;
-        let db_path = self.db_path.clone();
+        let db_path = self.db_path();
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
         let effect_store = AsgEffectStore::from_engine(&engine);
@@ -6469,7 +6504,7 @@ impl AsdMcpServer {
     )]
     async fn annotate_commit(&self, params: Parameters<AnnotateCommitParams>) -> String {
         let p = params.0;
-        let _db_path = self.db_path.clone();
+        let _db_path = self.db_path();
         let sha = p.sha.clone().unwrap_or_else(|| "HEAD".to_string());
 
         // Commit metadata
@@ -7119,4 +7154,90 @@ mod tool_name_regression {
             );
         }
     }
+}
+
+/// How often the registry watcher polls `~/.config/asd/repos.toml` for an
+/// mtime change. Below the round-trip of any meaningful MCP tool call, so a
+/// `asd repo use <other>` triggered from a separate shell becomes visible
+/// before the agent's next tool invocation lands.
+const REGISTRY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Spawn a background task that follows the active repo recorded in
+/// `~/.config/asd/repos.toml`. On every mtime change we re-read the registry
+/// and, if the active repo's db path differs from what the engine currently
+/// holds, open the new db and swap it in place. Errors are logged at WARN —
+/// the watcher never poisons the running engine.
+fn spawn_registry_watcher(
+    engine: Arc<Mutex<Engine>>,
+    db_path: Arc<std::sync::RwLock<PathBuf>>,
+) {
+    let registry_path = match agentstatedeveloper_core::registry::Registry::path() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "registry watcher disabled: cannot resolve registry path");
+            return;
+        }
+    };
+    tokio::spawn(async move {
+        let mut cached_mtime: Option<std::time::SystemTime> = None;
+        loop {
+            tokio::time::sleep(REGISTRY_POLL_INTERVAL).await;
+
+            let mtime = std::fs::metadata(&registry_path)
+                .and_then(|m| m.modified())
+                .ok();
+            if mtime == cached_mtime {
+                continue;
+            }
+            cached_mtime = mtime;
+
+            // Mtime changed (or first observation). Re-read the registry and
+            // decide whether the active path actually moved.
+            let reg = match agentstatedeveloper_core::registry::Registry::load_from(
+                &registry_path,
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "registry watcher: load failed");
+                    continue;
+                }
+            };
+            let Some(active) = reg.active() else {
+                continue;
+            };
+            let current = db_path
+                .read()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            if active.path == current {
+                continue;
+            }
+
+            match Engine::open_sqlite(&active.path) {
+                Ok(new_engine) => {
+                    {
+                        let mut guard = engine.lock().await;
+                        *guard = new_engine;
+                    }
+                    if let Ok(mut g) = db_path.write() {
+                        *g = active.path.clone();
+                    }
+                    tracing::info!(
+                        from = %current.display(),
+                        to = %active.path.display(),
+                        name = %active.name,
+                        "switched active repo via registry",
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = %active.path.display(),
+                        "registry watcher: opening new db failed; keeping current engine",
+                    );
+                }
+            }
+        }
+    });
 }

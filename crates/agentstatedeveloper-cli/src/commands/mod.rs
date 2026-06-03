@@ -25,6 +25,7 @@ pub mod read;
 pub mod recipe;
 pub mod references;
 pub mod repair;
+pub mod repo;
 pub mod scopes;
 pub mod scorecard;
 pub mod scratch;

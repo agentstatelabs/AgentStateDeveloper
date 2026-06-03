@@ -263,6 +263,11 @@ pub enum Command {
     /// Task workflow session history: evidence quality, workflow type, and
     /// missing steps across recent `asd task-close` invocations.
     Workflow(commands::workflow::WorkflowArgs),
+
+    /// Manage the shared ASD repo registry at ~/.config/asd/repos.toml.
+    /// Subcommands: add, list, use, rm, show.
+    #[command(subcommand)]
+    Repo(commands::repo::RepoCmd),
 }
 
 /// Resolve [`Config`] from the parsed CLI flags.
@@ -328,5 +333,6 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Probe(cmd) => probe::run(cfg, cmd),
         Command::Trust(args) => trust::run(cfg, args),
         Command::Workflow(args) => workflow::run(cfg, args),
+        Command::Repo(cmd) => repo::run(cfg, cmd),
     }
 }

@@ -22,6 +22,7 @@ pub mod paths;
 pub mod policy;
 pub mod prepare_change;
 pub mod recipes;
+pub mod registry;
 pub mod repair;
 pub mod schema;
 pub mod scratch;
