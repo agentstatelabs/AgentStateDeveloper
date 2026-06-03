@@ -609,6 +609,24 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 &args.query,
                 feedback_metrics.entries_applied,
             );
+            // Plan J t-004: broad-search miss diagnosis. When the
+            // primary pass returns fewer than BROADEN_THRESHOLD hits
+            // AND at least one narrowing filter is active (paths,
+            // exclude_paths, exclude_languages, language), retry once
+            // with those filters cleared. Report whatever NEW qnames
+            // surface as `extra_hits` plus a `dropped_filters` array
+            // so the agent can see what was holding back the original
+            // pass without having to guess.
+            const BROADEN_THRESHOLD: usize = 3;
+            let broadened_search = compute_broadened_search(
+                BROADEN_THRESHOLD,
+                &results,
+                &filters,
+                &args.query,
+                args.limit,
+                &cfg.db_path,
+            );
+
             let raw = serde_json::json!({
                 "query": args.query,
                 "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
@@ -619,6 +637,7 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 "query_suggestions": query_suggestions,
                 "scoped_suggestions": scoped_suggestions,
                 "scope_narrowed": scope_narrowed,
+                "broadened_search": broadened_search,
                 "feedback_suppressed": feedback_metrics.suppressed,
                 "feedback_suppressed_detail": feedback_suppressed_detail,
                 "boosted_outranked": boosted_outranked,
@@ -929,3 +948,142 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+/// Plan J t-004: when the primary search returned fewer than
+/// `threshold` hits AND any of the path/language narrowing filters
+/// is active, re-run the FTS query without those filters and report
+/// the new qnames that surface plus a list of which filters were
+/// dropped. Returns `Value::Null` when not triggered so callers can
+/// emit it unconditionally in the response without padding the
+/// shape on hot queries.
+///
+/// What gets dropped:
+///   - `paths_filter` (positive glob list)
+///   - `exclude_paths` (negative globs)
+///   - `exclude_languages`
+///   - `language` (single-language filter)
+///
+/// Deliberately KEPT in the broadening pass:
+///   - `kind` (explicit type filter; the agent meant it)
+///   - `include_tests` / `tests_only` (test-tier filter)
+///   - `exclude_terms` (user typed `-foo` in the query body)
+///
+/// The fallback uses the same `args.limit` cap, so a query that's
+/// over-filtered down to 1 hit might return up to `limit` extra hits.
+fn compute_broadened_search(
+    threshold: usize,
+    primary_results: &[serde_json::Value],
+    filters: &agentstatedeveloper_core::FtsFilters,
+    query: &str,
+    limit: usize,
+    db_path: &std::path::Path,
+) -> serde_json::Value {
+    if primary_results.len() >= threshold {
+        return serde_json::Value::Null;
+    }
+
+    // Identify which narrowing filters are active.
+    let mut dropped: Vec<String> = Vec::new();
+    if !filters.paths_filter.is_empty() {
+        dropped.push(format!(
+            "paths ({} pattern{})",
+            filters.paths_filter.len(),
+            if filters.paths_filter.len() == 1 { "" } else { "s" }
+        ));
+    }
+    if !filters.exclude_paths.is_empty() {
+        dropped.push(format!(
+            "exclude-paths ({} pattern{})",
+            filters.exclude_paths.len(),
+            if filters.exclude_paths.len() == 1 { "" } else { "s" }
+        ));
+    }
+    if !filters.exclude_languages.is_empty() {
+        dropped.push(format!(
+            "exclude-lang ({})",
+            filters.exclude_languages.join(", ")
+        ));
+    }
+    if let Some(ref lang) = filters.language {
+        dropped.push(format!("language ({lang})"));
+    }
+    if dropped.is_empty() {
+        // Low hit count but no narrowing filter to blame — the
+        // query is just genuinely sparse. Don't run a redundant
+        // search; callers already get `confidence_warnings` /
+        // `possible_misses` for this case.
+        return serde_json::Value::Null;
+    }
+
+    // Build a broadened FtsFilters: clear the path/language axes,
+    // preserve everything else (kind, include_tests, tests_only,
+    // exclude_terms, the user's explicit choices).
+    let broadened_filters = agentstatedeveloper_core::FtsFilters {
+        kind: filters.kind.clone(),
+        language: None,
+        include_tests: filters.include_tests,
+        tests_only: filters.tests_only,
+        exclude_terms: filters.exclude_terms.clone(),
+        paths_filter: Vec::new(),
+        exclude_paths: Vec::new(),
+        exclude_languages: Vec::new(),
+    };
+
+    let broadened_hits = match SearchFtsDb::open(db_path).ok() {
+        Some(fts) if fts.has_data() => fts
+            .search(query, &broadened_filters, limit)
+            .ok()
+            .unwrap_or_default(),
+        _ => return serde_json::Value::Null,
+    };
+
+    // Surface only qnames that DID NOT appear in the primary
+    // results — that's the actual signal an agent needs to see.
+    let primary_qnames: std::collections::HashSet<&str> = primary_results
+        .iter()
+        .filter_map(|r| r["qname"].as_str())
+        .collect();
+    let extra_hits: Vec<serde_json::Value> = broadened_hits
+        .iter()
+        .filter(|h| !primary_qnames.contains(h.qname.as_str()))
+        .take(limit)
+        .map(|h| {
+            serde_json::json!({
+                "qname": h.qname,
+                "file": h.file,
+                "score": h.bm25_score,
+            })
+        })
+        .collect();
+
+    if extra_hits.is_empty() {
+        // The filters weren't actually narrowing — broadening
+        // surfaces the same set. Tell the agent so they know
+        // it's not a filter problem.
+        return serde_json::json!({
+            "triggered": true,
+            "primary_hits": primary_results.len(),
+            "threshold": threshold,
+            "dropped_filters": dropped,
+            "extra_hits": [],
+            "note": "Broadening produced no additional results — the low hit count is likely a query sparsity issue, not a filter narrowing one.",
+        });
+    }
+
+    serde_json::json!({
+        "triggered": true,
+        "primary_hits": primary_results.len(),
+        "threshold": threshold,
+        "dropped_filters": dropped,
+        "extra_hits": extra_hits,
+        "note": format!(
+            "Primary pass returned {} hit{} below threshold {}. Broadened by dropping {} and recovered {} extra qname{}.",
+            primary_results.len(),
+            if primary_results.len() == 1 { "" } else { "s" },
+            threshold,
+            dropped.join(" + "),
+            extra_hits.len(),
+            if extra_hits.len() == 1 { "" } else { "s" },
+        ),
+    })
+}
