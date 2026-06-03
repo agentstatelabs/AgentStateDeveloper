@@ -4528,12 +4528,25 @@ impl AsdMcpServer {
             }
         }
 
-        // Collect invariants/hazards from target + all callers.
+        // Collect invariants/hazards/validation_scenarios/known_bugs
+        // from target + all callers. Plan J t-013 extends the prior
+        // (invariants + hazards only) shape to surface
+        // ValidationScenario and KnownBug — same blast-radius
+        // pattern, same `source_symbol_id` annotation. Invariants are
+        // deduped by summary; the other kinds aren't (callers want
+        // every instance for impact reasoning).
+        // Pre-existing bug surfaced by Plan J t-013 tests: `visited`
+        // already contains the target symbol, so chain(once(target),
+        // visited) walked the target's ledger twice. Dedupe at source.
+        let mut seen_ids: HashSet<String> = HashSet::new();
         let all_sym_ids: Vec<String> = std::iter::once(symbol.symbol_id.clone())
             .chain(visited.iter().cloned())
+            .filter(|id| seen_ids.insert(id.clone()))
             .collect();
         let mut all_invariants: Vec<serde_json::Value> = Vec::new();
         let mut all_hazards: Vec<serde_json::Value> = Vec::new();
+        let mut all_validation_scenarios: Vec<serde_json::Value> = Vec::new();
+        let mut all_known_bugs: Vec<serde_json::Value> = Vec::new();
         let mut seen_inv: HashSet<String> = HashSet::new();
         for sym_id in &all_sym_ids {
             let entries = ledger_store
@@ -4561,6 +4574,20 @@ impl AsdMcpServer {
                         }
                         all_hazards.push(v);
                     }
+                    LedgerKind::ValidationScenario => {
+                        let mut v = serde_json::to_value(&entry).unwrap_or_default();
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.insert("source_symbol_id".to_string(), serde_json::json!(sym_id));
+                        }
+                        all_validation_scenarios.push(v);
+                    }
+                    LedgerKind::KnownBug => {
+                        let mut v = serde_json::to_value(&entry).unwrap_or_default();
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.insert("source_symbol_id".to_string(), serde_json::json!(sym_id));
+                        }
+                        all_known_bugs.push(v);
+                    }
                     _ => {}
                 }
             }
@@ -4587,6 +4614,8 @@ impl AsdMcpServer {
             "test_count": affected_test_rows.len(),
             "invariants": all_invariants,
             "hazards": all_hazards,
+            "validation_scenarios": all_validation_scenarios,
+            "known_bugs": all_known_bugs,
             "effects": effects,
             "callers": caller_rows,
             "affected_tests": affected_test_rows,

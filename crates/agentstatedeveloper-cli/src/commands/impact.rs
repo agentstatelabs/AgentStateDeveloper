@@ -184,13 +184,31 @@ pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
         .unwrap_or_default();
     let effects_out: Value = serde_json::to_value(&effects_raw).unwrap_or(json!(null));
 
-    // --- Invariants/hazards from target + all callers ----------------------
+    // --- Invariants/hazards/validation_scenarios/known_bugs from target + callers ---
+    //
+    // Plan J t-013: ValidationScenario and KnownBug entries now
+    // surface on `impact` so the agent can see "what tests this
+    // hits" and "what's known broken" without a separate
+    // context_for call. Invariants are deduped by summary because
+    // the same invariant frequently appears on multiple callers;
+    // hazards / scenarios / bugs are NOT deduped — callers usually
+    // want every instance for blast-radius reasoning.
     let mut all_invariants: Vec<Value> = Vec::new();
     let mut all_hazards: Vec<Value> = Vec::new();
+    let mut all_validation_scenarios: Vec<Value> = Vec::new();
+    let mut all_known_bugs: Vec<Value> = Vec::new();
     let mut seen_inv: HashSet<String> = HashSet::new();
 
+    // Pre-existing bug surfaced by Plan J t-013 tests: `visited`
+    // (the BFS traversal set) includes the target symbol itself, so
+    // chaining `once(target)` with `visited` walked the target's
+    // ledger twice. Invariants didn't notice because they dedupe by
+    // summary; hazards (and the newly-added validation_scenarios /
+    // known_bugs) doubled up. Dedupe by symbol_id at the source.
+    let mut seen_ids: HashSet<String> = HashSet::new();
     let all_sym_ids: Vec<String> = std::iter::once(symbol.symbol_id.clone())
         .chain(visited.iter().cloned())
+        .filter(|id| seen_ids.insert(id.clone()))
         .collect();
 
     for sym_id in &all_sym_ids {
@@ -215,6 +233,20 @@ pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
                         obj.insert("source_symbol_id".to_string(), json!(sym_id));
                     }
                     all_hazards.push(v);
+                }
+                LedgerKind::ValidationScenario => {
+                    let mut v = serde_json::to_value(&entry).unwrap_or(json!(null));
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("source_symbol_id".to_string(), json!(sym_id));
+                    }
+                    all_validation_scenarios.push(v);
+                }
+                LedgerKind::KnownBug => {
+                    let mut v = serde_json::to_value(&entry).unwrap_or(json!(null));
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("source_symbol_id".to_string(), json!(sym_id));
+                    }
+                    all_known_bugs.push(v);
                 }
                 _ => {}
             }
@@ -263,6 +295,8 @@ pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
         "stale_symbols": stale_symbols,
         "invariants": all_invariants,
         "hazards": all_hazards,
+        "validation_scenarios": all_validation_scenarios,
+        "known_bugs": all_known_bugs,
         "effects": effects_out,
         "callers": caller_rows,
         "affected_tests": affected_test_rows,
