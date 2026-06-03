@@ -37,12 +37,33 @@ pub enum ShardBy {
     Package,
 }
 
-/// Top-level sidecar config. Currently only carries the shard_by
-/// choice; future Plan K tasks (e.g. t-008 budget thresholds) will
-/// add fields here.
+/// Plan K t-008: size budget for the committed sidecar. Defaults
+/// chosen for ExampleFlow-scale projects: 1 MB total, 200 KB per
+/// shard file. Configurable per-project via `.asd/config.toml`.
+#[derive(Debug, Clone, Copy)]
+pub struct BudgetConfig {
+    /// Hard upper bound on the total size of `.asd/conclusions/`
+    /// (sum across all shard files). Default 1 MiB.
+    pub total_bytes: u64,
+    /// Hard upper bound on any single shard file's size. Default
+    /// 200 KiB.
+    pub per_shard_bytes: u64,
+}
+
+impl Default for BudgetConfig {
+    fn default() -> Self {
+        Self {
+            total_bytes: 1024 * 1024,
+            per_shard_bytes: 200 * 1024,
+        }
+    }
+}
+
+/// Top-level sidecar config.
 #[derive(Debug, Clone, Default)]
 pub struct SidecarConfig {
     pub shard_by: ShardBy,
+    pub budget: BudgetConfig,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -57,6 +78,14 @@ struct SidecarSection {
     /// to the default with a logged warning.
     #[serde(default)]
     shard_by: Option<String>,
+    /// Plan K t-008. Bytes for the whole `.asd/conclusions/` tree.
+    /// Omitted or invalid → default (1 MiB).
+    #[serde(default)]
+    budget_total_bytes: Option<u64>,
+    /// Plan K t-008. Bytes for any individual shard file. Omitted
+    /// or invalid → default (200 KiB).
+    #[serde(default)]
+    budget_per_shard_bytes: Option<u64>,
 }
 
 impl SidecarConfig {
@@ -78,9 +107,9 @@ impl SidecarConfig {
             Ok(p) => p,
             Err(_) => return Self::default(),
         };
-        let shard_by = parsed
-            .sidecar
-            .and_then(|s| s.shard_by)
+        let sidecar = parsed.sidecar.unwrap_or_default();
+        let shard_by = sidecar
+            .shard_by
             .as_deref()
             .map(|s| match s {
                 "package" => ShardBy::Package,
@@ -88,7 +117,16 @@ impl SidecarConfig {
                 _ => ShardBy::Class, // unknown → safe default
             })
             .unwrap_or_default();
-        Self { shard_by }
+        let default_budget = BudgetConfig::default();
+        let budget = BudgetConfig {
+            total_bytes: sidecar
+                .budget_total_bytes
+                .unwrap_or(default_budget.total_bytes),
+            per_shard_bytes: sidecar
+                .budget_per_shard_bytes
+                .unwrap_or(default_budget.per_shard_bytes),
+        };
+        Self { shard_by, budget }
     }
 }
 
@@ -171,6 +209,29 @@ mod tests {
         std::fs::write(asd.join("config.toml"), "this is not toml {{{").unwrap();
         let cfg = SidecarConfig::load_from_project(tmp.path());
         assert_eq!(cfg.shard_by, ShardBy::Class);
+    }
+
+    #[test]
+    fn reads_budget_overrides() {
+        let tmp = tempdir().unwrap();
+        let asd = tmp.path().join(".asd");
+        std::fs::create_dir_all(&asd).unwrap();
+        std::fs::write(
+            asd.join("config.toml"),
+            "[sidecar]\nbudget_total_bytes = 5000\nbudget_per_shard_bytes = 1000\n",
+        )
+        .unwrap();
+        let cfg = SidecarConfig::load_from_project(tmp.path());
+        assert_eq!(cfg.budget.total_bytes, 5000);
+        assert_eq!(cfg.budget.per_shard_bytes, 1000);
+    }
+
+    #[test]
+    fn budget_defaults_when_not_specified() {
+        let tmp = tempdir().unwrap();
+        let cfg = SidecarConfig::load_from_project(tmp.path());
+        assert_eq!(cfg.budget.total_bytes, 1024 * 1024);
+        assert_eq!(cfg.budget.per_shard_bytes, 200 * 1024);
     }
 
     #[test]

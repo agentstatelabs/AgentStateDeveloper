@@ -258,6 +258,90 @@ fn package_dir(file: &str) -> String {
     }
 }
 
+// -- Budget enforcement (Plan K t-008) -------------------------------------
+
+/// One shard file's size measurement against the per-shard budget.
+#[derive(Debug, Clone)]
+pub struct ShardSize {
+    /// Repo-relative path to the shard, e.g. `decisions.jsonl` or
+    /// `decisions/crates--core.jsonl`.
+    pub path: String,
+    pub bytes: u64,
+    /// True when `bytes > BudgetConfig::per_shard_bytes`.
+    pub over_per_shard: bool,
+}
+
+/// Result of `check_budget`. `ok` is true iff neither the total
+/// nor any individual shard exceeds its configured cap.
+#[derive(Debug, Clone)]
+pub struct BudgetReport {
+    pub ok: bool,
+    pub total_bytes: u64,
+    pub total_budget: u64,
+    pub per_shard_budget: u64,
+    pub shards: Vec<ShardSize>,
+    /// True when `total_bytes > total_budget`.
+    pub over_total: bool,
+}
+
+/// Plan K t-008: walk `out_dir`, sum sizes per shard file
+/// (including per-package subdirectory shards from t-007), and
+/// compare against the budget config. Pure read of the
+/// filesystem — does not re-export.
+pub fn check_budget(
+    out_dir: &Path,
+    budget: &crate::sidecar_config::BudgetConfig,
+) -> std::io::Result<BudgetReport> {
+    let mut shards: Vec<ShardSize> = Vec::new();
+    if out_dir.is_dir() {
+        collect_jsonl_sizes(out_dir, out_dir, &mut shards)?;
+    }
+    let mut total_bytes = 0u64;
+    for s in &mut shards {
+        s.over_per_shard = s.bytes > budget.per_shard_bytes;
+        total_bytes = total_bytes.saturating_add(s.bytes);
+    }
+    let over_total = total_bytes > budget.total_bytes;
+    let ok = !over_total && shards.iter().all(|s| !s.over_per_shard);
+    // Stable order for deterministic output.
+    shards.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(BudgetReport {
+        ok,
+        total_bytes,
+        total_budget: budget.total_bytes,
+        per_shard_budget: budget.per_shard_bytes,
+        shards,
+        over_total,
+    })
+}
+
+fn collect_jsonl_sizes(
+    base: &Path,
+    dir: &Path,
+    out: &mut Vec<ShardSize>,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_jsonl_sizes(base, &path, out)?;
+        } else if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+            let bytes = path.metadata().map(|m| m.len()).unwrap_or(0);
+            let rel = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push(ShardSize {
+                path: rel,
+                bytes,
+                over_per_shard: false,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn author_kind_str(k: AuthorKind) -> &'static str {
     match k {
         AuthorKind::Agent => "agent",
@@ -812,6 +896,105 @@ mod tests {
         append("sym_a", "led_a2", "alpha decision 2");
         append("sym_b", "led_b1", "beta decision 1");
         engine
+    }
+
+    // ---- Plan K t-008: budget enforcement ------------------------------
+
+    #[test]
+    fn check_budget_reports_ok_when_well_under_limits() {
+        use crate::sidecar_config::BudgetConfig;
+        let tmp = tempdir().unwrap();
+        // Write one small JSONL file.
+        std::fs::write(tmp.path().join("decisions.jsonl"), b"{}\n{}\n").unwrap();
+        let budget = BudgetConfig {
+            total_bytes: 1024,
+            per_shard_bytes: 1024,
+        };
+        let r = check_budget(tmp.path(), &budget).unwrap();
+        assert!(r.ok);
+        assert!(!r.over_total);
+        assert_eq!(r.shards.len(), 1);
+        assert!(!r.shards[0].over_per_shard);
+    }
+
+    #[test]
+    fn check_budget_flags_over_total() {
+        use crate::sidecar_config::BudgetConfig;
+        let tmp = tempdir().unwrap();
+        let blob = vec![b'x'; 600];
+        std::fs::write(tmp.path().join("a.jsonl"), &blob).unwrap();
+        std::fs::write(tmp.path().join("b.jsonl"), &blob).unwrap();
+        let budget = BudgetConfig {
+            total_bytes: 1000, // 1200 actual > 1000 budget
+            per_shard_bytes: 1024,
+        };
+        let r = check_budget(tmp.path(), &budget).unwrap();
+        assert!(!r.ok);
+        assert!(r.over_total);
+        // Neither individual shard violates per-shard.
+        assert!(r.shards.iter().all(|s| !s.over_per_shard));
+    }
+
+    #[test]
+    fn check_budget_flags_over_per_shard() {
+        use crate::sidecar_config::BudgetConfig;
+        let tmp = tempdir().unwrap();
+        let big = vec![b'x'; 500];
+        std::fs::write(tmp.path().join("big.jsonl"), &big).unwrap();
+        let budget = BudgetConfig {
+            total_bytes: 10_000,
+            per_shard_bytes: 200, // 500 actual > 200 per-shard
+        };
+        let r = check_budget(tmp.path(), &budget).unwrap();
+        assert!(!r.ok);
+        assert!(!r.over_total);
+        assert!(r.shards[0].over_per_shard);
+    }
+
+    #[test]
+    fn check_budget_walks_into_package_subdirs() {
+        // Plan K t-007 + t-008: when shard_by = "package" produces a
+        // subdirectory layout, the budget walker must descend into
+        // it. Sets up a per-class subdir + a file inside, asserts
+        // the file is counted.
+        use crate::sidecar_config::BudgetConfig;
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("decisions")).unwrap();
+        std::fs::write(
+            tmp.path().join("decisions/crates--core.jsonl"),
+            b"row\n",
+        )
+        .unwrap();
+        let r = check_budget(
+            tmp.path(),
+            &BudgetConfig {
+                total_bytes: 1024,
+                per_shard_bytes: 1024,
+            },
+        )
+        .unwrap();
+        assert_eq!(r.shards.len(), 1);
+        assert!(
+            r.shards[0].path.contains("decisions/crates--core.jsonl")
+                || r.shards[0].path.contains("decisions\\crates--core.jsonl"),
+            "shard path must include the subdir; got {:?}",
+            r.shards[0].path
+        );
+    }
+
+    #[test]
+    fn check_budget_handles_missing_directory_gracefully() {
+        use crate::sidecar_config::BudgetConfig;
+        let tmp = tempdir().unwrap();
+        // tmp/conclusions doesn't exist.
+        let r = check_budget(
+            &tmp.path().join("conclusions"),
+            &BudgetConfig::default(),
+        )
+        .unwrap();
+        assert!(r.ok, "empty/missing dir is trivially under budget");
+        assert_eq!(r.total_bytes, 0);
+        assert!(r.shards.is_empty());
     }
 
     #[test]

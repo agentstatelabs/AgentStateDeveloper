@@ -76,6 +76,18 @@ pub struct ExportArgs {
     /// Emit a one-line summary instead of full per-class counts.
     #[arg(long)]
     pub quiet: bool,
+
+    /// Plan K t-008: after export, verify total + per-shard sizes
+    /// against `.asd/config.toml` budgets (defaults: 1 MiB total,
+    /// 200 KiB per shard). Exits non-zero on violation.
+    #[arg(long)]
+    pub check_budget: bool,
+
+    /// Pairs with `--check-budget`. Warn on violation instead of
+    /// exiting non-zero — for CI gates that should surface drift
+    /// without failing the build.
+    #[arg(long, requires = "check_budget")]
+    pub soft: bool,
 }
 
 #[derive(Debug, Args)]
@@ -236,6 +248,25 @@ fn export(cfg: &Config, args: ExportArgs) -> Result<()> {
 
     let counts = conclusions_export::export_all(&engine, &out_dir)?;
 
+    // Plan K t-008: optionally enforce the size budget after writing.
+    // Resolve the project root the same way export_all does (out_dir's
+    // grandparent) so the budget read picks up the same .asd/config.toml
+    // the layout choice did.
+    let budget_report = if args.check_budget {
+        let project_root = out_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let cfg_sidecar =
+            agentstatedeveloper_core::sidecar_config::SidecarConfig::load_from_project(
+                project_root,
+            );
+        let report = conclusions_export::check_budget(&out_dir, &cfg_sidecar.budget)?;
+        Some(report)
+    } else {
+        None
+    };
+
     if args.quiet {
         let total_entries: usize = counts.iter().map(|(_, n, _)| n).sum();
         let total_bytes: u64 = counts.iter().map(|(_, _, b)| b).sum();
@@ -246,7 +277,7 @@ fn export(cfg: &Config, args: ExportArgs) -> Result<()> {
             out_dir.display()
         );
     } else {
-        let payload = json!({
+        let mut payload = json!({
             "out_dir": out_dir.display().to_string(),
             "files": counts.iter().map(|(stem, n, b)| json!({
                 "class": stem,
@@ -257,7 +288,53 @@ fn export(cfg: &Config, args: ExportArgs) -> Result<()> {
             "total_entries": counts.iter().map(|(_, n, _)| n).sum::<usize>(),
             "total_bytes": counts.iter().map(|(_, _, b)| b).sum::<u64>(),
         });
+        if let Some(ref r) = budget_report {
+            payload["budget"] = json!({
+                "ok": r.ok,
+                "total_bytes": r.total_bytes,
+                "total_budget": r.total_budget,
+                "over_total": r.over_total,
+                "per_shard_budget": r.per_shard_budget,
+                "shards": r.shards.iter().map(|s| json!({
+                    "path": s.path,
+                    "bytes": s.bytes,
+                    "over_per_shard": s.over_per_shard,
+                })).collect::<Vec<_>>(),
+            });
+        }
         println!("{}", serde_json::to_string_pretty(&payload)?);
+    }
+
+    // Plan K t-008: enforce the budget. `--soft` downgrades a hard
+    // failure to a stderr warning so CI can surface drift without
+    // breaking the build.
+    if let Some(r) = budget_report {
+        if !r.ok {
+            let mut violations: Vec<String> = Vec::new();
+            if r.over_total {
+                violations.push(format!(
+                    "total {} bytes > budget {} bytes",
+                    r.total_bytes, r.total_budget
+                ));
+            }
+            for s in &r.shards {
+                if s.over_per_shard {
+                    violations.push(format!(
+                        "shard `{}` {} bytes > per-shard budget {} bytes",
+                        s.path, s.bytes, r.per_shard_budget
+                    ));
+                }
+            }
+            let msg = format!(
+                "sidecar budget exceeded:\n  {}",
+                violations.join("\n  ")
+            );
+            if args.soft {
+                eprintln!("warning: {msg}");
+            } else {
+                anyhow::bail!(msg);
+            }
+        }
     }
     Ok(())
 }
