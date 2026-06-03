@@ -97,16 +97,26 @@ M5 scope exclusions, current dispositions:
 
 ### Ratification (M9) — remaining gaps
 
-- **PLANNED (Plan L t-007)** — `asd ledger reject <entry>` action.
-  Today the workaround is "don't approve" — entry sits forever.
+- **RESOLVED — `asd ledger reject <entry>` action.** Ships across
+  `core::ledger::RatifyOps::reject_entry`, CLI `asd ledger reject
+  --reason "..."`, MCP `ledger_reject` tool. Coverage: ratify
+  integration tests (`reject_transitions_entry_to_rejected`,
+  `reject_already_rejected_is_idempotent`, `reject_requires_nonempty_
+  reason`, `approve_rejected_entry_errors`). The Plan L t-001
+  DEFERRED refresh missed this; closed retroactively under Plan L
+  t-007.
 - **DEFERRED (Plan I t-021)** — Revoke approved entry
   (security-adjacent; gated on real use case).
 - **PLANNED (Plan L t-008)** — Approval rationale: `--message` on
   approve + first-class `approval_note` field.
 - **DEFERRED (Plan I t-023)** — Cryptographic signing (ed25519).
   Enterprise-shaped; gated on customers.
-- **PLANNED (Plan L t-009)** — `asd ledger supersede` surface across
-  CLI / MCP / HTTP. Schema already supports `supersedes: [entry_id]`.
+- **RESOLVED — `asd ledger supersede` surface.** Ships across
+  CLI `asd ledger supersede --supersede <id>`, MCP `ledger_supersede`
+  tool, and HTTP (via `build_router` reuse in `asd-pro-serve`).
+  Coverage: CLI integration test `ledger_supersede_marks_old_entry`.
+  The Plan L t-001 DEFERRED refresh missed this; closed retroactively
+  under Plan L t-009.
 
 ## HTTP / MCP
 
