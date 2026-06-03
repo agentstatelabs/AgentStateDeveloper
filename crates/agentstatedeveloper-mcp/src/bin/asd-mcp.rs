@@ -4,7 +4,8 @@
 //! MCP uses stdout for protocol frames, so all logging is routed to stderr.
 //!
 //! Env:
-//! - `ASD_DB` — path to SQLite db (default: `./.asd-state.db`)
+//! - `ASD_DB` — path to SQLite db. When unset, asd-mcp resolves the active
+//!   repo from `~/.config/asd/repos.toml` (see `asd repo use <name>`).
 //! - `ASD_POLICY` — optional path to a policy JSON file. When set, the
 //!   engine's `PolicyGate` is swapped to a `FilePolicyGate` loaded from that
 //!   file. Matches the `asd` CLI contract.
@@ -32,8 +33,10 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let db_path =
-        PathBuf::from(std::env::var("ASD_DB").unwrap_or_else(|_| "./.asd-state.db".to_string()));
+    let db_path = match std::env::var("ASD_DB") {
+        Ok(p) if !p.is_empty() => PathBuf::from(p),
+        _ => resolve_db_from_registry()?,
+    };
 
     tracing::info!(?db_path, "starting asd-mcp stdio server");
 
@@ -76,4 +79,35 @@ async fn main() -> Result<()> {
     service.waiting().await?;
     tracing::info!("asd-mcp shut down");
     Ok(())
+}
+
+/// Look up the active repo in `~/.config/asd/repos.toml` and return its db
+/// path. Errors with a clear, actionable message if the registry is missing,
+/// empty, or has no active entry — we deliberately do NOT silently fall back
+/// to `./.asd-state.db`, because that masks misconfiguration with what looks
+/// like a successful startup on the wrong db.
+fn resolve_db_from_registry() -> Result<PathBuf> {
+    use agentstatedeveloper_core::registry::Registry;
+
+    let reg = Registry::load().context(
+        "ASD_DB not set and could not read repo registry. Run `asd repo add` then \
+         `asd repo use <name>`, or start with ASD_DB=<path>.",
+    )?;
+    if let Some(active) = reg.active() {
+        tracing::info!(name = %active.name, "resolved db from registry active repo");
+        return Ok(active.path.clone());
+    }
+    let known: Vec<String> = reg.list().iter().map(|e| e.name.clone()).collect();
+    let hint = if known.is_empty() {
+        "Registry is empty. Run `asd repo add` then `asd repo use <name>`, \
+         or start with ASD_DB=<path>."
+            .to_string()
+    } else {
+        format!(
+            "No active repo. Run `asd repo use <name>` (known: {}), \
+             or start with ASD_DB=<path>.",
+            known.join(", ")
+        )
+    };
+    Err(anyhow::anyhow!(hint))
 }
