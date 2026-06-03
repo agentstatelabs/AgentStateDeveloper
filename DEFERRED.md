@@ -178,11 +178,19 @@ Plan I t-036 → t-040.
   A (M10 target) → Plan B compact format
   (`.asd/conclusions/*.jsonl`) → Plan G adds the thinking shard.
   The 2026-05 "never implemented" claim was wrong by then.
+- **RESOLVED — `.asd/v1/` on-disk legacy** is gitignored and
+  vestigial; superseded by `.asd/conclusions/`. `sync_to_dir` /
+  `hydrate_from_dir` still write/read it but it's local-debug only
+  (not on the commit path). Plan K t-009 audit chose to keep the
+  codepath rather than purge — harmless, and some local workflows
+  may still use it. DESIGN.md "Storage layout" section is now the
+  canonical reference; README sections that incorrectly told users
+  to `git add .asd/v1/` are fixed.
 - **DEFERRED — Sidecar canonicalization** (sort-on-write, effect
   filter, confidence-floor filter, self-describing entries,
   `asd onboard`, per-package sharding, `--check-budget`). Tracked
-  as Plan K (10 tasks). Standing recommendation: execute Plan K
-  before the sidecar grows past 1 MB on any real project.
+  as Plan K (9 remaining tasks). Standing recommendation: execute
+  Plan K before the sidecar grows past 1 MB on any real project.
 
 ## Schema migration
 

@@ -27,7 +27,7 @@ cargo install --path crates/agentstatedeveloper-mcp   # installs asd-mcp + asd-s
 | **Policy gate** | File-backed JSON rules: allow, deny, or require-approval per action and actor kind. |
 | **Ratification** | Approve, reject, or withdraw ledger entries. Full approval workflow. |
 | **Audit event stream** | Hash-chained JSONL log of every ledger mutation and policy evaluation. |
-| **Git-native sidecar** | Ledger entries and effects live in `.asd/v1/` — checked into git, travel with every clone. |
+| **Git-native sidecar** | The committed, compact subset of ledger entries (decisions, hazards, recipes, mappings, classifications, follow-ups, agent thinking) lives in `.asd/conclusions/*.jsonl` — checked into git, travels with every clone. Kilobytes, not megabytes. |
 
 ## Quick start
 
@@ -56,11 +56,14 @@ asd ledger append payments.chargeCard \
 # Register the MCP server with your agent tools
 asd mcp install
 
-# Sync to sidecar and commit
-asd sync --prune
-git add .asd/v1/
+# Export the committed sidecar and commit
+asd conclusions export
+git add .asd/conclusions/
 git commit -m "chore: sync ASD sidecar"
 ```
+
+(The `asd init` pre-commit hook runs `asd conclusions export` automatically;
+the explicit two-step above is just to illustrate what's happening.)
 
 ### MCP ↔ CLI naming reference
 
@@ -116,9 +119,18 @@ always connect to the right project database.
 
 ## Git-native sidecar
 
-ASD's live state lives in a local SQLite database (`.asd-state.db`,
-gitignored). The sidecar mirrors the human-authored subset into `.asd/v1/`
-so it travels with `git commit`.
+ASD has two on-disk locations and one in-SQLite namespace. Knowing which
+is which avoids surprise:
+
+| Location | What's in it | Tracked in git? | Authoritative for? |
+|----------|--------------|-----------------|---------------------|
+| `.asd-state.db` | Live SQLite ASG (index, call graph, FTS, full ledger, traces) | **No** (gitignored) | Everything at runtime |
+| `.asd/conclusions/*.jsonl` | Compact subset: decisions, classifications, mappings, hazards, recipes, follow-ups, agent thinking | **Yes** | What a fresh clone needs to inherit |
+| `.asd/v1/` (legacy) | Older verbose mirror — superseded by `.asd/conclusions/` | **No** (gitignored) | Vestigial; `asd sync`/`asd hydrate` still write/read it for local debug. Not on the commit path. |
+
+The principle: **the committed sidecar carries judgment** (decisions
+the agent or human had to make). **Everything else is regenerable**
+from source via `asd index .`, so it's gitignored.
 
 **One-time setup:**
 
@@ -128,20 +140,20 @@ asd init
 
 ```
 initialized at ./.asd-state.db
-.gitignore: updated (.asd-state.db ignored; .asd/v1/ tracked)
+.gitignore: updated (.asd-state.db and .asd/v1/ ignored — both are local derived state)
 
 ASD git hooks installed (.asd/hooks/):
 
   pre-commit    trigger:  git commit
-                command:  asd sync --prune
-                purpose:  flush ledger/effects to .asd/v1/ and remove stale entries
+                command:  asd conclusions export
+                purpose:  write committed conclusions (decisions/hazards/recipes/…) to .asd/conclusions/*.jsonl
 
   post-merge    trigger:  git merge / git pull
-                command:  asd hydrate && asd index .
-                purpose:  load new .asd/v1/ entries into local db and rebuild index
+                command:  asd conclusions import && asd index .
+                purpose:  import committed .asd/conclusions/ into local ledger and rebuild index
 
   post-checkout trigger:  git checkout / git switch
-                command:  asd hydrate && asd index .
+                command:  asd conclusions import && asd index .
                 purpose:  sync local db to the checked-out branch's sidecar state
 
   core.hooksPath → .asd/hooks  (hooks are now active)
@@ -150,17 +162,17 @@ ASD git hooks installed (.asd/hooks/):
   To review hooks later:     asd hooks
 ```
 
-After `asd init`, the pre-commit hook runs `asd sync --prune` automatically
-on every commit — no manual steps.
+After `asd init`, the pre-commit hook runs `asd conclusions export`
+automatically on every commit — no manual steps.
 
 **Onboarding after clone:**
 
 ```bash
 git clone <repo>
-asd init        # installs hooks, updates .gitignore
-asd hydrate     # loads .asd/v1/ → local SQLite
-asd index .     # rebuilds derived semantic index
-asd mcp install # registers asd-mcp with your agent tools
+asd init                  # installs hooks, updates .gitignore
+asd conclusions import    # loads .asd/conclusions/*.jsonl → local ledger
+asd index .               # rebuilds derived semantic index from source
+asd mcp install           # registers asd-mcp with your agent tools
 ```
 
 ## Indexing

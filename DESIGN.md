@@ -1169,7 +1169,7 @@ For this story to work the sidecar must:
 | t-006 | `asd think bootstrap --existing` mode | When sidecar already has thinking entries (new dev joining a project that's already been mapped), bootstrap should *summarize what's there* instead of pushing the agent through the initial-read prompt again. | Detects ≥1 MentalModel or ≥3 Hypotheses in the ledger → prints a "Inherited thinking from prior session(s)" summary block before the checklist. With `--check`, distinguishes "you" gaps from "team" gaps. |
 | t-007 | Optional per-package sharding under `.asd/config.toml` | One-shard-per-class is fine for ExampleFlow; monorepos with two teams editing the same class will see false conflicts. Opt-in finer granularity. | `.asd/config.toml` key `sidecar.shard_by = "package"` produces `.asd/conclusions/decisions/<package-key>.jsonl`. Default unchanged. `asd hydrate` reads either layout transparently. |
 | t-008 | `asd sync --check-budget` + CI gate | "Compact" becomes enforced, not aspirational. Pairs with Plan H t-004 (ExampleFlow size validation). | Threshold configurable in `.asd/config.toml` (default 1 MB total, 200 KB per shard). Exits non-zero when exceeded. CI surfaces as a soft gate (warns, doesn't fail) with `--soft`. |
-| t-009 | Audit & purge `.asd/v1/` legacy | Plan A layout still mentioned in DESIGN.md; need to confirm nothing writes there now, and that `asd init` doesn't recreate it. Drop dead code if any. | `git grep "asd/v1"` returns only documentation or migration references; no live write path. `sidecar.rs` no longer has `v1` branches except in `migrate`. |
+| t-009 | Audit `.asd/v1/` legacy + clarify storage layout — **DONE 1.0.35** (scope adjusted from "purge" to "audit + document"). Audit found: (a) `/asd/v1/` is BOTH the SQLite tree prefix (alive, `ASD_PATH_PREFIX`) AND a vestigial on-disk directory; (b) `.asd/v1/` on-disk is gitignored, `sync_to_dir`/`hydrate_from_dir` still write/read it for local debug; (c) README incorrectly told users to `git add .asd/v1/`. Fixed: rewrote README "Git-native sidecar" section, added DESIGN.md "Storage layout" canonical reference, updated DEFERRED.md. Did NOT delete `sync_to_dir`/`hydrate_from_dir` — they're still used by `asd sync`/`asd hydrate` for local-debug workflows and removal would break those without user benefit. | README has no stale `.asd/v1/` instructions; DESIGN.md has a single canonical storage-layout table; the SQLite-prefix-vs-on-disk distinction is explicit in docs. |
 | t-010 | Document the principle in `DESIGN.md` + emit lint warning on violations | The principle is only useful if new code respects it. A future contributor adding a new LedgerKind or artifact needs a single rule to test against. | New `DESIGN.md` section "Sidecar inclusion rule" with the boundary table from this plan. `asd repair` learns to detect & warn on regenerable artifacts that leaked into `.asd/conclusions/`. |
 
 ### Implementation order
@@ -1325,4 +1325,33 @@ warning per detected dynamic-dispatch site (Plan L t-005).
 - **SQL classification on `.execute(...)`** uses a prefix match.
   CTEs (`WITH …`) classify as `IoDbRead` (correct for SELECT-with-
   CTE, wrong for INSERT-with-CTE). Plan I t-006 has the upgrade.
+
+
+---
+
+## Storage layout — what lives where (1.0.35)
+
+ASD uses one in-SQLite namespace and two on-disk locations. They serve
+different purposes; the table below is the canonical reference. (Plan
+K t-009 audit clarification — earlier docs conflated the SQLite path
+prefix `/asd/v1/` with the on-disk directory `.asd/v1/`, which is a
+different thing.)
+
+| Where | What | Tracked? | Purpose | Notes |
+|-------|------|----------|---------|-------|
+| **SQLite tree `/asd/v1/...`** (in `.asd-state.db`) | Index, call graph, ledger, effects, traces, FTS5, search docs, symbol meta | n/a (local DB, gitignored) | Authoritative runtime state | `ASD_PATH_PREFIX = "/asd/v1"`. The `v1` here is the SQLite tree namespace, NOT an on-disk version. |
+| **`.asd/conclusions/*.jsonl`** | Compact subset by ConclusionClass (decisions, classifications, mappings, hazards, recipes, followups, thinking) | **Yes** (committed) | What a fresh clone inherits as judgment | Plan B compact format. Round-tripped via `asd conclusions export/import`. Pre-commit hook writes this; post-merge/post-checkout hooks import it. |
+| **`.asd/v1/`** (on-disk directory) | Verbose mirror written by `sync_to_dir` | No (gitignored since Plan B) | Vestigial local-debug artifact | Still written by `asd sync`, still readable by `asd hydrate`. Not on the commit path. Kept because the codepath is harmless and some local workflows still use it. Can be removed entirely if it ever becomes confusing — Plan K t-009 chose to keep it. |
+| **`.asd/cache/`** | Misc derived state (e.g., `active-task.json`) | No (gitignored) | Per-session ephemeral | Don't commit. |
+| **`.asd/scratch/`** | Working notes scoped to a symbol, with promote-to-ledger path | No (gitignored) | Per-developer scratch | Plan A scratch shipped local-only on purpose. |
+
+**Rule of thumb when adding a new artifact:**
+- Is it derivable from source by `asd index`? → SQLite tree, gitignored
+- Is it the kind of judgment an agent / human had to commit mental effort to? → `.asd/conclusions/`
+- Is it per-session / per-developer? → `.asd/cache/` or `.asd/scratch/`
+
+When in doubt, default to **regenerable + gitignored**. The principle is:
+sidecar = judgment; everything mechanical is regenerable; conflicts
+in the committed sidecar are meaningful (someone made a different
+judgment) and worth surfacing.
 
