@@ -16,7 +16,8 @@ use crate::engine::Engine;
 use crate::index::{AsgIndexStore, IndexStore};
 use crate::ledger::{AsgLedgerStore, LedgerStore};
 use crate::paths::ASD_ROOT;
-use crate::schema::{AuthorKind, ConclusionClass};
+use crate::schema::{AuthorKind, ConclusionClass, LedgerKind};
+use crate::thinking::DEFAULT_CONFIDENCE_FLOOR;
 
 /// Compact JSONL record. `preserve_order` is on for serde_json in this
 /// workspace so field order is stable across runs. Plan B t-005 requires
@@ -98,6 +99,22 @@ pub fn gather_buckets(
             .list_entries(&ref_name, &sym.symbol_id)
             .unwrap_or_default();
         for entry in entries {
+            // Plan K t-003: confidence-floor filter at sync time.
+            // Hypotheses below DEFAULT_CONFIDENCE_FLOOR (0.3) are
+            // speculative scratch — still useful locally via
+            // `asd think list`, but not durable enough to ship as
+            // inherited team judgment. Same threshold as the
+            // read-side `gather_prior_thinking` so a new dev sees
+            // exactly what the committed sidecar would carry. Only
+            // the Hypothesis kind has a confidence semantic worth
+            // gating on; Decision/Constraint/etc. carry the same
+            // field but the meaning is different (recorded judgment
+            // regardless of certainty) so they always ship.
+            if entry.kind == LedgerKind::Hypothesis
+                && entry.confidence.unwrap_or(0.0) < DEFAULT_CONFIDENCE_FLOOR
+            {
+                continue;
+            }
             let class = entry.kind.conclusion_class();
             let stem = class.filename_stem();
             let record = ExportRecord {
@@ -178,7 +195,7 @@ fn author_kind_str(k: AuthorKind) -> &'static str {
 
 // -- Import (Plan B t-005) ---------------------------------------------------
 
-use crate::schema::{Author, Evidence, LedgerEntry, LedgerKind};
+use crate::schema::{Author, Evidence, LedgerEntry};
 use chrono::{DateTime, Utc};
 
 /// Outcome of importing one JSONL file.
@@ -643,6 +660,146 @@ mod tests {
             ids,
             vec!["led_aaa", "led_mmm", "led_zzz"],
             "entries must come out in id-sorted order"
+        );
+    }
+
+    /// Append a single thinking-class entry of a given kind to the
+    /// given engine's `pkg.target` symbol. Used by the Plan K t-003
+    /// confidence-floor tests.
+    fn append_thinking_entry(
+        engine: &Engine,
+        kind: LedgerKind,
+        id: &str,
+        summary: &str,
+        confidence: Option<f64>,
+    ) {
+        let mut entry = LedgerEntry::new(
+            "sym_order_test",
+            kind,
+            summary,
+            Author { kind: AuthorKind::Agent, id: "t".into() },
+        );
+        entry.entry_id = id.to_string();
+        entry.confidence = confidence;
+        AsgLedgerStore::from_engine(engine)
+            .append_entry(&engine.ref_name, &entry, "t")
+            .unwrap();
+    }
+
+    #[test]
+    fn export_drops_low_confidence_hypotheses() {
+        // Plan K t-003 acceptance: a Hypothesis below
+        // DEFAULT_CONFIDENCE_FLOOR (0.3) must NOT appear in the
+        // exported sidecar, even though it's in the ledger.
+        let (engine, _) = engine_with_decisions_in_order(&[]);
+        // High-confidence: should ship.
+        append_thinking_entry(
+            &engine,
+            LedgerKind::Hypothesis,
+            "led_strong",
+            "well-supported hypothesis",
+            Some(0.7),
+        );
+        // Low-confidence: must be filtered out.
+        append_thinking_entry(
+            &engine,
+            LedgerKind::Hypothesis,
+            "led_weak",
+            "speculative guess",
+            Some(0.1),
+        );
+        // Hypothesis with no confidence: treated as 0.0 → dropped.
+        append_thinking_entry(
+            &engine,
+            LedgerKind::Hypothesis,
+            "led_unset",
+            "no confidence assigned",
+            None,
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        export_all(&engine, tmp.path()).unwrap();
+        let body =
+            std::fs::read_to_string(tmp.path().join("thinking.jsonl")).unwrap();
+
+        assert!(
+            body.contains("led_strong"),
+            "high-confidence hypothesis must ship; got:\n{body}"
+        );
+        assert!(
+            !body.contains("led_weak"),
+            "low-confidence hypothesis must NOT ship; got:\n{body}"
+        );
+        assert!(
+            !body.contains("led_unset"),
+            "hypothesis with no confidence must NOT ship; got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn confidence_floor_does_not_affect_non_hypothesis_kinds() {
+        // Plan K t-003: the filter is Hypothesis-only. MentalModels,
+        // FailedAttempts, and OpenQuestions don't carry a confidence
+        // semantic in the same way — they're recorded judgment
+        // regardless of certainty. Verify they ship even with
+        // confidence below the floor (or unset).
+        let (engine, _) = engine_with_decisions_in_order(&[]);
+        append_thinking_entry(
+            &engine,
+            LedgerKind::MentalModel,
+            "led_mm_low",
+            "mental model with low conf marker",
+            Some(0.1),
+        );
+        append_thinking_entry(
+            &engine,
+            LedgerKind::OpenQuestion,
+            "led_oq_unset",
+            "what does this mean?",
+            None,
+        );
+        append_thinking_entry(
+            &engine,
+            LedgerKind::FailedAttempt,
+            "led_fa_low",
+            "tried X, failed because Y",
+            Some(0.1),
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        export_all(&engine, tmp.path()).unwrap();
+        let body =
+            std::fs::read_to_string(tmp.path().join("thinking.jsonl")).unwrap();
+
+        for must_appear in ["led_mm_low", "led_oq_unset", "led_fa_low"] {
+            assert!(
+                body.contains(must_appear),
+                "non-Hypothesis kind {must_appear} must ship regardless of confidence; got:\n{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn confidence_floor_does_not_affect_decisions() {
+        // A Decision is a recorded choice; even "I'm 10% sure about
+        // this" is still a decision worth committing. The filter
+        // must only gate Hypothesis.
+        let (engine, _) = engine_with_decisions_in_order(&[]);
+        append_thinking_entry(
+            &engine,
+            LedgerKind::Decision,
+            "led_dec_low",
+            "decided X with low certainty",
+            Some(0.1),
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        export_all(&engine, tmp.path()).unwrap();
+        let body =
+            std::fs::read_to_string(tmp.path().join("decisions.jsonl")).unwrap();
+        assert!(
+            body.contains("led_dec_low"),
+            "low-confidence Decision must still ship; got:\n{body}"
         );
     }
 
