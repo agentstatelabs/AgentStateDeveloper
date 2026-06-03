@@ -386,6 +386,9 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
             }).collect::<Vec<_>>(),
         }))?
     );
+
+    auto_register_in_registry(&cfg.db_path);
+
     Ok(())
 }
 
@@ -424,6 +427,76 @@ fn log_skipped(skipped: &[PathBuf], log: &mut Option<IndexLog>, show_on_stderr: 
         eprintln!(
             "  … and {} more — see .asd/index.log for the full list",
             skipped.len() - SKIPPED_DISPLAY_LIMIT
+        );
+    }
+}
+
+/// Best-effort: after a successful index, make sure this repo is in the shared
+/// registry at `~/.config/asd/repos.toml`. Prints a one-line notice if a new
+/// entry was added; silently updates the stored path if the same name was
+/// already registered under a different path. All errors are swallowed —
+/// this must never fail an index.
+fn auto_register_in_registry(db_path: &Path) {
+    use agentstatedeveloper_core::registry::Registry;
+
+    let abs = match db_path.canonicalize().or_else(|_| {
+        if db_path.is_absolute() {
+            Ok(db_path.to_path_buf())
+        } else {
+            std::env::current_dir().map(|c| c.join(db_path))
+        }
+    }) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    let default_name = abs
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        .map(|s| {
+            s.chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
+                .collect::<String>()
+        });
+    let Some(name) = default_name.filter(|s| !s.is_empty() && s != "default") else {
+        return;
+    };
+
+    let mut reg = match Registry::load() {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    // Already registered under this name? Update silently if the path drifted.
+    if let Some(existing) = reg.get(&name) {
+        if existing.path == abs {
+            return;
+        }
+        if reg.register(&name, &abs).is_ok() {
+            let _ = reg.save();
+        }
+        return;
+    }
+
+    // Registered under a different name? Silently leave it — the user picked
+    // that name on purpose. Just confirm by walking entries.
+    if reg.list().iter().any(|e| e.path == abs) {
+        return;
+    }
+
+    if reg.register(&name, &abs).is_err() {
+        return;
+    }
+    if reg.save().is_ok() {
+        eprintln!(
+            "Registered as '{name}' — use `asd repo use {name}` to make it active."
         );
     }
 }
