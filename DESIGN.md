@@ -1226,7 +1226,7 @@ is what we actually burn through.
 | t-005 | I/t-012 | Document dynamic-dispatch as out-of-scope + `getattr` callsite warning | Python accuracy | S |
 | t-006 | I/t-041 | `asd index` summary reports dropped (unresolved) call edges | Diagnostic | S |
 | t-007 | I/t-020 | `asd ledger reject <entry>` action — **already done**; closed retroactively (already shipped across core/CLI/MCP with ratify integration tests) | Ratification | XS |
-| t-008 | I/t-022 | Approval rationale: `--message` on approve + first-class `approval_note` field | Ratification | XS |
+| t-008 | I/t-022 | Approval rationale: `--message` on approve — **already done** end-to-end (CLI + MCP wired; ratify appends "Approver note" to body; test `approve_with_message_appends_to_body`) | Ratification | XS |
 | t-009 | I/t-024 | `asd ledger supersede <old> <new>` surface across CLI / MCP / HTTP — **already done**; closed retroactively (already shipped, HTTP routes via `asd-pro-serve` reusing `build_router`) | Ratification | XS |
 | t-010 | I/t-028 | `health.symbol_count` reports total artifact count | Diagnostic | XS |
 

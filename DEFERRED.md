@@ -107,8 +107,16 @@ M5 scope exclusions, current dispositions:
   t-007.
 - **DEFERRED (Plan I t-021)** — Revoke approved entry
   (security-adjacent; gated on real use case).
-- **PLANNED (Plan L t-008)** — Approval rationale: `--message` on
-  approve + first-class `approval_note` field.
+- **RESOLVED — Approval rationale.** CLI `asd ledger approve
+  --message "..."` and MCP `ledger_approve { message: ... }` both
+  wired through to `RatifyOps::approve_entry`, which appends an
+  "Approver note" section to the entry body. Test coverage:
+  `approve_with_message_appends_to_body` in
+  `agentstatedeveloper-ratify/tests/ratify.rs`. Note: there's no
+  `asd ledger get <entry-id>` surface specifically; entries are
+  read via `asd read <qname>` (which renders body + notes) or MCP
+  `ledger_list`. The Plan L t-001 DEFERRED refresh missed this;
+  closed retroactively under Plan L t-008.
 - **DEFERRED (Plan I t-023)** — Cryptographic signing (ed25519).
   Enterprise-shaped; gated on customers.
 - **RESOLVED — `asd ledger supersede` surface.** Ships across
