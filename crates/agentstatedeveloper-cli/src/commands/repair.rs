@@ -21,7 +21,7 @@
 use anyhow::Result;
 use clap::Args;
 
-use agentstatedeveloper_core::{Engine, IssueSeverity, repair_asg, scan_asg};
+use agentstatedeveloper_core::{Engine, IssueSeverity, repair_asg, scan_asg, scan_sidecar};
 
 use crate::config::Config;
 
@@ -40,8 +40,21 @@ pub struct RepairArgs {
 pub fn run(cfg: &Config, args: RepairArgs) -> Result<()> {
     let engine = Engine::open_sqlite(&cfg.db_path)?;
 
+    // Plan K t-010: always run the sidecar inclusion-rule lint
+    // alongside the ASG integrity scan. The sidecar issues are
+    // read-only and never auto-fixed (intentional — flagged files
+    // might be legitimate work in progress, deserve human review).
+    let conclusions_dir = cfg
+        .db_path
+        .parent()
+        .map(|p| p.join(".asd").join("conclusions"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".asd/conclusions"));
+    let sidecar_issues = scan_sidecar(&conclusions_dir);
+
     if args.fix {
-        let report = repair_asg(&engine.repo, &engine.ref_name, &cfg.agent_id, false)?;
+        let mut report = repair_asg(&engine.repo, &engine.ref_name, &cfg.agent_id, false)?;
+        report.issues.extend(sidecar_issues.clone());
+        report.issues_found += sidecar_issues.len();
         if args.json {
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {
@@ -49,23 +62,17 @@ pub fn run(cfg: &Config, args: RepairArgs) -> Result<()> {
         }
     } else {
         // Dry-run: scan only.
-        let issues = scan_asg(&engine.repo, &engine.ref_name)?;
+        let mut issues = scan_asg(&engine.repo, &engine.ref_name)?;
+        issues.extend(sidecar_issues);
+        let report = agentstatedeveloper_core::RepairReport {
+            issues_found: issues.len(),
+            fixes_applied: 0,
+            dry_run: true,
+            issues,
+        };
         if args.json {
-            let report = agentstatedeveloper_core::RepairReport {
-                issues_found: issues.len(),
-                fixes_applied: 0,
-                dry_run: true,
-                issues,
-            };
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {
-            // Build a report struct just for the printer.
-            let report = agentstatedeveloper_core::RepairReport {
-                issues_found: issues.len(),
-                fixes_applied: 0,
-                dry_run: true,
-                issues,
-            };
             print_report_human(&report, true);
         }
     }

@@ -66,6 +66,7 @@ pub use policy::{
 };
 pub use repair::{
     IssueSeverity, RepairIssue, RepairReport, drop_orphaned_edge_refs, repair_asg, scan_asg,
+    scan_sidecar,
 };
 pub use schema::{
     ASD_PATH_PREFIX, ASD_SCHEMA_VERSION, Author, AuthorKind, ConclusionClass, Effect,

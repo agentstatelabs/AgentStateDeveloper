@@ -1,7 +1,9 @@
 //! ASG state repair — scan for corruption and apply safe auto-corrections.
 //!
-//! Two entry points:
-//!   - [`scan_asg`]: read-only; returns every detected issue.
+//! Three entry points:
+//!   - [`scan_asg`]: read-only; returns every detected ASG-side issue.
+//!   - [`scan_sidecar`]: read-only; flags files/dirs in `.asd/conclusions/`
+//!     that violate the Plan K sidecar inclusion rule (Plan K t-010).
 //!   - [`repair_asg`]: calls `scan_asg`, then optionally applies auto-fixable
 //!     corrections and re-scans to show what remains.
 //!
@@ -15,6 +17,9 @@
 //! | `orphaned_callee_ref` | warn | yes — ref removed from callees list |
 //! | `orphaned_caller_ref` | warn | yes — ref removed from callers list |
 //! | `orphaned_ledger` | warn | no — preserve audit trail |
+//! | `sidecar_unknown_file` | warn | no — manual review (might be intentional) |
+//! | `sidecar_unknown_dir` | warn | no — manual review |
+//! | `sidecar_wrong_extension` | warn | no — manual review |
 
 use std::collections::HashSet;
 
@@ -458,4 +463,242 @@ fn extract_str_array(v: &serde_json::Value, field: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Plan K t-010: sidecar inclusion-rule lint
+// ---------------------------------------------------------------------------
+
+/// Scan `.asd/conclusions/` for files and directories that don't match
+/// the Plan K sidecar inclusion rule:
+///
+/// > The committed sidecar carries **judgment** — anything an agent
+/// > or human had to decide, classify, hypothesize, approve, or
+/// > otherwise commit mental effort to. Anything mechanically
+/// > derivable from source stays in the regenerable SQLite cache and
+/// > is gitignored.
+///
+/// Concretely, `.asd/conclusions/` should ONLY contain:
+///   - `<stem>.jsonl` for the default Class layout, where `<stem>`
+///     is one of the 7 `ConclusionClass::filename_stem()` values
+///   - `<stem>/<anything>.jsonl` for per-package layout (Plan K t-007)
+///
+/// Anything else — `.md` notes, `.json` dumps, `effects.jsonl`
+/// (regenerable!), random subdirs — is leakage. We warn so a
+/// contributor or `pre-commit` hook can review before the noise
+/// lands in git.
+///
+/// Read-only; never deletes. Returns an empty list when the directory
+/// doesn't exist (fresh project — nothing to lint yet).
+pub fn scan_sidecar(conclusions_dir: &std::path::Path) -> Vec<RepairIssue> {
+    use crate::schema::ConclusionClass;
+    let mut issues = Vec::new();
+    if !conclusions_dir.is_dir() {
+        return issues;
+    }
+    let known_stems: std::collections::HashSet<&'static str> =
+        ConclusionClass::all().iter().map(|c| c.filename_stem()).collect();
+
+    let entries = match std::fs::read_dir(conclusions_dir) {
+        Ok(e) => e,
+        Err(_) => return issues,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(conclusions_dir)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        if path.is_dir() {
+            // Per-package layout subdirectory — name must match a
+            // known ConclusionClass stem.
+            if !known_stems.contains(name.as_str()) {
+                issues.push(RepairIssue {
+                    kind: "sidecar_unknown_dir".into(),
+                    severity: IssueSeverity::Warn,
+                    path: format!(".asd/conclusions/{rel}"),
+                    detail: format!(
+                        "subdirectory `{name}` is not a known ConclusionClass; \
+                         expected one of: {known_list}. If you intended a \
+                         per-package layout (Plan K t-007), the subdir name \
+                         must match a class stem.",
+                        known_list = sorted_known_stems_list(&known_stems),
+                    ),
+                    auto_fixable: false,
+                });
+                continue;
+            }
+            // Inside a valid class subdir, every file must be *.jsonl.
+            if let Ok(inner) = std::fs::read_dir(&path) {
+                for sub in inner.flatten() {
+                    let sub_path = sub.path();
+                    let sub_rel = sub_path
+                        .strip_prefix(conclusions_dir)
+                        .unwrap_or(&sub_path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    if sub_path.is_file()
+                        && sub_path.extension().and_then(|s| s.to_str()) != Some("jsonl")
+                    {
+                        issues.push(RepairIssue {
+                            kind: "sidecar_wrong_extension".into(),
+                            severity: IssueSeverity::Warn,
+                            path: format!(".asd/conclusions/{sub_rel}"),
+                            detail: format!(
+                                "file is not `.jsonl`; per-package shards must have \
+                                 the `.jsonl` extension to be picked up by import."
+                            ),
+                            auto_fixable: false,
+                        });
+                    }
+                }
+            }
+        } else if path.is_file() {
+            // Top-level file — must be `<known-stem>.jsonl`.
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let ext = path.extension().and_then(|s| s.to_str());
+            if ext != Some("jsonl") {
+                issues.push(RepairIssue {
+                    kind: "sidecar_wrong_extension".into(),
+                    severity: IssueSeverity::Warn,
+                    path: format!(".asd/conclusions/{rel}"),
+                    detail: format!(
+                        "file is not `.jsonl`; the committed sidecar should \
+                         carry only JSONL ledger projections. Move other \
+                         artifacts out of `.asd/conclusions/` — derived caches \
+                         belong in `.asd/cache/` (gitignored)."
+                    ),
+                    auto_fixable: false,
+                });
+            } else if !known_stems.contains(stem.as_str()) {
+                issues.push(RepairIssue {
+                    kind: "sidecar_unknown_file".into(),
+                    severity: IssueSeverity::Warn,
+                    path: format!(".asd/conclusions/{rel}"),
+                    detail: format!(
+                        "file `{name}` doesn't match a known ConclusionClass \
+                         (one of: {known_list}). If a new judgment class \
+                         shipped, add the ConclusionClass variant. If this is \
+                         a regenerable artifact (e.g. effects, FTS), move it \
+                         to `.asd/cache/` (gitignored).",
+                        known_list = sorted_known_stems_list(&known_stems),
+                    ),
+                    auto_fixable: false,
+                });
+            }
+        }
+    }
+    issues
+}
+
+fn sorted_known_stems_list(stems: &std::collections::HashSet<&str>) -> String {
+    let mut v: Vec<&str> = stems.iter().copied().collect();
+    v.sort();
+    v.join(", ")
+}
+
+#[cfg(test)]
+mod sidecar_lint_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn touch(p: &std::path::Path) {
+        std::fs::write(p, b"").unwrap();
+    }
+
+    #[test]
+    fn empty_or_missing_dir_returns_no_issues() {
+        let tmp = tempdir().unwrap();
+        let missing = tmp.path().join("nope");
+        assert!(scan_sidecar(&missing).is_empty());
+
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        assert!(scan_sidecar(&empty).is_empty());
+    }
+
+    #[test]
+    fn known_class_files_pass_clean() {
+        let tmp = tempdir().unwrap();
+        for stem in [
+            "decisions",
+            "classifications",
+            "mappings",
+            "hazards",
+            "recipes",
+            "followups",
+            "thinking",
+        ] {
+            touch(&tmp.path().join(format!("{stem}.jsonl")));
+        }
+        let issues = scan_sidecar(tmp.path());
+        assert!(
+            issues.is_empty(),
+            "all-known-stem files must lint clean; got: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn flags_unknown_top_level_file() {
+        let tmp = tempdir().unwrap();
+        touch(&tmp.path().join("effects.jsonl")); // not a ConclusionClass
+        let issues = scan_sidecar(tmp.path());
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].kind, "sidecar_unknown_file");
+        assert!(issues[0].path.contains("effects.jsonl"));
+    }
+
+    #[test]
+    fn flags_wrong_extension_at_top_level() {
+        let tmp = tempdir().unwrap();
+        touch(&tmp.path().join("notes.md"));
+        let issues = scan_sidecar(tmp.path());
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].kind, "sidecar_wrong_extension");
+    }
+
+    #[test]
+    fn flags_unknown_subdir_name() {
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("backups")).unwrap();
+        let issues = scan_sidecar(tmp.path());
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].kind, "sidecar_unknown_dir");
+    }
+
+    #[test]
+    fn accepts_known_class_subdir_with_jsonl_shards() {
+        // Per-package layout: `.asd/conclusions/decisions/crates--core.jsonl`
+        let tmp = tempdir().unwrap();
+        let class_dir = tmp.path().join("decisions");
+        std::fs::create_dir(&class_dir).unwrap();
+        touch(&class_dir.join("crates--core.jsonl"));
+        touch(&class_dir.join("crates--cli.jsonl"));
+        let issues = scan_sidecar(tmp.path());
+        assert!(
+            issues.is_empty(),
+            "known class subdir with .jsonl shards must lint clean; got: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn flags_wrong_extension_inside_class_subdir() {
+        let tmp = tempdir().unwrap();
+        let class_dir = tmp.path().join("decisions");
+        std::fs::create_dir(&class_dir).unwrap();
+        touch(&class_dir.join("crates--core.json")); // wrong ext
+        let issues = scan_sidecar(tmp.path());
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].kind, "sidecar_wrong_extension");
+        assert!(issues[0].path.contains("decisions/"));
+    }
 }

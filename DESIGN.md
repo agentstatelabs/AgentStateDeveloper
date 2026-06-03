@@ -1355,3 +1355,77 @@ sidecar = judgment; everything mechanical is regenerable; conflicts
 in the committed sidecar are meaningful (someone made a different
 judgment) and worth surfacing.
 
+
+---
+
+## Sidecar inclusion rule (Plan K t-010)
+
+A single rule for contributors adding new LedgerKinds, artifacts, or
+output paths. Test every new piece of data against this:
+
+> The committed sidecar (`.asd/conclusions/*.jsonl`) carries
+> **judgment** — anything an agent or human had to decide,
+> classify, hypothesize, approve, or otherwise commit mental effort
+> to. Anything mechanically derivable from source stays in the
+> regenerable SQLite cache and is gitignored.
+
+### How to decide
+
+| If your new artifact is… | …then it goes in | …because |
+|---|---|---|
+| A LedgerKind whose `conclusion_class()` routes to one of the 7 ConclusionClass buckets | `.asd/conclusions/<stem>.jsonl` (committed) | It's judgment. New dev should inherit it. |
+| A statically-derivable index, FTS table, or denorm cache | SQLite tree under `/asd/v1/...` (gitignored via `.asd-state.db`) | `asd index` regenerates it from source. |
+| A per-session ephemeral (active task, hot cache) | `.asd/cache/` (gitignored) | Doesn't survive a fresh clone. |
+| A personal/working note that may promote-to-ledger later | `.asd/scratch/` (gitignored) | Local-only by design. |
+| A runtime trace (expensive to regenerate but reproducible by re-running) | SQLite, NOT committed sidecar | Re-runnable. |
+
+### How the rule is enforced
+
+- **At sync time**: `asd conclusions export` only walks ledger
+  entries, never indexes or FTS. The export schema (`ExportRecord`)
+  has no field for derived artifacts.
+- **Plan K t-002 (effects)**: even though `EffectDecl` has a
+  schema-level way to ship verified effects, the current
+  ConclusionClass enum deliberately doesn't bucket them — keeping
+  the committed sidecar judgment-only.
+- **Plan K t-003 (confidence floor)**: Hypothesis entries below
+  `DEFAULT_CONFIDENCE_FLOOR` are filtered at sync time. A weak
+  speculation isn't durable enough to count as team judgment.
+- **Plan K t-010 (this section)**: `asd repair` walks
+  `.asd/conclusions/` and warns on anything that doesn't match the
+  expected `<known-class-stem>.jsonl` or `<known-class-stem>/*.jsonl`
+  layout. Catches accidental leakage of regenerable artifacts.
+
+### What `asd repair` detects (sidecar lint)
+
+| issue kind | trigger |
+|---|---|
+| `sidecar_unknown_file` | top-level file isn't `<known-class-stem>.jsonl` (e.g. `effects.jsonl` snuck in) |
+| `sidecar_unknown_dir` | subdirectory name isn't a known class stem (per-package layout only recognizes `<stem>/`) |
+| `sidecar_wrong_extension` | a file isn't `.jsonl` (e.g. someone committed `notes.md` to `.asd/conclusions/`) |
+
+None of these are auto-fixed — they need human review (the file
+might be intentional, or might be a new judgment class waiting on a
+schema extension). Surfaced as `Warn`, not `Error`, so they don't
+block `asd repair --fix` from running the auto-fixable ASG-side
+corrections.
+
+### Adding a new judgment class (workflow)
+
+If you're shipping a new kind of judgment that should travel with
+commits:
+
+1. Add the variant to `LedgerKind` in `core::schema`.
+2. Route it via `conclusion_class()` to an existing or new
+   `ConclusionClass` variant. New class → also add to
+   `ConclusionClass::all()` and `filename_stem()`.
+3. The export/import pipeline picks it up automatically — no
+   conclusions_export changes needed.
+4. The `asd repair` lint picks it up automatically — your new
+   class's `filename_stem()` joins the known-stems set.
+5. Document it in CHANGELOG and (if user-visible) README.
+
+If you're shipping a new derived artifact, it goes in SQLite or
+`.asd/cache/`, never `.asd/conclusions/`. The lint will warn you if
+you forget.
+
