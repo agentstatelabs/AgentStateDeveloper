@@ -54,6 +54,39 @@ async fn health_endpoint() {
 }
 
 #[tokio::test]
+async fn health_returns_artifact_count_breakdown() {
+    // Plan L t-010: bare `symbol_count` stays for backward compat,
+    // and a new `artifact_count` rollup exposes
+    // {symbols, ledger_entries, effects}. Catches regressions if
+    // either the bare field or the rollup gets dropped.
+    if !sample_db().exists() {
+        eprintln!("skipping: sample DB missing");
+        return;
+    }
+    let (status, body) = get_body(router().await, "/api/v1/health").await;
+    assert_eq!(status, StatusCode::OK, "body={}", body);
+    let bare = body["symbol_count"]
+        .as_u64()
+        .expect("bare symbol_count present (backward compat)");
+    let ac = body["artifact_count"]
+        .as_object()
+        .expect("artifact_count object present");
+    assert_eq!(
+        ac.get("symbols").and_then(|v| v.as_u64()),
+        Some(bare),
+        "artifact_count.symbols must mirror bare symbol_count"
+    );
+    assert!(
+        ac.contains_key("ledger_entries"),
+        "artifact_count.ledger_entries field must be present"
+    );
+    assert!(
+        ac.contains_key("effects"),
+        "artifact_count.effects field must be present"
+    );
+}
+
+#[tokio::test]
 async fn list_symbols_endpoint() {
     if !sample_db().exists() {
         return;

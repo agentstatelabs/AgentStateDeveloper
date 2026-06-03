@@ -840,7 +840,7 @@ impl AsdMcpServer {
     // -- Read tools --
 
     #[tool(
-        description = "Health check: reports MCP server status, ASG db path, and indexed symbol count."
+        description = "Health check: reports MCP server status, ASG db path, indexed symbol count, and total artifact counts (symbols + ledger entries + effects)."
     )]
     async fn health(&self) -> String {
         let engine = self.engine.lock().await;
@@ -857,30 +857,65 @@ impl AsdMcpServer {
             .to_string_lossy()
             .to_string();
         let ledger_prefix = format!("{}/ledger", ASD_PATH_PREFIX);
-        let orphan_count = match engine.repo.get_tree(&ref_name, &ledger_prefix) {
-            Ok(serde_json::Value::Object(by_symbol)) => {
-                let indexed_prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-                let indexed: std::collections::HashSet<String> =
-                    match engine.repo.get_tree(&ref_name, &indexed_prefix) {
-                        Ok(serde_json::Value::Object(m)) => m
-                            .values()
-                            .filter_map(|v| v.get("symbol_id")?.as_str().map(|s| s.to_string()))
-                            .collect(),
-                        _ => std::collections::HashSet::new(),
-                    };
-                by_symbol
-                    .keys()
-                    .filter(|sym_id| !indexed.contains(*sym_id))
-                    .count()
-            }
+        // Plan L t-010: walk the ledger tree once, derive BOTH the
+        // orphan count and the total entry count from the same pass.
+        // Orphan = ledger entries keyed by a symbol_id that isn't in
+        // the qname index. Total entries = sum across all symbol
+        // subtrees (one inner object per symbol; each value-of-key
+        // is one entry).
+        let (orphan_count, ledger_entry_count) =
+            match engine.repo.get_tree(&ref_name, &ledger_prefix) {
+                Ok(serde_json::Value::Object(by_symbol)) => {
+                    let indexed_prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+                    let indexed: std::collections::HashSet<String> =
+                        match engine.repo.get_tree(&ref_name, &indexed_prefix) {
+                            Ok(serde_json::Value::Object(m)) => m
+                                .values()
+                                .filter_map(|v| {
+                                    v.get("symbol_id")?.as_str().map(|s| s.to_string())
+                                })
+                                .collect(),
+                            _ => std::collections::HashSet::new(),
+                        };
+                    let mut orphans = 0usize;
+                    let mut entries = 0usize;
+                    for (sym_id, subtree) in &by_symbol {
+                        if let serde_json::Value::Object(es) = subtree {
+                            entries += es.len();
+                        }
+                        if !indexed.contains(sym_id) {
+                            orphans += 1;
+                        }
+                    }
+                    (orphans, entries)
+                }
+                _ => (0, 0),
+            };
+        // Plan L t-010: count symbols with at least one declared
+        // effect. Top-level keys under /asd/v1/effects are symbol_ids.
+        let effects_prefix = format!("{}/effects", ASD_PATH_PREFIX);
+        let effects_count = match engine.repo.get_tree(&ref_name, &effects_prefix) {
+            Ok(serde_json::Value::Object(map)) => map.len(),
             _ => 0,
         };
         let stale = stale_warning(&self.db_path, 3600);
         let payload = serde_json::json!({
             "status": "ok",
             "db_path": db_path,
+            // Bare `symbol_count` kept for backward compatibility —
+            // older callers (Plan L t-010 acceptance: "backward
+            // compat: bare symbol_count keeps working") depend on it.
             "symbol_count": symbol_count,
             "orphaned_symbol_count": orphan_count,
+            // Plan L t-010: total artifact rollup. Previously the
+            // bare symbol_count was being misread as "total things in
+            // the index" — it's only the qname count. This breakdown
+            // makes the distinction explicit.
+            "artifact_count": {
+                "symbols": symbol_count,
+                "ledger_entries": ledger_entry_count,
+                "effects": effects_count,
+            },
             "stale": stale,
         });
         serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())
