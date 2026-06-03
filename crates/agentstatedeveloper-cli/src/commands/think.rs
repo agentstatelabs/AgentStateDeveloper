@@ -127,9 +127,53 @@ pub fn run(cfg: &Config, cmd: ThinkCmd) -> Result<()> {
     }
 }
 
-/// Scan all thinking entries currently in the ledger and bucket them
-/// by kind. Used by `bootstrap --check` to report what's missing.
-fn count_thinking(cfg: &Config) -> Result<(usize, usize, usize, usize)> {
+/// Counts of each thinking kind, plus optional you-vs-team
+/// breakdown. Plan K t-006: `bootstrap --check` reports both.
+#[derive(Debug, Default, Clone)]
+struct ThinkingCounts {
+    hypothesis: usize,
+    mental_model: usize,
+    failed_attempt: usize,
+    open_question: usize,
+    // "you" subset — entries whose author.id matches the local agent_id.
+    hypothesis_you: usize,
+    mental_model_you: usize,
+    failed_attempt_you: usize,
+    open_question_you: usize,
+}
+
+/// One inherited mental-model or hypothesis sample for the auto-
+/// surfaced "Inherited thinking from prior session(s)" block in
+/// default bootstrap output (Plan K t-006).
+#[derive(Debug, Clone)]
+struct InheritedSample {
+    qname: String,
+    summary: String,
+    confidence: Option<f64>,
+    author_id: String,
+}
+
+#[derive(Debug, Default, Clone)]
+struct InheritanceSummary {
+    counts: ThinkingCounts,
+    /// Up to 3 mental-model samples (newest first).
+    mental_models: Vec<InheritedSample>,
+    /// Up to 3 highest-confidence hypotheses.
+    top_hypotheses: Vec<InheritedSample>,
+}
+
+impl InheritanceSummary {
+    /// Detection trigger: ≥1 MentalModel OR ≥3 Hypotheses → there's
+    /// inherited thinking worth surfacing.
+    fn has_inheritance(&self) -> bool {
+        self.counts.mental_model >= 1 || self.counts.hypothesis >= 3
+    }
+}
+
+/// Plan K t-006: walk every indexed symbol's ledger, bucket thinking
+/// entries by kind and by author (you vs team), and collect a few
+/// samples for the inheritance preview.
+fn gather_thinking(cfg: &Config) -> Result<InheritanceSummary> {
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let index = AsgIndexStore::from_engine(&engine);
     let ledger = AsgLedgerStore::from_engine(&engine);
@@ -146,7 +190,12 @@ fn count_thinking(cfg: &Config) -> Result<(usize, usize, usize, usize)> {
         serde_json::Value::Object(m) => m.keys().cloned().collect(),
         _ => Vec::new(),
     };
-    let (mut h, mut m, mut f, mut q) = (0, 0, 0, 0);
+
+    let mut counts = ThinkingCounts::default();
+    let mut mm_samples: Vec<InheritedSample> = Vec::new();
+    let mut hyp_samples: Vec<InheritedSample> = Vec::new();
+    let me = cfg.agent_id.as_str();
+
     for qn in qnames {
         let sym = match index.get_symbol_by_qname(&ref_name, &qn)? {
             Some(s) => s,
@@ -156,101 +205,214 @@ fn count_thinking(cfg: &Config) -> Result<(usize, usize, usize, usize)> {
             .list_entries(&ref_name, &sym.symbol_id)
             .unwrap_or_default();
         for e in entries {
+            let is_me = e.author.id == me;
             match e.kind {
-                LedgerKind::Hypothesis => h += 1,
-                LedgerKind::MentalModel => m += 1,
-                LedgerKind::FailedAttempt => f += 1,
-                LedgerKind::OpenQuestion => q += 1,
+                LedgerKind::Hypothesis => {
+                    counts.hypothesis += 1;
+                    if is_me {
+                        counts.hypothesis_you += 1;
+                    }
+                    hyp_samples.push(InheritedSample {
+                        qname: sym.qname.clone(),
+                        summary: e.summary.clone(),
+                        confidence: e.confidence,
+                        author_id: e.author.id.clone(),
+                    });
+                }
+                LedgerKind::MentalModel => {
+                    counts.mental_model += 1;
+                    if is_me {
+                        counts.mental_model_you += 1;
+                    }
+                    mm_samples.push(InheritedSample {
+                        qname: sym.qname.clone(),
+                        summary: e.summary.clone(),
+                        confidence: None,
+                        author_id: e.author.id.clone(),
+                    });
+                }
+                LedgerKind::FailedAttempt => {
+                    counts.failed_attempt += 1;
+                    if is_me {
+                        counts.failed_attempt_you += 1;
+                    }
+                }
+                LedgerKind::OpenQuestion => {
+                    counts.open_question += 1;
+                    if is_me {
+                        counts.open_question_you += 1;
+                    }
+                }
                 _ => {}
             }
         }
     }
-    Ok((h, m, f, q))
+
+    // Top 3 hypotheses by confidence desc (None sorts last).
+    hyp_samples.sort_by(|a, b| {
+        b.confidence
+            .unwrap_or(0.0)
+            .partial_cmp(&a.confidence.unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    hyp_samples.truncate(3);
+    mm_samples.truncate(3);
+
+    Ok(InheritanceSummary {
+        counts,
+        mental_models: mm_samples,
+        top_hypotheses: hyp_samples,
+    })
+}
+
+/// Backward-compatible bare-counts helper (kept for any external
+/// callers; internally we use `gather_thinking` for the richer
+/// inheritance summary).
+#[allow(dead_code)]
+fn count_thinking(cfg: &Config) -> Result<(usize, usize, usize, usize)> {
+    let s = gather_thinking(cfg)?;
+    Ok((
+        s.counts.hypothesis,
+        s.counts.mental_model,
+        s.counts.failed_attempt,
+        s.counts.open_question,
+    ))
 }
 
 fn run_bootstrap(cfg: &Config, args: BootstrapArgs) -> Result<()> {
     let prompt_path = "docs/initial-read-prompt.md";
+    let summary = gather_thinking(cfg)?;
+
     if args.check {
-        let (h, m, f, q) = count_thinking(cfg)?;
-        let mut gaps: Vec<&str> = Vec::new();
-        if m == 0 {
-            gaps.push("no MentalModel yet — describe the top-level architecture with `asd think model`");
-        }
-        if h == 0 {
-            gaps.push("no Hypothesis yet — record at least one speculation with `asd think speculate`");
-        }
-        if q == 0 {
-            gaps.push("no OpenQuestion yet — record known unknowns with `asd think question`");
-        }
-        if f == 0 {
-            gaps.push("no FailedAttempt yet — once a dead end appears, capture with `asd think failed`");
-        }
-        if args.json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
-                    "ok": true,
-                    "prompt_path": prompt_path,
-                    "counts": {
-                        "hypothesis": h, "mental_model": m,
-                        "failed_attempt": f, "open_question": q,
-                    },
-                    "gaps": gaps,
-                }))?
-            );
-        } else {
-            println!("# asd think bootstrap --check");
-            println!();
-            println!("prompt: {prompt_path}");
-            println!();
-            println!("counts:");
-            println!("  hypothesis     : {h}");
-            println!("  mental_model   : {m}");
-            println!("  failed_attempt : {f}");
-            println!("  open_question  : {q}");
-            println!();
-            if gaps.is_empty() {
-                println!("gaps: none — every thinking bucket has at least one entry.");
-            } else {
-                println!("gaps:");
-                for g in &gaps {
-                    println!("  - {g}");
-                }
-            }
-        }
-        return Ok(());
+        return run_bootstrap_check(prompt_path, &summary, args.json);
     }
 
-    // Default mode: print prompt path + starter checklist.
-    if args.json {
+    run_bootstrap_default(prompt_path, &summary, args.json)
+}
+
+fn run_bootstrap_check(
+    prompt_path: &str,
+    s: &InheritanceSummary,
+    json_out: bool,
+) -> Result<()> {
+    let c = &s.counts;
+    // Gaps are computed against the TEAM total (anything in the
+    // ledger counts as "we have it"). The "you" subset is reported
+    // alongside so a new dev can see what's inherited vs personal.
+    let mut gaps: Vec<&str> = Vec::new();
+    if c.mental_model == 0 {
+        gaps.push("no MentalModel yet — describe the top-level architecture with `asd think model`");
+    }
+    if c.hypothesis == 0 {
+        gaps.push("no Hypothesis yet — record at least one speculation with `asd think speculate`");
+    }
+    if c.open_question == 0 {
+        gaps.push("no OpenQuestion yet — record known unknowns with `asd think question`");
+    }
+    if c.failed_attempt == 0 {
+        gaps.push("no FailedAttempt yet — once a dead end appears, capture with `asd think failed`");
+    }
+
+    if json_out {
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "ok": true,
                 "prompt_path": prompt_path,
-                "checklist": [
-                    "Read the prompt at docs/initial-read-prompt.md",
-                    "Run `asd reindex` so the project graph is current",
-                    "Capture at least one MentalModel for the top-level architecture",
-                    "Capture Hypotheses for hot files with confidence in [0.0, 1.0]",
-                    "Record OpenQuestions for known unknowns",
-                    "Record FailedAttempts as dead ends emerge",
-                    "Re-run `asd think bootstrap --check` to confirm coverage",
-                ],
-                "commands": {
-                    "model": "asd think model <NAME> --symbols a.b,c.d --summary \"...\"",
-                    "speculate": "asd think speculate <QNAME> --conf 0.6 --summary \"...\"",
-                    "question": "asd think question <QNAME> --q \"...\"",
-                    "failed": "asd think failed <QNAME> --tried \"...\" --because \"...\"",
-                    "list": "asd think list [--kind hypothesis|model|failed|question]",
+                "counts_team": {
+                    "hypothesis": c.hypothesis,
+                    "mental_model": c.mental_model,
+                    "failed_attempt": c.failed_attempt,
+                    "open_question": c.open_question,
                 },
+                "counts_you": {
+                    "hypothesis": c.hypothesis_you,
+                    "mental_model": c.mental_model_you,
+                    "failed_attempt": c.failed_attempt_you,
+                    "open_question": c.open_question_you,
+                },
+                "gaps": gaps,
             }))?
         );
         return Ok(());
     }
 
+    println!("# asd think bootstrap --check");
+    println!();
+    println!("prompt: {prompt_path}");
+    println!();
+    // Plan K t-006: print you-vs-team counts side-by-side so a new
+    // dev can distinguish "what the team has captured" from
+    // "what I personally have contributed."
+    println!("counts (team / you):");
+    println!(
+        "  hypothesis     : {:>3} / {:>3}",
+        c.hypothesis, c.hypothesis_you
+    );
+    println!(
+        "  mental_model   : {:>3} / {:>3}",
+        c.mental_model, c.mental_model_you
+    );
+    println!(
+        "  failed_attempt : {:>3} / {:>3}",
+        c.failed_attempt, c.failed_attempt_you
+    );
+    println!(
+        "  open_question  : {:>3} / {:>3}",
+        c.open_question, c.open_question_you
+    );
+    println!();
+    if gaps.is_empty() {
+        println!("gaps: none — every thinking bucket has at least one entry.");
+    } else {
+        println!("gaps:");
+        for g in &gaps {
+            println!("  - {g}");
+        }
+    }
+    Ok(())
+}
+
+fn run_bootstrap_default(
+    prompt_path: &str,
+    s: &InheritanceSummary,
+    json_out: bool,
+) -> Result<()> {
+    if json_out {
+        // JSON output: include inheritance summary if present so MCP
+        // callers can detect it programmatically.
+        let mut payload = json!({
+            "ok": true,
+            "prompt_path": prompt_path,
+            "checklist": [
+                "Read the prompt at docs/initial-read-prompt.md",
+                "Run `asd reindex` so the project graph is current",
+                "Capture at least one MentalModel for the top-level architecture",
+                "Capture Hypotheses for hot files with confidence in [0.0, 1.0]",
+                "Record OpenQuestions for known unknowns",
+                "Record FailedAttempts as dead ends emerge",
+                "Re-run `asd think bootstrap --check` to confirm coverage",
+            ],
+            "commands": {
+                "model": "asd think model <NAME> --symbols a.b,c.d --summary \"...\"",
+                "speculate": "asd think speculate <QNAME> --conf 0.6 --summary \"...\"",
+                "question": "asd think question <QNAME> --q \"...\"",
+                "failed": "asd think failed <QNAME> --tried \"...\" --because \"...\"",
+                "list": "asd think list [--kind hypothesis|model|failed|question]",
+            },
+        });
+        if s.has_inheritance() {
+            payload["inherited_thinking"] = inheritance_json(s);
+        }
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
     println!("# asd think bootstrap");
     println!();
+    if s.has_inheritance() {
+        print_inheritance_block(s);
+    }
     println!("Prompt template: {prompt_path}");
     println!();
     println!("Starter checklist:");
@@ -269,6 +431,75 @@ fn run_bootstrap(cfg: &Config, args: BootstrapArgs) -> Result<()> {
     println!("  asd think failed    <QN>  --tried \"...\" --because \"...\"");
     println!("  asd think list      [--kind hypothesis|model|failed|question]");
     Ok(())
+}
+
+/// Plan K t-006: pretty-print the inherited-thinking block surfaced
+/// at the top of `asd think bootstrap` when a prior session captured
+/// enough thinking to be worth advertising. Goal: a new dev's agent
+/// sees "you're not starting from zero — here's what the team
+/// already concluded" before being pushed into the initial-read flow.
+fn print_inheritance_block(s: &InheritanceSummary) {
+    let c = &s.counts;
+    println!("## Inherited thinking from prior session(s)");
+    println!();
+    println!(
+        "  {} MentalModel{}, {} Hypothes{}, {} OpenQuestion{}, {} FailedAttempt{} already on file.",
+        c.mental_model,
+        if c.mental_model == 1 { "" } else { "s" },
+        c.hypothesis,
+        if c.hypothesis == 1 { "is" } else { "es" },
+        c.open_question,
+        if c.open_question == 1 { "" } else { "s" },
+        c.failed_attempt,
+        if c.failed_attempt == 1 { "" } else { "s" },
+    );
+    println!();
+    if !s.mental_models.is_empty() {
+        println!("  Mental models:");
+        for mm in &s.mental_models {
+            println!("    - {} ({}) — {}", mm.qname, mm.author_id, mm.summary);
+        }
+        println!();
+    }
+    if !s.top_hypotheses.is_empty() {
+        println!("  Top hypotheses (by confidence):");
+        for h in &s.top_hypotheses {
+            let conf = h
+                .confidence
+                .map(|c| format!("{:.2}", c))
+                .unwrap_or_else(|| "—".into());
+            println!("    - [{conf}] {} ({}) — {}", h.qname, h.author_id, h.summary);
+        }
+        println!();
+    }
+    println!("  Read `.asd/conclusions/thinking.jsonl` or run `asd think list` for the full set.");
+    println!("  The starter checklist below still applies for anything the team hasn't covered.");
+    println!();
+}
+
+fn inheritance_json(s: &InheritanceSummary) -> serde_json::Value {
+    let c = &s.counts;
+    json!({
+        "counts_team": {
+            "hypothesis": c.hypothesis,
+            "mental_model": c.mental_model,
+            "failed_attempt": c.failed_attempt,
+            "open_question": c.open_question,
+        },
+        "counts_you": {
+            "hypothesis": c.hypothesis_you,
+            "mental_model": c.mental_model_you,
+            "failed_attempt": c.failed_attempt_you,
+            "open_question": c.open_question_you,
+        },
+        "mental_models": s.mental_models.iter().map(|m| json!({
+            "qname": m.qname, "author": m.author_id, "summary": m.summary,
+        })).collect::<Vec<_>>(),
+        "top_hypotheses": s.top_hypotheses.iter().map(|h| json!({
+            "qname": h.qname, "author": h.author_id,
+            "confidence": h.confidence, "summary": h.summary,
+        })).collect::<Vec<_>>(),
+    })
 }
 
 fn open_with_symbol(cfg: &Config, qname: &str) -> Result<(Engine, String)> {
@@ -569,5 +800,47 @@ mod tests {
             Some(tmp.path()),
         );
         assert_eq!(id.as_deref(), Some("env-task"));
+    }
+
+    // ---- Plan K t-006: inheritance detection logic ----------------------
+    //
+    // `gather_thinking` requires a live engine + Config, which is more
+    // setup than a unit test should own. We unit-test the pure logic
+    // (`has_inheritance` trigger) directly here; integration coverage
+    // of the full bootstrap flow lives in tests/think_bootstrap_inheritance.rs.
+
+    #[test]
+    fn has_inheritance_triggers_on_one_mental_model() {
+        let mut s = InheritanceSummary::default();
+        s.counts.mental_model = 1;
+        assert!(s.has_inheritance());
+    }
+
+    #[test]
+    fn has_inheritance_triggers_on_three_hypotheses() {
+        let mut s = InheritanceSummary::default();
+        s.counts.hypothesis = 3;
+        assert!(s.has_inheritance());
+    }
+
+    #[test]
+    fn has_inheritance_false_when_only_one_or_two_hypotheses() {
+        let mut s = InheritanceSummary::default();
+        s.counts.hypothesis = 2;
+        assert!(
+            !s.has_inheritance(),
+            "two hypotheses without a mental model should NOT trigger inheritance preview"
+        );
+    }
+
+    #[test]
+    fn has_inheritance_false_when_only_questions_or_failures() {
+        let mut s = InheritanceSummary::default();
+        s.counts.open_question = 10;
+        s.counts.failed_attempt = 10;
+        assert!(
+            !s.has_inheritance(),
+            "open questions / failed attempts alone are not the inheritance trigger"
+        );
     }
 }
