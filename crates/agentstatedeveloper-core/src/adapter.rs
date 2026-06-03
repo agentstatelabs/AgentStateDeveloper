@@ -114,6 +114,20 @@ impl WorkspaceSymbols {
     }
 }
 
+/// Plan L t-006: one call site the static walker tried to resolve but
+/// couldn't. May be stdlib (`print`, `len`), third-party (an
+/// unindexed dependency), or genuinely dynamic. Aggregated by the
+/// indexer to expose the static-resolution coverage gap so agents
+/// don't assume missing edges are bugs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedCall {
+    pub file: String,
+    pub line: u32,
+    /// The function-position text as it appears in source (e.g.
+    /// `requests.get`, `Foo.bar`, `local_var`).
+    pub callee_text: String,
+}
+
 /// Plan L t-005: one dynamic-dispatch call site detected by an adapter.
 /// `pattern` is a short label (`getattr` / `callback-arg` / `metaclass`);
 /// `snippet` is the source line trimmed for display in CLI warnings.
@@ -156,6 +170,19 @@ pub trait LanguageAdapter: Send + Sync {
     /// Default: empty. Adapters with no dynamic-dispatch story return
     /// nothing.
     fn scan_dynamic_dispatch(&self, _file: &str, _source: &str) -> Vec<DynamicDispatchHint> {
+        Vec::new()
+    }
+
+    /// Plan L t-006: report call sites in this file whose function
+    /// position couldn't be resolved to a workspace qname. Default:
+    /// empty. Adapters that can compute this cheaply override.
+    fn report_unresolved_calls(
+        &self,
+        _file: &str,
+        _source: &str,
+        _symbols: &[ParsedSymbol],
+        _workspace: &WorkspaceSymbols,
+    ) -> Vec<UnresolvedCall> {
         Vec::new()
     }
 

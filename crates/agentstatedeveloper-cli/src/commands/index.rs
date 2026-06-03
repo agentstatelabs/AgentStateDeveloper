@@ -315,6 +315,36 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
         }
     }
 
+    // Plan L t-006: surface dropped (unresolved) call edges.
+    if summary.dropped_call_edges > 0 {
+        let warn_header = format!(
+            "Note: {} call site{} couldn't be resolved to a workspace symbol (stdlib / third-party / dynamic).",
+            summary.dropped_call_edges,
+            if summary.dropped_call_edges == 1 { "" } else { "s" }
+        );
+        eprintln!("{}", warn_header);
+        if let Some(l) = &mut log {
+            l.line(&warn_header);
+        }
+        for h in &summary.sample_unresolved {
+            let line = format!("  {}:{} {}", h.file, h.line, h.callee_text);
+            eprintln!("{}", line);
+            if let Some(l) = &mut log {
+                l.line(&line);
+            }
+        }
+        if summary.dropped_call_edges > summary.sample_unresolved.len() {
+            let more = format!(
+                "  …and {} more",
+                summary.dropped_call_edges - summary.sample_unresolved.len()
+            );
+            eprintln!("{}", more);
+            if let Some(l) = &mut log {
+                l.line(&more);
+            }
+        }
+    }
+
     let log_note = format!("Full log: {}", log_path.display());
     if let Some(l) = &mut log {
         l.line(&log_note);
@@ -346,6 +376,12 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
             "dynamic_dispatch_samples": summary.dynamic_dispatch_samples.iter().map(|h| {
                 serde_json::json!({
                     "file": h.file, "line": h.line, "pattern": h.pattern, "snippet": h.snippet,
+                })
+            }).collect::<Vec<_>>(),
+            "dropped_call_edges": summary.dropped_call_edges,
+            "sample_unresolved": summary.sample_unresolved.iter().map(|c| {
+                serde_json::json!({
+                    "file": c.file, "line": c.line, "callee": c.callee_text,
                 })
             }).collect::<Vec<_>>(),
         }))?

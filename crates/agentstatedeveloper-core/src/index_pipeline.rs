@@ -79,6 +79,13 @@ pub struct IndexSummary {
     pub dynamic_dispatch_sites: usize,
     /// Top dynamic-dispatch hits, capped at 5 for display.
     pub dynamic_dispatch_samples: Vec<crate::adapter::DynamicDispatchHint>,
+    /// Plan L t-006: call sites the static resolver couldn't bind to
+    /// a workspace qname. Includes stdlib (minus a known allowlist),
+    /// third-party, and dynamic — treat as a "static-resolution gap"
+    /// signal, not a bug count.
+    pub dropped_call_edges: usize,
+    /// Top unresolved calls, capped at 5 for display.
+    pub sample_unresolved: Vec<crate::adapter::UnresolvedCall>,
 }
 
 /// Result of collecting source files under a path.
@@ -398,11 +405,21 @@ pub fn run_index(
     if let Some(f) = on_phase {
         f("  building call graph…");
     }
+    // Plan L t-006: aggregate unresolved-call hints across all files.
+    let mut all_unresolved: Vec<crate::adapter::UnresolvedCall> = Vec::new();
     for ctx in &file_ctxs {
         let edges =
             ctx.adapter
                 .extract_call_edges(&ctx.file_str, &ctx.source, &ctx.parsed, &workspace);
         all_edges.extend(edges);
+        // Per-file unresolved-call report. Default trait impl returns
+        // empty for adapters that don't implement static resolution.
+        all_unresolved.extend(ctx.adapter.report_unresolved_calls(
+            &ctx.file_str,
+            &ctx.source,
+            &ctx.parsed,
+            &workspace,
+        ));
     }
 
     let mut callees_of: HashMap<String, Vec<String>> = HashMap::new();
@@ -653,6 +670,12 @@ pub fn run_index(
         dynamic_dispatch_sites: all_dynamic_dispatch.len(),
         dynamic_dispatch_samples: {
             let mut v = all_dynamic_dispatch;
+            v.truncate(5);
+            v
+        },
+        dropped_call_edges: all_unresolved.len(),
+        sample_unresolved: {
+            let mut v = all_unresolved;
             v.truncate(5);
             v
         },

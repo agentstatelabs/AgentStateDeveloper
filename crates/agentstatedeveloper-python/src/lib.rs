@@ -7,7 +7,8 @@
 use std::collections::{HashMap, HashSet};
 
 use agentstatedeveloper_core::adapter::{
-    CallEdge, DynamicDispatchHint, LanguageAdapter, ParsedSymbol, WorkspaceSymbols,
+    CallEdge, DynamicDispatchHint, LanguageAdapter, ParsedSymbol, UnresolvedCall,
+    WorkspaceSymbols,
 };
 use agentstatedeveloper_core::error::{AsdError, Result};
 use agentstatedeveloper_core::schema::{Effect, EffectCategory, SymbolKind};
@@ -67,6 +68,171 @@ impl LanguageAdapter for PythonAdapter {
 
     fn scan_dynamic_dispatch(&self, file: &str, source: &str) -> Vec<DynamicDispatchHint> {
         scan_dynamic_dispatch_in_python(file, source)
+    }
+
+    fn report_unresolved_calls(
+        &self,
+        file: &str,
+        source: &str,
+        symbols: &[ParsedSymbol],
+        workspace: &WorkspaceSymbols,
+    ) -> Vec<UnresolvedCall> {
+        report_unresolved_calls_in_python(file, source, symbols, workspace)
+    }
+}
+
+/// Plan L t-006: walk a Python file's call nodes and report any that
+/// the static resolver couldn't bind to a workspace qname. Includes
+/// stdlib + third-party + dynamic — callers should treat the count
+/// as "static-resolution gap," not "bug list."
+///
+/// Filters out a small known-stdlib allowlist so the output isn't
+/// drowned in `print` / `len` / `range` calls. Anything else gets
+/// reported, including third-party calls (which are useful to see —
+/// they tell you "these dependencies sit outside the indexed scope").
+pub fn report_unresolved_calls_in_python(
+    file: &str,
+    source: &str,
+    symbols: &[ParsedSymbol],
+    workspace: &WorkspaceSymbols,
+) -> Vec<UnresolvedCall> {
+    use std::collections::HashSet;
+
+    // The Python builtins that aren't worth surfacing as gaps —
+    // every program calls them and they're never going to resolve to
+    // a workspace symbol. Keep this list tight; when in doubt, leave
+    // the call OUT of the allowlist so it surfaces.
+    let stdlib_allowlist: HashSet<&str> = [
+        "print", "len", "range", "type", "isinstance", "super", "hasattr",
+        "getattr", "setattr", "delattr", "callable", "iter", "next",
+        "list", "dict", "set", "tuple", "str", "int", "float", "bool",
+        "bytes", "bytearray", "frozenset", "min", "max", "sum", "abs",
+        "round", "sorted", "reversed", "enumerate", "zip", "map", "filter",
+        "any", "all", "open", "repr", "hash", "id", "vars", "dir",
+        "format", "input", "ord", "chr", "hex", "oct", "bin", "pow",
+        "divmod", "compile", "eval", "exec",
+    ]
+    .into_iter()
+    .collect();
+
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_python::LANGUAGE.into())
+        .is_err()
+    {
+        return Vec::new();
+    }
+    let module_prefix = module_qname_prefix(file);
+    let src_bytes = source.as_bytes();
+
+    // Rebuild the same resolution context the call-graph walker uses.
+    let mut by_simple: HashMap<String, String> = HashMap::new();
+    let mut known: HashSet<&str> = HashSet::new();
+    for sym in symbols {
+        known.insert(sym.qname.as_str());
+        if let Some(simple) = sym.qname.rsplit_once('.').map(|(_, s)| s) {
+            by_simple.insert(simple.to_string(), sym.qname.clone());
+        }
+    }
+    let imports = parse_imports(source, &mut parser, &module_prefix);
+
+    let tree = match parser.parse(src_bytes, None) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    let mut line_starts: Vec<usize> = vec![0];
+    for (i, b) in src_bytes.iter().enumerate() {
+        if *b == b'\n' {
+            line_starts.push(i + 1);
+        }
+    }
+    let line_of = |off: usize| -> u32 {
+        match line_starts.binary_search(&off) {
+            Ok(i) => i as u32 + 1,
+            Err(i) => i.max(1) as u32,
+        }
+    };
+
+    let mut out = Vec::new();
+    walk_unresolved_calls(
+        tree.root_node(),
+        src_bytes,
+        &module_prefix,
+        &by_simple,
+        &known,
+        &imports,
+        workspace,
+        &stdlib_allowlist,
+        file,
+        &line_of,
+        &mut out,
+    );
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_unresolved_calls(
+    node: Node<'_>,
+    src: &[u8],
+    module_prefix: &str,
+    by_simple: &HashMap<String, String>,
+    known: &HashSet<&str>,
+    imports: &HashMap<String, ImportBinding>,
+    workspace: &WorkspaceSymbols,
+    stdlib_allowlist: &std::collections::HashSet<&str>,
+    file: &str,
+    line_of: &dyn Fn(usize) -> u32,
+    out: &mut Vec<UnresolvedCall>,
+) {
+    if node.kind() == "call" {
+        if let Some(func) = node.child_by_field_name("function") {
+            let callee_text = node_text(func, src).unwrap_or_default();
+            let resolved = resolve_callee(
+                func,
+                src,
+                module_prefix,
+                by_simple,
+                known,
+                imports,
+                workspace,
+                None, // enclosing_class — best-effort; we don't replay class scope
+            );
+            if resolved.is_none() {
+                // Filter out trivial stdlib calls. Match on the FIRST
+                // segment for chained attribute access (`foo.bar` →
+                // check `foo` against the allowlist; this catches
+                // `str.format`-style chains incidentally).
+                let head = callee_text
+                    .split('.')
+                    .next()
+                    .unwrap_or(&callee_text)
+                    .trim();
+                if !stdlib_allowlist.contains(head) {
+                    out.push(UnresolvedCall {
+                        file: file.to_string(),
+                        line: line_of(func.start_byte()),
+                        callee_text: callee_text.trim().to_string(),
+                    });
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_unresolved_calls(
+            child,
+            src,
+            module_prefix,
+            by_simple,
+            known,
+            imports,
+            workspace,
+            stdlib_allowlist,
+            file,
+            line_of,
+            out,
+        );
     }
 }
 
@@ -2037,6 +2203,112 @@ def foo():
     fn relative_escaping_workspace_returns_none() {
         // Two dots when we only have one segment to drop.
         assert!(super::resolve_relative_import("crucible", "..foo").is_none());
+    }
+
+    // ---- Plan L t-006: unresolved-call reporter -----------------------
+
+    #[test]
+    fn unresolved_calls_reports_third_party_call() {
+        // A call to a name that isn't in the workspace and isn't on
+        // the stdlib allowlist should surface.
+        use agentstatedeveloper_core::WorkspaceSymbols;
+        let src = "import requests\n\ndef fetch(url):\n    return requests.get(url)\n";
+        let parsed = vec![ParsedSymbol {
+            qname: "app.client.fetch".into(),
+            kind: SymbolKind::Function,
+            start_line: 3,
+            start_col: 0,
+            end_line: 4,
+            end_col: 30,
+            signature: Some("def fetch(url)".into()),
+            body: src.into(),
+            doc: None,
+        }];
+        let mut ws = WorkspaceSymbols::default();
+        ws.qnames.insert("app.client.fetch".into());
+        ws.kinds
+            .insert("app.client.fetch".into(), SymbolKind::Function);
+        ws.build_suffix_index();
+
+        let hits = report_unresolved_calls_in_python("app/client.py", src, &parsed, &ws);
+        assert!(
+            hits.iter().any(|h| h.callee_text.contains("requests")),
+            "expected unresolved hint for requests.get; got {hits:?}"
+        );
+    }
+
+    #[test]
+    fn unresolved_calls_skips_stdlib_allowlist() {
+        // print() / len() / range() must NOT show up as unresolved —
+        // they're on the allowlist.
+        use agentstatedeveloper_core::WorkspaceSymbols;
+        let src = "def show(items):\n    print(len(items))\n    for i in range(3): pass\n";
+        let parsed = vec![ParsedSymbol {
+            qname: "app.show.show".into(),
+            kind: SymbolKind::Function,
+            start_line: 1,
+            start_col: 0,
+            end_line: 3,
+            end_col: 30,
+            signature: Some("def show(items)".into()),
+            body: src.into(),
+            doc: None,
+        }];
+        let mut ws = WorkspaceSymbols::default();
+        ws.qnames.insert("app.show.show".into());
+        ws.kinds.insert("app.show.show".into(), SymbolKind::Function);
+        ws.build_suffix_index();
+
+        let hits = report_unresolved_calls_in_python("app/show.py", src, &parsed, &ws);
+        assert!(
+            hits.is_empty(),
+            "stdlib allowlist calls must not be reported; got {hits:?}"
+        );
+    }
+
+    #[test]
+    fn unresolved_calls_skips_resolved_internal_calls() {
+        // A call to an internal symbol that resolves must NOT appear
+        // in the unresolved list.
+        use agentstatedeveloper_core::WorkspaceSymbols;
+        let src = "def helper(): return 1\n\ndef use(): return helper()\n";
+        let parsed = vec![
+            ParsedSymbol {
+                qname: "app.lib.helper".into(),
+                kind: SymbolKind::Function,
+                start_line: 1,
+                start_col: 0,
+                end_line: 1,
+                end_col: 22,
+                signature: Some("def helper()".into()),
+                body: src.into(),
+                doc: None,
+            },
+            ParsedSymbol {
+                qname: "app.lib.use".into(),
+                kind: SymbolKind::Function,
+                start_line: 3,
+                start_col: 0,
+                end_line: 3,
+                end_col: 25,
+                signature: Some("def use()".into()),
+                body: src.into(),
+                doc: None,
+            },
+        ];
+        let mut ws = WorkspaceSymbols::default();
+        ws.qnames.insert("app.lib.helper".into());
+        ws.kinds
+            .insert("app.lib.helper".into(), SymbolKind::Function);
+        ws.qnames.insert("app.lib.use".into());
+        ws.kinds.insert("app.lib.use".into(), SymbolKind::Function);
+        ws.build_suffix_index();
+
+        let hits = report_unresolved_calls_in_python("app/lib.py", src, &parsed, &ws);
+        assert!(
+            !hits.iter().any(|h| h.callee_text == "helper"),
+            "internal resolved call must not appear in unresolved list; got {hits:?}"
+        );
     }
 
     // ---- Plan L t-005: dynamic-dispatch scanner -----------------------
