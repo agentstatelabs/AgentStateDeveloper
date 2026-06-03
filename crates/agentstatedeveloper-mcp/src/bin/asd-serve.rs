@@ -61,7 +61,14 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .with_context(|| format!("failed to bind {}", addr))?;
-    tracing::info!("listening on {}", addr);
+    // Log the *resolved* address. Callers that asked for `:0` need this to
+    // recover the OS-assigned port; logging the bind template `host:0` was
+    // silently wrong for supervisors like CTXone's AsdProcessPool.
+    let bound = listener
+        .local_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| addr.clone());
+    tracing::info!("listening on {}", bound);
     axum::serve(listener, app).await?;
     Ok(())
 }
