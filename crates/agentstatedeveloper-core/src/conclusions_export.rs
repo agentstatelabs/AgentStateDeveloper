@@ -45,8 +45,27 @@ pub struct ExportRecord {
 }
 
 /// Walk the index, bucket every ledger entry by `ConclusionClass`. Each
-/// bucket is sorted by (created_at, id) so re-export is byte-identical
-/// when no new entries are added.
+/// bucket is sorted by `id` alone — entry_ids are deterministic hashes
+/// (blake3-derived for Plan G thinking, content-derived for others), so
+/// id-sort gives:
+///
+/// 1. **Byte-identical output across runs** when the entry set is
+///    unchanged (re-export is a no-op).
+/// 2. **Conflict-resistant git merges**: hash-distributed positions
+///    mean two developers' concurrent same-day inserts land in
+///    different file regions and don't textually collide. Plan K
+///    t-001.
+///
+/// The previous sort key was `(created_at, id)`. That gave the same
+/// byte-stability but clustered same-day inserts together, raising the
+/// odds of merge conflicts when two devs added entries on the same day.
+/// id-only loses the time-ordered visual diff but gains real
+/// conflict-resistance — the Plan K principle (sidecar = judgment;
+/// conflicts must be meaningful) prefers the latter.
+///
+/// Upgrade note: re-exporting an existing project at >=1.0.36 will
+/// produce a one-time mass reorder of every `.asd/conclusions/*.jsonl`
+/// file. Commit it once, then steady state.
 pub fn gather_buckets(
     engine: &Engine,
 ) -> std::io::Result<BTreeMap<&'static str, Vec<ExportRecord>>> {
@@ -106,12 +125,10 @@ pub fn gather_buckets(
         }
     }
 
+    // Plan K t-001: sort by id alone (deterministic hash). See the
+    // `gather_buckets` docstring for the rationale.
     for bucket in buckets.values_mut() {
-        bucket.sort_by(|a, b| {
-            a.created_at
-                .cmp(&b.created_at)
-                .then_with(|| a.id.cmp(&b.id))
-        });
+        bucket.sort_by(|a, b| a.id.cmp(&b.id));
     }
     Ok(buckets)
 }
@@ -318,6 +335,7 @@ fn parse_author(s: &str) -> Option<Author> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::SymbolKind;
     use tempfile::tempdir;
 
     #[test]
@@ -495,5 +513,168 @@ mod tests {
             .list_entries(&engine2.ref_name, &sym.symbol_id)
             .unwrap();
         assert_eq!(entries.len(), 1, "second import must not duplicate");
+    }
+
+    // ---- Plan K t-001: sort-on-write byte-stability + conflict-resistance --
+
+    /// Build a fresh engine with N decision entries inserted in the
+    /// given order. Returns the (id, summary) pairs in the order they
+    /// were inserted so the caller can reason about the input.
+    fn engine_with_decisions_in_order(
+        ids_and_summaries: &[(&str, &str)],
+    ) -> (Engine, Vec<(String, String)>) {
+        let engine = Engine::open_in_memory().unwrap();
+        let sym = crate::schema::Symbol {
+            symbol_id: "sym_order_test".into(),
+            symbol_fp: "fp".into(),
+            qname: "pkg.target".into(),
+            language: "python".into(),
+            kind: SymbolKind::Function,
+            file: "src/target.py".into(),
+            start: crate::schema::Position { line: 1, col: 0 },
+            end: crate::schema::Position { line: 5, col: 0 },
+            signature: None,
+            doc: None,
+        };
+        AsgIndexStore::from_engine(&engine)
+            .put_symbol(&engine.ref_name, &sym, "test")
+            .unwrap();
+        let ledger = AsgLedgerStore::from_engine(&engine);
+        let mut inserted = Vec::new();
+        for (id, summary) in ids_and_summaries {
+            let mut entry = LedgerEntry::new(
+                &sym.symbol_id,
+                LedgerKind::Decision,
+                *summary,
+                Author { kind: AuthorKind::Agent, id: "t".into() },
+            );
+            entry.entry_id = (*id).to_string();
+            ledger
+                .append_entry(&engine.ref_name, &entry, "t")
+                .unwrap();
+            inserted.push(((*id).to_string(), (*summary).to_string()));
+        }
+        (engine, inserted)
+    }
+
+    fn sha_of_file(p: &Path) -> [u8; 32] {
+        let bytes = std::fs::read(p).expect("read jsonl");
+        *blake3::hash(&bytes).as_bytes()
+    }
+
+    #[test]
+    fn export_is_byte_identical_across_repeated_runs() {
+        // Plan K t-001 byte-stability claim, scoped correctly: SAME
+        // engine, two consecutive exports → identical bytes. (Across
+        // independent engines the per-entry `created_at` timestamp
+        // differs at append time, so byte-equality across engines is
+        // expected to fail and not what id-sort can fix.)
+        let entries = [
+            ("led_aaa", "first decision"),
+            ("led_zzz", "third decision"),
+            ("led_mmm", "second decision"),
+        ];
+        let (engine, _) = engine_with_decisions_in_order(&entries);
+
+        let tmp1 = tempfile::tempdir().unwrap();
+        let tmp2 = tempfile::tempdir().unwrap();
+        export_all(&engine, tmp1.path()).unwrap();
+        export_all(&engine, tmp2.path()).unwrap();
+
+        assert_eq!(
+            sha_of_file(&tmp1.path().join("decisions.jsonl")),
+            sha_of_file(&tmp2.path().join("decisions.jsonl")),
+            "two consecutive exports from the same engine must hash-equal"
+        );
+    }
+
+    #[test]
+    fn export_byte_output_is_deterministic_under_id_sort() {
+        // Stronger guarantee: the id-sort sorts the SAME entries into
+        // the SAME order regardless of insertion order. Verify by
+        // building two engines with identical (id, summary, …) inputs
+        // but inserted in different orders, stripping the per-entry
+        // created_at before comparing, then asserting both yield the
+        // same line sequence.
+        let order_a = [
+            ("led_aaa", "first decision"),
+            ("led_zzz", "third decision"),
+            ("led_mmm", "second decision"),
+        ];
+        let order_b = [
+            ("led_zzz", "third decision"),
+            ("led_mmm", "second decision"),
+            ("led_aaa", "first decision"),
+        ];
+
+        let (engine_a, _) = engine_with_decisions_in_order(&order_a);
+        let (engine_b, _) = engine_with_decisions_in_order(&order_b);
+
+        let tmp_a = tempfile::tempdir().unwrap();
+        let tmp_b = tempfile::tempdir().unwrap();
+        export_all(&engine_a, tmp_a.path()).unwrap();
+        export_all(&engine_b, tmp_b.path()).unwrap();
+
+        // Read line-by-line and pull out (id, summary) — drop the
+        // engine-specific created_at — and assert the SEQUENCE
+        // matches between the two engines.
+        let extract = |path: &Path| -> Vec<(String, String)> {
+            std::fs::read_to_string(path)
+                .unwrap()
+                .lines()
+                .map(|l| {
+                    let v: serde_json::Value = serde_json::from_str(l).unwrap();
+                    (
+                        v["id"].as_str().unwrap_or("").to_string(),
+                        v["summary"].as_str().unwrap_or("").to_string(),
+                    )
+                })
+                .collect()
+        };
+        let seq_a = extract(&tmp_a.path().join("decisions.jsonl"));
+        let seq_b = extract(&tmp_b.path().join("decisions.jsonl"));
+        assert_eq!(
+            seq_a, seq_b,
+            "id-sort must yield identical (id, summary) sequence regardless of insertion order"
+        );
+        // And the sequence must actually be id-sorted.
+        let ids: Vec<&str> = seq_a.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["led_aaa", "led_mmm", "led_zzz"],
+            "entries must come out in id-sorted order"
+        );
+    }
+
+    #[test]
+    fn export_sorts_by_id_not_by_created_at() {
+        // Conflict-resistance check: with id-sort, two same-day
+        // entries with very different ids end up far apart in the
+        // file. Verify by inserting two entries and checking the
+        // file lines them up in id order, not insertion order.
+        let entries = [
+            ("led_zzz", "zzz summary inserted first"),
+            ("led_aaa", "aaa summary inserted second"),
+        ];
+        let (engine, _) = engine_with_decisions_in_order(&entries);
+        let tmp = tempfile::tempdir().unwrap();
+        export_all(&engine, tmp.path()).unwrap();
+
+        let body = std::fs::read_to_string(tmp.path().join("decisions.jsonl"))
+            .unwrap();
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 2);
+        // led_aaa < led_zzz lexicographically; aaa must come first
+        // even though it was inserted second.
+        assert!(
+            lines[0].contains("led_aaa"),
+            "id-sort: led_aaa must precede led_zzz; got first line = {}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("led_zzz"),
+            "id-sort: led_zzz must follow led_aaa; got second line = {}",
+            lines[1]
+        );
     }
 }
