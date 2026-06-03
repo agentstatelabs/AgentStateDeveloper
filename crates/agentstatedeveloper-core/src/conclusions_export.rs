@@ -647,6 +647,46 @@ mod tests {
     }
 
     #[test]
+    fn exported_entries_are_self_describing() {
+        // Plan K t-004: every emitted entry must carry qname, kind,
+        // and summary inline (no symbol_id-only references). An agent
+        // reading raw .asd/conclusions/*.jsonl without a hydrated
+        // index must still be able to grep for a qname and find
+        // every relevant entry.
+        let entries = [("led_target_1", "first decision about pkg.target")];
+        let (engine, _) = engine_with_decisions_in_order(&entries);
+        let tmp = tempfile::tempdir().unwrap();
+        export_all(&engine, tmp.path()).unwrap();
+
+        let body = std::fs::read_to_string(tmp.path().join("decisions.jsonl"))
+            .unwrap();
+        // Grep-by-qname must hit. (The grep test mirrors what an
+        // agent reading the file cold would do.)
+        assert!(
+            body.contains("pkg.target"),
+            "qname must appear in serialized line for grep-by-qname; got: {body}"
+        );
+
+        // Structural check: parse the line and confirm the
+        // self-describing fields are present and non-empty.
+        let v: serde_json::Value =
+            serde_json::from_str(body.lines().next().expect("one line")).unwrap();
+        for field in ["id", "kind", "qname", "summary"] {
+            let s = v[field].as_str().unwrap_or("");
+            assert!(
+                !s.is_empty(),
+                "field `{field}` must be present and non-empty for self-describing entries; got {v}"
+            );
+        }
+        // No symbol_id leak — entries reference symbols by qname
+        // (human-readable) only.
+        assert!(
+            v.get("symbol_id").is_none(),
+            "ExportRecord must not leak opaque symbol_id; got {v}"
+        );
+    }
+
+    #[test]
     fn export_sorts_by_id_not_by_created_at() {
         // Conflict-resistance check: with id-sort, two same-day
         // entries with very different ids end up far apart in the
