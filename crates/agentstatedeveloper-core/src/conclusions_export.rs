@@ -17,6 +17,7 @@ use crate::index::{AsgIndexStore, IndexStore};
 use crate::ledger::{AsgLedgerStore, LedgerStore};
 use crate::paths::ASD_ROOT;
 use crate::schema::{AuthorKind, ConclusionClass, LedgerKind};
+use crate::sidecar_config::{package_key_for_filename, ShardBy, SidecarConfig};
 use crate::thinking::DEFAULT_CONFIDENCE_FLOOR;
 
 /// Compact JSONL record. `preserve_order` is on for serde_json in this
@@ -169,11 +170,37 @@ pub fn write_jsonl(path: &Path, records: &[ExportRecord]) -> std::io::Result<u64
 
 /// One-shot: gather + write all six files under `out_dir`. Returns per-class
 /// (stem, entry_count, byte_count).
+///
+/// Plan K t-007: honors `.asd/config.toml` for sharding. Config is
+/// resolved from `out_dir`'s parent (the project root); missing
+/// config = default Class sharding. For per-Package mode, writes
+/// `<out_dir>/<stem>/<package-key>.jsonl` and returns one row per
+/// non-empty (class, package) pair.
 pub fn export_all(
     engine: &Engine,
     out_dir: &Path,
 ) -> std::io::Result<Vec<(&'static str, usize, u64)>> {
     std::fs::create_dir_all(out_dir)?;
+    // out_dir is typically `<root>/.asd/conclusions/`; the config
+    // lives at `<root>/.asd/config.toml`. Walk up two parents to
+    // find the project root.
+    let project_root = out_dir
+        .parent() // .asd/
+        .and_then(|p| p.parent()) // <root>/
+        .unwrap_or(out_dir);
+    let cfg = SidecarConfig::load_from_project(project_root);
+
+    match cfg.shard_by {
+        ShardBy::Class => export_class_layout(engine, out_dir),
+        ShardBy::Package => export_package_layout(engine, out_dir),
+    }
+}
+
+/// Default layout: one file per ConclusionClass under `out_dir`.
+fn export_class_layout(
+    engine: &Engine,
+    out_dir: &Path,
+) -> std::io::Result<Vec<(&'static str, usize, u64)>> {
     let buckets = gather_buckets(engine)?;
     let mut out = Vec::with_capacity(6);
     for class in ConclusionClass::all() {
@@ -184,6 +211,51 @@ pub fn export_all(
         out.push((stem, entries.len(), bytes));
     }
     Ok(out)
+}
+
+/// Per-Package layout: `<out_dir>/<stem>/<package-key>.jsonl`,
+/// one file per (class, package_dir) pair. Empty buckets produce
+/// no file. Plan K t-007.
+fn export_package_layout(
+    engine: &Engine,
+    out_dir: &Path,
+) -> std::io::Result<Vec<(&'static str, usize, u64)>> {
+    let buckets = gather_buckets(engine)?;
+    let mut out = Vec::new();
+    for class in ConclusionClass::all() {
+        let stem = class.filename_stem();
+        let entries = buckets.get(stem).cloned().unwrap_or_default();
+        if entries.is_empty() {
+            continue;
+        }
+        // Re-bucket by package_dir(file). The same package always
+        // maps to the same shard filename → diffs and merges stay
+        // local to whichever package's entry changed.
+        let mut by_pkg: BTreeMap<String, Vec<ExportRecord>> = BTreeMap::new();
+        for rec in entries {
+            let pkg = package_dir(&rec.file);
+            by_pkg.entry(pkg).or_default().push(rec);
+        }
+        let class_dir = out_dir.join(stem);
+        std::fs::create_dir_all(&class_dir)?;
+        for (pkg, recs) in by_pkg {
+            let fname = format!("{}.jsonl", package_key_for_filename(&pkg));
+            let path = class_dir.join(fname);
+            let bytes = write_jsonl(&path, &recs)?;
+            out.push((stem, recs.len(), bytes));
+        }
+    }
+    Ok(out)
+}
+
+/// Directory portion of a file path — `src/pkg/foo.py` → `src/pkg`.
+/// Plan K t-007 mirror of the helper in commands/map.rs so the
+/// shard layout is computed from the same key.
+fn package_dir(file: &str) -> String {
+    match file.rsplit_once('/') {
+        Some((d, _)) => d.to_string(),
+        None => String::new(),
+    }
 }
 
 fn author_kind_str(k: AuthorKind) -> &'static str {
@@ -215,16 +287,54 @@ pub struct ImportFileResult {
 ///
 /// Records whose `qname` is not in the current index are skipped with a
 /// counter so callers can warn. Use after `git pull` / on a fresh clone.
+///
+/// Plan K t-007: reads either layout transparently. For each class:
+///   1. If `<in_dir>/<stem>.jsonl` exists (class layout), import that.
+///   2. If `<in_dir>/<stem>/` directory exists (package layout),
+///      import every `*.jsonl` inside.
+/// Both can coexist during a layout migration; the importer handles
+/// the union without de-duplication beyond entry_id idempotency.
 pub fn import_all(
     engine: &Engine,
     in_dir: &Path,
     agent_id: &str,
 ) -> std::io::Result<Vec<ImportFileResult>> {
-    let mut out = Vec::with_capacity(6);
+    let mut out = Vec::new();
     for class in ConclusionClass::all() {
         let stem = class.filename_stem();
-        let path = in_dir.join(format!("{stem}.jsonl"));
-        out.push(import_one(engine, &path, stem, agent_id)?);
+        // Class-layout file (default).
+        let class_file = in_dir.join(format!("{stem}.jsonl"));
+        if class_file.is_file() {
+            out.push(import_one(engine, &class_file, stem, agent_id)?);
+        }
+        // Package-layout directory (opt-in via .asd/config.toml).
+        // Read every *.jsonl in the per-class subdirectory.
+        let pkg_dir = in_dir.join(stem);
+        if pkg_dir.is_dir() {
+            let mut shard_paths: Vec<std::path::PathBuf> =
+                std::fs::read_dir(&pkg_dir)?
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| {
+                        p.extension().and_then(|s| s.to_str()) == Some("jsonl")
+                    })
+                    .collect();
+            // Sort for stable import order (helps test determinism).
+            shard_paths.sort();
+            for path in shard_paths {
+                out.push(import_one(engine, &path, stem, agent_id)?);
+            }
+        }
+        // If neither path exists, emit a zero-row result so callers
+        // see the class was considered (matches prior behavior).
+        if !class_file.is_file() && !pkg_dir.is_dir() {
+            out.push(ImportFileResult {
+                class: stem,
+                file: class_file.to_string_lossy().into_owned(),
+                imported: 0,
+                skipped_unknown_qname: 0,
+                skipped_parse_error: 0,
+            });
+        }
     }
     Ok(out)
 }
@@ -661,6 +771,166 @@ mod tests {
             vec!["led_aaa", "led_mmm", "led_zzz"],
             "entries must come out in id-sorted order"
         );
+    }
+
+    /// Seed an engine with N indexed symbols spread across two
+    /// packages, then return the engine. Used by Plan K t-007
+    /// sharding tests.
+    fn engine_with_multi_package_decisions() -> Engine {
+        let engine = Engine::open_in_memory().unwrap();
+        let mk_sym = |sid: &str, qname: &str, file: &str| crate::schema::Symbol {
+            symbol_id: sid.into(),
+            symbol_fp: "fp".into(),
+            qname: qname.into(),
+            language: "python".into(),
+            kind: SymbolKind::Function,
+            file: file.into(),
+            start: crate::schema::Position { line: 1, col: 0 },
+            end: crate::schema::Position { line: 5, col: 0 },
+            signature: None,
+            doc: None,
+        };
+        let index = AsgIndexStore::from_engine(&engine);
+        let sym_a = mk_sym("sym_a", "pkg.alpha.fn_a", "src/alpha/mod.py");
+        let sym_b = mk_sym("sym_b", "pkg.beta.fn_b", "src/beta/mod.py");
+        index.put_symbol(&engine.ref_name, &sym_a, "t").unwrap();
+        index.put_symbol(&engine.ref_name, &sym_b, "t").unwrap();
+
+        let append = |sid: &str, eid: &str, summary: &str| {
+            let mut entry = LedgerEntry::new(
+                sid,
+                LedgerKind::Decision,
+                summary,
+                Author { kind: AuthorKind::Agent, id: "t".into() },
+            );
+            entry.entry_id = eid.into();
+            AsgLedgerStore::from_engine(&engine)
+                .append_entry(&engine.ref_name, &entry, "t")
+                .unwrap();
+        };
+        append("sym_a", "led_a1", "alpha decision 1");
+        append("sym_a", "led_a2", "alpha decision 2");
+        append("sym_b", "led_b1", "beta decision 1");
+        engine
+    }
+
+    #[test]
+    fn package_layout_writes_per_package_shards() {
+        // Plan K t-007 acceptance: with `shard_by = "package"`,
+        // `export_all` writes `<out_dir>/<stem>/<pkg-key>.jsonl`
+        // rather than `<out_dir>/<stem>.jsonl`.
+        let tmp = tempdir().unwrap();
+        let project_root = tmp.path();
+        std::fs::create_dir_all(project_root.join(".asd")).unwrap();
+        std::fs::write(
+            project_root.join(".asd/config.toml"),
+            "[sidecar]\nshard_by = \"package\"\n",
+        )
+        .unwrap();
+
+        let engine = engine_with_multi_package_decisions();
+        let conclusions_dir = project_root.join(".asd/conclusions");
+        export_all(&engine, &conclusions_dir).unwrap();
+
+        // Default layout files must NOT exist.
+        assert!(
+            !conclusions_dir.join("decisions.jsonl").is_file(),
+            "package layout must not write a flat decisions.jsonl"
+        );
+        // Per-package files MUST exist.
+        let alpha = conclusions_dir.join("decisions/src--alpha.jsonl");
+        let beta = conclusions_dir.join("decisions/src--beta.jsonl");
+        assert!(alpha.is_file(), "expected per-package shard at {alpha:?}");
+        assert!(beta.is_file(), "expected per-package shard at {beta:?}");
+
+        let alpha_body = std::fs::read_to_string(&alpha).unwrap();
+        assert!(alpha_body.contains("led_a1") && alpha_body.contains("led_a2"));
+        assert!(
+            !alpha_body.contains("led_b1"),
+            "beta entry must not leak into alpha shard; got:\n{alpha_body}"
+        );
+    }
+
+    #[test]
+    fn class_layout_is_default_without_config() {
+        // No .asd/config.toml → default Class sharding, single flat
+        // file per class. Locks the backward-compat promise.
+        let tmp = tempdir().unwrap();
+        let project_root = tmp.path();
+        // intentionally no config.toml
+
+        let engine = engine_with_multi_package_decisions();
+        let conclusions_dir = project_root.join(".asd/conclusions");
+        export_all(&engine, &conclusions_dir).unwrap();
+
+        let flat = conclusions_dir.join("decisions.jsonl");
+        assert!(
+            flat.is_file(),
+            "default layout must write flat decisions.jsonl"
+        );
+        let body = std::fs::read_to_string(&flat).unwrap();
+        for id in ["led_a1", "led_a2", "led_b1"] {
+            assert!(body.contains(id), "flat file must contain {id}; got:\n{body}");
+        }
+        // The per-package subdir must NOT have been created.
+        assert!(
+            !conclusions_dir.join("decisions").is_dir(),
+            "default layout must not create per-class subdirectory"
+        );
+    }
+
+    #[test]
+    fn import_reads_package_layout_transparently() {
+        // Plan K t-007: round-trip through package layout — export
+        // with sharding on, import into a fresh engine, verify all
+        // entries land in the ledger.
+        let tmp = tempdir().unwrap();
+        let project_root = tmp.path();
+        std::fs::create_dir_all(project_root.join(".asd")).unwrap();
+        std::fs::write(
+            project_root.join(".asd/config.toml"),
+            "[sidecar]\nshard_by = \"package\"\n",
+        )
+        .unwrap();
+
+        let engine = engine_with_multi_package_decisions();
+        let conclusions_dir = project_root.join(".asd/conclusions");
+        export_all(&engine, &conclusions_dir).unwrap();
+
+        // Fresh engine; replay the same symbols so import has qnames
+        // to match against.
+        let engine2 = Engine::open_in_memory().unwrap();
+        let index2 = AsgIndexStore::from_engine(&engine2);
+        for (sid, qn, file) in [
+            ("sym_a", "pkg.alpha.fn_a", "src/alpha/mod.py"),
+            ("sym_b", "pkg.beta.fn_b", "src/beta/mod.py"),
+        ] {
+            let sym = crate::schema::Symbol {
+                symbol_id: sid.into(),
+                symbol_fp: "fp".into(),
+                qname: qn.into(),
+                language: "python".into(),
+                kind: SymbolKind::Function,
+                file: file.into(),
+                start: crate::schema::Position { line: 1, col: 0 },
+                end: crate::schema::Position { line: 5, col: 0 },
+                signature: None,
+                doc: None,
+            };
+            index2.put_symbol(&engine2.ref_name, &sym, "t").unwrap();
+        }
+        let results = import_all(&engine2, &conclusions_dir, "t").unwrap();
+        let total: usize = results.iter().map(|r| r.imported).sum();
+        assert_eq!(
+            total, 3,
+            "all 3 entries (2 alpha + 1 beta) must import; got results = {results:?}"
+        );
+        // Confirm by reading the ledger directly.
+        let ledger2 = AsgLedgerStore::from_engine(&engine2);
+        let a = ledger2.list_entries(&engine2.ref_name, "sym_a").unwrap();
+        let b = ledger2.list_entries(&engine2.ref_name, "sym_b").unwrap();
+        assert_eq!(a.len(), 2, "sym_a must have 2 imported entries");
+        assert_eq!(b.len(), 1, "sym_b must have 1 imported entry");
     }
 
     /// Append a single thinking-class entry of a given kind to the

@@ -27,6 +27,7 @@ pub mod schema;
 pub mod scratch;
 pub mod search_fts;
 pub mod sidecar;
+pub mod sidecar_config;
 pub mod symbol;
 pub mod transitive;
 pub mod trust;
