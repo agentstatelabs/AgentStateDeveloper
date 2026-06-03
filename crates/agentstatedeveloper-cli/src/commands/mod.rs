@@ -17,6 +17,7 @@ pub mod ledger;
 pub mod list;
 pub mod map;
 pub mod mcp;
+pub mod onboard;
 pub mod policy;
 pub mod prepare_change;
 pub mod probe;

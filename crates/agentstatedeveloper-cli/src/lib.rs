@@ -81,6 +81,12 @@ pub enum Command {
     /// Initialize an ASD repository and install git hooks.
     Init(commands::init::InitArgs),
 
+    /// Plan K t-005: one-shot post-clone setup. Runs `init → index →
+    /// conclusions import` in the right order so a new developer (or
+    /// their agent) gets a fully usable ASD project in one command.
+    /// Idempotent — re-runs are safe.
+    Onboard(commands::onboard::OnboardArgs),
+
     /// Show installed ASD git hooks and their current status.
     Hooks(commands::hooks::HooksArgs),
 
@@ -282,6 +288,7 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
     use commands::*;
     match cmd {
         Command::Init(args) => init::run(cfg, args),
+        Command::Onboard(args) => onboard::run(cfg, args),
         Command::Hooks(args) => hooks::run(cfg, args),
         Command::Index(args) => index::run(cfg, args),
         Command::Read(args) => read::run(cfg, args),
