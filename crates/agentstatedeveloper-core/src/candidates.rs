@@ -3210,6 +3210,133 @@ mod plan_c_t003_tests {
 }
 
 #[cfg(test)]
+mod plan_j_t012_explain_match_tests {
+    //! Plan J t-012: `match_reasons` is the per-hit "why this result"
+    //! array surfaced on every search/investigate response. The
+    //! infrastructure already shipped (Plan A / M26 era); these
+    //! tests lock the signal-vocabulary contract so future tweaks
+    //! can't silently shrink what's reported.
+
+    use crate::candidates::explain_match;
+    use crate::schema::{Author, AuthorKind, LedgerEntry, LedgerKind, Position, Symbol, SymbolKind};
+
+    fn mk_sym(qname: &str, file: &str, sig: Option<&str>, doc: Option<&str>) -> Symbol {
+        Symbol {
+            symbol_id: format!("sym_{}", qname.replace('.', "_")),
+            symbol_fp: "fp".into(),
+            qname: qname.into(),
+            language: "python".into(),
+            kind: SymbolKind::Function,
+            file: file.into(),
+            start: Position { line: 1, col: 0 },
+            end: Position { line: 5, col: 0 },
+            signature: sig.map(str::to_string),
+            doc: doc.map(str::to_string),
+        }
+    }
+
+    fn mk_entry(kind: LedgerKind, summary: &str) -> LedgerEntry {
+        LedgerEntry::new(
+            "sym_x",
+            kind,
+            summary,
+            Author { kind: AuthorKind::Human, id: "alice".into() },
+        )
+    }
+
+    #[test]
+    fn name_match_yields_name_reason() {
+        let sym = mk_sym("pkg.playhead", "src/playhead.py", None, None);
+        let reasons = explain_match(&sym, &["playhead".into()], &[], false);
+        assert!(
+            reasons.iter().any(|r| r == "name:playhead"),
+            "expected name:playhead in {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn file_match_yields_file_reason_when_name_misses() {
+        let sym = mk_sym("pkg.x", "src/transport.py", None, None);
+        let reasons = explain_match(&sym, &["transport".into()], &[], false);
+        assert!(
+            reasons.iter().any(|r| r == "file:transport"),
+            "expected file:transport in {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn doc_match_yields_doc_reason_when_higher_priority_miss() {
+        let sym = mk_sym("pkg.x", "src/x.py", None, Some("Handles the audio mixer pipeline."));
+        let reasons = explain_match(&sym, &["mixer".into()], &[], false);
+        assert!(
+            reasons.iter().any(|r| r == "doc:mixer"),
+            "expected doc:mixer in {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn hot_files_get_recent_edit_signal() {
+        let sym = mk_sym("pkg.x", "src/x.py", None, None);
+        let reasons = explain_match(&sym, &[], &[], true);
+        assert!(
+            reasons.contains(&"recent-edit".to_string()),
+            "is_hot=true must surface `recent-edit`; got {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn invariant_count_appears_as_signal() {
+        let sym = mk_sym("pkg.x", "src/x.py", None, None);
+        let entries = vec![
+            mk_entry(LedgerKind::Invariant, "must hold X"),
+            mk_entry(LedgerKind::Invariant, "must hold Y"),
+        ];
+        let reasons = explain_match(&sym, &[], &entries, false);
+        assert!(
+            reasons.iter().any(|r| r == "invariant-attached:2"),
+            "expected invariant-attached:2 in {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn hazard_count_appears_as_signal_with_pluralization() {
+        let sym = mk_sym("pkg.x", "src/x.py", None, None);
+        let one = vec![mk_entry(LedgerKind::Hazard, "be careful")];
+        let two = vec![
+            mk_entry(LedgerKind::Hazard, "be careful 1"),
+            mk_entry(LedgerKind::Hazard, "be careful 2"),
+        ];
+        assert!(explain_match(&sym, &[], &one, false)
+            .iter()
+            .any(|r| r == "ledger:1 hazard"));
+        assert!(explain_match(&sym, &[], &two, false)
+            .iter()
+            .any(|r| r == "ledger:2 hazards"));
+    }
+
+    #[test]
+    fn ownership_match_surfaces_when_summary_overlaps_query() {
+        let sym = mk_sym("pkg.audio", "src/audio.py", None, None);
+        let entries = vec![mk_entry(LedgerKind::Ownership, "audio mixer pipeline source of truth")];
+        let reasons = explain_match(&sym, &["audio".into()], &entries, false);
+        assert!(
+            reasons.iter().any(|r| r.starts_with("ownership:")),
+            "expected ownership:* in {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn empty_input_returns_empty_reasons() {
+        let sym = mk_sym("pkg.x", "src/x.py", None, None);
+        let reasons = explain_match(&sym, &[], &[], false);
+        assert!(
+            reasons.is_empty(),
+            "no tokens, no ledger, not hot → empty; got {reasons:?}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod plan_j_t011_exclude_sets_tests {
     //! Plan J t-011: `[exclude_sets]` table parsing in `.asd/scopes.toml`
     //! and `resolve_exclude_set` lookups.

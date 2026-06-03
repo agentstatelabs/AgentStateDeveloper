@@ -1095,10 +1095,20 @@ some need new code.
 - **t-011** — Scoping / exclusion polish: per-query negative globs
   (`--exclude 'tests/**'`), language exclusions
   (`--exclude-lang swift`), named exclude sets in `.asd/scopes.toml`.
-- **t-012** — Why-this-result explanations: a per-hit `why[]` array
-  on every search/investigate response listing the signals that
-  pushed it up the ranking (`+intent_focus`, `+ownership_boost`,
-  `−wrong_layer_penalty`).
+- **t-012** — **RESOLVED 1.0.46**. The `match_reasons` array (Plan
+  A / M26 era) already provides per-hit "why this result" signals
+  on every search and investigate response (CLI + MCP):
+  `name:foo` / `file:foo` / `sig:foo` / `doc:foo` /
+  `invariant-attached:N` / `ledger:N hazard[s]` / `ownership:abc` /
+  `recent-edit`. The M25 wishlist used different vocabulary
+  (`+intent_focus`, `-wrong_layer_penalty`) but the substance is
+  the same: a per-hit array of ranking-relevant signals. Locked
+  with 8 unit tests on `explain_match` covering name/file/doc match
+  precedence, recent-edit, invariant count, hazard count + plural,
+  ownership-overlap, and empty-input cases. If future field-eval
+  shows the descriptive vocabulary needs arithmetic deltas
+  (e.g. `+1.5 ownership_boost`), that's a separate task — the
+  current signals are descriptively complete.
 - **t-013** — More test-scenario coverage: extend
   `validation_scenarios` to surface on `impact` (not just
   `context_for`).
