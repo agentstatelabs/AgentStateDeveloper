@@ -1049,10 +1049,16 @@ some need new code.
 
 ### From M20
 
-- **t-001** — Invariants surfacing in `prepare_change` for symbols
-  that have invariants on a *caller*, not just the symbol itself.
-  (Field note: "invariants are silently dropped when you query the
-  callee.")
+- **t-001** — **RESOLVED 1.0.51** (commit `866b840`, shipped by a
+  parallel agent). Both CLI and MCP `prepare_change` now walk
+  direct callers of each candidate, collect their Invariant ledger
+  entries, dedupe via `seen_inv`, and surface them tagged
+  `from_caller: true`. Integration test
+  `invariants_from_callers.rs::invariant_on_direct_caller_surfaces_with_from_caller_tag`
+  seeds an indirect topology (caller's qname tokens are
+  intentionally disjoint from the query and the candidate so the
+  caller can't sneak in via FTS or ledger-anchor — only the
+  Plan J propagation path can surface its invariant).
 - **t-002** — Test-gap detection: when `prepare_change` finds an
   impl with no test in `affected_tests`, surface a "missing test"
   warning in `safe_change_recipe.manually_validate`.
