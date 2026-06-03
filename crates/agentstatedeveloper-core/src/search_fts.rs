@@ -2314,6 +2314,102 @@ pub fn propose_test_path(source_file: &str) -> String {
     format!("{parent}/{stem}Tests.{ext}")
 }
 
+/// Plan J t-007: language-aware test stub body for an agent that
+/// needs to write a new test against `source_file` exercising
+/// `symbol_name`. Returns the recommended skeleton — function
+/// declaration, arrange/act/assert comments, and a
+/// `NotImplementedError`-equivalent marker so the test FAILS until
+/// the agent fills it in (failing-first matches the missing-test
+/// recipe item which says "fails before the edit, passes after").
+///
+/// Language detected from the source file extension. Falls back to
+/// a generic comment-only stub for unknown extensions.
+pub fn propose_test_stub(source_file: &str, symbol_name: &str) -> String {
+    let ext = std::path::Path::new(source_file)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let snake = to_snake_case(symbol_name);
+    let pascal = to_pascal_case(symbol_name);
+    match ext.as_str() {
+        "py" => format!(
+            "def test_{snake}():\n    # arrange\n    # act\n    # assert\n    raise NotImplementedError(\"test_{snake}: fill in\")\n"
+        ),
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => format!(
+            "test('{snake}', () => {{\n  // arrange\n  // act\n  // assert\n  throw new Error('test {snake}: fill in');\n}});\n"
+        ),
+        "rs" => format!(
+            "#[test]\nfn {snake}() {{\n    // arrange\n    // act\n    // assert\n    todo!(\"{snake}: fill in\");\n}}\n"
+        ),
+        "go" => format!(
+            "func Test{pascal}(t *testing.T) {{\n    // arrange\n    // act\n    // assert\n    t.Fatal(\"Test{pascal}: fill in\")\n}}\n"
+        ),
+        "java" => format!(
+            "@Test\npublic void test{pascal}() {{\n    // arrange\n    // act\n    // assert\n    fail(\"test{pascal}: fill in\");\n}}\n"
+        ),
+        "cs" => format!(
+            "[Test]\npublic void {pascal}_Should() {{\n    // arrange\n    // act\n    // assert\n    Assert.Fail(\"{pascal}_Should: fill in\");\n}}\n"
+        ),
+        "rb" => format!(
+            "def test_{snake}\n  # arrange\n  # act\n  # assert\n  flunk(\"test_{snake}: fill in\")\nend\n"
+        ),
+        "kt" | "kts" => format!(
+            "@Test\nfun `{snake}`() {{\n    // arrange\n    // act\n    // assert\n    fail(\"{snake}: fill in\")\n}}\n"
+        ),
+        "swift" => format!(
+            "func test{pascal}() throws {{\n    // arrange\n    // act\n    // assert\n    XCTFail(\"test{pascal}: fill in\")\n}}\n"
+        ),
+        _ => format!(
+            "// New test exercising {symbol_name} — fill in the arrange / act / assert.\n"
+        ),
+    }
+}
+
+/// `payment.charge` / `PaymentCharge` / `payment_charge` → `payment_charge`.
+fn to_snake_case(name: &str) -> String {
+    // Drop module prefix if qname-shaped.
+    let leaf = name.rsplit('.').next().unwrap_or(name);
+    let mut out = String::new();
+    let mut prev_lower = false;
+    for ch in leaf.chars() {
+        if ch == '_' || ch == '-' {
+            if !out.ends_with('_') {
+                out.push('_');
+            }
+            prev_lower = false;
+        } else if ch.is_ascii_uppercase() {
+            if prev_lower && !out.ends_with('_') {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+            prev_lower = false;
+        } else {
+            out.push(ch);
+            prev_lower = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+        }
+    }
+    out.trim_matches('_').to_string()
+}
+
+/// `payment_charge` / `payment.charge` → `PaymentCharge`.
+fn to_pascal_case(name: &str) -> String {
+    let leaf = name.rsplit('.').next().unwrap_or(name);
+    let mut out = String::new();
+    let mut capitalize_next = true;
+    for ch in leaf.chars() {
+        if ch == '_' || ch == '-' {
+            capitalize_next = true;
+        } else if capitalize_next {
+            out.push(ch.to_ascii_uppercase());
+            capitalize_next = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// Run one `git log` pass covering up to `scan_commits` commits and return
 /// a map of relative file path → `FileRecency`.
 ///
@@ -4243,5 +4339,104 @@ mod tests {
         let fts = SearchFtsDb::open(&db_path).unwrap();
         let ids = fts.symbols_with_constraint_penalties("main").unwrap();
         assert!(ids.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod plan_j_t007_test_stub_tests {
+    //! Plan J t-007: `propose_test_stub` returns the language-aware
+    //! skeleton an agent should fill in. Covers all 10 indexed
+    //! adapter languages + the unknown-extension fallback.
+
+    use super::propose_test_stub;
+
+    fn assert_contains_all(actual: &str, needles: &[&str]) {
+        for n in needles {
+            assert!(
+                actual.contains(n),
+                "stub missing `{n}` — got:\n{actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn python_stub_uses_snake_case_def_and_raises_until_filled() {
+        let s = propose_test_stub("src/billing/calc.py", "discount");
+        assert_contains_all(
+            &s,
+            &["def test_discount", "arrange", "act", "assert", "NotImplementedError"],
+        );
+    }
+
+    #[test]
+    fn typescript_stub_uses_test_function_and_throws() {
+        let s = propose_test_stub("src/billing/calc.ts", "discount");
+        assert_contains_all(&s, &["test('discount'", "throw new Error"]);
+    }
+
+    #[test]
+    fn rust_stub_uses_test_attribute_and_todo_macro() {
+        let s = propose_test_stub("src/billing/calc.rs", "discount");
+        assert_contains_all(&s, &["#[test]", "fn discount", "todo!"]);
+    }
+
+    #[test]
+    fn go_stub_uses_pascal_case_and_t_fatal() {
+        let s = propose_test_stub("billing/calc.go", "discount");
+        assert_contains_all(
+            &s,
+            &["func TestDiscount", "*testing.T", "t.Fatal"],
+        );
+    }
+
+    #[test]
+    fn java_stub_uses_test_annotation_and_fail() {
+        let s = propose_test_stub("Billing.java", "discount");
+        assert_contains_all(&s, &["@Test", "testDiscount", "fail("]);
+    }
+
+    #[test]
+    fn csharp_stub_uses_pascal_case_and_assert_fail() {
+        let s = propose_test_stub("Billing.cs", "discount");
+        assert_contains_all(&s, &["[Test]", "Discount_Should", "Assert.Fail"]);
+    }
+
+    #[test]
+    fn ruby_stub_uses_def_test_and_flunk() {
+        let s = propose_test_stub("billing.rb", "discount");
+        assert_contains_all(&s, &["def test_discount", "flunk"]);
+    }
+
+    #[test]
+    fn kotlin_stub_uses_test_annotation_and_backticks() {
+        let s = propose_test_stub("Billing.kt", "discount");
+        assert_contains_all(&s, &["@Test", "`discount`", "fail("]);
+    }
+
+    #[test]
+    fn swift_stub_uses_pascal_case_and_xctfail() {
+        let s = propose_test_stub("Billing.swift", "discount");
+        assert_contains_all(&s, &["func testDiscount", "XCTFail"]);
+    }
+
+    #[test]
+    fn unknown_extension_falls_back_to_generic_comment() {
+        let s = propose_test_stub("data.bin", "discount");
+        assert!(s.contains("discount"));
+        assert!(s.starts_with("// "));
+    }
+
+    #[test]
+    fn qname_prefix_is_stripped_from_test_name() {
+        // billing.payment.charge → just `charge` for the test body.
+        let s = propose_test_stub("src/calc.py", "billing.payment.charge");
+        assert!(s.contains("def test_charge"), "got:\n{s}");
+        assert!(!s.contains("billing_payment"), "qname module path must not leak into test name; got:\n{s}");
+    }
+
+    #[test]
+    fn camel_case_input_becomes_snake_for_python() {
+        let s = propose_test_stub("src/calc.py", "applyDiscount");
+        assert!(s.contains("def test_apply_discount"), "got:\n{s}");
     }
 }

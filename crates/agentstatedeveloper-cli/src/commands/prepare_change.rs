@@ -22,7 +22,8 @@ use agentstatedeveloper_core::{
     confidence_scores, derive_cold_hints, detect_ambiguous_tokens, detect_possible_misses,
     estimate_tokens, explain_match, extract_summary, fetch_all_test_file_paths, find_candidates,
     gather_recency, git_dirty_files, glob_match, intent_focus, intent_layer_order,
-    load_layer_overrides, parse_intent, parse_query, propose_test_path, resolve_scope,
+    load_layer_overrides, parse_intent, parse_query, propose_test_path, propose_test_stub,
+    resolve_scope,
     result_bucket, stale_warning, symbol_tier, test_files_for_source, trim_for_agent,
 };
 
@@ -594,6 +595,28 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             }
         })
         .flatten();
+    // Plan J t-007: emit a language-aware test stub body shape so
+    // the agent doesn't have to guess the test-framework idiom. Only
+    // produced when test_gap fires AND we have an impl source file
+    // to anchor the language on.
+    let proposed_test_stub: Option<String> = if test_gap {
+        let source = file_scores
+            .first()
+            .map(|(_, f, _, _, _, _, _)| f.as_str())
+            .unwrap_or("");
+        // file_scores tuple shape: (score, file, layer, days, hot, qname, why)
+        let symbol = file_scores
+            .first()
+            .map(|(_, _, _, _, _, qname, _)| qname.as_str())
+            .unwrap_or("change");
+        if source.is_empty() {
+            None
+        } else {
+            Some(propose_test_stub(source, symbol))
+        }
+    } else {
+        None
+    };
     let suggested_test_coverage: Vec<String> = if test_gap {
         let mut hints: Vec<String> = design_invariants
             .iter()
@@ -1335,6 +1358,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         "affected_tests": affected_tests,
         "test_gap": test_gap,
         "proposed_test_path": proposed_test_path,
+        "proposed_test_stub": proposed_test_stub,
         "suggested_test_coverage": suggested_test_coverage,
         "scenario_tests": scenario_tests,
         "stale_symbols": stale_symbols,

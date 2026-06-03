@@ -83,6 +83,7 @@ pub use search_fts::{
     estimate_tokens, extract_summary, fetch_all_test_file_paths, find_covering_tests,
     find_indexed_test_files, gather_recency, git_dirty_files, hybrid_boost, intent_focus,
     intent_layer_order, is_stopword, load_layer_overrides, parse_intent, propose_test_path,
+    propose_test_stub,
     symbol_tier, test_files_for_source, trim_for_agent,
 };
 pub use search_fts::{DocHit, DocKind, SearchDoc, SearchDocsDb};

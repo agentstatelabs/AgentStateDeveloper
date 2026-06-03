@@ -3956,6 +3956,20 @@ impl AsdMcpServer {
                     .map(|(_, f, _, _, _, _, _)| propose_test_path(f))
             })
             .flatten();
+        // Plan J t-007: language-aware test stub body — same trigger
+        // as proposed_test_path. file_scores tuple = (score, file,
+        // layer, days, hot, qname, why); element 5 is the symbol qname
+        // used to derive the test name (snake_case for py/rs/rb/ts,
+        // PascalCase for go/java/cs/kt/swift).
+        let proposed_test_stub: Option<String> = if test_gap {
+            file_scores
+                .first()
+                .map(|(_, file, _, _, _, qname, _)| {
+                    agentstatedeveloper_core::propose_test_stub(file, qname)
+                })
+        } else {
+            None
+        };
         let suggested_test_coverage: Vec<String> = if test_gap {
             let mut hints: Vec<String> = design_invariants
                 .iter()
@@ -4119,6 +4133,7 @@ impl AsdMcpServer {
             "affected_tests": affected_tests,
             "test_gap": test_gap,
             "proposed_test_path": proposed_test_path,
+            "proposed_test_stub": proposed_test_stub,
             "suggested_test_coverage": suggested_test_coverage,
             "scenario_tests": scenario_tests,
             "effects_summary": effects_summary,
