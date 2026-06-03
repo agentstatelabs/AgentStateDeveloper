@@ -743,6 +743,23 @@ pub struct FeedbackEntry {
     /// path matches this pattern for queries in the same query family.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_scope: Option<String>,
+    /// Plan J t-014: optional expiry. When set, the verdict is
+    /// ignored by `apply_feedback_adjustments` after this timestamp.
+    /// Useful for false-positive feedback that should auto-decay
+    /// (e.g. "this hit doesn't belong here today, but might next
+    /// quarter when the layout shifts"). `None` = persist forever
+    /// (current default behavior for backward compat).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl FeedbackEntry {
+    /// Plan J t-014: true when `expires_at` is set and is in the past.
+    /// Filtering helper used by `apply_feedback_adjustments` so old
+    /// verdicts naturally lose their ranking influence.
+    pub fn is_expired(&self) -> bool {
+        self.expires_at.map_or(false, |t| Utc::now() > t)
+    }
 }
 
 #[cfg(test)]
@@ -752,6 +769,62 @@ mod plan_b_schema_tests {
     //! LedgerKind → ConclusionClass mapping that drives JSONL export.
 
     use super::*;
+
+    #[test]
+    fn feedback_is_expired_returns_false_when_unset() {
+        // Plan J t-014: backward-compat — entries without expires_at
+        // (the default for existing entries) must never count as
+        // expired.
+        let e = FeedbackEntry {
+            entry_id: "fb_x".into(),
+            symbol_id: "sym_x".into(),
+            symbol_qname: "pkg.x".into(),
+            query: "q".into(),
+            verdict: FeedbackVerdict::Useful,
+            author: "a".into(),
+            created_at: Utc::now(),
+            note: None,
+            file_scope: None,
+            expires_at: None,
+        };
+        assert!(!e.is_expired());
+    }
+
+    #[test]
+    fn feedback_is_expired_returns_true_when_past() {
+        let mut e = FeedbackEntry {
+            entry_id: "fb_x".into(),
+            symbol_id: "sym_x".into(),
+            symbol_qname: "pkg.x".into(),
+            query: "q".into(),
+            verdict: FeedbackVerdict::Useful,
+            author: "a".into(),
+            created_at: Utc::now(),
+            note: None,
+            file_scope: None,
+            expires_at: None,
+        };
+        e.expires_at = Some(Utc::now() - chrono::Duration::days(1));
+        assert!(e.is_expired(), "expired 1 day ago must report expired");
+    }
+
+    #[test]
+    fn feedback_is_expired_returns_false_when_future() {
+        let mut e = FeedbackEntry {
+            entry_id: "fb_x".into(),
+            symbol_id: "sym_x".into(),
+            symbol_qname: "pkg.x".into(),
+            query: "q".into(),
+            verdict: FeedbackVerdict::Useful,
+            author: "a".into(),
+            created_at: Utc::now(),
+            note: None,
+            file_scope: None,
+            expires_at: None,
+        };
+        e.expires_at = Some(Utc::now() + chrono::Duration::days(30));
+        assert!(!e.is_expired(), "future expiry must NOT report expired");
+    }
 
     #[test]
     fn new_kinds_serialize_to_snake_case() {

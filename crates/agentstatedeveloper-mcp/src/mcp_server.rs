@@ -372,6 +372,10 @@ pub struct FeedbackMarkParams {
     /// the symbol whose behavior covers this one. Auto-writes a paired
     /// Mapping ledger entry alongside the FeedbackEntry.
     pub covered_by: Option<String>,
+    /// Plan J t-014: optional expiry in days from now. After `now + N
+    /// days` the entry no longer influences ranking. Useful for
+    /// false-positive marks that should auto-decay.
+    pub ttl_days: Option<i64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -4952,6 +4956,8 @@ impl AsdMcpServer {
             Err(e) => return err_json(&e.to_string()),
         };
         let entry_id = format!("fb_{}", uuid::Uuid::new_v4().simple());
+        let now = chrono::Utc::now();
+        let expires_at = p.ttl_days.map(|days| now + chrono::Duration::days(days));
         let entry = FeedbackEntry {
             entry_id: entry_id.clone(),
             symbol_id: symbol.symbol_id.clone(),
@@ -4960,8 +4966,9 @@ impl AsdMcpServer {
             verdict,
             note: p.note.clone(),
             author: p.author_id.clone(),
-            created_at: chrono::Utc::now(),
+            created_at: now,
             file_scope: None,
+            expires_at,
         };
         let feedback_store = AsgFeedbackStore::from_engine(&engine);
         if let Err(e) = feedback_store.record(&ref_name, &entry, &p.author_id) {
@@ -5121,7 +5128,14 @@ impl AsdMcpServer {
 
         let all_feedback: Vec<agentstatedeveloper_core::FeedbackEntry> = {
             let fb_store = AsgFeedbackStore::from_engine(&engine);
-            fb_store.list_all(&ref_name).unwrap_or_default()
+            // Plan J t-014: expired entries don't influence ranking;
+            // storage is preserved so users can audit via feedback_list.
+            fb_store
+                .list_all(&ref_name)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|e| !e.is_expired())
+                .collect()
         };
 
         let (tokens, mut inline_exclusions) = parse_query(&p.query);

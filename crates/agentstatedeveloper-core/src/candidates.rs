@@ -2787,7 +2787,14 @@ pub fn build_feedback_state(
     entries_applied: usize,
 ) -> FeedbackState {
     let fb_store = AsgFeedbackStore::from_engine(engine);
-    let all = fb_store.list_all(ref_name).unwrap_or_default();
+    // Plan J t-014: feedback-state-building is part of the ranking
+    // path, so expired entries are filtered out here too.
+    let all: Vec<crate::schema::FeedbackEntry> = fb_store
+        .list_all(ref_name)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| !e.is_expired())
+        .collect();
     build_feedback_state_from_entries(&all, query, entries_applied)
 }
 

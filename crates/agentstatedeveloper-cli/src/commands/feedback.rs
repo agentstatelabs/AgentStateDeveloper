@@ -52,6 +52,15 @@ pub struct MarkArgs {
     /// coverage link is durable, not just a per-query verdict.
     #[arg(long)]
     pub covered_by: Option<String>,
+
+    /// Plan J t-014: optional verdict expiry in days from now. After
+    /// `now + N days` the entry no longer influences ranking (still
+    /// visible via `asd feedback list` / `export`). Useful for
+    /// false-positive marks that should auto-decay — code shifts,
+    /// what was wrong last quarter may be right next. Omit to keep
+    /// the verdict permanent (current default).
+    #[arg(long)]
+    pub ttl_days: Option<i64>,
 }
 
 #[derive(Debug, Args)]
@@ -140,6 +149,10 @@ fn run_mark(cfg: &Config, args: MarkArgs) -> Result<()> {
         };
         (symbol.symbol_id, args.qname.clone())
     };
+    let now = chrono::Utc::now();
+    let expires_at = args
+        .ttl_days
+        .map(|days| now + chrono::Duration::days(days));
     let entry = FeedbackEntry {
         entry_id: format!("fb_{}", Uuid::new_v4().simple()),
         symbol_id,
@@ -148,8 +161,9 @@ fn run_mark(cfg: &Config, args: MarkArgs) -> Result<()> {
         verdict,
         note: args.note.clone(),
         author: args.author.clone(),
-        created_at: chrono::Utc::now(),
+        created_at: now,
         file_scope: args.file_scope.clone(),
+        expires_at,
     };
     let feedback_store = AsgFeedbackStore::from_engine(&engine);
     feedback_store.record(&engine.ref_name, &entry, &args.author)?;

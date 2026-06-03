@@ -340,12 +340,20 @@ impl SearchFtsDb {
                 author       TEXT NOT NULL,
                 created_at   TEXT NOT NULL,
                 note         TEXT,
-                file_scope   TEXT
+                file_scope   TEXT,
+                expires_at   TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_asd_fb_symbol  ON asd_feedback(symbol_id);
             CREATE INDEX IF NOT EXISTS idx_asd_fb_qname   ON asd_feedback(symbol_qname);
             CREATE INDEX IF NOT EXISTS idx_asd_fb_verdict ON asd_feedback(verdict);",
         )?;
+        // Plan J t-014: add expires_at to pre-existing tables (DBs
+        // created before 1.0.48). ALTER...ADD COLUMN errors if the
+        // column already exists; we swallow that case and let any
+        // other error surface.
+        let _ = self
+            .conn
+            .execute("ALTER TABLE asd_feedback ADD COLUMN expires_at TEXT", []);
 
         // asd_symbols_cache: full Symbol JSON for every indexed symbol.
         // Populated at asd index time; eliminates the by-qname git tree walk
@@ -1385,8 +1393,8 @@ impl SearchFtsDb {
     pub fn upsert_feedback(&self, e: &FeedbackEntry) -> rusqlite::Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO asd_feedback
-             (entry_id, symbol_id, symbol_qname, query, verdict, author, created_at, note, file_scope)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (entry_id, symbol_id, symbol_qname, query, verdict, author, created_at, note, file_scope, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
                 e.entry_id,
                 e.symbol_id,
@@ -1397,6 +1405,9 @@ impl SearchFtsDb {
                 e.created_at.to_rfc3339(),
                 e.note,
                 e.file_scope,
+                // Plan J t-014: persist expires_at so the FTS cache
+                // round-trips it (was always None pre-1.0.48).
+                e.expires_at.map(|t| t.to_rfc3339()),
             ],
         )?;
         Ok(())
@@ -1405,7 +1416,7 @@ impl SearchFtsDb {
     /// Return all feedback entries from the SQLite cache, newest first.
     pub fn list_all_feedback(&self) -> rusqlite::Result<Vec<FeedbackEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT entry_id, symbol_id, symbol_qname, query, verdict, author, created_at, note, file_scope
+            "SELECT entry_id, symbol_id, symbol_qname, query, verdict, author, created_at, note, file_scope, expires_at
              FROM asd_feedback
              ORDER BY created_at DESC",
         )?;
@@ -1418,6 +1429,13 @@ impl SearchFtsDb {
                 let created_at: DateTime<Utc> = DateTime::parse_from_rfc3339(&ts_str)
                     .map(|d| d.with_timezone(&Utc))
                     .unwrap_or_else(|_| Utc::now());
+                // Plan J t-014: round-trip expires_at through the
+                // cache. Older DBs that pre-date the column have it
+                // backfilled as NULL by the ALTER migration above.
+                let expires_at: Option<DateTime<Utc>> = row
+                    .get::<_, Option<String>>(9)?
+                    .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                    .map(|d| d.with_timezone(&Utc));
                 Ok(FeedbackEntry {
                     entry_id: row.get(0)?,
                     symbol_id: row.get(1)?,
@@ -1428,6 +1446,7 @@ impl SearchFtsDb {
                     created_at,
                     note: row.get(7)?,
                     file_scope: row.get(8)?,
+                    expires_at,
                 })
             })?
             .filter_map(|r| r.ok())

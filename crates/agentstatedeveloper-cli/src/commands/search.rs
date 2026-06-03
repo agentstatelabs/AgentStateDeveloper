@@ -150,7 +150,16 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
     // score adjustment, once for result annotation, once for display badges).
     let all_feedback: Vec<agentstatedeveloper_core::FeedbackEntry> = {
         let fb_store = AsgFeedbackStore::from_engine(&engine);
-        fb_store.list_all(&engine.ref_name).unwrap_or_default()
+        // Plan J t-014: drop expired verdicts on the ranking path.
+        // Storage is untouched — `asd feedback list` still shows
+        // expired entries so users can audit / clean up. Only the
+        // search/ranking pipeline ignores them.
+        fb_store
+            .list_all(&engine.ref_name)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| !e.is_expired())
+            .collect()
     };
 
     let (tokens_from_query, mut inline_exclusions) = parse_query(&args.query);
