@@ -3932,23 +3932,11 @@ impl AsdMcpServer {
         let likely_edit_files: Vec<serde_json::Value> = file_scores
             .iter()
             .map(|(score, file, layer, days, hot, top_symbol, why)| {
-                let fl = file.to_lowercase();
-                let file_role = if fl.contains("/example")
-                    || fl.contains("/sample")
-                    || fl.contains("/demo")
-                {
-                    "example"
-                } else if fl.contains("/test")
-                    || fl.contains("/spec")
-                    || fl.contains("_test.")
-                    || fl.contains("spec.")
-                {
-                    "test"
-                } else if fl.contains("/reference") || fl.contains("/doc") || fl.ends_with(".md") {
-                    "reference"
-                } else {
-                    "impl"
-                };
+                // Plan J t-003: use the unified core classifier so
+                // CLI and MCP agree on the role taxonomy (was
+                // inline-divergent before — MCP missed fixture /
+                // script / generated / view / viewmodel).
+                let file_role = agentstatedeveloper_core::classify_file_role(file);
                 let conflict_risk = dirty_files_pc.contains(file.as_str());
                 serde_json::json!({
                     "file": file, "layer": layer, "score": score,

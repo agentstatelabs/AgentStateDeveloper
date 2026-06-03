@@ -3133,6 +3133,115 @@ pub fn classify_layer(
     "other"
 }
 
+/// Plan J t-003: classify a file by its functional ROLE in the
+/// project — `view` / `viewmodel` / `test` / `example` / `fixture` /
+/// `script` / `generated` / `reference` / `impl`. Distinct from
+/// `classify_layer`, which buckets by architectural tier
+/// (presentation / domain / persistence / etc.).
+///
+/// Order of precedence matters — tests/specs short-circuit before
+/// other patterns so a `ViewTests.swift` is `test`, not `view`.
+/// `view` and `viewmodel` are detected by filename suffix
+/// (`*ViewModel.*`, `*View.*`) AND `/views/` / `/viewmodels/` /
+/// `*.vue` / `*.svelte` path/extension patterns. Conservative on
+/// `.tsx`/`.jsx` — those frequently are UI but not always.
+///
+/// Was previously inline-duplicated in CLI prepare_change.rs and
+/// MCP mcp_server.rs (with diverged pattern sets); Plan J t-003
+/// lifts to one canonical impl. The MCP variant was missing
+/// `fixture` / `script` / `generated` / `view` / `viewmodel`
+/// entirely — the unified classifier picks them up everywhere.
+pub fn classify_file_role(file: &str) -> &'static str {
+    // Prefix with `/` so root-level dirs (`scripts/foo.sh`) match
+    // the same `/scripts` predicate as nested ones (`pkg/scripts/foo.sh`).
+    // Without this, paths without a leading slash fell through to
+    // `impl` silently — a pre-existing bug the old inline classifier
+    // also had.
+    let fl = format!("/{}", file.to_lowercase());
+    // Tests first — `ViewTests.swift` must classify as `test`, not `view`.
+    if fl.contains("/test")
+        || fl.contains("/tests/")
+        || fl.contains("/spec")
+        || fl.contains("_test.")
+        || fl.contains("spec.")
+        || fl.ends_with("tests.swift")
+    {
+        return "test";
+    }
+    if fl.contains("/example")
+        || fl.contains("/examples")
+        || fl.contains("/sample")
+        || fl.contains("/samples")
+        || fl.contains("/demo")
+        || fl.contains("/demos")
+    {
+        return "example";
+    }
+    if fl.contains("/fixture")
+        || fl.contains("/fixtures")
+        || fl.contains("/seed")
+        || fl.contains("/seeds")
+    {
+        return "fixture";
+    }
+    if fl.contains("/script")
+        || fl.contains("/scripts")
+        || fl.contains("/tool/")
+        || fl.contains("/tools/")
+        || fl.contains("/bin/")
+        || fl.contains("/hack/")
+    {
+        return "script";
+    }
+    if fl.contains("/generated")
+        || fl.contains("/gen/")
+        || fl.contains(".generated.")
+        || fl.contains(".pb.")
+        || fl.contains("_generated")
+    {
+        return "generated";
+    }
+    if fl.contains("/doc")
+        || fl.contains("/docs")
+        || fl.contains("/reference")
+        || fl.contains("readme")
+        || fl.ends_with(".md")
+        || fl.ends_with(".rst")
+        || fl.ends_with(".adoc")
+    {
+        return "reference";
+    }
+    // Plan J t-003: viewmodel + view patterns. Order matters —
+    // ViewModel.swift must short-circuit before the bare "view"
+    // suffix check below catches it.
+    if fl.contains("/viewmodels/")
+        || fl.contains("/viewmodel/")
+        || stem_ends_with(&fl, "viewmodel")
+    {
+        return "viewmodel";
+    }
+    if fl.contains("/views/")
+        || fl.contains("/view/")
+        || stem_ends_with(&fl, "view")
+        || fl.ends_with(".vue")
+        || fl.ends_with(".svelte")
+    {
+        return "view";
+    }
+    "impl"
+}
+
+/// Lower-cased helper: does the file STEM (without the extension)
+/// end with `suffix`? Avoids matching `viewmodel` in a path
+/// segment like `previewmodel/foo.rs`. Plan J t-003.
+fn stem_ends_with(path_lower: &str, suffix: &str) -> bool {
+    let stem = std::path::Path::new(path_lower)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    stem.ends_with(suffix)
+}
+
 /// Like [`classify_layer`] but uses the symbol's qualified name as a secondary
 /// hint when the file path alone yields `"other"`. Catches common cases where a
 /// class named `FooViewModel` lives in a file named after the app rather than
@@ -4438,5 +4547,115 @@ mod plan_j_t007_test_stub_tests {
     fn camel_case_input_becomes_snake_for_python() {
         let s = propose_test_stub("src/calc.py", "applyDiscount");
         assert!(s.contains("def test_apply_discount"), "got:\n{s}");
+    }
+}
+
+#[cfg(test)]
+mod plan_j_t003_classify_file_role_tests {
+    //! Plan J t-003: locks the unified file-role classifier and
+    //! exercises the new `view` / `viewmodel` patterns. Previously
+    //! a file like `ExampleFlowViewModel.swift` fell through to
+    //! `impl`; M21 field-eval flagged it as mis-bucketed "other".
+
+    use super::classify_file_role;
+
+    #[test]
+    fn impl_is_default_when_nothing_matches() {
+        assert_eq!(classify_file_role("src/lib.rs"), "impl");
+        assert_eq!(classify_file_role("crates/foo/src/main.py"), "impl");
+    }
+
+    #[test]
+    fn tests_short_circuit_before_view_check() {
+        // `ViewTests.swift` must be `test`, not `view` — the
+        // /test predicate runs first.
+        assert_eq!(classify_file_role("App/Tests/ExampleFlowViewTests.swift"), "test");
+        assert_eq!(classify_file_role("src/lib_test.py"), "test");
+        assert_eq!(classify_file_role("crates/x/tests/it.rs"), "test");
+    }
+
+    #[test]
+    fn viewmodel_by_filename_suffix() {
+        // The key M21 reproducer.
+        assert_eq!(
+            classify_file_role("App/Sources/ExampleFlowViewModel.swift"),
+            "viewmodel"
+        );
+        assert_eq!(
+            classify_file_role("web/src/PlaybackViewModel.ts"),
+            "viewmodel"
+        );
+    }
+
+    #[test]
+    fn viewmodel_by_path_pattern() {
+        assert_eq!(
+            classify_file_role("App/Sources/viewmodels/ExampleFlow.swift"),
+            "viewmodel"
+        );
+        assert_eq!(
+            classify_file_role("web/viewmodel/foo.ts"),
+            "viewmodel"
+        );
+    }
+
+    #[test]
+    fn view_by_filename_suffix() {
+        assert_eq!(
+            classify_file_role("App/Sources/ExampleFlowView.swift"),
+            "view"
+        );
+        assert_eq!(classify_file_role("web/src/TrackView.tsx"), "view");
+    }
+
+    #[test]
+    fn view_by_path_pattern() {
+        assert_eq!(
+            classify_file_role("App/Sources/views/ExampleFlow.swift"),
+            "view"
+        );
+        assert_eq!(classify_file_role("web/view/index.ts"), "view");
+    }
+
+    #[test]
+    fn view_by_extension() {
+        assert_eq!(classify_file_role("web/src/App.vue"), "view");
+        assert_eq!(classify_file_role("web/src/App.svelte"), "view");
+    }
+
+    #[test]
+    fn viewmodel_short_circuits_before_view() {
+        // ViewModel-suffixed files must NOT be reported as `view`.
+        // The viewmodel branch runs before the view branch in the
+        // classifier; without that ordering, `*ViewModel.*` would
+        // hit `stem_ends_with(view)` first and mis-classify.
+        let r = classify_file_role("App/Sources/ExampleFlowViewModel.swift");
+        assert_eq!(r, "viewmodel", "ViewModel must NOT fall to `view`; got {r}");
+    }
+
+    #[test]
+    fn preview_does_not_match_view_in_middle_of_segment() {
+        // `previewmodel/foo.rs` would naïvely match `viewmodel`
+        // in a substring scan — stem_ends_with guards against
+        // that for the suffix patterns. The path-segment match
+        // for `/viewmodels/` is explicit. Verify we don't
+        // misclassify a file whose stem coincidentally contains
+        // `view` mid-word but doesn't end in it.
+        assert_eq!(
+            classify_file_role("src/PreviewService.swift"),
+            "impl",
+            "PreviewService.swift must NOT be a view"
+        );
+    }
+
+    #[test]
+    fn existing_roles_still_classify_correctly() {
+        // Regression guard against the CLI-side helper that this
+        // function lifted from.
+        assert_eq!(classify_file_role("examples/sample-py-repo/foo.py"), "example");
+        assert_eq!(classify_file_role("fixtures/seed.json"), "fixture");
+        assert_eq!(classify_file_role("scripts/release.sh"), "script");
+        assert_eq!(classify_file_role("generated/proto.pb.go"), "generated");
+        assert_eq!(classify_file_role("docs/architecture.md"), "reference");
     }
 }

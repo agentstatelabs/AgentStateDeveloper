@@ -18,7 +18,8 @@ use serde_json::{Value, json};
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine,
     FeedbackMetrics, FeedbackStore, FtsFilters, IndexStore, LedgerKind, LedgerStore, SearchFtsDb,
-    apply_feedback_adjustments, classify_layer_sym, compute_trust_score, compute_uncertainty,
+    apply_feedback_adjustments, classify_file_role, classify_layer_sym, compute_trust_score,
+    compute_uncertainty,
     confidence_scores, derive_cold_hints, detect_ambiguous_tokens, detect_possible_misses,
     estimate_tokens, explain_match, extract_summary, fetch_all_test_file_paths, find_candidates,
     gather_recency, git_dirty_files, glob_match, intent_focus, intent_layer_order,
@@ -1499,63 +1500,10 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
 // t-001: expanded file role classification
 // ---------------------------------------------------------------------------
 
-fn classify_file_role(file: &str) -> &'static str {
-    let fl = file.to_lowercase();
-    if fl.contains("/test")
-        || fl.contains("/spec")
-        || fl.contains("_test.")
-        || fl.contains("spec.")
-        || fl.ends_with("tests.swift")
-        || fl.contains("/tests/")
-    {
-        return "test";
-    }
-    if fl.contains("/example")
-        || fl.contains("/examples")
-        || fl.contains("/sample")
-        || fl.contains("/samples")
-        || fl.contains("/demo")
-        || fl.contains("/demos")
-    {
-        return "example";
-    }
-    if fl.contains("/fixture")
-        || fl.contains("/fixtures")
-        || fl.contains("/seed")
-        || fl.contains("/seeds")
-    {
-        return "fixture";
-    }
-    if fl.contains("/script")
-        || fl.contains("/scripts")
-        || fl.contains("/tool/")
-        || fl.contains("/tools/")
-        || fl.contains("/bin/")
-        || fl.contains("/hack/")
-    {
-        return "script";
-    }
-    if fl.contains("/generated")
-        || fl.contains("/gen/")
-        || fl.contains(".generated.")
-        || fl.contains(".pb.")
-        || fl.contains(".pb.swift")
-        || fl.contains("_generated")
-    {
-        return "generated";
-    }
-    if fl.contains("/doc")
-        || fl.contains("/docs")
-        || fl.contains("/reference")
-        || fl.contains("readme")
-        || fl.ends_with(".md")
-        || fl.ends_with(".rst")
-        || fl.ends_with(".adoc")
-    {
-        return "reference";
-    }
-    "impl"
-}
+// Plan J t-003: classify_file_role lifted to
+// `agentstatedeveloper_core::classify_file_role` so CLI and MCP
+// prepare_change paths share one canonical impl. The new shared
+// version also recognizes `view` and `viewmodel` roles.
 
 // ---------------------------------------------------------------------------
 // t-002: detect the test command for a given source file

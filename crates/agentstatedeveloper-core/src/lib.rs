@@ -79,7 +79,8 @@ pub use scratch::{AsgScratchStore, CleanFilter, ScratchFilter, ScratchStore};
 pub use search_fts::{
     AGENT_DEFAULT_BUDGET, AnnotatedOwner, CoveringTest, FileRecency, FtsFilters, FtsHit,
     OwnerSignalSource, OwnershipSignal, ResolvedSymbol, SearchFtsDb, SymbolMeta, SymbolTier,
-    classify_layer, classify_layer_sym, derive_cold_hints, discover_symbol_ownership,
+    classify_file_role, classify_layer, classify_layer_sym, derive_cold_hints,
+    discover_symbol_ownership,
     estimate_tokens, extract_summary, fetch_all_test_file_paths, find_covering_tests,
     find_indexed_test_files, gather_recency, git_dirty_files, hybrid_boost, intent_focus,
     intent_layer_order, is_stopword, load_layer_overrides, parse_intent, propose_test_path,
