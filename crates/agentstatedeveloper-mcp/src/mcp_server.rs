@@ -3835,6 +3835,87 @@ impl AsdMcpServer {
                 .push(ep);
         }
 
+        // Plan J t-001: invariant propagation from direct callers.
+        // See the CLI handler in commands/prepare_change.rs for the
+        // full rationale; this mirror keeps the MCP `prepare_change`
+        // tool surface symmetric.
+        let mut candidate_sym_ids_pc: Vec<(String, String)> = Vec::new();
+        for (_, qname) in candidates.iter() {
+            if let Ok(Some(s)) = index.get_symbol_by_qname(&ref_name, qname) {
+                candidate_sym_ids_pc.push((s.symbol_id, s.qname));
+            }
+        }
+        let mut caller_ids_seen_pc: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut caller_visit_order_pc: Vec<(String, String)> = Vec::new();
+        for (cand_sym_id, _) in &candidate_sym_ids_pc {
+            let direct_callers = index
+                .get_callers(&ref_name, cand_sym_id)
+                .unwrap_or_default();
+            for caller_id in direct_callers {
+                if candidate_sym_ids_pc.iter().any(|(sid, _)| sid == &caller_id) {
+                    continue;
+                }
+                if caller_ids_seen_pc.insert(caller_id.clone()) {
+                    caller_visit_order_pc.push((cand_sym_id.clone(), caller_id));
+                }
+            }
+        }
+        let caller_id_strs: Vec<&str> = caller_visit_order_pc
+            .iter()
+            .map(|(_, cid)| cid.as_str())
+            .collect();
+        let caller_resolved = SearchFtsDb::open(&db_path)
+            .ok()
+            .map(|fts| fts.resolve_symbol_ids_bulk(&caller_id_strs))
+            .unwrap_or_default();
+        // Fallback qname lookup when FTS cache is cold (fresh post-
+        // import, or test fixtures writing edges directly). Builds
+        // the reverse index once via a single qname-tree walk.
+        let need_fallback_pc = caller_visit_order_pc
+            .iter()
+            .any(|(_, cid)| !caller_resolved.contains_key(cid.as_str()));
+        let fallback_id_to_qname_pc: std::collections::HashMap<String, String> =
+            if need_fallback_pc {
+                let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+                match engine.repo.get_tree(&ref_name, &prefix) {
+                    Ok(serde_json::Value::Object(m)) => m
+                        .into_iter()
+                        .filter_map(|(qn, v)| {
+                            v.get("symbol_id")
+                                .and_then(|v| v.as_str())
+                                .map(|sid| (sid.to_string(), qn))
+                        })
+                        .collect(),
+                    _ => std::collections::HashMap::new(),
+                }
+            } else {
+                std::collections::HashMap::new()
+            };
+        for (_cand_sym_id, caller_id) in &caller_visit_order_pc {
+            let caller_qname = caller_resolved
+                .get(caller_id.as_str())
+                .map(|r| r.qname.as_str())
+                .or_else(|| fallback_id_to_qname_pc.get(caller_id).map(String::as_str));
+            let Some(caller_qname) = caller_qname else {
+                continue;
+            };
+            let caller_entries = ledger_store
+                .list_entries(&ref_name, caller_id)
+                .unwrap_or_default();
+            for entry in caller_entries {
+                if !matches!(entry.kind, LedgerKind::Invariant) {
+                    continue;
+                }
+                if seen_inv.insert(entry.summary.clone()) {
+                    design_invariants.push(serde_json::json!({
+                        "summary": entry.summary,
+                        "source": caller_qname,
+                        "from_caller": true,
+                    }));
+                }
+            }
+        }
+
         // Reorder by_layer.
         let mut ordered: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
         for lk in layer_order {
