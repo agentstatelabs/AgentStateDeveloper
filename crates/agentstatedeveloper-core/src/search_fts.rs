@@ -726,14 +726,27 @@ impl SearchFtsDb {
             .unwrap_or(0)
     }
 
-    /// Count symbols that have any ledger entries (ledger_text is non-empty).
-    /// Used as a fast-path guard in compute_trust_score to skip the expensive
-    /// per-symbol ledger walk when the DB is unannotated.
-    pub fn annotated_symbol_count(&self) -> usize {
+    /// Count symbols that have any ledger entries.
+    ///
+    /// Field-test refinement (ExampleFlow feedback, 2026-06-04): this used
+    /// to read `SELECT COUNT(*) FROM asd_search_fts WHERE ledger_text != ''`,
+    /// but `ledger_text` is only populated at full `asd index` time. Any
+    /// entries written via `asd think`, `asd ledger append`, or
+    /// `asd annotate-commit` go to `asd_ledger_cache` via `upsert_ledger_entry`
+    /// — they're invisible to the FTS table until the next reindex. The
+    /// result: trust scoring kept reporting `unannotated` and projects
+    /// stuck in a confidence-erasing loop ("write entries → ASD says
+    /// nothing's annotated → reindex → maybe ASD sees them"). Reading
+    /// from the live cache instead means writes flip the count instantly.
+    ///
+    /// `ref_name` is required for accurate counting — `asd_ledger_cache`
+    /// stores entries per-ref. The DISTINCT collapses multiple entries
+    /// on the same symbol so we count *annotated symbols*, not entries.
+    pub fn annotated_symbol_count(&self, ref_name: &str) -> usize {
         self.conn
             .query_row(
-                "SELECT COUNT(*) FROM asd_search_fts WHERE ledger_text != ''",
-                [],
+                "SELECT COUNT(DISTINCT symbol_id) FROM asd_ledger_cache WHERE ref_name = ?1",
+                params![ref_name],
                 |r| r.get::<_, i64>(0),
             )
             .map(|n| n as usize)
@@ -1246,6 +1259,16 @@ impl SearchFtsDb {
     }
 
     /// Insert or replace a single ledger entry for `ref_name`.
+    ///
+    /// Field-test refinement (ExampleFlow, 2026-06-04): also backfills
+    /// the symbol's row in `asd_search_fts` so the ledger_text /
+    /// ledger_flags columns stay warm between reindexes. Previously these
+    /// columns were ONLY populated at full `asd index` time, which meant
+    /// any entries written via `asd think`/`asd ledger append` were
+    /// invisible to search-time ledger ranking until the next reindex.
+    /// The backfill is best-effort: if the symbol row doesn't exist in
+    /// FTS yet (rare — symbol writes happen before any ledger writes),
+    /// the UPDATE silently no-ops and the next reindex catches up.
     pub fn upsert_ledger_entry(&self, entry: &LedgerEntry, ref_name: &str) -> rusqlite::Result<()> {
         let body = serde_json::to_string(entry).unwrap_or_else(|_| "{}".to_string());
         self.conn.execute(
@@ -1253,6 +1276,28 @@ impl SearchFtsDb {
              VALUES (?1, ?2, ?3, ?4)",
             params![entry.entry_id, entry.symbol_id, ref_name, body],
         )?;
+
+        // Refresh the denormalized FTS columns from the now-current cache
+        // for this symbol. Concatenate all summaries for ledger_text,
+        // dedupe kinds for ledger_flags.
+        let summary_lower = entry.summary.to_lowercase();
+        let kind_str = entry.kind.as_str();
+        // Use COALESCE so the first entry on a symbol initializes from
+        // empty; subsequent entries append a space + new summary.
+        let _ = self.conn.execute(
+            "UPDATE asd_search_fts
+             SET ledger_text = CASE
+                   WHEN ledger_text IS NULL OR ledger_text = '' THEN ?1
+                   ELSE ledger_text || ' ' || ?1
+                 END,
+                 ledger_flags = CASE
+                   WHEN ledger_flags IS NULL OR ledger_flags = '' THEN ?2
+                   WHEN INSTR(',' || ledger_flags || ',', ',' || ?2 || ',') > 0 THEN ledger_flags
+                   ELSE ledger_flags || ',' || ?2
+                 END
+             WHERE symbol_id = ?3",
+            params![summary_lower, kind_str, entry.symbol_id],
+        );
         Ok(())
     }
 

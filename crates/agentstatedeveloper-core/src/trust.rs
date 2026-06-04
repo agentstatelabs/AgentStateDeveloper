@@ -52,6 +52,14 @@ pub struct TrustSignals {
     pub concept_gap_count: usize,
     /// Ledger entries per symbol (raw float).
     pub ledger_density: f64,
+    /// Field-test refinement (ExampleFlow, 2026-06-04): raw count of
+    /// distinct annotated symbols, sourced from live `asd_ledger_cache`.
+    /// Drives the classify_data_quality `unannotated` → `sparse_but_active`
+    /// rename when any annotations exist, even if density is tiny on a
+    /// large repo (5 entries on 9000 symbols would round to 0.0006 →
+    /// classified as `unannotated` under the old density-only gate).
+    /// `None` when FTS is unavailable.
+    pub annotated_symbol_count: Option<usize>,
     /// ASD schema version string embedded in the binary.
     pub schema_version: String,
 }
@@ -167,6 +175,25 @@ pub fn compute_trust_score(db_path: &Path) -> TrustScore {
     // -----------------------------------------------------------------------
     let (ledger_density, concept_gap_count) = ledger_signals(db_path, symbol_count);
 
+    // 4b. Live-cache annotated symbol count — drives the
+    // `unannotated` → `sparse_but_active` reclassification when the
+    // density is tiny but real entries exist (5 entries on 9000 symbols
+    // rounds to 0.0006 density; old code mislabeled this as
+    // "no annotations yet"). See ExampleFlow field-test feedback,
+    // 2026-06-04.
+    let annotated_symbol_count = SearchFtsDb::open(db_path)
+        .ok()
+        .map(|fts| {
+            // ref_name lives on Engine; reopen here to avoid threading it
+            // through ledger_signals. compute_trust_score is called once
+            // per status/probe/etc. invocation, so the extra open is
+            // negligible.
+            let ref_name = Engine::open_sqlite(db_path)
+                .map(|e| e.ref_name)
+                .unwrap_or_else(|_| "refs/heads/main".to_string());
+            fts.annotated_symbol_count(&ref_name)
+        });
+
     // -----------------------------------------------------------------------
     // 5. Schema version
     // -----------------------------------------------------------------------
@@ -179,6 +206,7 @@ pub fn compute_trust_score(db_path: &Path) -> TrustScore {
         dirty_file_count,
         concept_gap_count,
         ledger_density: (ledger_density * 1000.0).round() / 1000.0,
+        annotated_symbol_count,
         schema_version,
     };
 
@@ -412,6 +440,24 @@ fn classify_data_quality(sig: &TrustSignals, project_root: &std::path::Path) -> 
         || file_line_count(&dot_asd.join("trust-history.jsonl")) >= 3;
 
     if sig.ledger_density < 0.05 {
+        // Field-test refinement (ExampleFlow, 2026-06-04): if the live
+        // ledger cache has ANY annotated symbols, we're not "unannotated"
+        // — we're sparse-but-active. The density-only gate misclassified
+        // projects with a handful of entries spread across thousands of
+        // symbols (e.g. 13 entries on 9000 symbols → density 0.0014 →
+        // false `unannotated` label). Promote to sparse_but_active.
+        if sig.annotated_symbol_count.unwrap_or(0) > 0 {
+            return DataQuality {
+                state: "sparse_but_active".to_string(),
+                reason: format!(
+                    "{} annotated symbol(s) on a large surface — \
+                     coverage is low but annotation is active. \
+                     Keep adding entries to lift density.",
+                    sig.annotated_symbol_count.unwrap_or(0)
+                ),
+                expected_after_reset: false,
+            };
+        }
         if !has_prior_activity {
             // No index, no history → genuinely fresh.
             DataQuality {
@@ -503,12 +549,18 @@ fn ledger_signals(db_path: &Path, _symbol_count: u64) -> (f64, usize) {
     let index_store = AsgIndexStore::from_engine(&engine);
     let ledger_store = AsgLedgerStore::from_engine(&engine);
 
-    // Fast path: if the FTS index shows zero annotated symbols, skip the
-    // per-symbol ledger walks entirely (unannotated / clean-room DBs).
+    // Fast path: if the live ledger cache shows zero annotated symbols,
+    // skip the per-symbol ledger walks entirely (truly unannotated /
+    // clean-room DBs). Reads from `asd_ledger_cache` (live, written by
+    // every `asd think`/`asd ledger append`/`asd annotate-commit`), NOT
+    // from `asd_search_fts.ledger_text` (only populated at full
+    // `asd index` time, stale between reindexes). See
+    // SearchFtsDb::annotated_symbol_count docs for the field-test that
+    // motivated the swap.
     let annotated = engine
         .fts
         .as_ref()
-        .map(|fts| fts.annotated_symbol_count())
+        .map(|fts| fts.annotated_symbol_count(&engine.ref_name))
         .unwrap_or(0);
     if annotated == 0 {
         return (0.0, 0);
@@ -538,4 +590,85 @@ fn ledger_signals(db_path: &Path, _symbol_count: u64) -> (f64, usize) {
 
     let density = total_entries as f64 / syms.len().max(1) as f64;
     (density, concept_gaps)
+}
+
+#[cfg(test)]
+mod exampleflow_unannotated_fix_tests {
+    //! Field-test refinement (ExampleFlow, 2026-06-04): the
+    //! `unannotated` label was firing on projects with live ledger
+    //! entries because the density gate ignored `asd_ledger_cache`
+    //! and the count gate read from a stale FTS column. Lock the
+    //! new classification.
+
+    use super::*;
+
+    fn mk_signals(density: f64, annotated_count: Option<usize>) -> TrustSignals {
+        TrustSignals {
+            age_hours: 1.0,
+            symbol_count: 9675, // ExampleProj-shaped large repo
+            sidecar_state: "present".into(),
+            dirty_file_count: 0,
+            concept_gap_count: 0,
+            ledger_density: density,
+            annotated_symbol_count: annotated_count,
+            schema_version: ASD_SCHEMA_VERSION.to_string(),
+        }
+    }
+
+    #[test]
+    fn sparse_density_with_live_annotations_classifies_as_sparse_but_active() {
+        // The ExampleFlow scenario: 13 entries on 9675 symbols →
+        // density 0.0013, BUT annotated_symbol_count > 0. Must NOT
+        // be labeled `unannotated`.
+        let sig = mk_signals(0.0013, Some(13));
+        let dq = classify_data_quality(&sig, std::path::Path::new("/tmp/nonexistent"));
+        assert_eq!(
+            dq.state, "sparse_but_active",
+            "live annotations must promote out of unannotated; got: {dq:#?}"
+        );
+        assert!(
+            dq.reason.contains("13"),
+            "reason should mention the actual count; got: {}",
+            dq.reason
+        );
+    }
+
+    #[test]
+    fn zero_annotations_with_prior_activity_still_unannotated() {
+        // Backward-compat for the legit case: index built, history
+        // exists, but no ledger entries ever written. Stay
+        // `unannotated`. Need has_prior_activity to be true — use
+        // a CARGO_MANIFEST_DIR-based path that has a .asd dir
+        // (the repo root does).
+        let cli_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = cli_dir.parent().and_then(|p| p.parent()).unwrap();
+        // .asd/index.log exists in the repo root from prior asd runs.
+        // If not, this test falls into clean_room which is still
+        // semantically correct (no annotations + no history → fresh).
+        let sig = mk_signals(0.0, Some(0));
+        let dq = classify_data_quality(&sig, repo_root);
+        assert!(
+            dq.state == "unannotated" || dq.state == "clean_room",
+            "zero annotations should stay unannotated/clean_room, not sparse_but_active; got: {dq:#?}"
+        );
+    }
+
+    #[test]
+    fn unset_annotated_count_falls_back_to_density_gate() {
+        // Defensive: FTS unavailable → annotated_symbol_count = None.
+        // Must NOT panic, must not promote to sparse_but_active.
+        let sig = mk_signals(0.0, None);
+        let dq = classify_data_quality(&sig, std::path::Path::new("/tmp/nonexistent"));
+        // /tmp has no prior_activity → clean_room
+        assert_eq!(dq.state, "clean_room");
+    }
+
+    #[test]
+    fn high_density_unaffected_by_annotated_count_path() {
+        // Annotated count is only a fallback for the low-density
+        // case. Density above 0.50 → populated regardless.
+        let sig = mk_signals(0.75, Some(1000));
+        let dq = classify_data_quality(&sig, std::path::Path::new("/tmp/nonexistent"));
+        assert_eq!(dq.state, "populated");
+    }
 }
