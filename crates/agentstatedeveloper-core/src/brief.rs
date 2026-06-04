@@ -151,9 +151,8 @@ pub fn brief_search_results(hits: &[Value]) -> Vec<Value> {
 /// `entry_points` field directly (the CLI handler shape).
 pub fn brief_investigate(full: &Value) -> Value {
     let mut out = serde_json::Map::new();
-    if let Some(q) = full.get("query") {
-        out.insert("query".into(), q.clone());
-    }
+    // Token economy (1.0.80): no `query` echo — the agent has it.
+    // `query_id` (trace marker, not input) preserved below.
     let entry_points: Vec<Value> = if let Some(eps) = full.get("entry_points").and_then(Value::as_array) {
         eps.clone()
     } else if let Some(by_layer) = full.get("by_layer").and_then(Value::as_object) {
@@ -176,7 +175,7 @@ pub fn brief_investigate(full: &Value) -> Value {
             }
         }
     }
-    Value::Object(out)
+    crate::ser_helpers::drop_empty_top_level(Value::Object(out))
 }
 
 /// Plan F t-006: brief projection for a `prepare_change` response.
@@ -186,7 +185,11 @@ pub fn brief_investigate(full: &Value) -> Value {
 /// suggested_test_coverage / effects_summary) that bloats output.
 pub fn brief_prepare_change(full: &Value) -> Value {
     let mut out = serde_json::Map::new();
-    for k in ["description", "intent", "focus", "query_id", "stale"] {
+    // Token economy (1.0.80): no `description` echo (the agent
+    // literally just sent it). `intent`/`focus` are canonicalized
+    // derivatives, so they stay. `query_id`/`stale` preserved as
+    // trace/diagnostic signals.
+    for k in ["intent", "focus", "query_id", "stale"] {
         if let Some(v) = full.get(k) {
             if !v.is_null() {
                 out.insert(k.into(), v.clone());
@@ -220,13 +223,17 @@ pub fn brief_prepare_change(full: &Value) -> Value {
             }
         }
     }
-    // ExampleFlow refinement (1.0.76): thinking_summary always passes
+    // ExampleFlow refinement (1.0.76): thinking_summary passes
     // through (small, load-bearing — agents read it to tell "filtered"
     // from "absent" even when prior_thinking is empty/missing).
+    // Token economy (1.0.80): drop_empty_top_level still strips it if
+    // the struct's own skip-predicates collapsed it to `{}` — the
+    // ExampleFlow signal needs at LEAST one non-zero field to be
+    // worth emitting.
     if let Some(v) = full.get("thinking_summary") {
         out.insert("thinking_summary".into(), v.clone());
     }
-    Value::Object(out)
+    crate::ser_helpers::drop_empty_top_level(Value::Object(out))
 }
 
 /// Plan F t-006: brief projection for `context_for`. Keeps the symbol
@@ -443,7 +450,9 @@ mod tests {
         });
         let v = brief_investigate(&full);
         let o = v.as_object().unwrap();
-        assert!(o.contains_key("query"));
+        // Token economy (1.0.80): input echo `query` is no longer
+        // emitted — the agent has it.
+        assert!(!o.contains_key("query"), "input echo `query` dropped by brief");
         assert!(o.contains_key("entry_points"));
         assert!(!o.contains_key("ambiguous_terms"));
         assert!(!o.contains_key("possible_misses"));

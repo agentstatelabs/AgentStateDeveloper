@@ -2151,8 +2151,10 @@ impl AsdMcpServer {
             .collect();
         let ambiguous_terms = detect_ambiguous_tokens(&tokens, engine.fts.as_ref(), &filters);
         let possible_misses = detect_possible_misses(&p.query, &layers_present, entry_points.len());
+        // Token economy (1.0.80): drop `query` input echo. Other
+        // fields use `intent`/`focus` from input but those are
+        // resolved-and-canonicalized derivatives — keep them.
         let full = serde_json::json!({
-            "query": p.query,
             "intent": if intent.is_empty() { serde_json::Value::Null } else { serde_json::json!(intent) },
             "focus": if focus.is_empty() { serde_json::Value::Null } else { serde_json::json!(focus) },
             "tokens": tokens,
@@ -2168,6 +2170,7 @@ impl AsdMcpServer {
         } else {
             full
         };
+        let out = agentstatedeveloper_core::drop_empty_top_level(out);
         serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
     }
 
@@ -5715,8 +5718,11 @@ impl AsdMcpServer {
                 })
             })
             .collect();
+        // Token economy (1.0.80): MCP is always agent-consumed.
+        // Drop input echo (p.query) and any empty top-level fields.
         let raw =
-            serde_json::json!({"query": p.query, "results": results, "document_hits": doc_hits});
+            serde_json::json!({"results": results, "document_hits": doc_hits});
+        let raw = agentstatedeveloper_core::drop_empty_top_level(raw);
         serde_json::to_string(&raw).unwrap_or_else(|_| "{}".to_string())
     }
 
@@ -5947,8 +5953,10 @@ impl AsdMcpServer {
             symbols_out
         };
 
+        // Token economy (1.0.80): drop input echo `query`. The MCP
+        // client just sent `p.qnames`; echoing it costs ~50-200
+        // chars depending on the qname list size.
         let mut out_map = serde_json::Map::new();
-        out_map.insert("query".into(), serde_json::json!(p.qnames));
         out_map.insert("count".into(), serde_json::json!(symbols_projected.len()));
         out_map.insert("symbols".into(), serde_json::json!(symbols_projected));
         if !pt.entries.is_null() {
@@ -5958,7 +5966,9 @@ impl AsdMcpServer {
             "thinking_summary".into(),
             serde_json::to_value(&pt.summary).unwrap_or(serde_json::Value::Null),
         );
-        let out = serde_json::Value::Object(out_map);
+        let out = agentstatedeveloper_core::drop_empty_top_level(
+            serde_json::Value::Object(out_map),
+        );
 
         let mut output = serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string());
         if let Some(max_chars) = budget_chars {

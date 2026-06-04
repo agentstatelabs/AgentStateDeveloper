@@ -180,6 +180,9 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
         });
 
         // Append compact snapshot to trust-history.jsonl.
+        // Use the pre-strip dirty_files / concept_gaps lengths for
+        // historical accuracy (the snapshot wants 0/0 explicitly,
+        // not absence).
         append_trust_history(
             cfg,
             &trust,
@@ -190,6 +193,13 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
             dirty_files.len(),
             concept_gaps.len(),
         );
+
+        // Token economy (1.0.80): drop top-level null/[]/{} fields.
+        // status is mixed-use (human + machine); pretty-print stays
+        // for terminal readability, but the empty arrays and the
+        // null `index_consistency` (when consistent) drop out — both
+        // are signal-free for any consumer.
+        let out = agentstatedeveloper_core::drop_empty_top_level(out);
 
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
