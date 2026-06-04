@@ -13,6 +13,38 @@ pub trait IndexStore {
     fn put_symbol(&self, ref_name: &str, symbol: &Symbol, agent_id: &str) -> Result<()>;
     fn get_symbol_by_qname(&self, ref_name: &str, qname: &str) -> Result<Option<Symbol>>;
 
+    /// Plan J t-009: cross-language qname resolution.
+    ///
+    /// When two adapters produce the same `qname` (e.g. `auth.User`
+    /// from a Python module and a Swift struct with the same fully
+    /// qualified name), the primary qname index at
+    /// `/asd/v1/index/by-qname/{qname}` holds **whichever was
+    /// written last** — every prior language's symbol at that qname
+    /// is overwritten in that secondary index. The authoritative
+    /// per-language code tree at `/asd/v1/code/{lang}/{file}/...`
+    /// still has both, but lookups by qname alone silently pick the
+    /// winner of an arbitrary write order.
+    ///
+    /// This method takes an explicit language hint. If the primary
+    /// qname-index entry's language matches the hint, return it
+    /// (fast path). Otherwise walk the `code/{hint}/` tree for a
+    /// symbol with the requested qname; return it if found, else
+    /// fall back to the primary entry (better to return *something*
+    /// matching the qname than nothing — the caller can still see
+    /// the language mismatch on the returned Symbol).
+    ///
+    /// Default impl forwards to the language-agnostic
+    /// `get_symbol_by_qname`. Adapters that can resolve polyglot
+    /// collisions override this.
+    fn get_symbol_by_qname_lang(
+        &self,
+        ref_name: &str,
+        qname: &str,
+        _language_hint: Option<&str>,
+    ) -> Result<Option<Symbol>> {
+        self.get_symbol_by_qname(ref_name, qname)
+    }
+
     /// Read the callees list previously written for `symbol_id`. Returns an
     /// empty Vec if no edges have been recorded.
     fn get_callees(&self, _ref_name: &str, _symbol_id: &str) -> Result<Vec<String>> {
@@ -122,6 +154,53 @@ impl<'a> IndexStore for AsgIndexStore<'a> {
         }
     }
 
+    /// Plan J t-009: cross-language qname resolution. See trait
+    /// docs. The lookup is two-step:
+    ///
+    /// 1. Try the primary qname index. If its language matches the
+    ///    hint (or no hint was given), return it — no extra reads.
+    /// 2. Otherwise walk `/asd/v1/code/{lang_hint}/` for a symbol
+    ///    whose qname equals `qname`. Return the first match.
+    /// 3. If the per-language tree has no match, fall back to the
+    ///    primary entry. Returning the qname-index hit (even
+    ///    language-mismatched) is more useful than `None` —
+    ///    downstream code can inspect `Symbol.language` and decide.
+    fn get_symbol_by_qname_lang(
+        &self,
+        ref_name: &str,
+        qname: &str,
+        language_hint: Option<&str>,
+    ) -> Result<Option<Symbol>> {
+        let primary = self.get_symbol_by_qname(ref_name, qname)?;
+        let hint = match language_hint {
+            Some(h) if !h.is_empty() => h,
+            _ => return Ok(primary), // No hint → nothing to disambiguate.
+        };
+        if let Some(ref sym) = primary {
+            if sym.language == hint {
+                return Ok(primary);
+            }
+        }
+        // Walk the per-language code tree. Path shape:
+        //   /asd/v1/code/{lang}/{file}/{symbol_fp}
+        // We don't know the file or fp, so list and filter.
+        let lang_root = format!("{}/code/{}", paths::ASD_ROOT, hint);
+        if let Ok(tree) = self.repo.get_tree(ref_name, &lang_root) {
+            for_each_symbol(&tree, &mut |sym_value| {
+                if let Ok(sym) = serde_json::from_value::<Symbol>(sym_value.clone()) {
+                    if sym.qname == qname && sym.language == hint {
+                        return Some(sym);
+                    }
+                }
+                None
+            })
+            .map(|found| Ok(Some(found)))
+            .unwrap_or(Ok(primary))
+        } else {
+            Ok(primary)
+        }
+    }
+
     fn get_callees(&self, ref_name: &str, symbol_id: &str) -> Result<Vec<String>> {
         // Fast path: reuse open FTS connection.
         if let Some(fts) = &self.fts {
@@ -151,6 +230,31 @@ impl<'a> IndexStore for AsgIndexStore<'a> {
             Err(_) => Ok(Vec::new()),
         }
     }
+}
+
+/// Plan J t-009: walk a `code/{lang}/` subtree depth-first looking
+/// for a Symbol JSON leaf. Returns the first leaf for which `f`
+/// produces `Some(_)`. The tree shape under `code/{lang}/` is
+/// `{file_segment}/.../ {symbol_fp}: Symbol`, but `get_tree` flattens
+/// it into a nested object so we just recurse over Object children
+/// until we hit a leaf whose value parses as a Symbol.
+fn for_each_symbol<R>(
+    tree: &serde_json::Value,
+    f: &mut dyn FnMut(&serde_json::Value) -> Option<R>,
+) -> Option<R> {
+    // Try this node first — leaves (Symbol JSONs) are objects with
+    // the fields f's closure cares about; if it matches, return.
+    if let Some(found) = f(tree) {
+        return Some(found);
+    }
+    if let serde_json::Value::Object(map) = tree {
+        for child in map.values() {
+            if let Some(found) = for_each_symbol(child, f) {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 fn extract_string_array(v: &serde_json::Value, field: &str) -> Vec<String> {
