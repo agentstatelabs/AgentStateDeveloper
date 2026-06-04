@@ -1174,6 +1174,36 @@ some need new code.
   broadener gains a much bigger payoff window (the most common
   user-invoked narrowing actually works).
 
+- **t-018** — Verify shell-command examples in user-facing output.
+  Triggered by two consecutive field-test catches on ExampleProj in
+  the same session: `asd think bootstrap` told users to run
+  `asd reindex` (no such command — was `asd index` until 1.0.62
+  added the alias), and earlier `commands/think.rs:283` used a
+  CWD-relative path to docs/initial-read-prompt.md that failed
+  from any non-AgentStateDeveloper checkout (fixed in 1.0.61 via
+  `include_str!`). Pattern: command examples baked into help
+  text, JSON output, bootstrap checklists, error advisories,
+  README, DESIGN.md, and `asd --help long_about` can silently
+  drift from reality. Add a `tests/help_examples_resolve.rs`
+  integration test that:
+  1. Runs `asd think bootstrap`, `asd --help`, `asd init`,
+     `asd onboard`, and any other surfaces that print shell
+     commands as guidance.
+  2. Extracts anything matching `` `asd <subcommand>...` `` from
+     stdout.
+  3. For each, runs `asd <subcommand> --help` and asserts exit
+     code 0. (Full execution would have side effects; --help is
+     a cheap, side-effect-free sanity check that the subcommand
+     and its top-level flags resolve.)
+  4. Fails the build with a list of broken references when any
+     example doesn't resolve.
+  Bonus: extend to scan DESIGN.md and CHANGELOG.md backtick-quoted
+  command examples too — those drift even faster than runtime
+  output. The doc/code drift detection is the larger value;
+  catching it at CI time means agents stop hitting "tip: some
+  similar subcommands exist" errors that erode trust in the
+  documentation.
+
 ### Implementation order
 
 M25 cluster first (t-011 → t-014) — they're current pain, not
