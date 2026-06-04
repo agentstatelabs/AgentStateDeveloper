@@ -73,7 +73,8 @@ use rusqlite::{Connection, params};
 use serde_json::Value;
 
 use agentstatedeveloper_core::{
-    FtsFilters, FtsHit, SearchFtsDb, compute_trust_score, stale_warning,
+    FtsFilters, FtsHit, SearchFtsDb, calibration::compute_calibration, compute_trust_score,
+    stale_warning,
 };
 
 use crate::config::Config;
@@ -788,6 +789,30 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
 
     if args.json {
         let json_results: Vec<Value> = results.iter().map(|r| result_to_json(r)).collect();
+        // Plan J t-015: confidence-bucket calibration. Walk each
+        // probe's debug_payload for uncertainty.level and pair it
+        // with the assertion outcome. compute_calibration produces
+        // per-bucket pass-rate + advisory strings ("threshold may
+        // be too strict / too generous") so callers can see at a
+        // glance which buckets need tuning. Probes whose payload
+        // has no uncertainty.level field (e.g. hydrate-roundtrip,
+        // non-search probes) contribute nothing and are silently
+        // skipped — calibration only covers probes that emit a
+        // bucket label.
+        let calibration_obs: Vec<(String, bool)> = results
+            .iter()
+            .filter_map(|r| {
+                let level = r
+                    .debug_payload
+                    .as_ref()
+                    .and_then(|v| v.get("uncertainty"))
+                    .and_then(|u| u.get("level"))
+                    .and_then(|l| l.as_str())?;
+                Some((level.to_string(), r.error.is_none()))
+            })
+            .collect();
+        let calibration = compute_calibration(calibration_obs);
+
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -808,6 +833,7 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
                 "slow_violations": slow_violation_names,
                 "slowest": slowest_top5,
                 "trust": trust.to_json(),
+                "calibration": calibration,
                 "results": json_results,
             }))?
         );

@@ -1124,8 +1124,28 @@ some need new code.
 
 ### From M26 (uncertainty model rollout)
 
-- **t-015** — Calibrate confidence buckets against ExampleProj golden
-  set: are `strong / medium / weak` thresholds accurate? Run probe.
+- **t-015** — **PARTIAL 1.0.59** (kernel shipped, data run pending).
+  Shipped: pure `core::calibration::compute_calibration` helper
+  that takes `(bucket_label, passed)` observations and produces a
+  per-bucket `CalibrationReport { count, passed, pass_rate,
+  advice }`. Advisory strings ("threshold may be too strict / too
+  generous") fire when observed pass rate diverges from the
+  bucket's nominal semantics by more than 15pp (and sample ≥ 5,
+  so small-N noise is suppressed). Recognized labels:
+  `low/medium/high/critical` (uncertainty),
+  `weak/partial/strong` (recovery), `noisy/peripheral/core/
+  relevant` (result bucket). Wired into `asd probe run --json`
+  as a top-level `calibration` block; harvests `uncertainty.level`
+  from each probe's debug_payload paired with its assertion
+  outcome. 10 unit tests on synthetic distributions cover empty
+  input, single bucket, multi-bucket grouping, small-sample
+  suppression, too-strict/too-generous detection, well-calibrated
+  null-advice, unknown labels, and overall-rate aggregation.
+  Pending: an actual `asd probe run --json` execution against
+  ExampleProj's golden DB to read the empirical numbers and tune
+  the thresholds in `core::candidates::compute_uncertainty`. That
+  step needs human judgment on which tunings to ship and is a
+  natural session-bookend.
 
 ### From M27 (feedback loop rollout)
 
