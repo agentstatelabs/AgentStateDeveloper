@@ -9,7 +9,7 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
-    AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, Engine, FeedbackState,
+    AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, Engine,
     FeedbackStore, FtsFilters, IndexStore, LedgerStore, OwnershipSignal,
     apply_feedback_adjustments, build_feedback_state_from_entries, classify_layer_sym,
     compute_trust_score, compute_uncertainty, confidence_scores, detect_ambiguous_tokens,
@@ -19,7 +19,7 @@ use agentstatedeveloper_core::{
     result_bucket, stale_warning, symbol_tier, trim_for_agent,
 };
 
-use crate::commands::{context_for::assemble_symbol_context, graph::build_id_map};
+use crate::commands::context_for::assemble_symbol_context;
 use crate::config::Config;
 
 #[derive(Debug, Args)]

@@ -48,9 +48,7 @@ use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
 use serde_json::Value;
 
-use crate::effects::{AsgEffectStore, EffectStore};
 use crate::error::{AsdError, Result};
-use crate::index::{AsgIndexStore, IndexStore};
 use crate::ledger::{AsgLedgerStore, LedgerStore};
 use crate::paths;
 use crate::repair::drop_orphaned_edge_refs;

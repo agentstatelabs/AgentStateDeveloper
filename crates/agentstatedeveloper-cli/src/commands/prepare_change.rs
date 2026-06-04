@@ -16,8 +16,7 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
-    AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine,
-    FeedbackMetrics, FeedbackStore, FtsFilters, IndexStore, LedgerKind, LedgerStore, SearchFtsDb,
+    AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, FeedbackStore, FtsFilters, IndexStore, LedgerKind, LedgerStore, SearchFtsDb,
     apply_feedback_adjustments, classify_file_role, classify_layer_sym, compute_trust_score,
     compute_uncertainty,
     confidence_scores, derive_cold_hints, detect_ambiguous_tokens, detect_possible_misses,
@@ -28,7 +27,7 @@ use agentstatedeveloper_core::{
     result_bucket, stale_warning, symbol_tier, test_files_for_source, trim_for_agent,
 };
 
-use crate::commands::{graph::build_id_map, impact::git_recent_touches_pub};
+use crate::commands::impact::git_recent_touches_pub;
 use crate::config::Config;
 
 #[derive(Debug, Args)]

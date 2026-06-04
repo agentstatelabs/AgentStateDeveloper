@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    ASD_SCHEMA_VERSION, AsgIndexStore, AsgLedgerStore, Engine, IndexStore, LedgerStore,
+    ASD_SCHEMA_VERSION, AsgIndexStore, AsgLedgerStore, Engine, LedgerStore,
     SearchFtsDb, SidecarState,
     schema::{LedgerKind, Symbol},
     sidecar_lifecycle_state,
@@ -495,7 +495,7 @@ fn count_dirty_source_files(project_root: &Path) -> usize {
 
 /// Derive ledger density and concept-gap count from the ASG.
 /// Returns (density, gap_count). Falls back to (0.0, 0) if Engine can't open.
-fn ledger_signals(db_path: &Path, symbol_count: u64) -> (f64, usize) {
+fn ledger_signals(db_path: &Path, _symbol_count: u64) -> (f64, usize) {
     let engine = match Engine::open_sqlite(db_path) {
         Ok(e) => e,
         Err(_) => return (0.0, 0),

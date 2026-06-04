@@ -31,7 +31,7 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
-    AsgIndexStore, AsgLedgerStore, Engine, IndexStore, LedgerKind, LedgerStore, Symbol, kind_str,
+    AsgIndexStore, AsgLedgerStore, Engine, LedgerKind, LedgerStore, Symbol, kind_str,
     schema::{Author, AuthorKind, LedgerEntry},
 };
 

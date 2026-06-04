@@ -34,6 +34,34 @@ pub struct BucketStats {
     /// label semantics and observed pass rate. Empty string when
     /// the bucket appears well-calibrated.
     pub advice: String,
+    /// Why `advice` looks the way it does. Field-eval refinement
+    /// (1.0.73 ExampleProj run): an empty `advice` string had three
+    /// possible meanings — well-calibrated, sample-too-small,
+    /// or unknown-label — and consumers couldn't tell which from
+    /// the JSON alone. This explicit status lets downstream tools
+    /// gate alerting / dashboards without re-deriving the
+    /// classification from `count` + `bucket` semantics.
+    pub advice_status: AdviceStatus,
+}
+
+/// Why a bucket's `advice` field has the value it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdviceStatus {
+    /// Sample large enough AND observed pass rate within ±15pp of
+    /// the bucket's expected midpoint. `advice` is empty.
+    WellCalibrated,
+    /// `count < 5`. Statistical noise too high to act on; `advice`
+    /// is suppressed even if the rate looks off.
+    SampleTooSmall,
+    /// Bucket label is not in the known-semantics table (uncertainty
+    /// or quality axis). Can't judge calibration; `advice` is empty.
+    UnknownLabel,
+    /// `count ≥ 5` AND observed rate diverges from expected by >15pp.
+    /// `advice` contains the multi-cause analysis; this is the only
+    /// status that means "you should look at the bucket label vs.
+    /// the predictor's thresholds."
+    Actionable,
 }
 
 /// Aggregate calibration across all buckets.
@@ -77,13 +105,14 @@ where
             } else {
                 round4(passed as f64 / count as f64)
             };
-            let advice = bucket_advice(&label, count, rate);
+            let (advice, advice_status) = bucket_advice_with_status(&label, count, rate);
             BucketStats {
                 bucket: label,
                 count,
                 passed,
                 pass_rate: rate,
                 advice,
+                advice_status,
             }
         })
         .collect();
@@ -124,12 +153,16 @@ where
 /// rate we'd expect if the bucket label accurately describes
 /// the underlying signal. Advice fires when observed deviates
 /// from that by >15pp and sample size is ≥5.
-fn bucket_advice(label: &str, count: usize, rate: f64) -> String {
+fn bucket_advice_with_status(
+    label: &str,
+    count: usize,
+    rate: f64,
+) -> (String, AdviceStatus) {
     if count < 5 {
-        return String::new();
+        return (String::new(), AdviceStatus::SampleTooSmall);
     }
     if rate.is_nan() {
-        return String::new();
+        return (String::new(), AdviceStatus::SampleTooSmall);
     }
     let expected = match label {
         // Uncertainty axis — low uncertainty = high confidence
@@ -144,7 +177,7 @@ fn bucket_advice(label: &str, count: usize, rate: f64) -> String {
         "partial" | "peripheral" => 0.65,
         "weak" | "noisy" => 0.25,
 
-        _ => return String::new(), // unknown label, no advice
+        _ => return (String::new(), AdviceStatus::UnknownLabel),
     };
     let gap = rate - expected;
     if gap > 0.15 {
@@ -160,25 +193,27 @@ fn bucket_advice(label: &str, count: usize, rate: f64) -> String {
         // fail," it means "model has uncertainty about which exact
         // candidate." Don't assert which one until precision-mode
         // probes (Plan J t-019) are in place to distinguish.
-        format!(
+        let msg = format!(
             "observed pass rate {:.0}% exceeds expected midpoint {:.0}% by {:.0}pp — possible causes: (a) bucket threshold too strict, (b) probes too lenient to differentiate within-bucket precision, (c) bucket label genuinely describes uncertainty rather than expected failure rate. Tighten probes (rank_eq vs rank_lte) before retuning thresholds.",
             rate * 100.0,
             expected * 100.0,
             gap.abs() * 100.0,
-        )
+        );
+        (msg, AdviceStatus::Actionable)
     } else if gap < -0.15 {
         // The under-performing case is the clearer signal: probes
         // are failing, predictor said the result was high-confidence.
         // Leniency doesn't explain failures, so this advice can stay
         // direct.
-        format!(
+        let msg = format!(
             "observed pass rate {:.0}% trails expected midpoint {:.0}% by {:.0}pp — bucket threshold may be too generous (results are worse than the label promises)",
             rate * 100.0,
             expected * 100.0,
             gap.abs() * 100.0,
-        )
+        );
+        (msg, AdviceStatus::Actionable)
     } else {
-        String::new()
+        (String::new(), AdviceStatus::WellCalibrated)
     }
 }
 
@@ -323,6 +358,49 @@ mod tests {
             r.buckets[0].advice, "",
             "well-calibrated bucket should have empty advice"
         );
+        assert_eq!(
+            r.buckets[0].advice_status,
+            AdviceStatus::WellCalibrated,
+            "well-calibrated bucket must report status explicitly"
+        );
+    }
+
+    #[test]
+    fn advice_status_distinguishes_three_empty_causes() {
+        // Refinement (1.0.73): an empty `advice` string had three
+        // possible meanings — well-calibrated, sample-too-small,
+        // unknown-label. The advice_status field disambiguates so
+        // consumers don't have to re-derive.
+
+        // SampleTooSmall: low bucket, only 4 observations (below
+        // n=5 threshold), all passing.
+        let small: Vec<(&str, bool)> = (0..4).map(|_| ("low", true)).collect();
+        let r1 = compute_calibration(small);
+        assert_eq!(r1.buckets[0].advice, "");
+        assert_eq!(r1.buckets[0].advice_status, AdviceStatus::SampleTooSmall);
+
+        // UnknownLabel: bucket name not in the semantics table.
+        let unknown: Vec<(&str, bool)> = (0..10).map(|_| ("freshly_invented", true)).collect();
+        let r2 = compute_calibration(unknown);
+        assert_eq!(r2.buckets[0].advice, "");
+        assert_eq!(r2.buckets[0].advice_status, AdviceStatus::UnknownLabel);
+
+        // WellCalibrated: low bucket at 100% pass (expected ~95%,
+        // gap +5pp within ±15pp band).
+        let well: Vec<(&str, bool)> = (0..10).map(|_| ("low", true)).collect();
+        let r3 = compute_calibration(well);
+        assert_eq!(r3.buckets[0].advice, "");
+        assert_eq!(r3.buckets[0].advice_status, AdviceStatus::WellCalibrated);
+    }
+
+    #[test]
+    fn actionable_advice_reports_actionable_status() {
+        // Mirror: when advice IS populated, status is Actionable.
+        // 10 obs of "high" at 95% pass — expected ~45%, +50pp gap.
+        let obs: Vec<(&str, bool)> = (0..10).map(|i| ("high", i != 0)).collect();
+        let r = compute_calibration(obs);
+        assert!(!r.buckets[0].advice.is_empty());
+        assert_eq!(r.buckets[0].advice_status, AdviceStatus::Actionable);
     }
 
     #[test]

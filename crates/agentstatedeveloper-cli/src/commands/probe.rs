@@ -74,7 +74,7 @@ use rusqlite::{Connection, params};
 use serde_json::Value;
 
 use agentstatedeveloper_core::{
-    FtsFilters, FtsHit, SearchFtsDb, calibration::compute_calibration, compute_trust_score,
+    FtsFilters, SearchFtsDb, calibration::compute_calibration, compute_trust_score,
     stale_warning,
 };
 
@@ -230,7 +230,10 @@ struct ProbeFile {
 #[derive(Debug, serde::Deserialize, Clone)]
 struct ProbeEntry {
     name: String,
+    // Round-trip TOML field — surfaces in `asd probe list` output
+    // and probe-file diffs even though no internal logic reads it.
     #[serde(default)]
+    #[allow(dead_code)]
     description: String,
     command: String,
     #[serde(default)]
@@ -873,17 +876,71 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
         })
     };
 
-    // Top-5 slowest — full result shape, pre-sorted descending by duration_ms.
-    let mut by_duration: Vec<(usize, u128)> = results
-        .iter()
-        .enumerate()
-        .map(|(i, r)| (i, r.duration_ms))
-        .collect();
-    by_duration.sort_by(|a, b| b.1.cmp(&a.1));
-    let slowest_top5: Vec<Value> = by_duration
+    // Top-5 slowest — full result shape, pre-sorted descending by
+    // duration_ms.
+    //
+    // Refinement (1.0.73, after ExampleProj 1.0.72 field run): probes
+    // that share a subprocess via the command-cache (e.g.
+    // `rank-projectmanager-top5` + `rank-projectmanager-eq1` both
+    // hit the same `asd search ProjectManager --agent` invocation)
+    // were producing duplicate "slowest" rows with identical
+    // durations, making a 3-distinct-subprocess workload look like
+    // 5 separate slow paths. Collapse by (command, args, cwd)
+    // cache key so each row represents one ACTUAL slow subprocess;
+    // the probe_names array lists every probe that timed against
+    // that run.
+    let dedup_db_path = cfg.db_path.clone();
+    let mut by_cache: std::collections::HashMap<String, (u128, Vec<&ProbeResult>)> =
+        std::collections::HashMap::new();
+    for r in &results {
+        let key = format!(
+            "{}|{}",
+            r.command,
+            // Best-effort: probes share the cache when their probe
+            // entries share command+args. Result-level we only have
+            // command (not args), so probes with identical command +
+            // identical duration_ms collapse. Reading the probe
+            // entries here would require threading them through —
+            // skipped for now, the (command, duration) heuristic
+            // catches the rank-*-top5 + rank-*-eq1 pairs that
+            // motivated this refinement.
+            r.duration_ms,
+        );
+        let entry = by_cache.entry(key).or_insert((r.duration_ms, Vec::new()));
+        entry.1.push(r);
+    }
+    // Suppress unused-warning on dedup_db_path — kept available
+    // for a future tightening that hashes the full command-key.
+    let _ = dedup_db_path;
+    let mut deduped: Vec<(u128, Vec<&ProbeResult>)> = by_cache.into_values().collect();
+    deduped.sort_by(|a, b| b.0.cmp(&a.0));
+    let slowest_top5: Vec<Value> = deduped
         .iter()
         .take(5)
-        .map(|(i, _)| result_to_json(&results[*i]))
+        .map(|(duration_ms, group)| {
+            // Single-probe groups render exactly like the old shape
+            // (no extra `probe_names` field) for backward compat.
+            // Multi-probe groups add `probe_names` listing every
+            // sibling that shared the cache.
+            if group.len() == 1 {
+                result_to_json(group[0])
+            } else {
+                let names: Vec<&str> = group.iter().map(|r| r.name.as_str()).collect();
+                let mut v = result_to_json(group[0]);
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert(
+                        "probe_names".to_string(),
+                        serde_json::json!(names),
+                    );
+                    obj.insert(
+                        "cache_shared_count".to_string(),
+                        serde_json::json!(group.len()),
+                    );
+                    obj.insert("duration_ms".to_string(), serde_json::json!(duration_ms));
+                }
+                v
+            }
+        })
         .collect();
 
     // Compute summary values shared by JSON output, human output, and history.
@@ -1055,6 +1112,7 @@ fn extract_calibration_signal(json: Option<&Value>) -> Option<String> {
 
 /// Cached result of a single subprocess execution (command + args).
 /// Shared across all probes that map to the same command invocation.
+#[allow(dead_code)] // stdout_raw + timed_out kept for forensic dumps
 #[derive(Clone)]
 struct CachedOutput {
     /// Parsed JSON from stdout, or None if output was not valid JSON.

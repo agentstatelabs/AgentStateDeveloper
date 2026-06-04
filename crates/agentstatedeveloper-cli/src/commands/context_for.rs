@@ -18,10 +18,9 @@ use agentstatedeveloper_core::schema::VerificationStatus;
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, IndexStore, LedgerStore,
     OwnershipSignal, SearchFtsDb, Symbol, discover_symbol_ownership, find_covering_tests,
-    stale_warning,
 };
 
-use crate::commands::graph::{AsdTimer, build_id_map};
+use crate::commands::graph::AsdTimer;
 use crate::config::Config;
 
 #[derive(Debug, Args)]
@@ -313,7 +312,7 @@ pub(crate) fn assemble_symbol_context(
 
 /// Reduce ledger entries to fit within `max_chars`. Trims `decisions_and_notes`
 /// first (least critical), then `proofs`, keeping invariants and hazards.
-fn trim_to_budget(out: &Value, max_chars: usize) -> Value {
+fn trim_to_budget(out: &Value, _max_chars: usize) -> Value {
     // Simple approach: return as-is and let the caller log a warning.
     // A more sophisticated trim would iterate and drop entries.
     // For now just note the budget was exceeded.
