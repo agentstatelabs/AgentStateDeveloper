@@ -1124,28 +1124,70 @@ some need new code.
 
 ### From M26 (uncertainty model rollout)
 
-- **t-015** — **PARTIAL 1.0.59** (kernel shipped, data run pending).
-  Shipped: pure `core::calibration::compute_calibration` helper
-  that takes `(bucket_label, passed)` observations and produces a
-  per-bucket `CalibrationReport { count, passed, pass_rate,
-  advice }`. Advisory strings ("threshold may be too strict / too
-  generous") fire when observed pass rate diverges from the
-  bucket's nominal semantics by more than 15pp (and sample ≥ 5,
-  so small-N noise is suppressed). Recognized labels:
-  `low/medium/high/critical` (uncertainty),
-  `weak/partial/strong` (recovery), `noisy/peripheral/core/
-  relevant` (result bucket). Wired into `asd probe run --json`
-  as a top-level `calibration` block; harvests `uncertainty.level`
-  from each probe's debug_payload paired with its assertion
-  outcome. 10 unit tests on synthetic distributions cover empty
-  input, single bucket, multi-bucket grouping, small-sample
-  suppression, too-strict/too-generous detection, well-calibrated
-  null-advice, unknown labels, and overall-rate aggregation.
-  Pending: an actual `asd probe run --json` execution against
-  ExampleProj's golden DB to read the empirical numbers and tune
-  the thresholds in `core::candidates::compute_uncertainty`. That
-  step needs human judgment on which tunings to ship and is a
-  natural session-bookend.
+- **t-015** — **RESOLVED 1.0.68** (kernel + field-validated
+  semantics + cohort-split via t-019 precision probes).
+
+  Shipped surface:
+  - `core::calibration::compute_calibration(observations)
+    → CalibrationReport { buckets, total, overall_pass_rate }`,
+    pure (no I/O, no clock). Bucket grouping via BTreeMap for
+    stable sorted output. Advisory strings fire only when
+    sample ≥ 5 AND observed rate diverges from expected by >15pp.
+  - `ProbeResult.calibration_signal: Option<String>` populated
+    at probe-execution time from `uncertainty.level` regardless
+    of pass/fail (1.0.65 fix — original 1.0.59 wiring only
+    harvested from debug_payload, which is None on the pass
+    path, so all-passing runs produced empty buckets).
+  - Wired into `asd probe run --json` as a top-level
+    `calibration` block.
+
+  Bucket-semantics table (corrected in 1.0.68 after the
+  inverted-axis bug surfaced):
+    Uncertainty axis (low=high-confidence, critical=low-confidence):
+      low 95% | medium 70% | high 45% | critical 20%
+    Quality axis (core=good result, noisy=bad):
+      core/strong/relevant 90% | partial/peripheral 65% |
+      weak/noisy 25%
+
+  **Four-round arc** (the most expensive lesson of the session):
+
+    1.0.59  Synthetic only — 10 unit tests pass against the
+            (wrong) bucket-semantics assumption. Kernel ships.
+    1.0.65  First ExampleProj run produces empty calibration block.
+            Root cause: debug_payload is Some(_) only on probe
+            FAILURE; the calibration harvester read from there,
+            so an all-passing run produced no observations.
+            Fix: capture uncertainty.level into
+            ProbeResult.calibration_signal at execution time,
+            independent of pass/fail.
+    1.0.66  Second run produces a confidently-wrong single-cause
+            "threshold too strict" advisory. Softened the wording
+            to enumerate three competing causes (too-strict
+            threshold, too-lenient probes, label-semantics
+            mismatch) and recommend tightening probes before
+            retuning thresholds.
+    1.0.67  Added t-019 precision-mode probes (`qname_rank_eq
+            exact=1` alongside lenient `qname_rank_lte max=5`).
+            Probes shipped — same advisory still fires, but now
+            the cohort split (lenient + precision both pass)
+            rules out the lenient-probe explanation.
+    1.0.68  Traced the remaining mystery into
+            core::candidates::compute_uncertainty and found the
+            actual threshold ladder: `low` = LOW UNCERTAINTY =
+            high confidence, `critical` = highest uncertainty.
+            Inverted from the calibration table's assumption.
+            Fix: split the table into two explicit axes
+            (uncertainty + quality) with opposite directions.
+            New regression `exampleproj_field_signal_now_well_
+            calibrated` locks the corrected semantics.
+
+  **Postmortem — guideline pinned for future predictors:**
+  Never write a calibration table for a label scheme without
+  first staring at the predictor's actual threshold ladder. The
+  synthetic unit tests will pass against the wrong table because
+  they encode the same wrong assumption — only real-world
+  distributions tied to the real predictor can expose the
+  inversion. Codified in project CLAUDE.md.
 
 ### From M27 (feedback loop rollout)
 
