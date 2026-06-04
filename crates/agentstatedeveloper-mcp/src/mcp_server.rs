@@ -4194,11 +4194,17 @@ impl AsdMcpServer {
                     .map(String::from)
             })
             .collect();
-        let prior_thinking = thinking::gather_prior_thinking(
+        // ExampleFlow refinement (2026-06-04): gather now returns
+        // PriorThinking { entries, summary }. `thinking_summary` always
+        // emits (load-bearing signal: tells agents whether thinking
+        // exists but was filtered, vs. doesn't exist at all).
+        let pt = thinking::gather_prior_thinking(
             &engine,
             &thinking_qnames,
             thinking::DEFAULT_CONFIDENCE_FLOOR,
         );
+        let prior_thinking = pt.entries;
+        let thinking_summary = pt.summary;
 
         let full = serde_json::json!({
             "description": p.description,
@@ -4222,6 +4228,7 @@ impl AsdMcpServer {
             "effects_summary": effects_summary,
             "recently_touched": recently_touched,
             "prior_thinking": prior_thinking,
+            "thinking_summary": thinking_summary,
             "stale": stale_warning(&db_path, 3600),
             "confidence": {
                 "strong": "orientation across layers (app/engine/UI/persistence) for a feature-level change description",
@@ -5893,7 +5900,10 @@ impl AsdMcpServer {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        let prior_thinking = thinking::gather_prior_thinking(
+        // ExampleFlow refinement: thinking_summary always emits, even
+        // when prior_thinking is Null — load-bearing signal for agents
+        // ("entries exist but filtered" vs "no entries on these symbols").
+        let pt = thinking::gather_prior_thinking(
             &engine,
             &qnames_vec,
             thinking::DEFAULT_CONFIDENCE_FLOOR,
@@ -5913,9 +5923,13 @@ impl AsdMcpServer {
         out_map.insert("query".into(), serde_json::json!(p.qnames));
         out_map.insert("count".into(), serde_json::json!(symbols_projected.len()));
         out_map.insert("symbols".into(), serde_json::json!(symbols_projected));
-        if !prior_thinking.is_null() {
-            out_map.insert("prior_thinking".into(), prior_thinking);
+        if !pt.entries.is_null() {
+            out_map.insert("prior_thinking".into(), pt.entries);
         }
+        out_map.insert(
+            "thinking_summary".into(),
+            serde_json::to_value(&pt.summary).unwrap_or(serde_json::Value::Null),
+        );
         let out = serde_json::Value::Object(out_map);
 
         let mut output = serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string());

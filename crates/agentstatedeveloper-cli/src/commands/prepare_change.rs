@@ -107,6 +107,15 @@ pub struct PrepareChangeArgs {
     /// Example: --check-commit HEAD or --check-commit abc123f
     #[arg(long)]
     pub check_commit: Option<String>,
+
+    /// ExampleFlow refinement (1.0.76): minimum confidence for a
+    /// Hypothesis to surface in `prior_thinking`. Defaults to 0.3
+    /// (matches `core::thinking::DEFAULT_CONFIDENCE_FLOOR`). Lower
+    /// to see speculative hypotheses; raise to suppress noise.
+    /// Hypotheses below the floor still appear in
+    /// `thinking_summary.by_kind_dropped` for visibility.
+    #[arg(long)]
+    pub thinking_floor: Option<f64>,
 }
 
 pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
@@ -1443,6 +1452,31 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             "injected": ctx_text.is_some(),
         }),
     };
+    // ExampleFlow refinement (1.0.76): surface captured thinking on
+    // the symbols that matter for this query. Mirrors the MCP handler
+    // (mcp_server.rs:4189-4201). Pull top_symbol off each
+    // likely_edit_files entry; gather_prior_thinking walks the ledger
+    // and projects to the compact `prior_thinking` shape, plus a
+    // metadata summary that always emits even when entries is Null.
+    let thinking_qnames: Vec<String> = likely_edit_files
+        .iter()
+        .filter_map(|f| {
+            f.get("top_symbol")
+                .and_then(Value::as_str)
+                .map(String::from)
+        })
+        .collect();
+    let thinking_floor = args
+        .thinking_floor
+        .unwrap_or(agentstatedeveloper_core::thinking::DEFAULT_CONFIDENCE_FLOOR);
+    let pt = agentstatedeveloper_core::thinking::gather_prior_thinking(
+        &engine,
+        &thinking_qnames,
+        thinking_floor,
+    );
+    let prior_thinking = pt.entries;
+    let thinking_summary = serde_json::to_value(&pt.summary).unwrap_or(Value::Null);
+
     let out = json!({
         "description": args.description,
         "task_context": args.task_context,
@@ -1464,6 +1498,8 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         "safe_change_recipe": safe_change_recipe,
         "design_invariants": design_invariants,
         "known_hazards": known_hazards,
+        "prior_thinking": prior_thinking,
+        "thinking_summary": thinking_summary,
         "validation_scenarios": validation_scenarios_ledger,
         "entry_points": { "by_layer": ordered_by_layer },
         "likely_edit_files": likely_edit_files,

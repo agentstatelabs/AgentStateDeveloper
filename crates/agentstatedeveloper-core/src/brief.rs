@@ -220,6 +220,12 @@ pub fn brief_prepare_change(full: &Value) -> Value {
             }
         }
     }
+    // ExampleFlow refinement (1.0.76): thinking_summary always passes
+    // through (small, load-bearing — agents read it to tell "filtered"
+    // from "absent" even when prior_thinking is empty/missing).
+    if let Some(v) = full.get("thinking_summary") {
+        out.insert("thinking_summary".into(), v.clone());
+    }
     Value::Object(out)
 }
 
