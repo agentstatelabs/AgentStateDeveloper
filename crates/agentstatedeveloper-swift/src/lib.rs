@@ -125,7 +125,32 @@ fn file_qname_prefix(file: &str) -> String {
     let s = file.strip_prefix("./").unwrap_or(file);
     let s = s.strip_suffix(".swift").unwrap_or(s);
     let s = strip_sources_prefix(s);
-    s.replace('/', ".")
+    let joined = s.replace('/', ".");
+    dedupe_consecutive_segments(&joined)
+}
+
+/// Collapse consecutive identical path segments after the `/` → `.`
+/// join. Xcode projects routinely nest the project name (no SPM
+/// `Sources/` marker to strip), producing paths like
+/// `App/ExampleFlow/ExampleFlow/ExampleFlow/Views/DriftPad/...`
+/// which yield qnames like
+/// `App.ExampleFlow.ExampleFlow.ExampleFlow.Views.DriftPad.DriftPadView`.
+/// The triple `ExampleFlow` is noise: it inflates token count for
+/// every Swift result, distorts BM25 against multi-word queries
+/// that match the duplicated stem, and lengthens display output.
+///
+/// Dedup is conservative — only CONSECUTIVE identical segments
+/// collapse. A legitimate qname like `Foo.bar.Foo.baz` (non-
+/// adjacent repeat) is unaffected. Cross-language safe: Python /
+/// Rust / TS adapters use their own qname builders.
+fn dedupe_consecutive_segments(qname: &str) -> String {
+    let mut out: Vec<&str> = Vec::with_capacity(qname.split('.').count());
+    for seg in qname.split('.') {
+        if out.last() != Some(&seg) {
+            out.push(seg);
+        }
+    }
+    out.join(".")
 }
 
 fn node_text<'a>(node: Node<'_>, src: &'a [u8]) -> &'a str {
@@ -1241,6 +1266,56 @@ enum Currency {
         );
         // Top-level file
         assert_eq!(file_qname_prefix("main.swift"), "main");
+    }
+
+    #[test]
+    fn file_prefix_dedupes_consecutive_repeated_segments() {
+        // Refinement (1.0.74): Xcode-style nested project naming
+        // produces paths like
+        //   App/ExampleFlow/ExampleFlow/ExampleFlow/Views/DriftPad/DriftPadView.swift
+        // (no SPM `Sources/` marker — strip_sources_prefix is a
+        // no-op). Pre-fix this yielded
+        //   App.ExampleFlow.ExampleFlow.ExampleFlow.Views.DriftPad.DriftPadView
+        // — the triple ExampleFlow inflates tokens, distorts
+        // BM25, and pollutes search output. Field-test surfaced
+        // in ExampleProj 1.0.72.
+        assert_eq!(
+            file_qname_prefix(
+                "App/ExampleFlow/ExampleFlow/ExampleFlow/Views/DriftPad/DriftPadView.swift"
+            ),
+            "App.ExampleFlow.Views.DriftPad.DriftPadView",
+            "consecutive `ExampleFlow` segments should collapse to one"
+        );
+        // Double, not triple
+        assert_eq!(
+            file_qname_prefix("Foo/Bar/Bar/baz.swift"),
+            "Foo.Bar.baz"
+        );
+        // Non-consecutive duplicates left alone (could be a real
+        // semantic structure: `App.Auth.User.Auth.helper`)
+        assert_eq!(
+            file_qname_prefix("Foo/Bar/Baz/Bar/qux.swift"),
+            "Foo.Bar.Baz.Bar.qux"
+        );
+        // Doesn't collide with the SPM Sources-strip path
+        assert_eq!(
+            file_qname_prefix("App/ExampleFlow/Sources/ExampleFlow/ExampleFlow/foo.swift"),
+            "ExampleFlow.foo",
+            "after Sources-strip, the ExampleFlow/ExampleFlow/ also dedupes"
+        );
+    }
+
+    #[test]
+    fn dedupe_consecutive_segments_unit() {
+        assert_eq!(dedupe_consecutive_segments("a.a.a.b.c"), "a.b.c");
+        assert_eq!(dedupe_consecutive_segments("a.b.c"), "a.b.c");
+        assert_eq!(dedupe_consecutive_segments(""), "");
+        assert_eq!(dedupe_consecutive_segments("a"), "a");
+        assert_eq!(dedupe_consecutive_segments("a.b.a"), "a.b.a"); // non-consecutive
+        assert_eq!(
+            dedupe_consecutive_segments("App.ExampleFlow.ExampleFlow.ExampleFlow.Views"),
+            "App.ExampleFlow.Views"
+        );
     }
 
     #[test]

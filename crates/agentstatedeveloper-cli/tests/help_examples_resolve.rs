@@ -228,3 +228,83 @@ fn extractor_unit_returns_empty_for_no_backticks() {
     let subs = extract_asd_subcommands(text);
     assert!(subs.is_empty(), "got: {subs:?}");
 }
+
+#[test]
+fn design_md_and_changelog_backtick_examples_resolve() {
+    // Stretch goal from t-018's DESIGN.md entry: scan
+    // architectural docs for backtick-quoted `asd <sub>` examples
+    // too. Docs drift faster than runtime output (no test asserts
+    // them at write time), so they're a real source of stale
+    // hints — but they also produce more false positives
+    // (hypothetical commands, future-tense plans, deprecated
+    // surfaces in postmortems).
+    //
+    // Mitigation: known-acceptable false positives go in
+    // KNOWN_PLACEHOLDERS; everything else must resolve.
+    //
+    // Refinement (1.0.74): files scanned via env!("CARGO_MANIFEST_DIR")
+    // → workspace root, NOT CWD. Tests run from any cwd; bashing
+    // a relative path would be a t-018-style bug itself.
+    const KNOWN_PLACEHOLDERS: &[&str] = &[
+        // Add hypothetical / deprecated / forward-looking command
+        // tokens here as DESIGN.md or CHANGELOG.md evolve. Each
+        // entry is a comment-grade contract: "this name does NOT
+        // resolve today AND that's intentional in the doc."
+        //
+        // `health` — MCP tool only (`mcp__asd__health`). DESIGN.md
+        // references it (e.g. in the index-consistency comparison
+        // narrative) because MCP and CLI surfaces ARE compared in
+        // those discussions. If we ever add an `asd health`
+        // wrapper, remove this entry.
+        "health",
+        // `pull-meta` — forward-looking command discussed in a
+        // DESIGN.md architectural section (commit-trailer-anchored
+        // ASG metadata fetch). Not implemented. The doc is the
+        // spec for a future capability, not a hint that should
+        // resolve today.
+        "pull-meta",
+    ];
+
+    // CARGO_MANIFEST_DIR for the cli crate → repo/crates/cli;
+    // walk up two to the repo root.
+    let cli_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = cli_dir
+        .parent() // crates/
+        .and_then(|p| p.parent()) // repo root
+        .expect("repo root must be two levels above cli crate");
+
+    let mut all_text = String::new();
+    for fname in &["DESIGN.md", "CHANGELOG.md"] {
+        let path = repo_root.join(fname);
+        match std::fs::read_to_string(&path) {
+            Ok(s) => all_text.push_str(&s),
+            Err(e) => {
+                // Missing CHANGELOG.md is acceptable for repos that
+                // don't keep one; missing DESIGN.md is a real
+                // problem worth surfacing.
+                if *fname == "DESIGN.md" {
+                    panic!("required doc {} unreadable: {e}", path.display());
+                }
+            }
+        }
+        all_text.push('\n');
+    }
+
+    let extracted = extract_asd_subcommands(&all_text);
+    let known: std::collections::HashSet<&str> = KNOWN_PLACEHOLDERS.iter().copied().collect();
+    let mut broken: Vec<String> = Vec::new();
+    for sub in &extracted {
+        if known.contains(sub.as_str()) {
+            continue;
+        }
+        if let Err(msg) = assert_subcommand_resolves(sub) {
+            broken.push(format!("  - {sub}: {msg}"));
+        }
+    }
+    assert!(
+        broken.is_empty(),
+        "DESIGN.md/CHANGELOG.md reference {} broken `asd <sub>` example(s):\n{}\n(extracted set: {extracted:?})\n\nIf the broken example is intentional (hypothetical, deprecated, forward-looking), add the subcommand token to KNOWN_PLACEHOLDERS in this test file.",
+        broken.len(),
+        broken.join("\n")
+    );
+}
