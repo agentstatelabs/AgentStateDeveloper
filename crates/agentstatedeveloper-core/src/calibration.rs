@@ -130,13 +130,29 @@ fn bucket_advice(label: &str, count: usize, rate: f64) -> String {
     };
     let gap = rate - expected;
     if gap > 0.15 {
+        // Field-eval (2026-06-04, ExampleProj 1.0.65): first real run
+        // showed 7 `low` observations at 100% pass rate. The original
+        // wording asserted "bucket threshold is too strict" — but
+        // that's only one of three possible explanations. The probes
+        // themselves may be too lenient (e.g. `qname_rank_lte
+        // max_rank=5` passes if the right symbol is anywhere in the
+        // top 5, not just at rank 1), or the predictor may have
+        // correctly classified queries that any reasonable retrieval
+        // would handle — `low` doesn't necessarily mean "expected to
+        // fail," it means "model has uncertainty about which exact
+        // candidate." Don't assert which one until precision-mode
+        // probes (Plan J t-019) are in place to distinguish.
         format!(
-            "observed pass rate {:.0}% exceeds expected midpoint {:.0}% by {:.0}pp — bucket threshold may be too strict (results are better than the label promises)",
+            "observed pass rate {:.0}% exceeds expected midpoint {:.0}% by {:.0}pp — possible causes: (a) bucket threshold too strict, (b) probes too lenient to differentiate within-bucket precision, (c) bucket label genuinely describes uncertainty rather than expected failure rate. Tighten probes (rank_eq vs rank_lte) before retuning thresholds.",
             rate * 100.0,
             expected * 100.0,
             gap.abs() * 100.0,
         )
     } else if gap < -0.15 {
+        // The under-performing case is the clearer signal: probes
+        // are failing, predictor said the result was high-confidence.
+        // Leniency doesn't explain failures, so this advice can stay
+        // direct.
         format!(
             "observed pass rate {:.0}% trails expected midpoint {:.0}% by {:.0}pp — bucket threshold may be too generous (results are worse than the label promises)",
             rate * 100.0,
@@ -224,21 +240,33 @@ mod tests {
     }
 
     #[test]
-    fn low_bucket_overperforming_gets_too_strict_advice() {
-        // 10 obs at 95% pass rate — `low` label expects ~25%.
-        // 70pp gap should trigger the "too strict" advisory.
+    fn low_bucket_overperforming_advice_lists_competing_causes() {
+        // 10 obs at 90% pass rate — `low` label expects ~25%.
+        // 65pp gap should trigger the over-performing advisory.
+        // Field-eval (1.0.65 ExampleProj run) reworded this to enumerate
+        // three competing causes — too-strict-threshold,
+        // too-lenient-probes, label-semantics-mismatch — rather than
+        // assert the first as truth. Test pins the multi-cause shape
+        // and the "exceeds" + "tighten probes" anchors so a future
+        // copy edit can't accidentally drop the nuance.
         let mut obs: Vec<(&str, bool)> = Vec::new();
         for i in 0..10 {
-            // 1 fail, 9 pass — but we want stronger signal so 10 pass.
             obs.push(("low", i != 0));
         }
         let r = compute_calibration(obs);
         let advice = &r.buckets[0].advice;
         assert!(
-            advice.contains("too strict"),
-            "expected 'too strict' advice for low@90%; got: {advice:?}"
+            advice.contains("exceeds"),
+            "must report the over-performance; got: {advice:?}"
         );
-        assert!(advice.contains("exceeds"), "got: {advice}");
+        assert!(
+            advice.contains("(a)") && advice.contains("(b)") && advice.contains("(c)"),
+            "must enumerate three competing causes; got: {advice:?}"
+        );
+        assert!(
+            advice.contains("Tighten probes"),
+            "must suggest the precision-mode remediation before threshold tuning; got: {advice:?}"
+        );
     }
 
     #[test]

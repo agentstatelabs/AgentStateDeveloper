@@ -1204,6 +1204,35 @@ some need new code.
   similar subcommands exist" errors that erode trust in the
   documentation.
 
+- **t-019** — Precision-mode probe assertions to disambiguate
+  calibration signal. Triggered by 1.0.65 ExampleProj field run:
+  `asd probe run --json | jq .calibration` showed 7 of 9
+  uncertainty-bearing probes in the `low` bucket with 100% pass
+  rate (75pp over the bucket's expected midpoint). The advisory
+  fires, but the cause is ambiguous — `low` could mean (a) the
+  threshold is too strict, (b) the probes are too lenient
+  (`qname_rank_lte max_rank=5` passes when the right symbol is
+  anywhere in the top 5, not just at rank 1), or (c) the bucket
+  label semantics describe within-result uncertainty rather than
+  an expected failure rate, in which case 100% pass is consistent
+  with `low` and the threshold is correct. Without precision
+  probes, we can't distinguish. Add:
+  1. New assertion kind `qname_rank_eq { fragment, exact_rank }`
+     — probe fails unless the matching symbol is at the EXACT
+     specified rank (typically 1).
+  2. Update `asd probe bootstrap` to generate one precision
+     probe per ranking probe (matching `qname_rank_eq` with
+     `exact_rank: 1` for the top symbol).
+  3. Tag the new probes `precision` so they can be filtered with
+     `asd probe run --tag precision`.
+  4. Once the same `low` cohort shows MIXED pass rates (lenient
+     probes pass + precision probes fail), the original
+     "threshold too strict" advisory becomes actionable for
+     retuning `compute_uncertainty`.
+  Until then, the kernel correctly reports "we don't know which
+  cause" — the multi-line advisory text reworded in 1.0.66
+  enumerates all three explicitly.
+
 ### Implementation order
 
 M25 cluster first (t-011 → t-014) — they're current pain, not
