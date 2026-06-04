@@ -906,12 +906,11 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
         let calibration_obs: Vec<(String, bool)> = results
             .iter()
             .filter_map(|r| {
-                let level = r
-                    .debug_payload
-                    .as_ref()
-                    .and_then(|v| v.get("uncertainty"))
-                    .and_then(|u| u.get("level"))
-                    .and_then(|l| l.as_str())?;
+                // Plan J t-015 fix: read the pre-extracted signal,
+                // NOT debug_payload (which is None on the pass path
+                // — populating calibration only from failures gave
+                // empty buckets on every all-passing run).
+                let level = r.calibration_signal.as_deref()?;
                 Some((level.to_string(), r.error.is_none()))
             })
             .collect();
@@ -1031,6 +1030,26 @@ struct ProbeResult {
     error: Option<String>,
     debug_payload: Option<Value>,
     debug_payload_summary: Option<String>,
+    /// Plan J t-015: uncertainty bucket label extracted from the
+    /// cached JSON output, captured for EVERY probe (pass or fail)
+    /// so the calibration harvester has observations even when
+    /// debug_payload is None. `None` when the probe's command
+    /// output didn't include `uncertainty.level` (e.g. `asd trust`,
+    /// which doesn't emit a bucket).
+    calibration_signal: Option<String>,
+}
+
+/// Extract `uncertainty.level` from a probe's parsed JSON output.
+/// Used to populate `ProbeResult.calibration_signal` regardless of
+/// pass/fail, so the calibration harvester sees every observation
+/// (debug_payload is only attached on failure — relying on it
+/// silently drops the entire pass cohort).
+fn extract_calibration_signal(json: Option<&Value>) -> Option<String> {
+    json?
+        .get("uncertainty")?
+        .get("level")?
+        .as_str()
+        .map(|s| s.to_string())
 }
 
 /// Cached result of a single subprocess execution (command + args).
@@ -1171,6 +1190,7 @@ fn run_assertion_against(probe: &ProbeEntry, cached: &CachedOutput) -> ProbeResu
             error: Some(exec_err.clone()),
             debug_payload: None,
             debug_payload_summary: None,
+            calibration_signal: cached.json.as_ref().and_then(|j| extract_calibration_signal(Some(j))),
         };
     }
 
@@ -1185,6 +1205,7 @@ fn run_assertion_against(probe: &ProbeEntry, cached: &CachedOutput) -> ProbeResu
             error: Some(format!("command failed: {}", cached.stderr.trim())),
             debug_payload: None,
             debug_payload_summary: None,
+            calibration_signal: cached.json.as_ref().and_then(|j| extract_calibration_signal(Some(j))),
         };
     }
 
@@ -1201,6 +1222,7 @@ fn run_assertion_against(probe: &ProbeEntry, cached: &CachedOutput) -> ProbeResu
                 error: Some("command output was not valid JSON".to_string()),
                 debug_payload: None,
                 debug_payload_summary: None,
+            calibration_signal: cached.json.as_ref().and_then(|j| extract_calibration_signal(Some(j))),
             };
         }
     };
@@ -1216,6 +1238,7 @@ fn run_assertion_against(probe: &ProbeEntry, cached: &CachedOutput) -> ProbeResu
             error: None,
             debug_payload: None,
             debug_payload_summary: None,
+            calibration_signal: cached.json.as_ref().and_then(|j| extract_calibration_signal(Some(j))),
         },
         Err(msg) => {
             let summary = summarize_debug_payload(json);
@@ -1229,6 +1252,7 @@ fn run_assertion_against(probe: &ProbeEntry, cached: &CachedOutput) -> ProbeResu
                 error: Some(msg),
                 debug_payload: Some(json.clone()),
                 debug_payload_summary: summary,
+                calibration_signal: extract_calibration_signal(Some(json)),
             }
         }
     }
@@ -1264,6 +1288,7 @@ fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
                 error: None,
                 debug_payload: Some(serde_json::json!({ "message": msg })),
                 debug_payload_summary: Some(msg),
+                calibration_signal: None, // hydrate doesn't emit uncertainty.level
             },
             Err(msg) => ProbeResult {
                 name: probe.name.clone(),
@@ -1275,6 +1300,7 @@ fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
                 error: Some(msg.clone()),
                 debug_payload: Some(serde_json::json!({ "error": msg })),
                 debug_payload_summary: Some(msg),
+                calibration_signal: None,
             },
         };
     }
@@ -1351,6 +1377,7 @@ fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
                 )),
                 debug_payload: None,
                 debug_payload_summary: None,
+                calibration_signal: None, // exec failed; no JSON to harvest
             };
         }
     };
@@ -1376,6 +1403,7 @@ fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
             )),
             debug_payload: None,
             debug_payload_summary: None,
+            calibration_signal: None, // cmd failed without parseable JSON
         };
     }
 
@@ -1392,6 +1420,7 @@ fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
                 error: Some("command output was not valid JSON".to_string()),
                 debug_payload: None,
                 debug_payload_summary: None,
+                calibration_signal: None, // unparseable stdout, nothing to extract
             };
         }
     };
@@ -1408,9 +1437,11 @@ fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
             error: None,
             debug_payload: None,
             debug_payload_summary: None,
+            calibration_signal: extract_calibration_signal(Some(&json)),
         },
         Err(msg) => {
             let summary = summarize_debug_payload(&json);
+            let cal = extract_calibration_signal(Some(&json));
             ProbeResult {
                 name: probe.name.clone(),
                 command: probe.command.clone(),
@@ -1421,6 +1452,7 @@ fn execute_probe(cfg: &Config, probe: &ProbeEntry) -> ProbeResult {
                 error: Some(msg),
                 debug_payload: Some(json),
                 debug_payload_summary: summary,
+                calibration_signal: cal,
             }
         }
     }
