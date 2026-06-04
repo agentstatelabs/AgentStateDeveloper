@@ -21,6 +21,14 @@ use agentstatedeveloper_core::{
 
 use crate::config::Config;
 
+/// Initial-read prompt template, embedded at compile time so
+/// `asd think prompt` works from any CWD (ExampleProj or any other
+/// project that asd indexes — not just the AgentStateDeveloper
+/// source checkout). The path is resolved relative to think.rs:
+/// repo-root/docs/initial-read-prompt.md.
+pub const INITIAL_READ_PROMPT: &str =
+    include_str!("../../../../docs/initial-read-prompt.md");
+
 #[derive(Debug, Subcommand)]
 pub enum ThinkCmd {
     /// Record a Hypothesis: speculation with a confidence (0.0–1.0).
@@ -33,6 +41,11 @@ pub enum ThinkCmd {
     Question(QuestionArgs),
     /// List captured thinking entries.
     List(ListArgs),
+    /// Print the initial-read prompt template to stdout. Embedded at
+    /// compile time — works from any CWD. Pipe into your agent
+    /// (e.g. `asd think prompt | claude`) or redirect to a file
+    /// (`asd think prompt > .asd/onboarding-prompt.md`).
+    Prompt,
     /// Print the initial-read prompt path + starter checklist.
     /// With --check, scans existing thinking entries and reports gaps.
     Bootstrap(BootstrapArgs),
@@ -123,6 +136,13 @@ pub fn run(cfg: &Config, cmd: ThinkCmd) -> Result<()> {
         ThinkCmd::Failed(a) => run_failed(cfg, a),
         ThinkCmd::Question(a) => run_question(cfg, a),
         ThinkCmd::List(a) => run_list(cfg, a),
+        ThinkCmd::Prompt => {
+            // No trailing newline added — include_str! preserves
+            // the file's final newline already; a second one would
+            // pollute pipe consumers.
+            print!("{}", INITIAL_READ_PROMPT);
+            Ok(())
+        }
         ThinkCmd::Bootstrap(a) => run_bootstrap(cfg, a),
     }
 }
@@ -384,8 +404,9 @@ fn run_bootstrap_default(
         let mut payload = json!({
             "ok": true,
             "prompt_path": prompt_path,
+            "prompt_command": "asd think prompt",
             "checklist": [
-                "Read the prompt at docs/initial-read-prompt.md",
+                "Read the prompt: run `asd think prompt` (embedded — works from any CWD)",
                 "Run `asd reindex` so the project graph is current",
                 "Capture at least one MentalModel for the top-level architecture",
                 "Capture Hypotheses for hot files with confidence in [0.0, 1.0]",
@@ -413,10 +434,11 @@ fn run_bootstrap_default(
     if s.has_inheritance() {
         print_inheritance_block(s);
     }
-    println!("Prompt template: {prompt_path}");
+    println!("Prompt template: `asd think prompt` (embedded — works from any CWD)");
+    println!("                 source: {prompt_path} (in the AgentStateDeveloper repo)");
     println!();
     println!("Starter checklist:");
-    println!("  1. Read the prompt at {prompt_path}");
+    println!("  1. Read the prompt: `asd think prompt` (pipe into your agent or read directly)");
     println!("  2. Run `asd reindex` so the project graph is current");
     println!("  3. Capture at least one MentalModel for the top-level architecture");
     println!("  4. Capture Hypotheses for hot files with confidence in [0.0, 1.0]");
