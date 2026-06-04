@@ -119,9 +119,23 @@ pub struct PrepareChangeArgs {
 }
 
 pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
+    // ExampleFlow refinement (1.0.77): use the 24h soft threshold +
+    // classify severity. Only print Critical to stderr unconditionally;
+    // Soft warnings (just-past-threshold but FTS healthy) are demoted
+    // into the JSON output's `stale_severity` field, where downstream
+    // UIs can render them quietly — or skip rendering if the query
+    // resolved successfully.
     if !args.quiet {
-        if let Some(warn) = stale_warning(&cfg.db_path, 3600) {
-            eprintln!("{warn}");
+        if let Some(warn) = agentstatedeveloper_core::stale_warning_classified(
+            &cfg.db_path,
+            agentstatedeveloper_core::SOFT_STALE_THRESHOLD_SECS,
+        ) {
+            if warn.severity == agentstatedeveloper_core::StaleSeverity::Critical {
+                eprintln!("{}", warn.message);
+            }
+            // Soft severity: suppressed from stderr; surfaces in the
+            // response JSON's `stale` + `stale_severity` fields so the
+            // agent can read it without it bullhorning every run.
         }
     }
     let intent = args.intent.as_deref().and_then(parse_intent).unwrap_or("");
@@ -1477,10 +1491,26 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     let prior_thinking = pt.entries;
     let thinking_summary = serde_json::to_value(&pt.summary).unwrap_or(Value::Null);
 
+    // ExampleFlow refinement: compute once (cheap) for both fields.
+    let stale_classified = agentstatedeveloper_core::stale_warning_classified(
+        &cfg.db_path,
+        agentstatedeveloper_core::SOFT_STALE_THRESHOLD_SECS,
+    );
+    let stale_msg = stale_classified
+        .as_ref()
+        .map(|w| Value::String(w.message.clone()))
+        .unwrap_or(Value::Null);
+    let stale_severity = stale_classified
+        .as_ref()
+        .map(|w| serde_json::to_value(w.severity).unwrap_or(Value::Null))
+        .unwrap_or(Value::Null);
+
     let out = json!({
         "description": args.description,
         "task_context": args.task_context,
         "ctx_context": ctx_context_val,
+        "stale": stale_msg,
+        "stale_severity": stale_severity,
         "intent": if intent.is_empty() { Value::Null } else { json!(intent) },
         "focus": if focus.is_empty() { Value::Null } else { json!(focus) },
         "uncertainty": uncertainty.to_json(),

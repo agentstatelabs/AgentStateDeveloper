@@ -93,7 +93,8 @@ pub use search_fts::{
 };
 pub use search_fts::{DocHit, DocKind, SearchDoc, SearchDocsDb};
 pub use search_fts::{
-    compute_index_consistency, effect_detail_reason, format_age, stale_warning,
+    SOFT_STALE_THRESHOLD_SECS, StaleSeverity, StaleWarning, compute_index_consistency,
+    effect_detail_reason, format_age, stale_warning, stale_warning_classified,
 };
 pub use sidecar::{
     HydrateSummary, SidecarState, SyncSummary, hydrate_from_dir, mark_fresh_reset, prune_sidecar,

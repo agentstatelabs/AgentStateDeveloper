@@ -4229,7 +4229,26 @@ impl AsdMcpServer {
             "recently_touched": recently_touched,
             "prior_thinking": prior_thinking,
             "thinking_summary": thinking_summary,
-            "stale": stale_warning(&db_path, 3600),
+            // ExampleFlow refinement (1.0.77): 24h soft threshold for
+            // prepare-change (matches a typical dev day; index built
+            // this morning is fine all afternoon). When age exceeds the
+            // threshold but the query DID resolve, downstream UIs can
+            // demote via `stale_severity == "soft"`. Loud severity
+            // ("critical") fires on empty/broken FTS regardless of age.
+            "stale": agentstatedeveloper_core::stale_warning_classified(
+                &db_path,
+                agentstatedeveloper_core::SOFT_STALE_THRESHOLD_SECS,
+            )
+                .as_ref()
+                .map(|w| serde_json::Value::String(w.message.clone()))
+                .unwrap_or(serde_json::Value::Null),
+            "stale_severity": agentstatedeveloper_core::stale_warning_classified(
+                &db_path,
+                agentstatedeveloper_core::SOFT_STALE_THRESHOLD_SECS,
+            )
+                .as_ref()
+                .map(|w| serde_json::to_value(w.severity).unwrap_or(serde_json::Value::Null))
+                .unwrap_or(serde_json::Value::Null),
             "confidence": {
                 "strong": "orientation across layers (app/engine/UI/persistence) for a feature-level change description",
                 "weak": "narrow bug-fix work — verify each suggested file with `references` or `read` before editing; broad descriptions can surface unrelated files",
