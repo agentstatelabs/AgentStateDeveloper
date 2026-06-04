@@ -1980,29 +1980,34 @@ pub fn compute_index_consistency(
     fts_symbols: usize,
 ) -> serde_json::Value {
     let delta = asg_symbols as i64 - fts_symbols as i64;
-    let consistent = delta == 0;
-    let advice = if consistent {
-        serde_json::Value::Null
-    } else if delta > 0 {
-        serde_json::Value::String(format!(
+    if delta == 0 {
+        // Token economy (1.0.79): return Null when consistent.
+        // The agent infers "indexes agree" from absence; emitting
+        // a 5-field block to say "everything is fine" is pure
+        // bloat. Callers (status, health) can pair with
+        // `drop_empty_top_level` to omit the field from output.
+        return serde_json::Value::Null;
+    }
+    let advice = if delta > 0 {
+        format!(
             "ASG has {delta} symbol{p} not in the FTS search cache — run 'asd index' to rebuild the search index.",
             p = if delta == 1 { "" } else { "s" }
-        ))
+        )
     } else {
         // FTS > ASG. Rare — usually means FTS holds symbols whose
         // ASG entries were deleted (e.g. `asd ledger-withdraw`
         // followed by no reindex). Same fix: rebuild FTS.
-        let extra = (-delta) as i64;
-        serde_json::Value::String(format!(
+        let extra = -delta;
+        format!(
             "FTS holds {extra} stale symbol{p} no longer in the ASG — run 'asd index' to rebuild.",
             p = if extra == 1 { "" } else { "s" }
-        ))
+        )
     };
     serde_json::json!({
         "asg_symbols": asg_symbols,
         "fts_symbols": fts_symbols,
         "delta": delta,
-        "consistent": consistent,
+        "consistent": false,
         "advice": advice,
     })
 }
@@ -4063,15 +4068,13 @@ pub fn effect_detail_reason(decl: Option<&crate::schema::EffectDecl>) -> String 
 mod tests {
     use super::*;
 
-    // Plan J t-005: index_consistency advisory.
+    // Plan J t-005 / 1.0.79 token economy: consistent → returns Null.
+    // Callers omit the field entirely; agent infers "indexes agree"
+    // from absence.
     #[test]
-    fn index_consistency_consistent_when_counts_match() {
+    fn index_consistency_consistent_returns_null() {
         let v = compute_index_consistency(100, 100);
-        assert_eq!(v["asg_symbols"], 100);
-        assert_eq!(v["fts_symbols"], 100);
-        assert_eq!(v["delta"], 0);
-        assert_eq!(v["consistent"], true);
-        assert!(v["advice"].is_null());
+        assert!(v.is_null(), "consistent → Null; got: {v:#?}");
     }
 
     #[test]
@@ -4111,10 +4114,9 @@ mod tests {
 
     #[test]
     fn index_consistency_handles_empty_repo() {
-        // 0/0 is consistent (just empty).
+        // 0/0 is consistent (just empty) → Null (1.0.79).
         let v = compute_index_consistency(0, 0);
-        assert_eq!(v["consistent"], true);
-        assert!(v["advice"].is_null());
+        assert!(v.is_null());
     }
 
     // ExampleFlow refinement (1.0.77): stale_warning_classified

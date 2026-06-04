@@ -199,11 +199,16 @@ fn cli_thinking_floor_flag_lowers_threshold() {
         2,
         "with floor 0.05 both hypotheses must surface: {hyps:#?}"
     );
-    // by_kind_dropped should now be 0 for hypothesis
+    // Token economy (1.0.79): by_kind_dropped is now omitted
+    // entirely when all-zero (was: emitted with all-zero counts).
+    // "No hypotheses dropped" → the whole map is absent. Either
+    // semantics are valid; assert via the field shape that
+    // matches the current serde skip predicates.
+    let dropped = &v["thinking_summary"]["by_kind_dropped"];
+    let hyp_dropped = dropped.get("hypothesis").and_then(|v| v.as_u64()).unwrap_or(0);
     assert_eq!(
-        v["thinking_summary"]["by_kind_dropped"]["hypothesis"].as_u64(),
-        Some(0),
-        "no hypotheses dropped at floor 0.05"
+        hyp_dropped, 0,
+        "no hypotheses dropped at floor 0.05 (absent OR explicit 0 both fine; got: {dropped:#?})"
     );
 }
 

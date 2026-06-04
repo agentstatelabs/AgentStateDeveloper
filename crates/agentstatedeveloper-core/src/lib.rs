@@ -97,6 +97,7 @@ pub use search_fts::{
     SOFT_STALE_THRESHOLD_SECS, StaleSeverity, StaleWarning, compute_index_consistency,
     effect_detail_reason, format_age, stale_warning, stale_warning_classified,
 };
+pub use ser_helpers::drop_empty_top_level;
 pub use sidecar::{
     HydrateSummary, SidecarState, SyncSummary, hydrate_from_dir, mark_fresh_reset, prune_sidecar,
     sidecar_lifecycle_state, sync_to_dir,

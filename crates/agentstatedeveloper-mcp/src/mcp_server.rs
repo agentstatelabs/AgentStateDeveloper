@@ -4257,11 +4257,20 @@ impl AsdMcpServer {
         // Plan F t-006: brief drops by_layer / recently_touched / scenario_tests
         // / suggested_test_coverage / effects_summary and trims likely_edit_files
         // to {file, why, top_symbol, layer}.
-        let out = if brief::brief_from_env() {
+        let mut out = if brief::brief_from_env() {
             brief::brief_prepare_change(&full)
         } else {
             full
         };
+        // Token economy (1.0.79): drop input echoes (the MCP client
+        // just sent these) and dedupe stale string vs severity. Then
+        // strip top-level null/[]/{} via drop_empty_top_level.
+        if let Some(obj) = out.as_object_mut() {
+            obj.remove("description");
+            obj.remove("task_context");
+            obj.remove("stale");
+        }
+        let out = agentstatedeveloper_core::drop_empty_top_level(out);
         serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
     }
 

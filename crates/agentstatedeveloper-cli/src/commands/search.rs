@@ -724,10 +724,12 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 "document_hits": doc_results,
             });
             let max_list = (args.agent_budget / 500).max(3).min(20);
-            let trimmed = trim_for_agent(&raw, max_list);
-            // Token economy: compact JSON in agent mode. Estimate
-            // computed against the compact form (matches what the
-            // model actually sees).
+            let mut trimmed = trim_for_agent(&raw, max_list);
+            // 1.0.79: drop input echo (the agent has the query).
+            if let Some(obj) = trimmed.as_object_mut() {
+                obj.remove("query");
+            }
+            let trimmed = agentstatedeveloper_core::drop_empty_top_level(trimmed);
             let compact = serde_json::to_string(&trimmed)?;
             let token_est = estimate_tokens(&compact);
             let mut out = trimmed.clone();

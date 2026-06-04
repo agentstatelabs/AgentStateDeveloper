@@ -13,6 +13,42 @@
 
 use std::collections::BTreeMap;
 
+use serde_json::Value;
+
+/// Token economy: drop top-level fields whose value is `null`, `[]`,
+/// or `{}`. The agent doesn't need the absence-of-X echo when X has
+/// no signal — they can infer "no entries" / "no warning" / "fresh"
+/// from absence.
+///
+/// Top-level only: nested empty arrays/objects can be load-bearing
+/// (e.g. an empty `dropped` list inside a populated bucket says
+/// something different from an absent `dropped` list).
+///
+/// 1.0.79: applied after `trim_for_agent` in CLI/MCP agent-mode
+/// hot paths. Together with the skip-zero serde predicates from
+/// 1.0.78 this catches the remaining empty-field bloat: keys
+/// whose value the json! macro emitted as null/[]/{} unconditionally.
+pub fn drop_empty_top_level(v: Value) -> Value {
+    if let Value::Object(map) = v {
+        let filtered: serde_json::Map<String, Value> = map
+            .into_iter()
+            .filter(|(_, val)| !is_empty_signal(val))
+            .collect();
+        Value::Object(filtered)
+    } else {
+        v
+    }
+}
+
+fn is_empty_signal(v: &Value) -> bool {
+    match v {
+        Value::Null => true,
+        Value::Array(a) => a.is_empty(),
+        Value::Object(o) => o.is_empty(),
+        _ => false,
+    }
+}
+
 /// Skip a numeric counter when it's zero. Useful for fields like
 /// `surfaced`, `entries_applied`, etc. — zero on these means "nothing
 /// happened on this axis," which is the default state the agent can
@@ -58,5 +94,49 @@ mod tests {
         m.insert("a".into(), 0usize);
         m.insert("b".into(), 1);
         assert!(!is_all_zero_string_usize_map(&m));
+    }
+
+    #[test]
+    fn drop_empty_removes_null_empty_array_empty_object() {
+        let v = serde_json::json!({
+            "kept": 1,
+            "kept_str": "value",
+            "drop_null": serde_json::Value::Null,
+            "drop_empty_arr": [],
+            "drop_empty_obj": {},
+            "kept_arr": [1],
+            "kept_obj": {"x": 1},
+            "kept_zero": 0,         // 0 is signal; skip predicates handle it elsewhere
+            "kept_false": false,    // booleans are signal
+        });
+        let out = drop_empty_top_level(v);
+        let obj = out.as_object().unwrap();
+        assert!(obj.contains_key("kept"));
+        assert!(obj.contains_key("kept_str"));
+        assert!(obj.contains_key("kept_arr"));
+        assert!(obj.contains_key("kept_obj"));
+        assert!(obj.contains_key("kept_zero"));
+        assert!(obj.contains_key("kept_false"));
+        assert!(!obj.contains_key("drop_null"));
+        assert!(!obj.contains_key("drop_empty_arr"));
+        assert!(!obj.contains_key("drop_empty_obj"));
+    }
+
+    #[test]
+    fn drop_empty_only_touches_top_level() {
+        // Nested empty arrays/objects are LOAD-BEARING — keep them.
+        let v = serde_json::json!({
+            "wrapper": { "nested_empty": [] }
+        });
+        let out = drop_empty_top_level(v);
+        // wrapper kept (non-empty object); nested empty array stays.
+        assert!(out["wrapper"]["nested_empty"].is_array());
+    }
+
+    #[test]
+    fn drop_empty_no_op_on_non_object() {
+        let v = serde_json::json!([1, 2, 3]);
+        let out = drop_empty_top_level(v.clone());
+        assert_eq!(out, v);
     }
 }
