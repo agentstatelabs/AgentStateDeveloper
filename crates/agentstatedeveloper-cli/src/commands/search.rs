@@ -411,7 +411,29 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
         scored.truncate(args.limit);
 
         if scored.is_empty() {
-            println!("No results for {:?}", args.query);
+            // Field-eval (2026-06-04): users piping `asd search ...
+            // --agent | jq` got "Invalid numeric literal" when the
+            // query returned 0 hits because the empty-results path
+            // bypassed JSON and printed a plain "No results for ..."
+            // line. `--agent` MUST always emit JSON so downstream
+            // consumers don't have to special-case the empty case.
+            if args.agent {
+                let empty = serde_json::json!({
+                    "query": args.query,
+                    "intent": if intent.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!(intent)
+                    },
+                    "results": [],
+                    "document_hits": [],
+                    "broadened_search": serde_json::Value::Null,
+                    "note": format!("No results for {:?}", args.query),
+                });
+                println!("{}", serde_json::to_string_pretty(&empty)?);
+            } else {
+                println!("No results for {:?}", args.query);
+            }
             return Ok(());
         }
 
@@ -915,7 +937,25 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
     scored.truncate(args.limit);
 
     if scored.is_empty() {
-        println!("No results for {:?}", args.query);
+        // Same fix as the FTS hot path above: --agent must always
+        // emit JSON so pipe consumers can run `jq` unconditionally.
+        if args.agent {
+            let empty = serde_json::json!({
+                "query": args.query,
+                "intent": if intent.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(intent)
+                },
+                "results": [],
+                "document_hits": [],
+                "broadened_search": serde_json::Value::Null,
+                "note": format!("No results for {:?} (in-memory fallback)", args.query),
+            });
+            println!("{}", serde_json::to_string_pretty(&empty)?);
+        } else {
+            println!("No results for {:?}", args.query);
+        }
         return Ok(());
     }
 

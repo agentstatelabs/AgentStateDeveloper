@@ -97,10 +97,26 @@ pub enum ProbeSub {
     Add(ProbeAddArgs),
     /// Generate a starter .asd/probes.toml from the current index.
     Bootstrap(ProbeBootstrapArgs),
+    /// Print configured probes (name, command, tags) from
+    /// .asd/probes.toml. Use this to see what `asd probe run`
+    /// would execute, without actually running anything.
+    /// `history` shows past run results — this shows the
+    /// definitions themselves.
+    List(ProbeListArgs),
     /// Show probe run history from .asd/probe-history.jsonl.
     History(ProbeHistoryArgs),
     /// Rebuild probe-analytics.db from probe-history.jsonl.
     Reindex(ProbeReindexArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ProbeListArgs {
+    /// Emit JSON instead of human-readable text.
+    #[arg(long)]
+    pub json: bool,
+    /// Filter to probes whose `tags` array contains this tag.
+    #[arg(long)]
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -243,9 +259,97 @@ pub fn run(cfg: &Config, cmd: ProbeCmd) -> Result<()> {
         ProbeSub::Run(args) => run_probes(cfg, args),
         ProbeSub::Add(args) => add_probe(cfg, args),
         ProbeSub::Bootstrap(args) => bootstrap_probes(cfg, args),
+        ProbeSub::List(args) => list_probes(cfg, args),
         ProbeSub::History(args) => show_history(cfg, args),
         ProbeSub::Reindex(args) => reindex_analytics(cfg, args),
     }
+}
+
+/// `asd probe list` — show what's configured in .asd/probes.toml
+/// without actually running anything. Mirrors the shape of
+/// `asd probe run --json` so a follow-up `--name <n>` invocation
+/// is easy to construct.
+fn list_probes(cfg: &Config, args: ProbeListArgs) -> Result<()> {
+    let path = probe_file_path(cfg);
+    if !path.exists() {
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "probe_file": path.display().to_string(),
+                    "exists": false,
+                    "probes": [],
+                    "note": "no probes configured — run `asd probe bootstrap` to generate a starter set",
+                }))?
+            );
+        } else {
+            println!("no probes file at {}", path.display());
+            println!("run `asd probe bootstrap` to generate a starter set");
+        }
+        return Ok(());
+    }
+
+    let raw =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let pf: ProbeFile =
+        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+
+    let probes: Vec<&ProbeEntry> = pf
+        .probe
+        .iter()
+        .filter(|p| match &args.tag {
+            Some(t) => p.tags.iter().any(|pt| pt == t),
+            None => true,
+        })
+        .collect();
+
+    if args.json {
+        let entries: Vec<serde_json::Value> = probes
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "name": p.name,
+                    "command": p.command,
+                    "args": p.args,
+                    "tags": p.tags,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "probe_file": path.display().to_string(),
+                "exists": true,
+                "total": pf.probe.len(),
+                "matched": probes.len(),
+                "probes": entries,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("# probes from {}", path.display());
+    if probes.is_empty() {
+        let total = pf.probe.len();
+        if total == 0 {
+            println!("(file exists but has no [[probe]] entries)");
+        } else {
+            println!("(no probes match --tag filter; {total} total in file)");
+        }
+        return Ok(());
+    }
+    for p in &probes {
+        let tags = if p.tags.is_empty() {
+            String::new()
+        } else {
+            format!("  [{}]", p.tags.join(", "))
+        };
+        println!("{}{tags}", p.name);
+        println!("  asd {} {}", p.command, p.args.join(" "));
+    }
+    println!();
+    println!("{} probe(s); run with `asd probe run`", probes.len());
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
