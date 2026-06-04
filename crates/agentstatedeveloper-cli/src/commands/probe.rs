@@ -24,6 +24,7 @@
 //!   file_not_in_key  — no item in JSON array `key` has `field` containing `value`
 //!   file_in_key      — at least one item in array `key` has `field` containing `value`
 //!   qname_rank_lte   — result whose qname contains `fragment` appears at rank ≤ `max_rank`
+//!   qname_rank_eq    — result whose qname contains `fragment` appears at EXACTLY `exact_rank` (precision-mode; Plan J t-019)
 //!   result_count_lte — results array length ≤ `max`
 //!   cluster_winner_kind_not        — cluster_debug entry matching `doc_stem` winner kind ≠ `kind_not`
 //!   cluster_winner_qname_contains  — cluster_debug entry matching `doc_stem` winner qname contains `fragment`
@@ -1663,6 +1664,44 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
             }
         }
 
+        // Plan J t-019: qname_rank_eq — strict variant of
+        // qname_rank_lte. Passes ONLY when the matching qname is at
+        // EXACTLY the specified rank (typically 1). Use for
+        // precision-mode probes: lenient probes (rank_lte max=5)
+        // surface "is the right symbol anywhere near the top"; this
+        // surfaces "is the right symbol AT the top." When both
+        // variants exist for the same query in the same uncertainty
+        // bucket, calibration's "too strict" advisory becomes
+        // actionable — split pass rates within a bucket cohort
+        // mean the lenient signal was hiding ranking noise.
+        "qname_rank_eq" => {
+            let fragment = str_field(map, "fragment")?;
+            let exact_rank = u64_field(map, "exact_rank")?;
+            let results = output
+                .get("results")
+                .and_then(|v| v.as_array())
+                .unwrap_or(&empty_arr);
+            let pos = results.iter().position(|r| {
+                r.get("qname")
+                    .and_then(|v| v.as_str())
+                    .map_or(false, |q| q.contains(fragment))
+            });
+            match pos {
+                Some(idx) if (idx as u64 + 1) == exact_rank => Ok(()),
+                Some(idx) => Err(format!(
+                    "qname_rank_eq: {:?} found at rank {}, expected exactly {}",
+                    fragment,
+                    idx + 1,
+                    exact_rank
+                )),
+                None => Err(format!(
+                    "qname_rank_eq: no result qname contains {:?} (checked {} results)",
+                    fragment,
+                    results.len()
+                )),
+            }
+        }
+
         // result_count_lte: len(results) ≤ max.
         "result_count_lte" => {
             let max = u64_field(map, "max")?;
@@ -2985,12 +3024,14 @@ fn bootstrap_probes(cfg: &Config, args: ProbeBootstrapArgs) -> Result<()> {
         );
 
         for (i, (qname, short)) in top_symbols.iter().enumerate() {
-            let probe_name = format!(
-                "rank-{}-top5",
-                short
-                    .to_lowercase()
-                    .replace(|c: char| !c.is_alphanumeric(), "-")
-            );
+            let slug = short
+                .to_lowercase()
+                .replace(|c: char| !c.is_alphanumeric(), "-");
+
+            // Lenient (existing): rank ≤ 5. Surfaces "right symbol
+            // is anywhere near the top" — useful for ranking-not-broken
+            // sanity but can't distinguish rank-1 from rank-5.
+            let probe_name = format!("rank-{}-top5", slug);
             let desc = format!("{} must appear in top 5 results for its own name", qname);
             out.push_str(&format!("[[probe]]\nname = {:?}\n", probe_name));
             out.push_str(&format!("description = {:?}\n", desc));
@@ -3001,6 +3042,30 @@ fn bootstrap_probes(cfg: &Config, args: ProbeBootstrapArgs) -> Result<()> {
                 "assert = {{ kind = \"qname_rank_lte\", fragment = {:?}, max_rank = 5 }}\n\n",
                 qname
             ));
+
+            // Plan J t-019: precision (new): rank == 1. Surfaces
+            // "right symbol is AT the top" — when both probes for
+            // the same query land in the same uncertainty bucket,
+            // their pass/fail split tells the calibration harvester
+            // whether the bucket label is too strict (precision
+            // fails → predictor was right to flag low confidence)
+            // or genuinely miscalibrated (precision passes too →
+            // bucket should be promoted).
+            let prec_name = format!("rank-{}-eq1", slug);
+            let prec_desc = format!(
+                "{} must be the #1 result for its own name (precision-mode for calibration)",
+                qname
+            );
+            out.push_str(&format!("[[probe]]\nname = {:?}\n", prec_name));
+            out.push_str(&format!("description = {:?}\n", prec_desc));
+            out.push_str("tags = [\"ranking\", \"precision\"]\n");
+            out.push_str("command = \"search\"\n");
+            out.push_str(&format!("args = [{:?}, \"--agent\"]\n", short));
+            out.push_str(&format!(
+                "assert = {{ kind = \"qname_rank_eq\", fragment = {:?}, exact_rank = 1 }}\n\n",
+                qname
+            ));
+
             if i >= args.top.saturating_sub(1) {
                 break;
             }
@@ -3106,4 +3171,110 @@ fn add_probe(cfg: &Config, args: ProbeAddArgs) -> Result<()> {
     std::fs::write(&path, &content)?;
     println!("Added probe {:?} to {}", args.name, path.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod plan_j_t019_qname_rank_eq_tests {
+    //! Plan J t-019: precision-mode probe assertion. The lenient
+    //! `qname_rank_lte` passes if the matching qname is anywhere
+    //! in the top N; `qname_rank_eq` passes only at EXACTLY the
+    //! specified rank. Together they let calibration distinguish
+    //! threshold-too-strict from probes-too-lenient.
+
+    use super::eval_assert;
+    use serde_json::json;
+
+    fn assert_block(kind: &str, fragment: &str, exact_rank: u64) -> toml::Value {
+        let s = format!(
+            "kind = {:?}\nfragment = {:?}\nexact_rank = {}",
+            kind, fragment, exact_rank
+        );
+        toml::from_str(&s).unwrap()
+    }
+
+    fn results_with(qnames: &[&str]) -> serde_json::Value {
+        json!({
+            "results": qnames
+                .iter()
+                .map(|q| json!({ "qname": q }))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    #[test]
+    fn passes_when_exact_rank_match() {
+        let assert = assert_block("qname_rank_eq", "ProjectManager", 1);
+        let output = results_with(&[
+            "App.Foo.ProjectManager",
+            "App.Bar.OtherSym",
+        ]);
+        assert!(eval_assert(&assert, &output).is_ok());
+    }
+
+    #[test]
+    fn fails_when_match_at_wrong_rank() {
+        let assert = assert_block("qname_rank_eq", "ProjectManager", 1);
+        let output = results_with(&[
+            "App.Bar.OtherSym",            // rank 1
+            "App.Foo.ProjectManager",       // rank 2 — wrong
+        ]);
+        let err = eval_assert(&assert, &output).expect_err("must fail");
+        assert!(err.contains("rank 2"), "got: {err}");
+        assert!(err.contains("expected exactly 1"), "got: {err}");
+    }
+
+    #[test]
+    fn fails_when_no_match() {
+        let assert = assert_block("qname_rank_eq", "MissingSymbol", 1);
+        let output = results_with(&["App.Foo.SomethingElse"]);
+        let err = eval_assert(&assert, &output).expect_err("must fail");
+        assert!(err.contains("no result qname contains"), "got: {err}");
+        assert!(err.contains("MissingSymbol"), "got: {err}");
+    }
+
+    #[test]
+    fn precision_distinguishes_from_lte_on_same_input() {
+        // The whole point of t-019: same query, same results — but
+        // rank_lte(5) passes while rank_eq(1) fails. This split is
+        // the signal the calibration harvester needs to disambiguate
+        // its "too strict" advisory.
+        let output = results_with(&[
+            "App.Bar.OtherSym",            // rank 1
+            "App.Bar.OtherSym2",            // rank 2
+            "App.Foo.ProjectManager",       // rank 3 — within top-5 but not #1
+        ]);
+
+        let lenient: toml::Value = toml::from_str(
+            "kind = \"qname_rank_lte\"\nfragment = \"ProjectManager\"\nmax_rank = 5",
+        )
+        .unwrap();
+        assert!(
+            eval_assert(&lenient, &output).is_ok(),
+            "rank_lte(5) must accept rank 3"
+        );
+
+        let precision = assert_block("qname_rank_eq", "ProjectManager", 1);
+        assert!(
+            eval_assert(&precision, &output).is_err(),
+            "rank_eq(1) must reject rank 3 — the very split that drives calibration"
+        );
+    }
+
+    #[test]
+    fn rank_eq_2_passes_when_match_at_rank_2() {
+        // Defensive: exact_rank isn't hardcoded to 1. Future probes
+        // might assert "this symbol is reliably second" if there's
+        // a known canonical winner ahead of it.
+        // Fragment chosen to avoid substring-match collision with
+        // the rank-1 qname — a real issue (fragment "Manager"
+        // would match both "ProjectManager" and "SnapshotManager")
+        // that the pre-existing qname_rank_lte already has, so it's
+        // not t-019-specific.
+        let assert = assert_block("qname_rank_eq", "AlphaCanon", 2);
+        let output = results_with(&[
+            "App.Bar.BetaSibling",
+            "App.Foo.AlphaCanon",
+        ]);
+        assert!(eval_assert(&assert, &output).is_ok());
+    }
 }
