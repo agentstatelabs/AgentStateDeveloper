@@ -19,6 +19,10 @@
 use std::collections::BTreeMap;
 
 /// Per-bucket calibration statistics.
+///
+/// Token economy (1.0.78): `advice` is skipped when empty — the
+/// `advice_status` enum carries the same signal in a more compact form
+/// for the well_calibrated / sample_too_small / unknown_label cases.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct BucketStats {
     /// Bucket label (e.g. "low", "medium", "high", "critical").
@@ -32,7 +36,9 @@ pub struct BucketStats {
     pub pass_rate: f64,
     /// Plain-English advisory drawn from the gap between bucket
     /// label semantics and observed pass rate. Empty string when
-    /// the bucket appears well-calibrated.
+    /// the bucket appears well-calibrated — skipped in serialization
+    /// for that case (advice_status carries the signal).
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub advice: String,
     /// Why `advice` looks the way it does. Field-eval refinement
     /// (1.0.73 ExampleProj run): an empty `advice` string had three

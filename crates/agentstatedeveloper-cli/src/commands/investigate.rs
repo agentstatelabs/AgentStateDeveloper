@@ -429,19 +429,25 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             "by_layer": by_layer,
         })
     };
-    let out = if args.agent {
+    // Token economy (1.0.78): agent mode emits compact JSON.
+    let (out, compact_for_agent) = if args.agent {
         let max_list = (args.agent_budget / 500).max(3).min(20);
         let trimmed = trim_for_agent(&out, max_list);
-        let json_str = serde_json::to_string_pretty(&trimmed)?;
-        let token_est = estimate_tokens(&json_str);
+        let compact = serde_json::to_string(&trimmed)?;
+        let token_est = estimate_tokens(&compact);
         let mut v = trimmed;
         if let Some(obj) = v.as_object_mut() {
             obj.insert("token_estimate".into(), json!(token_est));
         }
-        v
+        (v, true)
     } else {
-        out
+        (out, false)
     };
-    println!("{}", serde_json::to_string_pretty(&out)?);
+    let json_str = if compact_for_agent {
+        serde_json::to_string(&out)?
+    } else {
+        serde_json::to_string_pretty(&out)?
+    };
+    println!("{}", json_str);
     Ok(())
 }

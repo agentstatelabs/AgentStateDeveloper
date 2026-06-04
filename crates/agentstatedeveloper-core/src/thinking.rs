@@ -57,22 +57,41 @@ pub struct PriorThinking {
 
 /// Metadata accompanying the prior_thinking projection. Parallel in
 /// shape to `FeedbackMetrics` — same idea, different domain.
+///
+/// Token economy (1.0.78): every count field that's zero is skipped
+/// during serialization, and the all-zero `by_kind` / `by_kind_dropped`
+/// maps are skipped entirely. On a query where no thinking exists, the
+/// serialized form collapses to `{"scanned_qnames": N}` (or empty if
+/// even scanned_qnames is 0), saving ~200 chars/call. Non-zero counts
+/// still emit — accuracy preserved.
 #[derive(Debug, Clone, Serialize)]
 pub struct ThinkingSummary {
     /// Number of qnames the caller passed in for scanning.
+    /// Skipped when zero (no qnames provided → nothing to summarize).
+    #[serde(skip_serializing_if = "crate::ser_helpers::is_zero_usize")]
     pub scanned_qnames: usize,
     /// Qnames that had at least one thinking entry (any kind).
+    /// Skipped when zero; agent infers "no match" from absence.
+    #[serde(skip_serializing_if = "crate::ser_helpers::is_zero_usize")]
     pub matched_for_query: usize,
     /// Entries kept after kind-filter + confidence-floor cuts.
+    /// Skipped when zero; agent infers "no entries surfaced" from
+    /// absence (and from `prior_thinking` being null/absent).
+    #[serde(skip_serializing_if = "crate::ser_helpers::is_zero_usize")]
     pub surfaced: usize,
-    /// Surfaced counts broken out by kind. Always present (omitted
-    /// kinds reported as 0) so consumers don't have to defensive-check.
+    /// Surfaced counts broken out by kind. Skipped entirely when
+    /// every kind is zero. When emitted, ALL kinds appear (so the
+    /// agent doesn't have to defensive-check) — this is the
+    /// established `feedback_summary` pattern.
+    #[serde(skip_serializing_if = "crate::ser_helpers::is_all_zero_string_usize_map")]
     pub by_kind: BTreeMap<String, usize>,
     /// Entries the kind/confidence filters dropped, broken out by kind.
     /// The load-bearing field for the "thinking exists but isn't
     /// showing" case — when `by_kind_dropped["hypothesis"] > 0` AND
     /// `by_kind["hypothesis"] == 0`, the agent knows hypotheses exist
     /// for these symbols but all fell below the confidence floor.
+    /// Skipped when all-zero (most calls).
+    #[serde(skip_serializing_if = "crate::ser_helpers::is_all_zero_string_usize_map")]
     pub by_kind_dropped: BTreeMap<String, usize>,
     /// Workspace-wide thinking count (across ALL indexed symbols).
     /// Only populated when `matched_for_query == 0` — gives the agent
@@ -81,6 +100,20 @@ pub struct ThinkingSummary {
     /// `None` otherwise to keep the typical hot path cheap.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entries_in_workspace: Option<usize>,
+}
+
+impl ThinkingSummary {
+    /// True when the summary carries no signal — useful for the
+    /// caller's "emit at all?" decision per the sentinel rule
+    /// (emit only when prior_thinking is null AND scanned_qnames > 0).
+    pub fn is_quiet(&self) -> bool {
+        self.scanned_qnames == 0
+            && self.matched_for_query == 0
+            && self.surfaced == 0
+            && self.by_kind.values().all(|v| *v == 0)
+            && self.by_kind_dropped.values().all(|v| *v == 0)
+            && self.entries_in_workspace.is_none()
+    }
 }
 
 impl ThinkingSummary {

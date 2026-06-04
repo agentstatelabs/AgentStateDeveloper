@@ -470,7 +470,8 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                     "broadened_search": serde_json::Value::Null,
                     "note": format!("No results for {:?}", args.query),
                 });
-                println!("{}", serde_json::to_string_pretty(&empty)?);
+                // Token economy: compact JSON in agent mode.
+                println!("{}", serde_json::to_string(&empty)?);
             } else {
                 println!("No results for {:?}", args.query);
             }
@@ -724,13 +725,16 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             });
             let max_list = (args.agent_budget / 500).max(3).min(20);
             let trimmed = trim_for_agent(&raw, max_list);
-            let json_str = serde_json::to_string_pretty(&trimmed)?;
-            let token_est = estimate_tokens(&json_str);
+            // Token economy: compact JSON in agent mode. Estimate
+            // computed against the compact form (matches what the
+            // model actually sees).
+            let compact = serde_json::to_string(&trimmed)?;
+            let token_est = estimate_tokens(&compact);
             let mut out = trimmed.clone();
             if let Some(obj) = out.as_object_mut() {
                 obj.insert("token_estimate".into(), serde_json::json!(token_est));
             }
-            println!("{}", serde_json::to_string_pretty(&out)?);
+            println!("{}", serde_json::to_string(&out)?);
         } else {
             // t-005: show query suggestions before results.
             let scope_narrowed_term =

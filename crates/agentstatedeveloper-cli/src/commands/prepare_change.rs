@@ -1505,6 +1505,40 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         .map(|w| serde_json::to_value(w.severity).unwrap_or(Value::Null))
         .unwrap_or(Value::Null);
 
+    // Token economy (1.0.78): build feedback_summary as a Map so
+    // all-zero counts skip serialization. On a call with no
+    // feedback activity (the common case), the entire block
+    // collapses to `{}` and the json! macro below would still emit
+    // it as `{}` — so we conditionally insert only when non-empty.
+    let feedback_summary = {
+        let mut m = serde_json::Map::new();
+        if feedback_metrics.entries_applied > 0 {
+            m.insert("entries_applied".into(), json!(feedback_metrics.entries_applied));
+        }
+        if feedback_metrics.suppressed > 0 {
+            m.insert("suppressed".into(), json!(feedback_metrics.suppressed));
+        }
+        if feedback_metrics.preserved_useful_siblings > 0 {
+            m.insert(
+                "preserved_useful_siblings".into(),
+                json!(feedback_metrics.preserved_useful_siblings),
+            );
+        }
+        if feedback_metrics.boosted > 0 {
+            m.insert("boosted".into(), json!(feedback_metrics.boosted));
+        }
+        if feedback_metrics.recurring_fp_suppressed > 0 {
+            m.insert(
+                "recurring_fp_suppressed".into(),
+                json!(feedback_metrics.recurring_fp_suppressed),
+            );
+        }
+        if !feedback_metrics.rules_applied.is_empty() {
+            m.insert("rules_applied".into(), json!(feedback_metrics.rules_applied));
+        }
+        Value::Object(m)
+    };
+
     let out = json!({
         "description": args.description,
         "task_context": args.task_context,
@@ -1517,14 +1551,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         "ambiguous_terms": ambiguous_terms,
         "possible_misses": possible_misses,
         "scope_narrowed": scope_narrowed,
-        "feedback_summary": {
-            "entries_applied": feedback_metrics.entries_applied,
-            "suppressed": feedback_metrics.suppressed,
-            "preserved_useful_siblings": feedback_metrics.preserved_useful_siblings,
-            "boosted": feedback_metrics.boosted,
-            "recurring_fp_suppressed": feedback_metrics.recurring_fp_suppressed,
-            "rules_applied": feedback_metrics.rules_applied,
-        },
+        "feedback_summary": feedback_summary,
         "safe_change_recipe": safe_change_recipe,
         "design_invariants": design_invariants,
         "known_hazards": known_hazards,
@@ -1550,20 +1577,30 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             Value::Null
         },
     });
-    let out = if args.agent {
+    // Token economy (1.0.78): agent mode emits compact JSON (no
+    // pretty-print whitespace). The token_estimate is now computed
+    // against the compact form too — that's what the model actually
+    // sees, so the estimate is more accurate. Human mode keeps
+    // pretty-print so terminal output stays readable.
+    let (out, compact_for_agent) = if args.agent {
         let max_list = (args.agent_budget / 500).max(3).min(20);
         let trimmed = trim_for_agent(&out, max_list);
-        let json_str = serde_json::to_string_pretty(&trimmed)?;
-        let token_est = estimate_tokens(&json_str);
+        let compact = serde_json::to_string(&trimmed)?;
+        let token_est = estimate_tokens(&compact);
         let mut v = trimmed;
         if let Some(obj) = v.as_object_mut() {
             obj.insert("token_estimate".into(), json!(token_est));
         }
-        v
+        (v, true)
     } else {
-        out
+        (out, false)
     };
-    println!("{}", serde_json::to_string_pretty(&out)?);
+    let json_str = if compact_for_agent {
+        serde_json::to_string(&out)?
+    } else {
+        serde_json::to_string_pretty(&out)?
+    };
+    println!("{}", json_str);
     Ok(())
 }
 

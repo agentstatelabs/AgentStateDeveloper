@@ -99,14 +99,16 @@ pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
         "symbols": symbols_out,
     });
 
-    let mut output = serde_json::to_string_pretty(&out)?;
+    // Token economy (1.0.78): context_for output is always JSON
+    // consumed by agents — compact, no whitespace bloat.
+    let mut output = serde_json::to_string(&out)?;
 
     // Trim to budget if requested (trim ledger entries from the end).
     if let Some(max_chars) = budget_chars {
         if output.len() > max_chars {
             // Re-assemble with fewer ledger entries per symbol.
             let trimmed = trim_to_budget(&out, max_chars);
-            output = serde_json::to_string_pretty(&trimmed)?;
+            output = serde_json::to_string(&trimmed)?;
         }
     }
 

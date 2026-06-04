@@ -9,6 +9,7 @@ pub mod audit;
 pub mod brief;
 pub mod calibration;
 pub mod candidates;
+pub mod ser_helpers;
 pub mod conclusions_export;
 pub mod thinking;
 pub mod doc_adapters;
