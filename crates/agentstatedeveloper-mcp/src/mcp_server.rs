@@ -938,6 +938,19 @@ impl AsdMcpServer {
             _ => 0,
         };
         let stale = stale_warning(&self.db_path(), 3600);
+        // Plan J t-005: compute FTS-side symbol count so the
+        // response can flag any divergence from the ASG-side count.
+        // Field reports (M21) had agents seeing different numbers
+        // from `asd status` (FTS) and `asd health` (ASG) on the
+        // same repo with no explanation. Now both surfaces report
+        // BOTH counts plus a consistency advisory string when they
+        // diverge.
+        let fts_symbol_count = SearchFtsDb::open(&self.db_path())
+            .ok()
+            .map(|f| f.symbol_count() as usize)
+            .unwrap_or(0);
+        let index_consistency =
+            agentstatedeveloper_core::compute_index_consistency(symbol_count, fts_symbol_count);
         let payload = serde_json::json!({
             "status": "ok",
             "db_path": db_path,
@@ -955,6 +968,7 @@ impl AsdMcpServer {
                 "ledger_entries": ledger_entry_count,
                 "effects": effects_count,
             },
+            "index_consistency": index_consistency,
             "stale": stale,
         });
         serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())
@@ -6363,6 +6377,22 @@ impl AsdMcpServer {
 
         let trust = compute_trust_score(&db_path);
 
+        // Plan J t-005: walk by-qname once to also report the
+        // ASG-side symbol count alongside the FTS-side `count`,
+        // so MCP `status` matches MCP `health`'s reconciliation
+        // view and field-eval no longer sees two divergent
+        // numbers without explanation.
+        let asg_symbol_count = engine
+            .repo
+            .get_tree(&ref_name, "/asd/v1/index/by-qname")
+            .ok()
+            .and_then(|v| v.as_object().map(|m| m.len()));
+        let index_consistency = asg_symbol_count
+            .map(|asg| {
+                agentstatedeveloper_core::compute_index_consistency(asg, count as usize)
+            })
+            .unwrap_or(serde_json::Value::Null);
+
         let out = serde_json::json!({
             "db": db_path.display().to_string(),
             "symbols": count,
@@ -6373,6 +6403,7 @@ impl AsdMcpServer {
             "sidecar_action": sidecar_action,
             "dirty_files": dirty_files,
             "concept_gaps": concept_gaps,
+            "index_consistency": index_consistency,
             "trust": trust.to_json(),
         });
         serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())

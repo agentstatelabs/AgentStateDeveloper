@@ -1826,6 +1826,62 @@ pub fn stale_warning(db_path: &std::path::Path, threshold_secs: u64) -> Option<S
     }
 }
 
+/// Plan J t-005: reconcile the two divergent symbol counts that
+/// `asd status` and `asd health` were each reporting in isolation.
+///
+/// - **`asg_symbols`** — `len(/asd/v1/index/by-qname)`, the canonical
+///   ASG view. This is what `health` already returned as the bare
+///   `symbol_count`. Authoritative for "what does the indexed graph
+///   actually contain right now."
+/// - **`fts_symbols`** — `SearchFtsDb::symbol_count()`, the count
+///   inside the search cache. This is what `status` already returned
+///   as `symbols`. Authoritative for "what will ranked queries see."
+///
+/// They diverge when:
+/// - An `asd index` run wrote symbols to the ASG tree but the FTS
+///   rebuild failed mid-pass (e.g. `database is locked`).
+/// - A `hydrate` repopulated the ASG from a sidecar without
+///   re-running FTS (rare, but the call surfaces have changed across
+///   M22–M24 and the wiring isn't guaranteed).
+/// - Symbol-level migrations (`asd ledger-rebind`, `asd
+///   ledger-supersede`) touch the qname tree but skip FTS.
+///
+/// Returns `null`-shaped guidance fields when the two agree, so the
+/// hot path in `status` / `health` adds zero ceremony on a healthy
+/// repo. When they diverge, includes an `advice` string the agent
+/// can act on directly.
+pub fn compute_index_consistency(
+    asg_symbols: usize,
+    fts_symbols: usize,
+) -> serde_json::Value {
+    let delta = asg_symbols as i64 - fts_symbols as i64;
+    let consistent = delta == 0;
+    let advice = if consistent {
+        serde_json::Value::Null
+    } else if delta > 0 {
+        serde_json::Value::String(format!(
+            "ASG has {delta} symbol{p} not in the FTS search cache — run 'asd index' to rebuild the search index.",
+            p = if delta == 1 { "" } else { "s" }
+        ))
+    } else {
+        // FTS > ASG. Rare — usually means FTS holds symbols whose
+        // ASG entries were deleted (e.g. `asd ledger-withdraw`
+        // followed by no reindex). Same fix: rebuild FTS.
+        let extra = (-delta) as i64;
+        serde_json::Value::String(format!(
+            "FTS holds {extra} stale symbol{p} no longer in the ASG — run 'asd index' to rebuild.",
+            p = if extra == 1 { "" } else { "s" }
+        ))
+    };
+    serde_json::json!({
+        "asg_symbols": asg_symbols,
+        "fts_symbols": fts_symbols,
+        "delta": delta,
+        "consistent": consistent,
+        "advice": advice,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Agent output trimming
 // ---------------------------------------------------------------------------
@@ -3881,6 +3937,60 @@ pub fn effect_detail_reason(decl: Option<&crate::schema::EffectDecl>) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Plan J t-005: index_consistency advisory.
+    #[test]
+    fn index_consistency_consistent_when_counts_match() {
+        let v = compute_index_consistency(100, 100);
+        assert_eq!(v["asg_symbols"], 100);
+        assert_eq!(v["fts_symbols"], 100);
+        assert_eq!(v["delta"], 0);
+        assert_eq!(v["consistent"], true);
+        assert!(v["advice"].is_null());
+    }
+
+    #[test]
+    fn index_consistency_asg_ahead_advises_reindex() {
+        // ASG has 412, FTS only 408 — the classic "FTS rebuild
+        // failed mid-pass" pattern. Advice tells the agent what
+        // to run.
+        let v = compute_index_consistency(412, 408);
+        assert_eq!(v["delta"], 4);
+        assert_eq!(v["consistent"], false);
+        let advice = v["advice"].as_str().expect("advice when divergent");
+        assert!(advice.contains("4 symbols"), "got: {advice}");
+        assert!(advice.contains("'asd index'"), "got: {advice}");
+    }
+
+    #[test]
+    fn index_consistency_singular_grammar() {
+        // Off-by-one: "1 symbol" not "1 symbols".
+        let v = compute_index_consistency(101, 100);
+        let advice = v["advice"].as_str().unwrap();
+        assert!(advice.contains("1 symbol "), "got: {advice}");
+        assert!(!advice.contains("1 symbols"), "got: {advice}");
+    }
+
+    #[test]
+    fn index_consistency_fts_ahead_advises_reindex_with_stale_wording() {
+        // Rare inverse: FTS holds entries no longer in the ASG.
+        // Advice should say "stale" rather than "not in cache" so
+        // the agent reads the direction of the drift correctly.
+        let v = compute_index_consistency(100, 103);
+        assert_eq!(v["delta"], -3);
+        assert_eq!(v["consistent"], false);
+        let advice = v["advice"].as_str().unwrap();
+        assert!(advice.contains("3 stale symbols"), "got: {advice}");
+        assert!(advice.contains("'asd index'"), "got: {advice}");
+    }
+
+    #[test]
+    fn index_consistency_handles_empty_repo() {
+        // 0/0 is consistent (just empty).
+        let v = compute_index_consistency(0, 0);
+        assert_eq!(v["consistent"], true);
+        assert!(v["advice"].is_null());
+    }
 
     #[test]
     fn stopword_filtering() {

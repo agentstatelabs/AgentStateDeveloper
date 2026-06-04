@@ -1133,6 +1133,27 @@ some need new code.
   Add half-life so a verdict 6 months old has less ranking weight
   than yesterday's.
 
+### Discovered during t-004 implementation (2026-06-03)
+
+- **t-017** — `--paths` (and probably `--scope`, `--exclude-path`,
+  `--exclude-set`, `--exclude-lang`) are no-ops for **results** in
+  `asd search`'s FTS hot path. They populate `FtsFilters` and gate
+  the `scope_narrowed` advisory flag, but the FTS SQL only filters
+  by `kind` + `language`. The `apply_paths_filter` logic in
+  `core::candidates` runs from `find_candidates` (used by
+  `prepare_change`, `investigate`, etc.) but not from
+  `commands/search.rs`. Result: an agent typing
+  `asd search "auth" --paths "src/api/**"` sees ALL `auth` matches
+  across the repo, with only the `scope_narrowed: true` flag as a
+  hint that the filter was registered. Fix: thread
+  `apply_paths_filter` + `apply_exclude_paths_filter` +
+  `apply_exclude_languages_filter` + `apply_exclude_terms_filter`
+  through the post-FTS rerank stage in search.rs. Should also be
+  covered by an integration test that asserts the filtered set is
+  a proper subset of the unfiltered set. Once fixed, t-004's
+  broadener gains a much bigger payoff window (the most common
+  user-invoked narrowing actually works).
+
 ### Implementation order
 
 M25 cluster first (t-011 → t-014) — they're current pain, not

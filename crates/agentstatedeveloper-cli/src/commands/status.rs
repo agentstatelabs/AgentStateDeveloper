@@ -9,7 +9,7 @@ use clap::{Args, Subcommand};
 use serde_json::json;
 
 use agentstatedeveloper_core::{
-    AsgIndexStore, AsgLedgerStore, Engine, IndexStore, LedgerStore, SearchFtsDb, SidecarState,
+    AsgLedgerStore, Engine, LedgerStore, SearchFtsDb, SidecarState, compute_index_consistency,
     compute_trust_score, format_age,
     schema::{LedgerKind, Symbol},
     sidecar_lifecycle_state,
@@ -100,15 +100,22 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
     };
 
     // Concept-gap detection: symbols with Ownership but no Concept entry.
-    let concept_gaps: Vec<serde_json::Value> = if args.json {
+    // Plan J t-005: while we have the by-qname tree open, also tally
+    // its length so we can emit `index_consistency` alongside the
+    // FTS-derived `symbols` count. The two diverge after a failed FTS
+    // rebuild or an out-of-band ledger migration; surfacing the delta
+    // turns a silent "why does asd status say 412 but asd health say
+    // 408?" puzzle into a one-line `advice` field.
+    let (concept_gaps, asg_symbol_count): (Vec<serde_json::Value>, Option<usize>) = if args.json {
         if let Ok(engine) = Engine::open_sqlite(&cfg.db_path) {
-            let index_store = AsgIndexStore::from_engine(&engine);
             let ledger_store = AsgLedgerStore::from_engine(&engine);
             let tree = engine
                 .repo
                 .get_tree(&engine.ref_name, "/asd/v1/index/by-qname")
                 .unwrap_or(serde_json::Value::Object(Default::default()));
-            tree.as_object()
+            let asg_count = tree.as_object().map(|m| m.len());
+            let gaps = tree
+                .as_object()
                 .map(|m| {
                     m.values()
                         .filter_map(|v| serde_json::from_value::<Symbol>(v.clone()).ok())
@@ -127,12 +134,13 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
                         })
                         .collect()
                 })
-                .unwrap_or_default()
+                .unwrap_or_default();
+            (gaps, asg_count)
         } else {
-            vec![]
+            (vec![], None)
         }
     } else {
-        vec![]
+        (vec![], None)
     };
 
     let sidecar_key = sidecar_state_key(&sidecar_state);
@@ -150,6 +158,13 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
         // State Trust Score rollup.
         let trust = compute_trust_score(&cfg.db_path);
 
+        // Plan J t-005: emit `index_consistency` when we have an
+        // ASG count to compare against. Null when the engine couldn't
+        // open (concept_gaps would also be empty in that case).
+        let index_consistency = asg_symbol_count
+            .map(|asg| compute_index_consistency(asg, count as usize))
+            .unwrap_or(serde_json::Value::Null);
+
         let out = json!({
             "db": cfg.db_path.display().to_string(),
             "symbols": count,
@@ -160,6 +175,7 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
             "sidecar_action": sidecar_action,
             "dirty_files": dirty_files,
             "concept_gaps": concept_gaps,
+            "index_consistency": index_consistency,
             "trust": trust.to_json(),
         });
 

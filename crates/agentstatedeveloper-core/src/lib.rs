@@ -88,7 +88,9 @@ pub use search_fts::{
     symbol_tier, test_files_for_source, trim_for_agent,
 };
 pub use search_fts::{DocHit, DocKind, SearchDoc, SearchDocsDb};
-pub use search_fts::{effect_detail_reason, format_age, stale_warning};
+pub use search_fts::{
+    compute_index_consistency, effect_detail_reason, format_age, stale_warning,
+};
 pub use sidecar::{
     HydrateSummary, SidecarState, SyncSummary, hydrate_from_dir, mark_fresh_reset, prune_sidecar,
     sidecar_lifecycle_state, sync_to_dir,
