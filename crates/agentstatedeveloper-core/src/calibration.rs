@@ -101,19 +101,29 @@ where
     }
 }
 
-/// Bucket-semantics advisory. The thresholds here come from
-/// generous defaults — tighten via DESIGN.md once ExampleProj data
-/// shows what real distributions look like.
+/// Bucket-semantics advisory. ASD uses TWO bucket axes with
+/// OPPOSITE directions — getting this wrong was the original
+/// 1.0.59-through-1.0.66 calibration bug (ExampleProj's `low`
+/// bucket at 100% pass rate looked miscalibrated only because
+/// this table had the uncertainty axis inverted).
 ///
-/// Semantics assumed:
-///   - "low" / "weak" / "noisy"        ~ caller should expect ≤50% accuracy
-///   - "medium" / "partial" / "peripheral" ~ 50-80%
-///   - "high" / "strong" / "core" / "relevant" ~ 80-95%
-///   - "critical"                     ~ ≥95% (use-as-truth signal)
+/// **Uncertainty axis** (from `compute_uncertainty` →
+/// `uncertainty.level`): `low` means "low uncertainty / HIGH
+/// confidence", `critical` means "highest uncertainty / LOW
+/// confidence". A `low` bucket at 95% pass rate is correctly
+/// calibrated; a `critical` bucket at 95% would be miscalibrated
+/// (results are better than the predictor warned).
 ///
-/// Advice fires when the observed rate is more than 15 percentage
-/// points off from the bucket's expected midpoint. Sample size
-/// must be at least 5 — smaller samples produce noise, not signal.
+/// **Quality axis** (from `result_bucket` and recovery
+/// estimation): `core` / `strong` mean "high-quality result",
+/// `noisy` / `weak` mean "low-quality result". Direction
+/// matches intuition: high-quality buckets should pass at high
+/// rates, low-quality at low rates.
+///
+/// Reading the table below: `expected` is the OBSERVED pass
+/// rate we'd expect if the bucket label accurately describes
+/// the underlying signal. Advice fires when observed deviates
+/// from that by >15pp and sample size is ≥5.
 fn bucket_advice(label: &str, count: usize, rate: f64) -> String {
     if count < 5 {
         return String::new();
@@ -122,10 +132,18 @@ fn bucket_advice(label: &str, count: usize, rate: f64) -> String {
         return String::new();
     }
     let expected = match label {
-        "low" | "weak" | "noisy" => 0.25,
-        "medium" | "partial" | "peripheral" => 0.65,
-        "high" | "strong" | "core" | "relevant" => 0.875,
-        "critical" => 0.975,
+        // Uncertainty axis — low uncertainty = high confidence
+        // = expect high pass rate.
+        "low" => 0.95,
+        "medium" => 0.70,
+        "high" => 0.45,
+        "critical" => 0.20,
+
+        // Quality axis — high quality = expect high pass rate.
+        "core" | "strong" | "relevant" => 0.90,
+        "partial" | "peripheral" => 0.65,
+        "weak" | "noisy" => 0.25,
+
         _ => return String::new(), // unknown label, no advice
     };
     let gap = rate - expected;
@@ -223,35 +241,40 @@ mod tests {
     }
 
     #[test]
-    fn high_bucket_underperforming_gets_too_generous_advice() {
-        // 10 obs at 40% pass rate — `high` label expects ~87.5%.
-        // 47.5pp gap should trigger the "too generous" advisory.
+    fn low_bucket_underperforming_gets_too_generous_advice() {
+        // Uncertainty axis: `low` means LOW UNCERTAINTY = high
+        // confidence → expect ~95% pass rate. 10 obs at 30% pass
+        // rate is 65pp below — predictor said "high confidence,
+        // results trustworthy" but probes failed → bucket
+        // threshold was too generous (predictor admitted
+        // high-confidence too easily).
         let mut obs: Vec<(&str, bool)> = Vec::new();
         for i in 0..10 {
-            obs.push(("high", i < 4)); // 4 pass, 6 fail
+            obs.push(("low", i < 3)); // 3 pass, 7 fail
         }
         let r = compute_calibration(obs);
         let advice = &r.buckets[0].advice;
         assert!(
             advice.contains("too generous"),
-            "expected 'too generous' advice for high@40%; got: {advice:?}"
+            "expected 'too generous' advice for low@30% (uncertainty axis); got: {advice:?}"
         );
         assert!(advice.contains("trails"), "got: {advice}");
     }
 
     #[test]
-    fn low_bucket_overperforming_advice_lists_competing_causes() {
-        // 10 obs at 90% pass rate — `low` label expects ~25%.
-        // 65pp gap should trigger the over-performing advisory.
-        // Field-eval (1.0.65 ExampleProj run) reworded this to enumerate
-        // three competing causes — too-strict-threshold,
-        // too-lenient-probes, label-semantics-mismatch — rather than
-        // assert the first as truth. Test pins the multi-cause shape
-        // and the "exceeds" + "tighten probes" anchors so a future
-        // copy edit can't accidentally drop the nuance.
+    fn high_bucket_overperforming_advice_lists_competing_causes() {
+        // Uncertainty axis: `high` means HIGH UNCERTAINTY → expect
+        // ~45% pass rate. 10 obs at 95% pass rate is 50pp above —
+        // predictor warned low-confidence but probes passed →
+        // either bucket is too strict, probes too lenient, or
+        // "high uncertainty" describes scope-of-doubt rather than
+        // expected-failure-rate. The multi-cause advisory shape
+        // (added in 1.0.66, semantics direction corrected in
+        // 1.0.68) is pinned by checking for "(a)/(b)/(c)" and
+        // "Tighten probes" anchors.
         let mut obs: Vec<(&str, bool)> = Vec::new();
         for i in 0..10 {
-            obs.push(("low", i != 0));
+            obs.push(("high", i != 0)); // 9 pass, 1 fail
         }
         let r = compute_calibration(obs);
         let advice = &r.buckets[0].advice;
@@ -266,6 +289,24 @@ mod tests {
         assert!(
             advice.contains("Tighten probes"),
             "must suggest the precision-mode remediation before threshold tuning; got: {advice:?}"
+        );
+    }
+
+    #[test]
+    fn exampleproj_field_signal_now_well_calibrated() {
+        // Regression test for the ExampleProj 1.0.65/66/67 case: 10
+        // observations in the `low` bucket all passing. With the
+        // semantics-inverted advice table (1.0.59-1.0.67), this
+        // produced a confidently-wrong "threshold too strict"
+        // advisory. With the corrected semantics (1.0.68), `low`
+        // expects ~95% pass rate, so 100% observed is +5pp —
+        // well within the ±15pp band → advice empty (correctly
+        // calibrated).
+        let obs: Vec<(&str, bool)> = (0..10).map(|_| ("low", true)).collect();
+        let r = compute_calibration(obs);
+        assert_eq!(
+            r.buckets[0].advice, "",
+            "low@100% must be well-calibrated under uncertainty-axis semantics"
         );
     }
 
