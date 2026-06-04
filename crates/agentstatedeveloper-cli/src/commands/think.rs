@@ -407,7 +407,7 @@ fn run_bootstrap_default(
             "prompt_command": "asd think prompt",
             "checklist": [
                 "Read the prompt: run `asd think prompt` (embedded — works from any CWD)",
-                "Run `asd reindex` so the project graph is current",
+                "Run `asd reindex` so the project graph is current (defaults to CWD)",
                 "Capture at least one MentalModel for the top-level architecture",
                 "Capture Hypotheses for hot files with confidence in [0.0, 1.0]",
                 "Record OpenQuestions for known unknowns",
@@ -439,7 +439,7 @@ fn run_bootstrap_default(
     println!();
     println!("Starter checklist:");
     println!("  1. Read the prompt: `asd think prompt` (pipe into your agent or read directly)");
-    println!("  2. Run `asd reindex` so the project graph is current");
+    println!("  2. Run `asd reindex` so the project graph is current (defaults to CWD)");
     println!("  3. Capture at least one MentalModel for the top-level architecture");
     println!("  4. Capture Hypotheses for hot files with confidence in [0.0, 1.0]");
     println!("  5. Record OpenQuestions for known unknowns");

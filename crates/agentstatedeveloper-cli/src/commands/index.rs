@@ -30,6 +30,9 @@ const SKIPPED_DISPLAY_LIMIT: usize = 100;
 pub struct IndexArgs {
     /// Directory (or file) to index. Recursively walks for known source
     /// extensions (`.py`, `.ts`, `.tsx`, `.rs`, `.go`, `.java`, `.cs`, `.rb`, `.kt`, `.swift`).
+    /// Defaults to the current directory — `asd index` / `asd reindex`
+    /// (no args) both mean "index whatever I'm sitting in."
+    #[arg(default_value = ".")]
     pub path: PathBuf,
 
     /// Tee the full index log to stderr in real time.

@@ -119,7 +119,10 @@ pub enum Command {
     /// Show installed ASD git hooks and their current status.
     Hooks(commands::hooks::HooksArgs),
 
-    /// Index Python source files under a directory.
+    /// Walk source files under a directory and build the FTS + ASG
+    /// index. Re-runnable; idempotent. (Aliased as `reindex` to
+    /// match the MCP `mcp__asd__reindex` tool name.)
+    #[command(alias = "reindex")]
     Index(commands::index::IndexArgs),
 
     /// Read a symbol, its effects, and recent ledger entries.
