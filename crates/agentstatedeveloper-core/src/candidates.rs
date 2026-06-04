@@ -14,7 +14,9 @@ use crate::engine::Engine;
 use crate::index::{AsgIndexStore, IndexStore};
 use crate::ledger::{AsgLedgerStore, LedgerStore};
 use crate::schema::{LedgerEntry, LedgerKind, Symbol, SymbolKind};
-use crate::search_fts::{FtsFilters, SearchFtsDb, classify_layer_sym, hybrid_boost, is_stopword};
+use crate::search_fts::{
+    FtsFilters, SearchFtsDb, classify_file_role, classify_layer_sym, hybrid_boost, is_stopword,
+};
 
 // ---------------------------------------------------------------------------
 // Query tokenisation
@@ -64,6 +66,27 @@ pub fn parse_query(query: &str) -> (Vec<String>, Vec<String>) {
 // ---------------------------------------------------------------------------
 // Kind helpers
 // ---------------------------------------------------------------------------
+
+/// Plan J t-006: gate for the +2.0 view-query boost. A symbol
+/// qualifies if EITHER:
+///   - `classify_layer_sym` puts it in `"ui"` or `"viewmodel"`
+///     (broader directory + qname-suffix sweep), OR
+///   - `classify_file_role` (Plan J t-003) puts it in `"view"` or
+///     `"viewmodel"` (stem + extension + `/view(s)/` patterns —
+///     catches `.vue`, `.svelte`, and projects that name view
+///     directories `components/`).
+///
+/// Either signal alone is sufficient; the union closes M22's
+/// reported gap where files clearly named `*View.swift` lived in
+/// non-`/views/` directories and missed the boost despite obvious
+/// intent.
+pub fn view_layer_matches(layer: &str, file: &str) -> bool {
+    if layer == "ui" || layer == "viewmodel" {
+        return true;
+    }
+    let role = classify_file_role(file);
+    role == "view" || role == "viewmodel"
+}
 
 pub fn kind_str(kind: &SymbolKind) -> &'static str {
     match kind {
@@ -685,7 +708,24 @@ pub fn find_candidates(
                         let boost = hybrid_boost(&hit, tokens);
                         let tier = hit.tier;
                         let layer = classify_layer_sym(&hit.file, &hit.qname, tier, &[]);
-                        let view_boost = if is_view_query && (layer == "ui" || layer == "viewmodel")
+                        // Plan J t-006: extend the M28 view-query +2.0
+                        // boost to ALSO fire on `file_role == "view"`
+                        // and `"viewmodel"`. The original gate keyed
+                        // only off `classify_layer_sym`, which uses
+                        // directory + qname-suffix patterns; that
+                        // misses files where the path doesn't follow
+                        // the typical UI convention (`.vue`, `.svelte`,
+                        // or any project that puts views in
+                        // `app/components/` instead of `views/`).
+                        // `classify_file_role` (Plan J t-003) is the
+                        // newer, stem+extension-aware check — applying
+                        // EITHER signal closes the gap without
+                        // changing behavior on already-caught hits
+                        // (boost is the same magnitude, scoring is
+                        // monotone, the boost still only fires when
+                        // `is_view_query` is true).
+                        let view_boost = if is_view_query
+                            && view_layer_matches(layer, &hit.file)
                         {
                             2.0
                         } else {
@@ -3452,5 +3492,69 @@ mod plan_j_t011_exclude_sets_tests {
         // vice-versa.
         assert!(!aliases.contains_key("tests"));
         assert!(!excl.contains_key("drift-pad"));
+    }
+}
+
+#[cfg(test)]
+mod plan_j_t006_view_layer_matches_tests {
+    //! Plan J t-006: view-query +2.0 boost gate union with file_role.
+
+    use super::view_layer_matches;
+
+    #[test]
+    fn ui_layer_alone_qualifies() {
+        // Pre-existing behavior preserved: any "ui" layer fires.
+        assert!(view_layer_matches("ui", "anything/not/even/a/view.go"));
+    }
+
+    #[test]
+    fn viewmodel_layer_alone_qualifies() {
+        assert!(view_layer_matches("viewmodel", "Foo.swift"));
+    }
+
+    #[test]
+    fn non_view_layer_with_non_view_file_does_not_qualify() {
+        assert!(!view_layer_matches("scheduler", "src/audio/clock.rs"));
+        assert!(!view_layer_matches("persistence", "src/db/migrations.rs"));
+    }
+
+    #[test]
+    fn file_role_view_closes_layer_gap() {
+        // Plan J t-006: layer="other" (classify_layer misses the
+        // file) BUT classify_file_role picks it up via stem suffix.
+        // This is the M22 field-eval case — `*View.swift` outside
+        // a /views/ directory used to miss the boost.
+        assert!(view_layer_matches("other", "app/components/ExampleFlowView.swift"));
+    }
+
+    #[test]
+    fn file_role_view_via_vue_extension_qualifies() {
+        // Web frontends — single-file components with .vue/.svelte
+        // extension. classify_layer typically misses these (no
+        // suffix convention); file_role catches them.
+        assert!(view_layer_matches("other", "src/Components/UserCard.vue"));
+        assert!(view_layer_matches("other", "src/widgets/Toolbar.svelte"));
+    }
+
+    #[test]
+    fn file_role_viewmodel_closes_layer_gap() {
+        // *ViewModel.kt in a non-`/viewmodels/` directory.
+        assert!(view_layer_matches("other", "app/screens/login/LoginViewModel.kt"));
+    }
+
+    #[test]
+    fn impl_file_role_not_a_view() {
+        // Negative: a regular implementation file shouldn't get the
+        // boost just because the layer string is unrecognized.
+        assert!(!view_layer_matches("other", "src/services/auth.rs"));
+        assert!(!view_layer_matches("other", "src/util/helpers.ts"));
+    }
+
+    #[test]
+    fn previewservice_is_not_a_view_negative_regression() {
+        // From t-003 unit tests: stem_ends_with avoids `Preview*`
+        // false-matching `view`. Lock the same regression here so
+        // we don't reintroduce it via the boost gate.
+        assert!(!view_layer_matches("other", "src/preview/PreviewService.swift"));
     }
 }
