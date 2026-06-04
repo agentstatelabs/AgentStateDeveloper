@@ -1233,29 +1233,24 @@ some need new code.
   `--scope` resolve to populated `paths_filter` /
   `exclude_paths` lists so they inherit the fix.
 
-- **t-018** — Verify shell-command examples in user-facing output.
-  Triggered by two consecutive field-test catches on ExampleProj in
-  the same session: `asd think bootstrap` told users to run
-  `asd reindex` (no such command — was `asd index` until 1.0.62
-  added the alias), and earlier `commands/think.rs:283` used a
-  CWD-relative path to docs/initial-read-prompt.md that failed
-  from any non-AgentStateDeveloper checkout (fixed in 1.0.61 via
-  `include_str!`). Pattern: command examples baked into help
-  text, JSON output, bootstrap checklists, error advisories,
-  README, DESIGN.md, and `asd --help long_about` can silently
-  drift from reality. Add a `tests/help_examples_resolve.rs`
-  integration test that:
-  1. Runs `asd think bootstrap`, `asd --help`, `asd init`,
-     `asd onboard`, and any other surfaces that print shell
-     commands as guidance.
-  2. Extracts anything matching `` `asd <subcommand>...` `` from
-     stdout.
-  3. For each, runs `asd <subcommand> --help` and asserts exit
-     code 0. (Full execution would have side effects; --help is
-     a cheap, side-effect-free sanity check that the subcommand
-     and its top-level flags resolve.)
-  4. Fails the build with a list of broken references when any
-     example doesn't resolve.
+- **t-018** — **RESOLVED 1.0.72**. Integration test
+  `tests/help_examples_resolve.rs` extracts every
+  `` `asd <subcommand>...` `` reference from `asd --help`
+  (long_about block) and `asd think bootstrap` (both human and
+  --json output) and asserts each subcommand resolves via
+  `asd <subcommand> --help` (cheap, side-effect-free). The
+  extractor walks backtick-quoted spans manually (no regex
+  dependency added) and skips placeholders (`<NAME>`), flags
+  (`--foo`), and clap usage templates (`[OPTIONS]`) via an
+  allow-list. 3 production tests + 3 extractor self-tests
+  covering trailing punctuation, no-backticks-no-panic, and
+  placeholder rejection. Future scope (filed below as stretch
+  if it bites): extend to scan DESIGN.md / CHANGELOG.md
+  backtick blocks — those drift faster than runtime output.
+  Original triggers (1.0.61–62): `asd reindex` typo in
+  bootstrap checklist + CWD-relative docs/initial-read-prompt.md
+  path. Both would have failed this test on the commit that
+  introduced them.
   Bonus: extend to scan DESIGN.md and CHANGELOG.md backtick-quoted
   command examples too — those drift even faster than runtime
   output. The doc/code drift detection is the larger value;
