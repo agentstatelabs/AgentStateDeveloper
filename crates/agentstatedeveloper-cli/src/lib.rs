@@ -47,7 +47,36 @@ pub(crate) fn ratify_ops_override() -> Option<Arc<dyn RatifyOps>> {
 
 /// AgentStateDeveloper — code-level context and audit overlay.
 #[derive(Debug, Parser)]
-#[command(name = "asd", version, about = "AgentStateDeveloper CLI")]
+#[command(
+    name = "asd",
+    version,
+    about = "AgentStateDeveloper CLI",
+    long_about = "AgentStateDeveloper CLI — code-level context and audit overlay.
+
+Bootstrap a NEW repo (no sidecar yet) — manual sequence:
+  asd init                  # install git hooks, create .asd/ directory
+  asd index <path>          # walk source files; build FTS + ASG state
+  asd sync                  # write .asd/v1/ sidecar (commit this)
+  asd status                # verify (expect state: fresh, sidecar: hydrated)
+
+Bootstrap a FRESH CLONE (sidecar already in repo) — manual sequence:
+  asd init                  # install git hooks
+  asd hydrate --verify      # restore ASG from sidecar; --verify catches drift
+  asd status                # verify (index_consistency.consistent == true)
+
+One-shot alternative (recommended): `asd onboard` runs the right sequence
+automatically for either case above. Idempotent — safe to re-run.
+
+Daily loop:
+  asd prepare-change \"<task>\"   # one-call context package (use BEFORE editing)
+  asd search \"<query>\" --agent   # ranked semantic search
+  asd impact <symbol>             # blast radius for a planned change
+  asd ledger append ...           # record a decision / invariant / hazard
+
+When source changes outside ASD's commit hooks, re-run `asd index <path>`
+to refresh the FTS cache. `asd status` will flag staleness if the index
+is more than an hour behind."
+)]
 pub struct Cli {
     /// Path to the ASD SQLite database. Overrides `ASD_DB` env var.
     #[arg(long, global = true)]
