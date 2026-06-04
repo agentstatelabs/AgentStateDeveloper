@@ -11,7 +11,7 @@ use agentstatedeveloper_core::{
     AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine,
     FeedbackMetrics, FeedbackState, FeedbackStore, FeedbackVerdict, FtsFilters, IndexStore,
     LedgerStore, SearchDocsDb, SearchFtsDb, apply_feedback_adjustments, apply_file_scope_feedback,
-    build_feedback_state_from_entries, classify_layer_sym, compute_trust_score,
+    build_feedback_state_from_entries, classify_layer_sym, compute_trust_score, matches_any_path_glob,
     compute_uncertainty, confidence_reason, confidence_scores, detect_ambiguous_tokens,
     detect_confidence_warnings, detect_possible_misses, effect_detail_reason, estimate_tokens,
     explain_feedback_impacts, explain_match, extract_summary, gather_recency, hybrid_boost,
@@ -245,7 +245,46 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             .and_then(|fts| fts.search(&args.query, &filters, args.limit * 2).ok())
     };
 
-    if let Some(hits) = fts_result {
+    if let Some(mut hits) = fts_result {
+        // Plan J t-017: filter the FTS result set by paths /
+        // exclude_paths / exclude_languages BEFORE the expensive
+        // hybrid reranking + ledger lookups run. These filters were
+        // previously a no-op in the search hot path — `--paths`,
+        // `--exclude-path`, `--exclude-lang`, `--scope`,
+        // `--exclude-set` populated FtsFilters and gated the
+        // `scope_narrowed` advisory flag, but the actual result
+        // pruning lived in core::candidates::apply_*_filter, which
+        // only `find_candidates` (used by prepare_change, investigate,
+        // context_for, etc.) called. Search bypassed all of it.
+        //
+        // We filter on FtsHit directly rather than calling the core
+        // helpers because FtsHit already carries `file` and
+        // `language` — zero extra reads. The helpers' value is when
+        // you only have a qname and need to resolve back to a file;
+        // search has the full hit.
+        //
+        // Order: positive (paths) → negative (exclude_paths) →
+        // language exclude. Each is a no-op when its filter list is
+        // empty, so the cost on unfiltered queries is one
+        // `is_empty()` check per axis.
+        if !filters.paths_filter.is_empty() {
+            hits.retain(|h| matches_any_path_glob(&filters.paths_filter, &h.file));
+        }
+        if !filters.exclude_paths.is_empty() {
+            hits.retain(|h| !matches_any_path_glob(&filters.exclude_paths, &h.file));
+        }
+        if !filters.exclude_languages.is_empty() {
+            let lower: Vec<String> = filters
+                .exclude_languages
+                .iter()
+                .map(|s| s.to_lowercase())
+                .collect();
+            hits.retain(|h| {
+                let lang = h.language.to_lowercase();
+                !lower.iter().any(|excl| excl == &lang)
+            });
+        }
+
         let tokens = tokens_from_query.clone();
 
         // Hybrid reranking: BM25 + path/name boost + ledger boost + ownership anchor boost.

@@ -1214,24 +1214,24 @@ some need new code.
 
 ### Discovered during t-004 implementation (2026-06-03)
 
-- **t-017** — `--paths` (and probably `--scope`, `--exclude-path`,
-  `--exclude-set`, `--exclude-lang`) are no-ops for **results** in
-  `asd search`'s FTS hot path. They populate `FtsFilters` and gate
-  the `scope_narrowed` advisory flag, but the FTS SQL only filters
-  by `kind` + `language`. The `apply_paths_filter` logic in
-  `core::candidates` runs from `find_candidates` (used by
-  `prepare_change`, `investigate`, etc.) but not from
-  `commands/search.rs`. Result: an agent typing
-  `asd search "auth" --paths "src/api/**"` sees ALL `auth` matches
-  across the repo, with only the `scope_narrowed: true` flag as a
-  hint that the filter was registered. Fix: thread
-  `apply_paths_filter` + `apply_exclude_paths_filter` +
-  `apply_exclude_languages_filter` + `apply_exclude_terms_filter`
-  through the post-FTS rerank stage in search.rs. Should also be
-  covered by an integration test that asserts the filtered set is
-  a proper subset of the unfiltered set. Once fixed, t-004's
-  broadener gains a much bigger payoff window (the most common
-  user-invoked narrowing actually works).
+- **t-017** — **RESOLVED 1.0.71**. `asd search` now applies
+  `paths_filter`, `exclude_paths`, and `exclude_languages` to the
+  FTS result set IMMEDIATELY after the hits come back, before the
+  expensive hybrid reranking + ledger lookups run. Filtering uses
+  `FtsHit.file` and `FtsHit.language` directly (both already
+  populated by the FTS query) — zero extra git/SQL reads. Each
+  filter is a no-op when its list is empty, so unfiltered queries
+  pay one `is_empty()` check per axis. Coverage: 6 integration
+  tests in `tests/paths_filter_actually_filters.rs` — baseline
+  (no filter), paths-filter narrows, exclude-path drops,
+  exclude-lang drops, composition (paths + exclude-lang
+  together), AND a t-004 broadener bonus test proving the
+  broadener now meaningfully recovers extra hits when
+  paths_filter is dropped (the broadener's payoff window was
+  always blocked by t-017's no-op until now). `--language` was
+  already enforced via FTS SQL WHERE clause; `--exclude-set` and
+  `--scope` resolve to populated `paths_filter` /
+  `exclude_paths` lists so they inherit the fix.
 
 - **t-018** — Verify shell-command examples in user-facing output.
   Triggered by two consecutive field-test catches on ExampleProj in
