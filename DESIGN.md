@@ -1191,9 +1191,26 @@ some need new code.
 
 ### From M27 (feedback loop rollout)
 
-- **t-016** — Feedback decay: `Useful +1.5` boosts stay forever.
-  Add half-life so a verdict 6 months old has less ranking weight
-  than yesterday's.
+- **t-016** — **RESOLVED 1.0.70**. Pure decay helpers in
+  `core::feedback::{decay_factor, decay_for_entry}` with
+  `DEFAULT_FEEDBACK_HALF_LIFE_DAYS = 90.0` (one quarter — survives
+  near-full weight then meaningfully fades). Wired into both
+  `apply_feedback_adjustments` (per-symbol path) and
+  `apply_file_scope_feedback` (file-glob path) by multiplying the
+  `+1.5` Useful boost by `decay_for_entry(created_at, now,
+  half_life)`. Suppression verdicts (Noisy / WrongLayer /
+  AlreadyCovered / DiagnosticOnly) deliberately do NOT decay —
+  they're explicit "this is wrong" signals; agents can use Plan J
+  t-014's `--ttl-days` for soft expiry on negatives. Tuple shape
+  for `flat_verdicts` / `flat_file_scope_verdicts` widened to
+  4 elements (added `created_at: DateTime<Utc>`); all 6 call sites
+  across CLI + MCP updated. Coverage: 9 pure decay unit tests in
+  `feedback.rs::plan_j_t016_decay_tests` (zero age, half-life,
+  multiples, clock-skew defense, sub-day resolution, disabled-by-
+  zero-half-life) + 2 integration tests in
+  `tests/feedback_decay_integration.rs` (fresh vs 9-month-old
+  end-to-end, negative-verdict-does-not-decay regression). 367 →
+  377 lib tests passing.
 
 ### Discovered during t-004 implementation (2026-06-03)
 

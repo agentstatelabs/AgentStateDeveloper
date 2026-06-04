@@ -205,13 +205,19 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     let all_fb = feedback_store
         .list_all(&engine.ref_name)
         .unwrap_or_default();
-    // Derive flat_verdicts from the hoisted list (same logic as the FeedbackStore default impl).
-    let feedback_verdicts: Vec<(String, String, agentstatedeveloper_core::FeedbackVerdict)> =
-        all_fb
-            .iter()
-            .filter(|e| e.file_scope.is_none())
-            .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict))
-            .collect();
+    // Derive flat_verdicts from the hoisted list (same logic as the
+    // FeedbackStore default impl). Plan J t-016: tuple includes
+    // created_at so the boost arithmetic can decay by age.
+    let feedback_verdicts: Vec<(
+        String,
+        String,
+        agentstatedeveloper_core::FeedbackVerdict,
+        chrono::DateTime<chrono::Utc>,
+    )> = all_fb
+        .iter()
+        .filter(|e| e.file_scope.is_none())
+        .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict, e.created_at))
+        .collect();
     let feedback_metrics = apply_feedback_adjustments(
         &engine,
         &index_store,

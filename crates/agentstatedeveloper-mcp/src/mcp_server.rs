@@ -5412,17 +5412,25 @@ impl AsdMcpServer {
             let mut feedback_metrics = agentstatedeveloper_core::FeedbackMetrics::default();
             {
                 if !all_feedback.is_empty() {
+                    // Plan J t-016: tuple gained created_at for age-decay.
                     let fb_tuples: Vec<_> = all_feedback
                         .iter()
                         .filter(|e| e.file_scope.is_none())
-                        .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict))
+                        .map(|e| {
+                            (
+                                e.symbol_id.clone(),
+                                e.query.clone(),
+                                e.verdict,
+                                e.created_at,
+                            )
+                        })
                         .collect();
                     let fs_tuples: Vec<_> = all_feedback
                         .iter()
                         .filter_map(|e| {
                             e.file_scope
                                 .as_ref()
-                                .map(|g| (g.clone(), e.verdict, e.query.clone()))
+                                .map(|g| (g.clone(), e.verdict, e.query.clone(), e.created_at))
                         })
                         .collect();
                     let mut adj: Vec<(f64, String)> =

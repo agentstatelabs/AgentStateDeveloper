@@ -56,7 +56,10 @@ pub use doc_adapters::{adapt_document, is_doc_file};
 pub use effects::{AsgEffectStore, EffectStore};
 pub use engine::Engine;
 pub use error::{AsdError, Result};
-pub use feedback::{AsgFeedbackStore, FeedbackStore};
+pub use feedback::{
+    AsgFeedbackStore, DEFAULT_FEEDBACK_HALF_LIFE_DAYS, FeedbackStore, decay_factor,
+    decay_for_entry,
+};
 pub use index::{AsgIndexStore, IndexStore};
 pub use index_pipeline::{CollectResult, IndexSummary, collect_source_files, run_index};
 pub use ledger::{

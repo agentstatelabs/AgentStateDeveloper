@@ -1706,7 +1706,16 @@ pub fn apply_feedback_adjustments(
     index_store: &AsgIndexStore,
     query: &str,
     scored: &mut Vec<(f64, String)>,
-    feedback_entries: &[(String, String, crate::schema::FeedbackVerdict)],
+    // Plan J t-016: tuple gained `created_at` so the Useful boost can
+    // decay by age. Tuple shape kept (vs converting to a struct) to
+    // minimize churn across the ~7 CLI/MCP callers; the trait helper
+    // `FeedbackStore::flat_verdicts` already produces this shape.
+    feedback_entries: &[(
+        String,
+        String,
+        crate::schema::FeedbackVerdict,
+        chrono::DateTime<chrono::Utc>,
+    )],
 ) -> FeedbackMetrics {
     // Plan C t-006: bias toward the active CTX task's scope first, so
     // in-scope candidates start with a small head-start before
@@ -1748,7 +1757,7 @@ pub fn apply_feedback_adjustments(
     // Metrics accumulators.
     let entries_applied = feedback_entries
         .iter()
-        .filter(|(_, fb_q, _)| query_family_matches(&current_tokens, fb_q))
+        .filter(|(_, fb_q, _, _)| query_family_matches(&current_tokens, fb_q))
         .count();
     let mut preserved_useful_siblings: usize = 0;
     let mut boosted: usize = 0;
@@ -1766,7 +1775,7 @@ pub fn apply_feedback_adjustments(
     // --- Recurring false positive map ---
     let mut noisy_queries_by_sym: std::collections::HashMap<&str, Vec<&str>> =
         std::collections::HashMap::new();
-    for (sym_id, fb_query, verdict) in feedback_entries {
+    for (sym_id, fb_query, verdict, _created_at) in feedback_entries {
         if matches!(
             verdict,
             crate::schema::FeedbackVerdict::Noisy | crate::schema::FeedbackVerdict::WrongLayer
@@ -1808,14 +1817,14 @@ pub fn apply_feedback_adjustments(
     {
         let noisy_ids: Vec<&str> = feedback_entries
             .iter()
-            .filter(|(_, fb_query, verdict)| {
+            .filter(|(_, fb_query, verdict, _)| {
                 matches!(
                     verdict,
                     crate::schema::FeedbackVerdict::Noisy
                         | crate::schema::FeedbackVerdict::WrongLayer
                 ) && query_family_matches(&current_tokens, fb_query)
             })
-            .map(|(sym_id, _, _)| sym_id.as_str())
+            .map(|(sym_id, _, _, _)| sym_id.as_str())
             .collect();
         if !noisy_ids.is_empty() {
             // M60: bulk-resolve noisy symbol_ids via FTS — one SQL query.
@@ -1901,7 +1910,7 @@ pub fn apply_feedback_adjustments(
             let is_container = matches!(sym_kind_enum, SymbolKind::Class | SymbolKind::Module);
             let is_the_noisy_sym = noisy_syms.iter().any(|ns| ns.sym_id == *sym_id);
             if !is_container && !is_the_noisy_sym {
-                let has_useful = feedback_entries.iter().any(|(fid, fq, v)| {
+                let has_useful = feedback_entries.iter().any(|(fid, fq, v, _)| {
                     fid == sym_id
                         && matches!(v, crate::schema::FeedbackVerdict::Useful)
                         && query_family_matches(&current_tokens, fq)
@@ -1932,7 +1941,13 @@ pub fn apply_feedback_adjustments(
         }
 
         // Per-symbol verdict matching (t-003: query-family aware).
-        for (fb_symbol_id, fb_query, verdict) in feedback_entries {
+        // Plan J t-016: snapshot `now` ONCE per scoring pass so all
+        // entries in this loop decay against the same instant —
+        // avoids the (cosmetic but real) bug where two entries with
+        // the same created_at could get slightly different decay
+        // factors if Utc::now() is called inside the loop body.
+        let now_for_decay = chrono::Utc::now();
+        for (fb_symbol_id, fb_query, verdict, fb_created_at) in feedback_entries {
             if fb_symbol_id != sym_id {
                 continue;
             }
@@ -1942,7 +1957,19 @@ pub fn apply_feedback_adjustments(
             }
             match verdict {
                 crate::schema::FeedbackVerdict::Useful => {
-                    *score += 1.5;
+                    // Plan J t-016: scale the +1.5 boost by age-based
+                    // decay. Negative verdicts (Noisy / WrongLayer /
+                    // AlreadyCovered / DiagnosticOnly) intentionally
+                    // do NOT decay — they're explicit "this is wrong"
+                    // signals, not preferences. The agent can use
+                    // `asd feedback mark --ttl-days N` from Plan J
+                    // t-014 if they want soft expiry on a negative.
+                    let decay = crate::feedback::decay_for_entry(
+                        *fb_created_at,
+                        now_for_decay,
+                        crate::feedback::DEFAULT_FEEDBACK_HALF_LIFE_DAYS,
+                    );
+                    *score += 1.5 * decay;
                     boosted += 1;
                     record_rule!("useful_boost");
                 }
@@ -2193,7 +2220,15 @@ pub fn apply_file_scope_feedback(
     index_store: &AsgIndexStore,
     query: &str,
     scored: &mut Vec<(f64, String)>,
-    file_scope_entries: &[(String, crate::schema::FeedbackVerdict, String)],
+    // Plan J t-016: tuple gained `created_at` so Useful boosts on
+    // file-scope verdicts decay by age, same as the per-symbol path
+    // in `apply_feedback_adjustments`.
+    file_scope_entries: &[(
+        String,
+        crate::schema::FeedbackVerdict,
+        String,
+        chrono::DateTime<chrono::Utc>,
+    )],
 ) {
     if file_scope_entries.is_empty() {
         return;
@@ -2209,6 +2244,9 @@ pub fn apply_file_scope_feedback(
         .map(|fts| fts.resolve_qnames_bulk(&qname_strs))
         .unwrap_or_default();
 
+    // Plan J t-016: snapshot now once for the whole pass; see
+    // matching comment in apply_feedback_adjustments.
+    let now_for_decay = chrono::Utc::now();
     for (score, qname) in scored.iter_mut() {
         if !score.is_finite() {
             continue;
@@ -2221,7 +2259,7 @@ pub fn apply_file_scope_feedback(
                 _ => continue,
             }
         };
-        for (file_glob, verdict, entry_query) in file_scope_entries {
+        for (file_glob, verdict, entry_query, fb_created_at) in file_scope_entries {
             if !query_family_matches(&current_tokens, entry_query) {
                 continue;
             }
@@ -2233,7 +2271,15 @@ pub fn apply_file_scope_feedback(
             // `verdict.is_suppression()` so future variants don't need a
             // separate file-scope branch.
             match verdict {
-                crate::schema::FeedbackVerdict::Useful => *score += 1.5,
+                crate::schema::FeedbackVerdict::Useful => {
+                    // Plan J t-016: age-decay the Useful boost.
+                    let decay = crate::feedback::decay_for_entry(
+                        *fb_created_at,
+                        now_for_decay,
+                        crate::feedback::DEFAULT_FEEDBACK_HALF_LIFE_DAYS,
+                    );
+                    *score += 1.5 * decay;
+                }
                 crate::schema::FeedbackVerdict::Missing => {}
                 v if v.is_suppression() => {
                     *score = f64::NEG_INFINITY;
@@ -2991,6 +3037,7 @@ mod plan_c_t003_tests {
                 sym_id,
                 "match my query".into(),
                 crate::schema::FeedbackVerdict::AlreadyCovered,
+                chrono::Utc::now(), // Plan J t-016: created_at for decay
             )],
         );
         // apply_feedback_adjustments retains only finite scores at the
@@ -3013,6 +3060,7 @@ mod plan_c_t003_tests {
                 sym_id,
                 "match my query".into(),
                 crate::schema::FeedbackVerdict::DiagnosticOnly,
+                chrono::Utc::now(), // Plan J t-016: created_at for decay
             )],
         );
         assert!(scored.is_empty(), "suppressed symbol must be dropped");
