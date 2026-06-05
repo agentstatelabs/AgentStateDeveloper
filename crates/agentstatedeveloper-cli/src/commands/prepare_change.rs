@@ -318,59 +318,13 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         }
     }
 
-    // Sort likely_edit_files: score desc, then hot files first.
-    file_scores.sort_by(|a, b| {
-        b.4.cmp(&a.4) // hot first
-            .then_with(|| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal))
-    });
-    // 1.0.87: apply cliff detection at the FILE level (not the
-    // symbol-candidate level — see ExampleFlow 2026-06-04 regression
-    // notes in core::prepare_change::cliff_cutoff_index docs).
-    // file_score_floor's candidate-level cliff missed cliffs that only
-    // appear after file aggregation. Walking the file_scores list
-    // directly catches the 42/31/19/18 cohort split that the symbol-
-    // level walk missed because of intermediate same-file candidates.
-    //
-    // Note: sort above is HOT-FIRST then score-desc. For the cliff to
-    // see scores in pure descending order, build the scores list
-    // separately from the actual sort order. Hot ranking is a display
-    // preference; cliff detection is about cohort boundaries.
-    let mut score_only_sorted: Vec<f64> = file_scores.iter().map(|f| f.0).collect();
-    score_only_sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-    let cliff_cut = agentstatedeveloper_core::cliff_cutoff_index(score_only_sorted.iter().copied());
-    if cliff_cut < file_scores.len() {
-        // The cliff cuts files at and below a threshold. Compute the
-        // threshold score (the cliff_cut-th highest), then filter
-        // file_scores by score >= that value.
-        let cutoff_score = score_only_sorted[cliff_cut - 1];
-        file_scores.retain(|f| f.0 >= cutoff_score);
-    }
     // Hoist git_dirty_files() — reused for conflict_risk below and stale_symbols further down.
     let dirty_files = git_dirty_files();
-    let likely_edit_files: Vec<Value> = file_scores
-        .iter()
-        .map(|(score, file, layer, days, hot, top_symbol, why)| {
-            let file_role = classify_file_role(file);
-            let conflict_risk = dirty_files.contains(file.as_str());
-            let conflict_detail = if conflict_risk {
-                explain_conflict_risk(file)
-            } else {
-                None
-            };
-            json!({
-                "file": file,
-                "layer": layer,
-                "score": score,
-                "last_touched_days": days,
-                "hot": hot,
-                "file_role": file_role,
-                "conflict_risk": conflict_risk,
-                "conflict_detail": conflict_detail,
-                "top_symbol": top_symbol,
-                "why": why,
-            })
-        })
-        .collect();
+    // Plan M t-003 (1.0.97): sort + cliff cut + likely_edit_files build
+    // extracted to finalize_file_scores(). Mutates file_scores in place
+    // (sorts hot-first, applies cliff retain) so downstream stale_symbols
+    // sees the same filtered set.
+    let likely_edit_files = finalize_file_scores(&mut file_scores, &dirty_files);
 
     // ---- Affected tests via BFS from the top entry point ----------------
     // Plan M t-003 (1.0.93): extracted to gather_affected_tests().
@@ -2050,6 +2004,61 @@ fn compute_blast_radius(
         "callee_layer_distribution": callee_layers,
         "top_caller_chains": top_caller_chains,
     })
+}
+
+/// Plan M t-003 (1.0.97): sort + cliff-cut + build likely_edit_files.
+///
+/// Mutates `file_scores` in place: sorts hot-first then score-desc, then
+/// applies the file-level cliff cut (see ExampleFlow 2026-06-04 notes
+/// in core::prepare_change::cliff_cutoff_index docs — file-level cliffs
+/// only become visible AFTER file aggregation, which is why this runs
+/// here rather than against candidate scores).
+///
+/// Returns the JSON value array used directly in the prepare_change
+/// output. `dirty_files` is taken by ref so the caller's hoisted
+/// git_dirty_files() result is also reusable for downstream stale_symbols.
+fn finalize_file_scores(
+    file_scores: &mut Vec<(f64, String, String, Option<f64>, bool, String, String)>,
+    dirty_files: &std::collections::HashSet<String>,
+) -> Vec<Value> {
+    // Sort hot-first then score-desc (display preference).
+    file_scores.sort_by(|a, b| {
+        b.4.cmp(&a.4)
+            .then_with(|| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    // Cliff cut wants pure descending order — build a separate sorted
+    // copy because the display sort puts hot files first regardless of score.
+    let mut score_only_sorted: Vec<f64> = file_scores.iter().map(|f| f.0).collect();
+    score_only_sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let cliff_cut = agentstatedeveloper_core::cliff_cutoff_index(score_only_sorted.iter().copied());
+    if cliff_cut < file_scores.len() {
+        let cutoff_score = score_only_sorted[cliff_cut - 1];
+        file_scores.retain(|f| f.0 >= cutoff_score);
+    }
+    file_scores
+        .iter()
+        .map(|(score, file, layer, days, hot, top_symbol, why)| {
+            let file_role = classify_file_role(file);
+            let conflict_risk = dirty_files.contains(file.as_str());
+            let conflict_detail = if conflict_risk {
+                explain_conflict_risk(file)
+            } else {
+                None
+            };
+            json!({
+                "file": file,
+                "layer": layer,
+                "score": score,
+                "last_touched_days": days,
+                "hot": hot,
+                "file_role": file_role,
+                "conflict_risk": conflict_risk,
+                "conflict_detail": conflict_detail,
+                "top_symbol": top_symbol,
+                "why": why,
+            })
+        })
+        .collect()
 }
 
 /// Plan M t-003 (1.0.96): main candidate-loop accumulators.
