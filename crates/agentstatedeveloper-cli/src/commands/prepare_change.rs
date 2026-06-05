@@ -431,94 +431,16 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // `impact` (which does walk transitive callers) is the right
     // tool for full blast-radius reasoning; prepare_change stays
     // focused on edit-time signal.
-    let mut candidate_sym_ids: Vec<(String, String)> = Vec::new();
-    for (_, qname) in candidates.iter() {
-        if let Ok(Some(s)) = index_store.get_symbol_by_qname(&engine.ref_name, qname) {
-            candidate_sym_ids.push((s.symbol_id, s.qname));
-        }
-    }
-    // Collect every unique direct-caller id for batched qname resolve.
-    let mut caller_ids_seen: HashSet<String> = HashSet::new();
-    let mut caller_visit_order: Vec<(String, String)> = Vec::new();
-    for (cand_sym_id, _) in &candidate_sym_ids {
-        let direct_callers = index_store
-            .get_callers(&engine.ref_name, cand_sym_id)
-            .unwrap_or_default();
-        for caller_id in direct_callers {
-            // Skip if the caller is itself one of the candidates —
-            // its invariants were already collected above.
-            if candidate_sym_ids.iter().any(|(sid, _)| sid == &caller_id) {
-                continue;
-            }
-            if caller_ids_seen.insert(caller_id.clone()) {
-                caller_visit_order.push((cand_sym_id.clone(), caller_id));
-            }
-        }
-    }
-    // Reverse-lookup qname for each caller via the FTS bulk resolver
-    // (single SQL pass). Falls back to a per-id lookup pattern when
-    // FTS isn't available; in that case we skip the propagation
-    // gracefully — better to under-surface than block prepare_change.
-    let caller_id_strs: Vec<&str> =
-        caller_visit_order.iter().map(|(_, cid)| cid.as_str()).collect();
-    let caller_resolved = SearchFtsDb::open(&cfg.db_path)
-        .ok()
-        .map(|fts| fts.resolve_symbol_ids_bulk(&caller_id_strs))
-        .unwrap_or_default();
-    // Fallback qname lookup for ids the FTS cache doesn't know yet
-    // (fresh sidecar, post-import-before-reindex, or test fixtures
-    // that wrote edges directly to the repo). Walks the qname tree
-    // once to build the reverse index — only cost when FTS is cold.
-    let need_fallback = caller_visit_order
-        .iter()
-        .any(|(_, cid)| !caller_resolved.contains_key(cid.as_str()));
-    let fallback_id_to_qname: std::collections::HashMap<String, String> = if need_fallback {
-        let prefix = format!(
-            "{}/index/by-qname",
-            agentstatedeveloper_core::ASD_PATH_PREFIX
-        );
-        match engine.repo.get_tree(&engine.ref_name, &prefix) {
-            Ok(Value::Object(m)) => m
-                .into_iter()
-                .filter_map(|(qn, v)| {
-                    v.get("symbol_id")
-                        .and_then(|v| v.as_str())
-                        .map(|sid| (sid.to_string(), qn))
-                })
-                .collect(),
-            _ => std::collections::HashMap::new(),
-        }
-    } else {
-        std::collections::HashMap::new()
-    };
-    for (_cand_sym_id, caller_id) in &caller_visit_order {
-        let caller_qname = caller_resolved
-            .get(caller_id.as_str())
-            .map(|r| r.qname.as_str())
-            .or_else(|| fallback_id_to_qname.get(caller_id).map(String::as_str));
-        let Some(caller_qname) = caller_qname else {
-            continue;
-        };
-        let caller_entries = ledger_store
-            .list_entries(&engine.ref_name, caller_id)
-            .unwrap_or_default();
-        for entry in caller_entries {
-            if !matches!(entry.kind, LedgerKind::Invariant) {
-                continue;
-            }
-            let key = entry.summary.clone();
-            if seen_inv.insert(key) {
-                // 1.0.86: include entry_id (see comment at first
-                // design_invariants.push site).
-                design_invariants.push(json!({
-                    "entry_id": entry.entry_id,
-                    "summary": entry.summary,
-                    "source": caller_qname,
-                    "from_caller": true,
-                }));
-            }
-        }
-    }
+    // Plan M t-003 (1.0.95): extracted to propagate_caller_invariants().
+    let propagated = propagate_caller_invariants(
+        &engine,
+        &index_store,
+        &ledger_store,
+        &cfg.db_path,
+        &candidates,
+        &mut seen_inv,
+    );
+    design_invariants.extend(propagated);
 
     // Reorder by_layer keys according to layer_order.
     let mut ordered_by_layer: serde_json::Map<String, Value> = serde_json::Map::new();
@@ -2260,6 +2182,116 @@ fn compute_blast_radius(
         "callee_layer_distribution": callee_layers,
         "top_caller_chains": top_caller_chains,
     })
+}
+
+/// Plan M t-003 (1.0.95): caller-invariant propagation extracted from run().
+///
+/// Plan J t-001 logic. Walks each candidate's direct callers (depth=1)
+/// and returns any Invariant ledger entries that aren't already in
+/// `seen_inv`. Each returned value is tagged `from_caller: true` so the
+/// agent can tell which upstream contract is at stake.
+///
+/// `seen_inv` is mutated — new invariant summaries are inserted as the
+/// helper accumulates them, preserving the original loop's dedup
+/// semantics with the main-candidate invariants gathered earlier.
+fn propagate_caller_invariants(
+    engine: &Engine,
+    index_store: &AsgIndexStore<'_>,
+    ledger_store: &AsgLedgerStore<'_>,
+    db_path: &std::path::Path,
+    candidates: &[(f64, String)],
+    seen_inv: &mut HashSet<String>,
+) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    let mut candidate_sym_ids: Vec<(String, String)> = Vec::new();
+    for (_, qname) in candidates.iter() {
+        if let Ok(Some(s)) = index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+            candidate_sym_ids.push((s.symbol_id, s.qname));
+        }
+    }
+    // Collect every unique direct-caller id for batched qname resolve.
+    let mut caller_ids_seen: HashSet<String> = HashSet::new();
+    let mut caller_visit_order: Vec<(String, String)> = Vec::new();
+    for (cand_sym_id, _) in &candidate_sym_ids {
+        let direct_callers = index_store
+            .get_callers(&engine.ref_name, cand_sym_id)
+            .unwrap_or_default();
+        for caller_id in direct_callers {
+            // Skip if the caller is itself one of the candidates —
+            // its invariants were already collected in the main loop.
+            if candidate_sym_ids.iter().any(|(sid, _)| sid == &caller_id) {
+                continue;
+            }
+            if caller_ids_seen.insert(caller_id.clone()) {
+                caller_visit_order.push((cand_sym_id.clone(), caller_id));
+            }
+        }
+    }
+    // Reverse-lookup qname for each caller via the FTS bulk resolver
+    // (single SQL pass). Falls back to a per-id lookup pattern when
+    // FTS isn't available; in that case we skip the propagation
+    // gracefully — better to under-surface than block prepare_change.
+    let caller_id_strs: Vec<&str> =
+        caller_visit_order.iter().map(|(_, cid)| cid.as_str()).collect();
+    let caller_resolved = SearchFtsDb::open(db_path)
+        .ok()
+        .map(|fts| fts.resolve_symbol_ids_bulk(&caller_id_strs))
+        .unwrap_or_default();
+    // Fallback qname lookup for ids the FTS cache doesn't know yet
+    // (fresh sidecar, post-import-before-reindex, or test fixtures
+    // that wrote edges directly to the repo). Walks the qname tree
+    // once to build the reverse index — only cost when FTS is cold.
+    let need_fallback = caller_visit_order
+        .iter()
+        .any(|(_, cid)| !caller_resolved.contains_key(cid.as_str()));
+    let fallback_id_to_qname: HashMap<String, String> = if need_fallback {
+        let prefix = format!(
+            "{}/index/by-qname",
+            agentstatedeveloper_core::ASD_PATH_PREFIX
+        );
+        match engine.repo.get_tree(&engine.ref_name, &prefix) {
+            Ok(Value::Object(m)) => m
+                .into_iter()
+                .filter_map(|(qn, v)| {
+                    v.get("symbol_id")
+                        .and_then(|v| v.as_str())
+                        .map(|sid| (sid.to_string(), qn))
+                })
+                .collect(),
+            _ => HashMap::new(),
+        }
+    } else {
+        HashMap::new()
+    };
+    for (_cand_sym_id, caller_id) in &caller_visit_order {
+        let caller_qname = caller_resolved
+            .get(caller_id.as_str())
+            .map(|r| r.qname.as_str())
+            .or_else(|| fallback_id_to_qname.get(caller_id).map(String::as_str));
+        let Some(caller_qname) = caller_qname else {
+            continue;
+        };
+        let caller_entries = ledger_store
+            .list_entries(&engine.ref_name, caller_id)
+            .unwrap_or_default();
+        for entry in caller_entries {
+            if !matches!(entry.kind, LedgerKind::Invariant) {
+                continue;
+            }
+            let key = entry.summary.clone();
+            if seen_inv.insert(key) {
+                // 1.0.86: include entry_id (see comment at first
+                // design_invariants.push site).
+                out.push(json!({
+                    "entry_id": entry.entry_id,
+                    "summary": entry.summary,
+                    "source": caller_qname,
+                    "from_caller": true,
+                }));
+            }
+        }
+    }
+    out
 }
 
 /// Plan M t-003 (1.0.94): test-gap detection extracted from run().
