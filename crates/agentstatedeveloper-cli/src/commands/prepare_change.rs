@@ -623,50 +623,9 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // Pre-fetch all indexed test file paths once — reused for proposed_test_path
     // and the recipe_edit per-file coverage lookup, avoiding N separate DB opens.
     let all_test_file_paths = fetch_all_test_file_paths(&cfg.db_path);
-    let test_gap = affected_tests.is_empty();
-    // Try to find a real indexed test file before falling back to a suggested path.
-    let proposed_test_path = test_gap
-        .then(|| {
-            let source = file_scores
-                .first()
-                .map(|(_, f, _, _, _, _, _)| f.as_str())
-                .unwrap_or("");
-            if source.is_empty() {
-                return None;
-            }
-            let real = test_files_for_source(&all_test_file_paths, source);
-            if real.is_empty() {
-                Some(format!(
-                    "no known test target (suggested: {})",
-                    propose_test_path(source)
-                ))
-            } else {
-                Some(real.join(", "))
-            }
-        })
-        .flatten();
-    // Plan J t-007: emit a language-aware test stub body shape so
-    // the agent doesn't have to guess the test-framework idiom. Only
-    // produced when test_gap fires AND we have an impl source file
-    // to anchor the language on.
-    let proposed_test_stub: Option<String> = if test_gap {
-        let source = file_scores
-            .first()
-            .map(|(_, f, _, _, _, _, _)| f.as_str())
-            .unwrap_or("");
-        // file_scores tuple shape: (score, file, layer, days, hot, qname, why)
-        let symbol = file_scores
-            .first()
-            .map(|(_, _, _, _, _, qname, _)| qname.as_str())
-            .unwrap_or("change");
-        if source.is_empty() {
-            None
-        } else {
-            Some(propose_test_stub(source, symbol))
-        }
-    } else {
-        None
-    };
+    // Plan M t-003 (1.0.94): extracted to detect_test_gap().
+    let (test_gap, proposed_test_path, proposed_test_stub) =
+        detect_test_gap(&file_scores, &affected_tests, &all_test_file_paths);
     // 1.0.86: suggested_test_coverage was emitting bare summary
     // strings duplicated from design_invariants. ExampleFlow probe
     // 2 confirmed the overlap. Now emits structured entries:
@@ -2301,4 +2260,43 @@ fn compute_blast_radius(
         "callee_layer_distribution": callee_layers,
         "top_caller_chains": top_caller_chains,
     })
+}
+
+/// Plan M t-003 (1.0.94): test-gap detection extracted from run().
+/// Given current file_scores + affected_tests, returns:
+///   - test_gap: true when no covering tests were found
+///   - proposed_test_path: real indexed test file if any, else suggested path
+///   - proposed_test_stub: language-aware test-framework body shape
+fn detect_test_gap(
+    file_scores: &[(f64, String, String, Option<f64>, bool, String, String)],
+    affected_tests: &[Value],
+    all_test_file_paths: &[String],
+) -> (bool, Option<String>, Option<String>) {
+    let test_gap = affected_tests.is_empty();
+    if !test_gap {
+        return (false, None, None);
+    }
+    let source = file_scores
+        .first()
+        .map(|(_, f, _, _, _, _, _)| f.as_str())
+        .unwrap_or("");
+    if source.is_empty() {
+        return (true, None, None);
+    }
+    let real = test_files_for_source(all_test_file_paths, source);
+    let proposed_test_path = if real.is_empty() {
+        Some(format!(
+            "no known test target (suggested: {})",
+            propose_test_path(source)
+        ))
+    } else {
+        Some(real.join(", "))
+    };
+    // file_scores tuple shape: (score, file, layer, days, hot, qname, why)
+    let symbol = file_scores
+        .first()
+        .map(|(_, _, _, _, _, qname, _)| qname.as_str())
+        .unwrap_or("change");
+    let proposed_test_stub = Some(propose_test_stub(source, symbol));
+    (true, proposed_test_path, proposed_test_stub)
 }
