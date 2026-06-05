@@ -1599,3 +1599,189 @@ If you're shipping a new derived artifact, it goes in SQLite or
 `.asd/cache/`, never `.asd/conclusions/`. The lint will warn you if
 you forget.
 
+
+---
+
+## Plan M — Refactor pass (post-1.0.89 survey)
+
+Driven by a three-axis exploration survey run at 1.0.89 (file size,
+CLI ↔ MCP duplication, technical debt). The debt situation came
+back healthier than expected — no FIXME/HACK/XXX in `src/`, all
+`#[allow]`s justified, all `let _ =` discards intentional. But the
+survey did surface a small set of high-leverage refactor
+opportunities, mostly around the largest files and one
+long-standing duplication.
+
+This plan is the actionable subset. Sequenced small → large so
+each commit's risk stays bounded and each tier validates the
+loop before the next.
+
+### Task table
+
+| # | Title | Tier | Effort | Risk |
+|---|---|---|---|---|
+| t-001 | Lift `assemble_symbol_context()` so MCP `context_for` stops reimplementing CLI's helper | 1 | S | Low |
+| t-002 | Group `mcp_server.rs`'s 53 param structs into `mcp_params/` sub-modules | 1 | S | Low |
+| t-003 | Break `prepare_change.rs::run()` into staged functions (10 named steps) | 2 | M | Medium |
+| t-004 | Close Plan F TODO — lift `prepare_change` scoring walk to `core::prepare_change` | 2 | M | Medium |
+| t-005 | Probe.rs assertion-eval enum refactor (~400-line match → polymorphic) | 3 | M-L | Med-High |
+| t-006 | `candidates.rs::find_candidates()` pipeline-builder refactor | 3 | M-L | Medium |
+| t-007 | Add rationale comments to ~5 `let _ = expr` patterns missing context | 3 | XS | None |
+
+### Wave ordering
+
+**Wave 1 — Small sharp wins (t-001, t-002)**
+
+Both pure mechanical. Together they validate the refactor loop on
+the codebase as it stands today and substantially improve the two
+most-visible navigation hotspots (MCP server file + the duplication
+that earlier rounds didn't catch).
+
+- **t-001**: extract `assemble_symbol_context()` from
+  `cli/src/commands/context_for.rs` to a new
+  `core/src/context.rs` module. Update CLI to call the core
+  version. Update MCP `context_for` handler (currently at
+  `mcp_server.rs:~5730`) to call the core version instead of
+  inlining ~60 lines. The Result/String error-shape difference
+  between CLI (returns `Result`) and MCP (returns json error
+  string) is handled by a thin adapter at the MCP call site.
+
+  *Acceptance*: `mcp_server.rs::context_for` body drops from
+  ~262 lines to ~30 (call + error adapter + budget trim). No
+  behavior change in the response JSON. All integration tests
+  green.
+
+- **t-002**: split `mcp_server.rs`'s 53 param structs into
+  logical sub-modules under
+  `crates/agentstatedeveloper-mcp/src/mcp_params/`:
+    - `search.rs` (search, code_search, code_query params)
+    - `ledger.rs` (ledger_append, ledger_approve, ledger_reject,
+      ledger_rebind, ledger_supersede, ledger_withdraw,
+      ledger_get, ledger_find, invariant_add, invariant_list)
+    - `feedback.rs` (feedback_mark, feedback_list,
+      feedback_promote)
+    - `effect.rs` (effect_declare, effects, verify_effects)
+    - `change.rs` (prepare_change, checklist, impact, context_for,
+      recipe_classify_test_migration)
+    - `scratch.rs` (scratch_* tools)
+    - `conclusions.rs` (conclusions_export/import/list)
+    - `thinking.rs` (think_* tools — if any are MCP-exposed)
+    - `audit.rs` (audit_tail, audit_verify, annotate_commit,
+      task_close)
+    - `meta.rs` (status, health, scorecard, traces, since,
+      reindex)
+  Each handler `use`s its subsystem. Zero behavior change.
+
+  *Acceptance*: `mcp_server.rs` drops from 7,543 → ~4,500-5,000
+  lines. New `mcp_params/` directory has ~9-10 files each
+  averaging 200-500 lines (each subsystem's params + nothing else).
+  All tests green.
+
+**Wave 2 — The big readability win (t-003, t-004)**
+
+t-003 is the cognitive payoff. t-004 cleans up the long-standing
+Plan F TODO and gets easier once t-003 lands.
+
+- **t-003**: `prepare_change.rs::run()` is currently a 1,633-line
+  single function. The function already has 10 well-named comment
+  blocks ("// 1. query enrichment", "// 2. candidate finding", ...).
+  Extract each into a `fn stage_<name>(...) -> StageOutput`. Define
+  a `PrepareChangeContext` struct holding the shared state plumbed
+  through stages. The orchestrator `run()` becomes ~150 lines.
+
+  *Risk*: medium — lots of shared state to plumb correctly. The
+  `args.agent` branch's tokenization budget needs to stay correct
+  across all extracted stages.
+  *Acceptance*: `run()` < 200 lines. Each stage_* function has a
+  single-paragraph docstring + a unit test where feasible (some
+  stages need the full engine context — integration tests acceptable
+  there).
+
+- **t-004**: with t-003 done, the shared scoring walk (currently
+  ~150 lines in CLI + ~150 in MCP) extracts cleanly to
+  `core::prepare_change::scoring_walk(...) -> ScoringWalkOutput`.
+  Closes the explicit TODO at `prepare_change.rs:277` (CLI) and
+  `mcp_server.rs:3761` (MCP).
+
+  Preserve the intentional MCP-only fields (entry_id, seen_vs,
+  seen_effect, separate effect_score_floor) via output struct
+  fields the CLI can ignore. Don't strip them from MCP.
+
+  *Acceptance*: both call sites use the core helper. The walk's
+  output struct has explicit fields for every divergence-relevant
+  signal (no implicit "MCP-only" branches inside the core fn).
+
+**Wave 3 — Bigger lifts, only if motivated (t-005, t-006, t-007)**
+
+These have weaker forcing functions. Do only if the file in
+question becomes a pain point in real work.
+
+- **t-005**: probe.rs assertion eval. Currently a giant match
+  statement (~400 lines, ~30 assertion kinds). Refactor to:
+    ```rust
+    enum Assertion {
+        FileNotInKey { key: String, field: String, value: String },
+        QnameRankLte { fragment: String, max_rank: u64 },
+        // ... one variant per kind ...
+    }
+    impl Assertion {
+        fn evaluate(&self, output: &Value) -> Result<(), String> { ... }
+    }
+    ```
+  Each variant gets its own evaluator. Adding new assertion kinds
+  becomes one variant + one match arm. Easier to unit-test in
+  isolation.
+
+  *Risk*: medium-high — probe-harness contract is well-exercised
+  by t-018's regression test. Need to keep the human-readable
+  failure messages byte-identical.
+
+- **t-006**: `candidates.rs::find_candidates()` pipeline. 739-line
+  orchestrator with stages already extracted as
+  `apply_paths_filter`, `apply_exclude_paths_filter`, etc.
+  Compose them via a builder pattern:
+    ```rust
+    CandidatePipeline::new(query, tokens, filters)
+        .fts_search()
+        .file_stem_inject()
+        .ledger_dedup()
+        .apply_path_filters()
+        .ledger_anchor()
+        .resolve()
+    ```
+  Each stage owns its mutation. Hot path; lots of test coverage
+  to keep green.
+
+  *Risk*: medium — well-tested but high-stakes (every prepare_change
+  / investigate / search goes through this).
+
+- **t-007**: add rationale comments to the handful of `let _ = expr`
+  patterns the debt survey flagged as missing context (probe.rs:370,
+  status.rs:299, scorecard.rs:158, search.rs:975). Each gets one
+  line explaining why the error is ignorable. Trivial.
+
+### What's NOT in this plan (intentional)
+
+The survey explicitly identified things NOT to touch:
+
+- **CLI `--agent` mode token budgeting** in search/investigate/impact
+  — asymmetric by design (MCP consumed via Cowork wrapper, no
+  `--agent` exposure). Don't lift.
+- **MCP search's simpler shape** vs CLI search — deliberately
+  stripped (no detailed ambiguity, no by-language rollup).
+  Architectural choice, not duplication.
+- **The 14 `let _ =` discards** — all best-effort with
+  rationale (except the 5 in t-007's scope).
+- **The 8 `#[allow(...)]`s** — all justified per the debt audit.
+- **TS / Python adapter `#[allow(dead_code)]` suppressions** —
+  flagged in the survey as "language-binding migration debt"; track
+  separately if/when an Ada-rewrite pass happens.
+
+### Done when
+
+All Wave 1 + Wave 2 tasks closed. Wave 3 tasks revisited only if
+their pain surfaces. Net expected: `mcp_server.rs` drops by ~3,000
+lines (t-002), `prepare_change.rs::run()` becomes readable (t-003),
+the Plan F TODO is finally closed (t-004), and one ~60-line
+duplication mistake is fixed (t-001).
+
