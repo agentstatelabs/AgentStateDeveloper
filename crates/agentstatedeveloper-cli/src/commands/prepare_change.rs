@@ -331,7 +331,16 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             match entry.kind {
                 LedgerKind::Invariant => {
                     if seen_inv.insert(key) {
+                        // 1.0.86: include entry_id so the three
+                        // downstream "duplicate" sections (preserve,
+                        // suggested_test_coverage, scenario_tests)
+                        // can reference by id instead of repeating
+                        // the summary text. ExampleFlow probe 2
+                        // confirmed all four sections emitted the
+                        // identical summary in different wrappers
+                        // — ~1500 chars of pure duplication.
                         design_invariants.push(json!({
+                            "entry_id": entry.entry_id,
                             "summary": entry.summary,
                             "source": sym.qname,
                         }));
@@ -499,7 +508,10 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             }
             let key = entry.summary.clone();
             if seen_inv.insert(key) {
+                // 1.0.86: include entry_id (see comment at first
+                // design_invariants.push site).
                 design_invariants.push(json!({
+                    "entry_id": entry.entry_id,
                     "summary": entry.summary,
                     "source": caller_qname,
                     "from_caller": true,
@@ -755,36 +767,50 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     } else {
         None
     };
-    let suggested_test_coverage: Vec<String> = if test_gap {
-        let mut hints: Vec<String> = design_invariants
-            .iter()
-            .filter_map(|inv| inv.get("summary").and_then(Value::as_str))
-            .map(|s| s.to_string())
-            .collect();
-        for eff in &effects_summary {
-            if let Some(cat) = eff.get("category").and_then(Value::as_str) {
-                let hint = format!("verify {} after change", cat.to_lowercase());
-                if !hints.contains(&hint) {
-                    hints.push(hint);
+    // 1.0.86: suggested_test_coverage was emitting bare summary
+    // strings duplicated from design_invariants. ExampleFlow probe
+    // 2 confirmed the overlap. Now emits structured entries:
+    //   { ref: "<entry_id>" }   for invariant-derived hints
+    //   { hint: "<text>" }      for effect-derived / cold-start hints
+    // Agent resolves refs against design_invariants. Saves the
+    // summary-text duplication (~200-800 chars on rich-ledger
+    // responses) while preserving the cold-start + effect-derived
+    // semantics that AREN'T duplicates of anything.
+    let suggested_test_coverage: Vec<Value> = if test_gap {
+        let mut out: Vec<Value> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for inv in &design_invariants {
+            if let Some(eid) = inv.get("entry_id").and_then(Value::as_str) {
+                if seen.insert(format!("ref:{eid}")) {
+                    out.push(json!({ "ref": eid }));
                 }
             }
         }
-        // Cold-start fallback: when no invariants are recorded, derive hints
-        // from the top candidate symbol's name, signature, and doc comment.
+        for eff in &effects_summary {
+            if let Some(cat) = eff.get("category").and_then(Value::as_str) {
+                let hint = format!("verify {} after change", cat.to_lowercase());
+                if seen.insert(format!("hint:{hint}")) {
+                    out.push(json!({ "hint": hint }));
+                }
+            }
+        }
+        // Cold-start fallback: derive hints from the top candidate
+        // symbol when no invariants exist. These are genuinely new
+        // (not duplicates), emit as text hints.
         if design_invariants.is_empty() {
             if let Some((_, qname)) = candidates.first() {
                 if let Ok(Some(sym)) = index_store.get_symbol_by_qname(&engine.ref_name, qname) {
                     for h in
                         derive_cold_hints(&sym.qname, sym.signature.as_deref(), sym.doc.as_deref())
                     {
-                        if !hints.contains(&h) {
-                            hints.push(h);
+                        if seen.insert(format!("hint:{h}")) {
+                            out.push(json!({ "hint": h }));
                         }
                     }
                 }
             }
         }
-        hints
+        out
     } else {
         vec![]
     };
@@ -805,14 +831,24 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         "invariant",
         "forbidden",
     ];
+    // 1.0.86: scenario_tests was emitting bare summary strings
+    // (a filtered subset of design_invariants[].summary). Now
+    // emits { ref: "<entry_id>" } references — agent resolves
+    // against design_invariants. The CONSTRAINT_WORDS filter is
+    // preserved: only invariants phrased as constraints
+    // (must/never/shall/...) become scenario_tests.
     let scenario_tests: Vec<Value> = design_invariants
         .iter()
-        .filter_map(|inv| inv.get("summary").and_then(Value::as_str))
-        .filter(|s| {
-            let sl = s.to_lowercase();
-            CONSTRAINT_WORDS.iter().any(|w| sl.contains(w))
+        .filter_map(|inv| {
+            let summary = inv.get("summary").and_then(Value::as_str)?;
+            let entry_id = inv.get("entry_id").and_then(Value::as_str)?;
+            let sl = summary.to_lowercase();
+            if CONSTRAINT_WORDS.iter().any(|w| sl.contains(w)) {
+                Some(json!({ "ref": entry_id }))
+            } else {
+                None
+            }
         })
-        .map(|s| json!(s))
         .collect();
 
     let ambiguous_terms = detect_ambiguous_tokens(&tokens, engine.fts.as_ref(), &filters);
@@ -982,9 +1018,26 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             })
         })
         .collect();
-    let recipe_preserve: Vec<Value> = design_invariants.iter()
-        .map(|inv| json!({ "constraint": inv["summary"], "source": inv["source"], "kind": "invariant" }))
-        .chain(known_hazards.iter().map(|h| json!({ "constraint": h["summary"], "source": h["source"], "kind": "hazard" })))
+    // 1.0.86: recipe_preserve emitted `constraint` (== invariant
+    // summary) + source + kind. The constraint text was identical
+    // to design_invariants[].summary. Now emits refs for
+    // invariants; hazards stay inline because they're sourced from
+    // known_hazards (a separate canonical list — no dedupe target
+    // there yet).
+    let recipe_preserve: Vec<Value> = design_invariants
+        .iter()
+        .filter_map(|inv| {
+            inv.get("entry_id")
+                .and_then(Value::as_str)
+                .map(|eid| json!({ "ref": eid, "kind": "invariant" }))
+        })
+        .chain(known_hazards.iter().map(|h| {
+            json!({
+                "constraint": h["summary"],
+                "source": h["source"],
+                "kind": "hazard",
+            })
+        }))
         .collect();
     // t-005: Find files where a matching symbol has a WrongLayer verdict for
     // the current query family. Those impl files are demoted to recipe_reference.

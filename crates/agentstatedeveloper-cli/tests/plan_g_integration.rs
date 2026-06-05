@@ -139,7 +139,9 @@ fn end_to_end_thinking_surfaces_in_prior_thinking_projection() {
         vec!["source:asd-think".into()],
     );
 
-    let v = gather_prior_thinking(&engine, &[qn.clone()], DEFAULT_CONFIDENCE_FLOOR);
+    // 1.0.76: gather_prior_thinking returns PriorThinking{entries,summary}.
+    let pt = gather_prior_thinking(&engine, &[qn.clone()], DEFAULT_CONFIDENCE_FLOOR);
+    let v = pt.entries;
     let o = v.as_object().expect("non-null projection");
 
     let hyps = o["hypotheses"].as_array().expect("hypotheses");
@@ -233,6 +235,6 @@ fn gather_prior_thinking_returns_null_when_only_non_thinking_kinds_exist() {
         vec![],
     );
 
-    let v = gather_prior_thinking(&engine, &[qn], DEFAULT_CONFIDENCE_FLOOR);
-    assert_eq!(v, serde_json::Value::Null);
+    let pt = gather_prior_thinking(&engine, &[qn], DEFAULT_CONFIDENCE_FLOOR);
+    assert_eq!(pt.entries, serde_json::Value::Null);
 }

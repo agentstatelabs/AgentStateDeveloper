@@ -3814,7 +3814,14 @@ impl AsdMcpServer {
                 match entry.kind {
                     LedgerKind::Invariant => {
                         if seen_inv.insert(entry.summary.clone()) {
-                            design_invariants.push(serde_json::json!({ "summary": entry.summary, "source": sym.qname }));
+                            // 1.0.86: include entry_id so downstream
+                            // sections (preserve, suggested_test_coverage,
+                            // scenario_tests) can ref instead of duplicate.
+                            design_invariants.push(serde_json::json!({
+                                "entry_id": entry.entry_id,
+                                "summary": entry.summary,
+                                "source": sym.qname,
+                            }));
                         }
                     }
                     LedgerKind::Hazard => {
@@ -3931,7 +3938,9 @@ impl AsdMcpServer {
                     continue;
                 }
                 if seen_inv.insert(entry.summary.clone()) {
+                    // 1.0.86: include entry_id (see other push site).
                     design_invariants.push(serde_json::json!({
+                        "entry_id": entry.entry_id,
                         "summary": entry.summary,
                         "source": caller_qname,
                         "from_caller": true,
@@ -4063,17 +4072,24 @@ impl AsdMcpServer {
         } else {
             None
         };
-        let suggested_test_coverage: Vec<String> = if test_gap {
-            let mut hints: Vec<String> = design_invariants
-                .iter()
-                .filter_map(|inv| inv.get("summary").and_then(serde_json::Value::as_str))
-                .map(|s| s.to_string())
-                .collect();
+        // 1.0.86: emit refs for invariant-derived hints (dedupes
+        // against design_invariants[].summary); keep effects + cold-
+        // start as inline hints (genuinely new content).
+        let suggested_test_coverage: Vec<serde_json::Value> = if test_gap {
+            let mut out: Vec<serde_json::Value> = Vec::new();
+            let mut seen: HashSet<String> = HashSet::new();
+            for inv in &design_invariants {
+                if let Some(eid) = inv.get("entry_id").and_then(serde_json::Value::as_str) {
+                    if seen.insert(format!("ref:{eid}")) {
+                        out.push(serde_json::json!({ "ref": eid }));
+                    }
+                }
+            }
             for eff in &effects_summary {
                 if let Some(cat) = eff.get("category").and_then(serde_json::Value::as_str) {
                     let hint = format!("verify {} after change", cat.to_lowercase());
-                    if !hints.contains(&hint) {
-                        hints.push(hint);
+                    if seen.insert(format!("hint:{hint}")) {
+                        out.push(serde_json::json!({ "hint": hint }));
                     }
                 }
             }
@@ -4085,14 +4101,14 @@ impl AsdMcpServer {
                             sym.signature.as_deref(),
                             sym.doc.as_deref(),
                         ) {
-                            if !hints.contains(&h) {
-                                hints.push(h);
+                            if seen.insert(format!("hint:{h}")) {
+                                out.push(serde_json::json!({ "hint": h }));
                             }
                         }
                     }
                 }
             }
-            hints
+            out
         } else {
             vec![]
         };
@@ -4113,12 +4129,19 @@ impl AsdMcpServer {
             "invariant",
             "forbidden",
         ];
-        let scenario_tests: Vec<&str> = design_invariants
+        // 1.0.86: emit refs against design_invariants[].entry_id
+        // instead of duplicating summary text.
+        let scenario_tests: Vec<serde_json::Value> = design_invariants
             .iter()
-            .filter_map(|inv| inv.get("summary").and_then(serde_json::Value::as_str))
-            .filter(|s| {
-                let sl = s.to_lowercase();
-                CONSTRAINT_WORDS.iter().any(|w| sl.contains(w))
+            .filter_map(|inv| {
+                let summary = inv.get("summary").and_then(serde_json::Value::as_str)?;
+                let entry_id = inv.get("entry_id").and_then(serde_json::Value::as_str)?;
+                let sl = summary.to_lowercase();
+                if CONSTRAINT_WORDS.iter().any(|w| sl.contains(w)) {
+                    Some(serde_json::json!({ "ref": entry_id }))
+                } else {
+                    None
+                }
             })
             .collect();
 
@@ -4129,9 +4152,22 @@ impl AsdMcpServer {
                 "top_symbol": top_symbol, "why": why,
             }))
             .collect();
-        let recipe_preserve: Vec<serde_json::Value> = design_invariants.iter()
-            .map(|inv| serde_json::json!({ "constraint": inv["summary"], "source": inv["source"], "kind": "invariant" }))
-            .chain(known_hazards.iter().map(|h| serde_json::json!({ "constraint": h["summary"], "source": h["source"], "kind": "hazard" })))
+        // 1.0.86: invariants emit refs; hazards stay inline (no
+        // dedupe target in this response).
+        let recipe_preserve: Vec<serde_json::Value> = design_invariants
+            .iter()
+            .filter_map(|inv| {
+                inv.get("entry_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|eid| serde_json::json!({ "ref": eid, "kind": "invariant" }))
+            })
+            .chain(known_hazards.iter().map(|h| {
+                serde_json::json!({
+                    "constraint": h["summary"],
+                    "source": h["source"],
+                    "kind": "hazard",
+                })
+            }))
             .collect();
         let recipe_edit: Vec<serde_json::Value> = likely_edit_files
             .iter()
