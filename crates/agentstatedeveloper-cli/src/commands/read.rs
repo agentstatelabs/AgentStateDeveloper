@@ -16,6 +16,21 @@ use crate::config::Config;
 pub struct ReadArgs {
     /// Fully-qualified symbol name, e.g. `pkg.module.func`.
     pub qname: String,
+
+    /// Maximum callers/callees to emit. Default 10 — most agent
+    /// queries care about the immediate few. ExampleFlow field-eval
+    /// (2026-06-04) reported `asd read` was "verbose in callers/
+    /// callees, though the ledger section is now very useful." Cap
+    /// is per-direction (10 callers + 10 callees). When truncated,
+    /// the array's last entry is a sentinel `{"truncated": N}`.
+    #[arg(long, default_value = "10")]
+    pub limit: usize,
+
+    /// Bypass the --limit cap and emit ALL callers/callees. Useful
+    /// for broad blast-radius queries; produces large output on
+    /// hot symbols.
+    #[arg(long)]
+    pub full: bool,
 }
 
 pub fn run(cfg: &Config, args: ReadArgs) -> Result<()> {
@@ -51,8 +66,25 @@ pub fn run(cfg: &Config, args: ReadArgs) -> Result<()> {
             .collect()
     };
 
-    let callers = resolve(caller_ids);
-    let callees = resolve(callee_ids);
+    let mut callers = resolve(caller_ids);
+    let mut callees = resolve(callee_ids);
+
+    // ExampleFlow refinement (1.0.82): cap callers/callees by
+    // default. `--full` to bypass. Truncation marker appended so
+    // the agent knows there's more — matches the pattern from
+    // trim_for_agent in core::search_fts.
+    if !args.full {
+        if callers.len() > args.limit {
+            let extra = callers.len() - args.limit;
+            callers.truncate(args.limit);
+            callers.push(json!({ "truncated": extra }));
+        }
+        if callees.len() > args.limit {
+            let extra = callees.len() - args.limit;
+            callees.truncate(args.limit);
+            callees.push(json!({ "truncated": extra }));
+        }
+    }
     let effects_json = effects
         .as_ref()
         .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null));
