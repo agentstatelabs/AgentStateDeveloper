@@ -7,6 +7,7 @@
 //! Also hosts the MCP stdio server module [`mcp_server`] — wired up by the
 //! `asd-mcp` binary.
 
+pub mod mcp_params;
 pub mod mcp_server;
 
 pub use mcp_server::AsdMcpServer;
