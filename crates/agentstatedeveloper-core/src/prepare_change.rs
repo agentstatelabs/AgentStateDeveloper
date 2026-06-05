@@ -74,6 +74,40 @@ pub const CLIFF_RATIO_THRESHOLD: f64 = 0.70;
 /// leaving smooth-decay queries (where every rank is a legitimate
 /// secondary hit) unaffected. Field-eval rationale in
 /// `CLIFF_RATIO_THRESHOLD` docs.
+/// Find the cliff cutoff index in a descending-sorted score list.
+/// Returns the count of entries that survive (the index right
+/// after the last pre-cliff score), or `scores.len()` when there's
+/// no cliff in the list.
+///
+/// ExampleFlow 1.0.86 regression (2026-06-04): the candidate-level
+/// cliff in `file_score_floor` missed cliffs that appear only after
+/// file aggregation. Symbol candidates had a smooth gradient
+/// (42/31/29/27/25/19/18) — no consecutive pair triggered 0.70.
+/// But file-level top scores were 42/31/19/18 — a clear 0.61 cliff
+/// at rank 3. This helper operates on the aggregated file scores
+/// so cliff detection happens at the right granularity.
+///
+/// Use:
+///   let cut = cliff_cutoff_index(file_scores.iter().map(|f| f.0));
+///   file_scores.truncate(cut);
+pub fn cliff_cutoff_index<I: IntoIterator<Item = f64>>(scores: I) -> usize {
+    let scores: Vec<f64> = scores.into_iter().collect();
+    if scores.len() < 2 {
+        return scores.len();
+    }
+    for i in 0..scores.len() - 1 {
+        let prev = scores[i];
+        let next = scores[i + 1];
+        if prev <= 0.0 {
+            return i + 1;
+        }
+        if next / prev < CLIFF_RATIO_THRESHOLD {
+            return i + 1; // keep through index i, cut starts at i+1
+        }
+    }
+    scores.len()
+}
+
 pub fn file_score_floor(candidates: &[(f64, String)]) -> f64 {
     let Some((top, _)) = candidates.first() else {
         return 0.0;
@@ -258,6 +292,34 @@ mod tests {
         ];
         let floor = file_score_floor(&cands);
         assert!((floor - 70.0).abs() < 1e-9, "cliff floor=70; got {floor}");
+    }
+
+    #[test]
+    fn cliff_cutoff_index_handles_short_lists() {
+        assert_eq!(cliff_cutoff_index(std::iter::empty::<f64>()), 0);
+        assert_eq!(cliff_cutoff_index(vec![42.0]), 1);
+    }
+
+    #[test]
+    fn cliff_cutoff_index_matches_exampleflow_file_scores() {
+        // 1.0.87 regression case: file-level scores 42/31/19/18.
+        // 31/42 = 0.74 (no cut), 19/31 = 0.61 (cut at index 2).
+        // Keep first 2 entries; cut starting at index 2.
+        let cut = cliff_cutoff_index(vec![42.0, 31.0, 19.0, 18.0]);
+        assert_eq!(cut, 2, "must keep top 2; got {cut}");
+    }
+
+    #[test]
+    fn cliff_cutoff_index_smooth_keeps_everything() {
+        // All consecutive ratios > 0.70 → no cliff → keep all.
+        let cut = cliff_cutoff_index(vec![100.0, 90.0, 80.0, 75.0]);
+        assert_eq!(cut, 4);
+    }
+
+    #[test]
+    fn cliff_cutoff_index_zero_prev_bails_safely() {
+        let cut = cliff_cutoff_index(vec![10.0, 0.0, 5.0]);
+        assert_eq!(cut, 1, "cliff at zero prev → keep through index 0");
     }
 
     #[test]

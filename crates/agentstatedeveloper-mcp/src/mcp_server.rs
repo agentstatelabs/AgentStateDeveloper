@@ -3961,6 +3961,16 @@ impl AsdMcpServer {
             b.4.cmp(&a.4)
                 .then_with(|| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal))
         });
+        // 1.0.87: file-level cliff detection (mirrors CLI prepare_change).
+        let mut score_only_sorted: Vec<f64> = file_scores.iter().map(|f| f.0).collect();
+        score_only_sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        let cliff_cut = agentstatedeveloper_core::cliff_cutoff_index(
+            score_only_sorted.iter().copied(),
+        );
+        if cliff_cut < file_scores.len() {
+            let cutoff_score = score_only_sorted[cliff_cut - 1];
+            file_scores.retain(|f| f.0 >= cutoff_score);
+        }
         let dirty_files_pc = git_dirty_files();
         let likely_edit_files: Vec<serde_json::Value> = file_scores
             .iter()
