@@ -1235,6 +1235,28 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         })
         .collect();
 
+    // 1.0.88: cliff cut at the FINAL rebuilt list. The earlier
+    // 1.0.87 cliff (on file_scores pre-recipe-split) missed cases
+    // where intermediate scores from soon-to-be-demoted files
+    // smoothed the gradient. After recipe_edit demotes
+    // reference-only files, the remaining edit-list often shows the
+    // cliff cleanly. ExampleFlow case: file_scores might have
+    // 42/31/29/27/25/19/18 (no cliff at file-scores time), but
+    // post-demotion only the impl-layer files remain — 42/31/19/18
+    // with the 19/31=0.61 cliff visible.
+    let mut likely_edit_files = likely_edit_files;
+    let scores: Vec<f64> = likely_edit_files
+        .iter()
+        .map(|e| e["score"].as_f64().unwrap_or(0.0))
+        .collect();
+    let mut sorted_desc = scores.clone();
+    sorted_desc.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let cliff_cut2 = agentstatedeveloper_core::cliff_cutoff_index(sorted_desc.iter().copied());
+    if cliff_cut2 < likely_edit_files.len() {
+        let cutoff = sorted_desc[cliff_cut2 - 1];
+        likely_edit_files.retain(|e| e["score"].as_f64().unwrap_or(0.0) >= cutoff);
+    }
+
     // t-002: include exact build/test commands for each affected test file.
     let mut recipe_run: Vec<Value> = affected_tests
         .iter()
