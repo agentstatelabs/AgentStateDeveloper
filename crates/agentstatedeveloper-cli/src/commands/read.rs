@@ -73,15 +73,24 @@ pub fn run(cfg: &Config, args: ReadArgs) -> Result<()> {
     // default. `--full` to bypass. Truncation marker appended so
     // the agent knows there's more — matches the pattern from
     // trim_for_agent in core::search_fts.
+    //
+    // 1.0.85: --limit N now means "at most N entries TOTAL,
+    // including any truncation sentinel." Pre-fix the cap left
+    // N entries then appended a sentinel for a total of N+1.
+    // Off-by-one caught by ExampleFlow field-eval 2026-06-04.
     if !args.full {
         if callers.len() > args.limit {
-            let extra = callers.len() - args.limit;
-            callers.truncate(args.limit);
+            // Reserve a slot for the truncation sentinel: keep
+            // (limit - 1) real entries, push the marker as the N-th.
+            let keep = args.limit.saturating_sub(1);
+            let extra = callers.len() - keep;
+            callers.truncate(keep);
             callers.push(json!({ "truncated": extra }));
         }
         if callees.len() > args.limit {
-            let extra = callees.len() - args.limit;
-            callees.truncate(args.limit);
+            let keep = args.limit.saturating_sub(1);
+            let extra = callees.len() - keep;
+            callees.truncate(keep);
             callees.push(json!({ "truncated": extra }));
         }
     }

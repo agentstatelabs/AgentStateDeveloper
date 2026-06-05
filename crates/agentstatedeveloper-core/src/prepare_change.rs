@@ -44,16 +44,59 @@ pub struct FileScoreEntry {
 /// are unaffected because the floor scales with the top score).
 pub const FILE_SCORE_FLOOR_RATIO: f64 = 0.40;
 
-/// Compute the precision floor for file scoring: 40% of the top
-/// candidate's score (was 25% pre-ExampleFlow). Files scoring below
-/// this are dropped from `likely_edit_files`. Returns 0.0 when
-/// `candidates` is empty so an empty input simply admits everything
-/// (well, nothing).
+/// Cliff detection threshold (1.0.85, ExampleFlow refinement #2 deep
+/// half): when a consecutive score ratio drops below this, the lower
+/// score is treated as the start of a new "also-ran" cohort and the
+/// floor is raised to exclude it.
+///
+/// ExampleFlow case: query "Drift Pad scheduler sync" produced
+/// scores 42 / 31 / 19 / 18. Ratios: 31/42=0.74, 19/31=0.61, 18/19=0.95.
+/// The 19/31 ratio (0.61 < 0.70) marks the cliff between cohort 1
+/// (genuine matches at 42 and 31) and cohort 2 (path-name false
+/// matches at 19 and 18). Floor set to 31 → 2 files survive instead
+/// of 4.
+///
+/// 0.70 picked empirically: queries with smoothly-decaying scores
+/// (e.g. 100 / 90 / 80 / 70) have all consecutive ratios > 0.7 and
+/// are NOT cliff-cut. Only sharp drops trigger.
+pub const CLIFF_RATIO_THRESHOLD: f64 = 0.70;
+
+/// Compute the precision floor for file scoring. Two-pass:
+///   1. Relative floor: 40% of the top candidate's score.
+///   2. Cliff-aware floor: walk consecutive ranks looking for a sharp
+///      drop (ratio < 0.70). When found, raise the floor to the last
+///      pre-cliff score so the also-ran cohort is excluded.
+///
+/// Files scoring below the final floor are dropped from
+/// `likely_edit_files`. Returns 0.0 when `candidates` is empty.
+///
+/// The cliff pass is conservative: it triggers only on sharp drops,
+/// leaving smooth-decay queries (where every rank is a legitimate
+/// secondary hit) unaffected. Field-eval rationale in
+/// `CLIFF_RATIO_THRESHOLD` docs.
 pub fn file_score_floor(candidates: &[(f64, String)]) -> f64 {
-    candidates
-        .first()
-        .map(|(s, _)| s * FILE_SCORE_FLOOR_RATIO)
-        .unwrap_or(0.0)
+    let Some((top, _)) = candidates.first() else {
+        return 0.0;
+    };
+    let relative_floor = top * FILE_SCORE_FLOOR_RATIO;
+
+    // Cliff pass: walk pairs of consecutive scores. The first pair
+    // where the LOWER score is < 0.70 of the higher score marks the
+    // cohort boundary. Floor becomes the HIGHER score (inclusive
+    // cutoff — pre-cliff cohort survives).
+    let mut cliff_floor = relative_floor;
+    for window in candidates.windows(2) {
+        let prev = window[0].0;
+        let next = window[1].0;
+        if prev <= 0.0 {
+            break;
+        }
+        if next / prev < CLIFF_RATIO_THRESHOLD {
+            cliff_floor = prev;
+            break;
+        }
+    }
+    relative_floor.max(cliff_floor)
 }
 
 /// Append a file-score entry if `file` is not yet seen AND `score` is at or
@@ -120,11 +163,13 @@ mod tests {
     }
 
     #[test]
-    fn file_score_floor_is_40pct_of_top() {
-        // ExampleFlow refinement #2 (1.0.83): floor bumped from 0.25
-        // to 0.40 to cut targeted-query noise. Top=40 → floor=16.
+    fn file_score_floor_cliff_at_huge_drop() {
+        // 40 → 5 is a 0.125 ratio — obvious cliff. Floor locks to
+        // rank 1 (40); only rank 1 survives. (Reading 1.0.85 design:
+        // cliff IS the dominant signal even with just 2 candidates.)
         let cands = vec![(40.0_f64, "a".into()), (5.0, "b".into())];
-        assert!((file_score_floor(&cands) - 16.0).abs() < 1e-9);
+        let floor = file_score_floor(&cands);
+        assert!((floor - 40.0).abs() < 1e-9, "cliff at rank 1; got {floor}");
     }
 
     #[test]
@@ -134,9 +179,99 @@ mod tests {
 
     #[test]
     fn file_score_floor_ratio_is_40pct() {
-        // Lock the constant so any future tuning re-touch is
-        // intentional and pinned in test diff.
         assert!((FILE_SCORE_FLOOR_RATIO - 0.40).abs() < 1e-9);
+    }
+
+    #[test]
+    fn file_score_floor_cliff_ratio_is_70pct() {
+        // Pin the cliff threshold so future tunings are visible.
+        assert!((CLIFF_RATIO_THRESHOLD - 0.70).abs() < 1e-9);
+    }
+
+    #[test]
+    fn file_score_floor_cliff_cuts_at_cohort_boundary() {
+        // ExampleFlow refinement #2 (1.0.85, deep half): the
+        // literal field-eval case. Query "Drift Pad scheduler sync"
+        // produced 42 / 31 / 19 / 18. Ratios:
+        //   31/42 = 0.74 (above threshold, no cut)
+        //   19/31 = 0.61 (below 0.70 → CLIFF, cut at 31)
+        // Floor = 31. Files at 42 and 31 survive; 19 and 18 cut.
+        let cands = vec![
+            (42.0_f64, "drift_view_model".into()),
+            (31.0, "drift_app".into()),
+            (19.0, "project_view_model".into()),
+            (18.0, "project_controller".into()),
+        ];
+        let floor = file_score_floor(&cands);
+        assert!(
+            (floor - 31.0).abs() < 1e-9,
+            "cliff-aware floor must lock to pre-cliff rank score (31); got {floor}"
+        );
+    }
+
+    #[test]
+    fn file_score_floor_targeted_query_with_clear_winner() {
+        // Top=80 dominates rank-2=20 (ratio 0.25 < 0.70). Cliff at
+        // rank 2 → floor = 80. Only rank 1 survives.
+        let cands = vec![
+            (80.0_f64, "winner".into()),
+            (20.0, "also_ran".into()),
+            (15.0, "noise".into()),
+        ];
+        let floor = file_score_floor(&cands);
+        assert!((floor - 80.0).abs() < 1e-9, "got {floor}");
+    }
+
+    #[test]
+    fn file_score_floor_no_cliff_falls_back_to_relative() {
+        // Truly smooth decay: all consecutive ratios > 0.70. No
+        // cliff fires. Floor = 100 * 0.40 = 40. All ranks (100/
+        // 90/80/75) above floor → all survive.
+        //
+        // Note: must end the candidate list before any pair drops
+        // below 0.70 — otherwise the cliff pass fires. Real broad
+        // queries with this smooth a decay are uncommon but possible
+        // (4 near-equal options).
+        let cands = vec![
+            (100.0_f64, "a".into()),
+            (90.0, "b".into()),
+            (80.0, "c".into()),
+            (75.0, "d".into()),
+        ];
+        let floor = file_score_floor(&cands);
+        assert!((floor - 40.0).abs() < 1e-9, "got {floor}");
+    }
+
+    #[test]
+    fn file_score_floor_cliff_after_smooth_decay_stops_there() {
+        // 100 / 90 / 80 / 70 / 30 — smooth decay then cliff at
+        // 70→30. Floor locks to 70 (last pre-cliff score), so
+        // 100/90/80/70 survive, 30 cut. Cliff dominates the
+        // relative floor (which would have been 40 and admitted 70
+        // anyway, but also 60/50 if they existed).
+        let cands = vec![
+            (100.0_f64, "a".into()),
+            (90.0, "b".into()),
+            (80.0, "c".into()),
+            (70.0, "d".into()),
+            (30.0, "noise".into()),
+        ];
+        let floor = file_score_floor(&cands);
+        assert!((floor - 70.0).abs() < 1e-9, "cliff floor=70; got {floor}");
+    }
+
+    #[test]
+    fn file_score_floor_cliff_at_first_pair_triggers() {
+        // Cliff between rank 1 and rank 2 — relative floor would
+        // still admit rank 2 (since rank 2 = 60% * top > 40% floor),
+        // but cliff rule overrides.
+        let cands = vec![
+            (100.0_f64, "winner".into()),
+            (60.0, "after_cliff".into()), // 0.60 ratio < 0.70 threshold
+        ];
+        let floor = file_score_floor(&cands);
+        // Cliff at pair → floor = rank 1 = 100. Only rank 1 survives.
+        assert!((floor - 100.0).abs() < 1e-9, "got {floor}");
     }
 
     #[test]
