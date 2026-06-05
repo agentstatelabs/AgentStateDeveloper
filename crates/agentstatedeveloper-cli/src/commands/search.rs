@@ -999,7 +999,10 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 "broadened_search": serde_json::Value::Null,
                 "note": format!("No results for {:?} (in-memory fallback)", args.query),
             });
-            println!("{}", serde_json::to_string_pretty(&empty)?);
+            // Token economy: compact + drop empties. Matches the
+            // FTS-path empty branch.
+            let empty = agentstatedeveloper_core::drop_empty_top_level(empty);
+            println!("{}", serde_json::to_string(&empty)?);
         } else {
             println!("No results for {:?}", args.query);
         }

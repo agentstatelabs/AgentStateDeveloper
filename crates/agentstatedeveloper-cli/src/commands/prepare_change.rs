@@ -1580,12 +1580,19 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // Token economy:
     //   1.0.78: agent mode emits compact JSON (no pretty-print
     //           whitespace). Token estimate matches the compact form.
-    //   1.0.79: also drop top-level empty/null fields in agent mode —
-    //           the agent infers absence-of-X from the field being
-    //           missing. Also drop input-echo fields (description,
-    //           task_context, ctx_context) since the agent literally
-    //           just sent them, AND drop redundant stale string when
-    //           stale_severity is also emitted.
+    //   1.0.79: drop top-level empty/null fields + input echoes +
+    //           redundant stale string in agent mode.
+    //   1.0.81: ExampleFlow field-eval (2026-06-04) caught that
+    //           drop_empty_top_level was --agent-only. Agents
+    //           consuming the default JSON path were still getting
+    //           feedback_summary:{}, intent:null, etc. Fix: apply
+    //           drop_empty_top_level UNCONDITIONALLY — it strips
+    //           null/[]/{} which is signal-free for both humans
+    //           and agents. Input-echo fields are still
+    //           agent-mode-only since human terminal users like
+    //           seeing the description they typed.
+    let out = agentstatedeveloper_core::drop_empty_top_level(out);
+
     let (out, compact_for_agent) = if args.agent {
         let max_list = (args.agent_budget / 500).max(3).min(20);
         let mut trimmed = trim_for_agent(&out, max_list);
@@ -1601,9 +1608,9 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             obj.remove("ctx_context");
         }
 
-        // Drop top-level null/[]/ {} that survived trim_for_agent
-        // (e.g. feedback_summary: {}, index_consistency: null when
-        // consistent, intent: null when unset, etc).
+        // Re-strip after agent-mode-specific removals (an empty
+        // map that survived the unconditional pass above might
+        // have been re-emptied here).
         let trimmed = agentstatedeveloper_core::drop_empty_top_level(trimmed);
 
         let compact = serde_json::to_string(&trimmed)?;

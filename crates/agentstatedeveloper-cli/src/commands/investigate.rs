@@ -429,8 +429,13 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
             "by_layer": by_layer,
         })
     };
-    // Token economy (1.0.78/79): agent mode emits compact JSON, drops
-    // input-echo + top-level empty/null fields.
+    // Token economy:
+    //   1.0.78/79: agent mode compact + drop input echo.
+    //   1.0.81: drop_empty_top_level applied unconditionally
+    //           (ExampleFlow case: agents using default JSON
+    //           path were still getting feedback_summary:{} etc.)
+    let out = agentstatedeveloper_core::drop_empty_top_level(out);
+
     let (out, compact_for_agent) = if args.agent {
         let max_list = (args.agent_budget / 500).max(3).min(20);
         let mut trimmed = trim_for_agent(&out, max_list);
