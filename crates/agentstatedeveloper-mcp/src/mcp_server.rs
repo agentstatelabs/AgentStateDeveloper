@@ -5808,6 +5808,9 @@ impl AsdMcpServer {
         let budget_chars = p.budget_tokens.map(|t| t as usize * 4);
         let include_body = p.include_body;
 
+        // Plan M t-001 (1.0.91): per-symbol context assembly is now
+        // a single core helper shared with the CLI `asd context-for`
+        // command. ~150 lines of inline duplication removed.
         let mut symbols_out = Vec::new();
         for qname in &qnames {
             let symbol = match index_store.get_symbol_by_qname(&ref_name, qname) {
@@ -5822,165 +5825,22 @@ impl AsdMcpServer {
                     continue;
                 }
             };
-
-            // Callers/callees
-            let callee_ids = index_store
-                .get_callees(&ref_name, &symbol.symbol_id)
-                .unwrap_or_default();
-            let caller_ids = index_store
-                .get_callers(&ref_name, &symbol.symbol_id)
-                .unwrap_or_default();
-            let resolve = |ids: &[String]| -> Vec<serde_json::Value> {
-                ids.iter().map(|id| {
-                    if let Some(s) = id_map.get(id) {
-                        serde_json::json!({ "qname": s.qname, "file": s.file, "line": s.start.line })
-                    } else {
-                        serde_json::json!({ "symbol_id": id })
-                    }
-                }).collect()
-            };
-
-            // Effects
-            let effects = effect_store
-                .get_effects(&ref_name, &symbol.symbol_id)
-                .unwrap_or(None);
-
-            // Ledger — grouped by kind
-            let ledger = ledger_store
-                .list_entries(&ref_name, &symbol.symbol_id)
-                .unwrap_or_default();
-            let mut invariants: Vec<serde_json::Value> = Vec::new();
-            let mut hazards: Vec<serde_json::Value> = Vec::new();
-            let mut ownership: Vec<serde_json::Value> = Vec::new();
-            let mut proofs: Vec<serde_json::Value> = Vec::new();
-            let mut validation_scenarios: Vec<serde_json::Value> = Vec::new();
-            let mut known_bugs: Vec<serde_json::Value> = Vec::new();
-            let mut concepts: Vec<serde_json::Value> = Vec::new();
-            let mut other_ledger: Vec<serde_json::Value> = Vec::new();
-            for entry in &ledger {
-                let v = serde_json::to_value(entry).unwrap_or_default();
-                match entry.kind {
-                    LedgerKind::Invariant => invariants.push(v),
-                    LedgerKind::Hazard => hazards.push(v),
-                    LedgerKind::Ownership => ownership.push(v),
-                    LedgerKind::Proof => proofs.push(v),
-                    LedgerKind::ValidationScenario => validation_scenarios.push(v),
-                    LedgerKind::KnownBug => known_bugs.push(v),
-                    LedgerKind::Concept => concepts.push(v),
-                    _ => other_ledger.push(v),
-                }
+            match agentstatedeveloper_core::assemble_symbol_context(
+                &engine,
+                &index_store,
+                &effect_store,
+                &ledger_store,
+                &symbol,
+                &id_map,
+                include_body,
+                engine.fts.as_ref(),
+                None,
+            ) {
+                Ok(ctx) => symbols_out.push(ctx),
+                Err(e) => symbols_out.push(
+                    serde_json::json!({ "qname": qname, "error": e.to_string() }),
+                ),
             }
-
-            // Symbol value (without body if !include_body)
-            let mut sym_val = serde_json::to_value(&symbol).unwrap_or_default();
-            if !include_body {
-                if let Some(obj) = sym_val.as_object_mut() {
-                    obj.remove("body");
-                }
-            }
-
-            // Ownership discovery
-            let ownership_signal = discover_symbol_ownership(
-                &symbol.file,
-                symbol.start.line,
-                symbol.end.line,
-                symbol.doc.as_deref(),
-            );
-            let mut discovered_ownership: serde_json::Map<String, serde_json::Value> =
-                serde_json::Map::new();
-            if let Some(ref author) = ownership_signal.primary_author {
-                discovered_ownership.insert("primary_author".into(), serde_json::json!(author));
-            }
-            if let Some(ref doc_owner) = ownership_signal.doc_owner {
-                discovered_ownership.insert("doc_owner".into(), serde_json::json!(doc_owner));
-            }
-            if !ownership_signal.recent_committers.is_empty() {
-                discovered_ownership.insert(
-                    "recent_committers".into(),
-                    serde_json::json!(ownership_signal.recent_committers),
-                );
-            }
-            if !ownership_signal.annotated.is_empty() {
-                let annotated_val: Vec<serde_json::Value> = ownership_signal.annotated.iter().map(|a| {
-                    serde_json::json!({ "name": a.name, "source": serde_json::to_value(a.source).unwrap_or(serde_json::json!("unknown")) })
-                }).collect();
-                discovered_ownership.insert("annotated".into(), serde_json::json!(annotated_val));
-            }
-
-            // Covering tests
-            let covering_tests: Vec<serde_json::Value> = find_covering_tests(engine.fts.as_ref(), &symbol.qname)
-                .into_iter().map(|ct| serde_json::json!({
-                    "qname": ct.qname, "file": ct.file, "line": ct.line, "run_command": ct.run_command,
-                })).collect();
-
-            // Effects detail
-            let effects_detail: Vec<serde_json::Value> = if let Some(ref decl) = effects {
-                let mismatch_effects: std::collections::HashSet<String> = decl
-                    .verification
-                    .as_ref()
-                    .map(|v| {
-                        v.mismatches
-                            .iter()
-                            .map(|m| m.effect.as_str().to_string())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let overall_ok = decl
-                    .verification
-                    .as_ref()
-                    .map(|v| matches!(v.status, VerificationStatus::Ok))
-                    .unwrap_or(false);
-                decl.declared
-                    .iter()
-                    .map(|e| {
-                        let effect_str = e.effect.as_str();
-                        let is_mismatched = mismatch_effects.contains(effect_str);
-                        let status = if decl.verification.is_none() {
-                            "unverified"
-                        } else if is_mismatched {
-                            "mismatch"
-                        } else if overall_ok {
-                            "ok"
-                        } else {
-                            "ok"
-                        };
-                        let mut obj = serde_json::Map::new();
-                        obj.insert("effect".into(), serde_json::json!(effect_str));
-                        obj.insert("status".into(), serde_json::json!(status));
-                        if let Some(ref adapter) = e.adapter {
-                            obj.insert("adapter".into(), serde_json::json!(adapter));
-                        }
-                        if let Some(ref pattern) = e.source_pattern {
-                            obj.insert("source_pattern".into(), serde_json::json!(pattern));
-                        }
-                        if let Some(note) = &e.note {
-                            obj.insert("note".into(), serde_json::json!(note));
-                        }
-                        serde_json::Value::Object(obj)
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-
-            let sym_ctx = serde_json::json!({
-                "symbol": sym_val,
-                "invariants": invariants,
-                "hazards": hazards,
-                "known_bugs": known_bugs,
-                "concepts": concepts,
-                "ownership": ownership,
-                "ownership_discovery": discovered_ownership,
-                "covering_tests": covering_tests,
-                "validation_scenarios": validation_scenarios,
-                "callers": resolve(&caller_ids),
-                "callees": resolve(&callee_ids),
-                "effects": effects,
-                "effects_detail": effects_detail,
-                "proofs": proofs,
-                "decisions_and_notes": other_ledger,
-            });
-            symbols_out.push(sym_ctx);
         }
 
         // Plan G t-006: surface captured thinking across the requested qnames.

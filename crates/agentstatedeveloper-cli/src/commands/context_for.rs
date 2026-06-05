@@ -8,20 +8,21 @@
 //!
 //! This is also exposed as the `asd_context_for` MCP tool.
 
-use std::collections::HashMap;
-
 use anyhow::Result;
 use clap::Args;
 use serde_json::{Value, json};
 
-use agentstatedeveloper_core::schema::VerificationStatus;
 use agentstatedeveloper_core::{
-    AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, IndexStore, LedgerStore,
-    OwnershipSignal, SearchFtsDb, Symbol, discover_symbol_ownership, find_covering_tests,
+    AsgEffectStore, AsgIndexStore, AsgLedgerStore, Engine, IndexStore,
 };
 
 use crate::commands::graph::AsdTimer;
 use crate::config::Config;
+
+// Plan M t-001 (1.0.91): assemble_symbol_context lifted to
+// core::context. Re-export so existing intra-CLI imports keep
+// working (investigate.rs imports this path).
+pub(crate) use agentstatedeveloper_core::assemble_symbol_context;
 
 #[derive(Debug, Args)]
 pub struct ContextForArgs {
@@ -117,200 +118,6 @@ pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn assemble_symbol_context(
-    engine: &Engine,
-    index_store: &AsgIndexStore<'_>,
-    effect_store: &AsgEffectStore<'_>,
-    ledger_store: &AsgLedgerStore<'_>,
-    symbol: &Symbol,
-    id_map: &HashMap<String, Symbol>,
-    include_body: bool,
-    // Borrowed FTS connection from the owning Engine — used for covering-test
-    // lookup.  `None` skips the test scan (tests, one-off calls).
-    fts: Option<&SearchFtsDb>,
-    // Pre-computed ownership signal for this symbol's file.  When `Some`,
-    // skips the `discover_symbol_ownership` git blame/log calls entirely —
-    // pass this when processing multiple symbols to share per-file results.
-    ownership_hint: Option<&OwnershipSignal>,
-) -> Result<Value> {
-    // Callers and callees.
-    let callee_ids = index_store.get_callees(&engine.ref_name, &symbol.symbol_id)?;
-    let caller_ids = index_store.get_callers(&engine.ref_name, &symbol.symbol_id)?;
-
-    let resolve = |ids: &[String]| -> Vec<Value> {
-        ids.iter()
-            .map(|id| {
-                if let Some(s) = id_map.get(id) {
-                    json!({ "qname": s.qname, "file": s.file, "line": s.start.line })
-                } else {
-                    json!({ "symbol_id": id })
-                }
-            })
-            .collect()
-    };
-
-    // Effects.
-    let effects = effect_store.get_effects(&engine.ref_name, &symbol.symbol_id)?;
-
-    // Ledger — all entries, newest first.
-    let ledger = ledger_store.list_entries(&engine.ref_name, &symbol.symbol_id)?;
-
-    // Build output — group ledger by kind for readability.
-    let mut invariants: Vec<Value> = Vec::new();
-    let mut hazards: Vec<Value> = Vec::new();
-    let mut ownership: Vec<Value> = Vec::new();
-    let mut proofs: Vec<Value> = Vec::new();
-    let mut validation_scenarios: Vec<Value> = Vec::new();
-    let mut known_bugs: Vec<Value> = Vec::new();
-    let mut concepts: Vec<Value> = Vec::new();
-    let mut other_ledger: Vec<Value> = Vec::new();
-
-    for entry in &ledger {
-        let v = serde_json::to_value(entry)?;
-        match entry.kind {
-            agentstatedeveloper_core::LedgerKind::Invariant => invariants.push(v),
-            agentstatedeveloper_core::LedgerKind::Hazard => hazards.push(v),
-            agentstatedeveloper_core::LedgerKind::Ownership => ownership.push(v),
-            agentstatedeveloper_core::LedgerKind::Proof => proofs.push(v),
-            agentstatedeveloper_core::LedgerKind::ValidationScenario => {
-                validation_scenarios.push(v)
-            }
-            agentstatedeveloper_core::LedgerKind::KnownBug => known_bugs.push(v),
-            agentstatedeveloper_core::LedgerKind::Concept => concepts.push(v),
-            _ => other_ledger.push(v),
-        }
-    }
-
-    let mut sym_val = serde_json::to_value(symbol)?;
-    if !include_body {
-        // Remove body from the symbol output to keep context compact.
-        // The file + line range tells an agent exactly where to look.
-        if let Some(obj) = sym_val.as_object_mut() {
-            obj.remove("body");
-        }
-    }
-
-    // t-003: Ownership discovery from git blame + doc-comment annotations.
-    // If the caller passes a pre-computed hint (e.g. per-file cache from investigate),
-    // skip the git subprocess spawns entirely.
-    let ownership_signal_owned;
-    let ownership_signal = if let Some(hint) = ownership_hint {
-        hint
-    } else {
-        ownership_signal_owned = discover_symbol_ownership(
-            &symbol.file,
-            symbol.start.line,
-            symbol.end.line,
-            symbol.doc.as_deref(),
-        );
-        &ownership_signal_owned
-    };
-    // Merge discovered signals into the existing ledger ownership entries.
-    let mut discovered_ownership: serde_json::Map<String, Value> = serde_json::Map::new();
-    if let Some(ref author) = ownership_signal.primary_author {
-        discovered_ownership.insert("primary_author".into(), json!(author));
-    }
-    if let Some(ref doc_owner) = ownership_signal.doc_owner {
-        discovered_ownership.insert("doc_owner".into(), json!(doc_owner));
-    }
-    if !ownership_signal.recent_committers.is_empty() {
-        discovered_ownership.insert(
-            "recent_committers".into(),
-            json!(ownership_signal.recent_committers),
-        );
-    }
-    // t-005: Include annotated owners with source confidence for each signal.
-    if !ownership_signal.annotated.is_empty() {
-        let annotated_val: Vec<Value> = ownership_signal.annotated.iter().map(|a| {
-            json!({ "name": a.name, "source": serde_json::to_value(a.source).unwrap_or(json!("unknown")) })
-        }).collect();
-        discovered_ownership.insert("annotated".into(), json!(annotated_val));
-    }
-
-    // t-003: Find test symbols that cover this impl symbol (with file + run command).
-    let covering_tests: Vec<Value> = find_covering_tests(fts, &symbol.qname)
-        .into_iter()
-        .map(|ct| {
-            json!({
-                "qname": ct.qname,
-                "file": ct.file,
-                "line": ct.line,
-                "run_command": ct.run_command,
-            })
-        })
-        .collect();
-
-    // t-002: Per-effect verification detail — cross-reference declared effects
-    // against the verification mismatches so agents see ok/mismatch/unverified per effect.
-    let effects_detail: Vec<Value> = if let Some(ref decl) = effects {
-        let mismatch_effects: std::collections::HashSet<String> = decl
-            .verification
-            .as_ref()
-            .map(|v| {
-                v.mismatches
-                    .iter()
-                    .map(|m| m.effect.as_str().to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let overall_ok = decl
-            .verification
-            .as_ref()
-            .map(|v| matches!(v.status, VerificationStatus::Ok))
-            .unwrap_or(false);
-        decl.declared
-            .iter()
-            .map(|e| {
-                let effect_str = e.effect.as_str();
-                let is_mismatched = mismatch_effects.contains(effect_str);
-                let status = if decl.verification.is_none() {
-                    "unverified"
-                } else if is_mismatched {
-                    "mismatch"
-                } else if overall_ok {
-                    "ok"
-                } else {
-                    "ok"
-                };
-                let mut obj = serde_json::Map::new();
-                obj.insert("effect".into(), json!(effect_str));
-                obj.insert("status".into(), json!(status));
-                if let Some(ref adapter) = e.adapter {
-                    obj.insert("adapter".into(), json!(adapter));
-                }
-                if let Some(ref pattern) = e.source_pattern {
-                    obj.insert("source_pattern".into(), json!(pattern));
-                }
-                if let Some(note) = &e.note {
-                    obj.insert("note".into(), json!(note));
-                }
-                Value::Object(obj)
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    // Invariants and hazards are anti-footgun guards — surface them first so
-    // agents see them before the call-graph details.
-    Ok(json!({
-        "symbol": sym_val,
-        "invariants": invariants,
-        "hazards": hazards,
-        "known_bugs": known_bugs,
-        "concepts": concepts,
-        "ownership": ownership,
-        "ownership_discovery": discovered_ownership,
-        "covering_tests": covering_tests,
-        "validation_scenarios": validation_scenarios,
-        "callers": resolve(&caller_ids),
-        "callees": resolve(&callee_ids),
-        "effects": effects,
-        "effects_detail": effects_detail,
-        "proofs": proofs,
-        "decisions_and_notes": other_ledger,
-    }))
-}
 
 /// Reduce ledger entries to fit within `max_chars`. Trims `decisions_and_notes`
 /// first (least critical), then `proofs`, keeping invariants and hazards.

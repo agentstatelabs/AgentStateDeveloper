@@ -9,6 +9,7 @@ pub mod audit;
 pub mod brief;
 pub mod calibration;
 pub mod candidates;
+pub mod context;
 pub mod ser_helpers;
 pub mod conclusions_export;
 pub mod thinking;
@@ -98,6 +99,7 @@ pub use search_fts::{
     effect_detail_reason, format_age, stale_warning, stale_warning_classified,
 };
 pub use ser_helpers::{drop_empty_recursive, drop_empty_top_level};
+pub use context::assemble_symbol_context;
 pub use prepare_change::{
     CLIFF_RATIO_THRESHOLD, FILE_SCORE_FLOOR_RATIO, cliff_cutoff_index, file_score_floor,
 };
