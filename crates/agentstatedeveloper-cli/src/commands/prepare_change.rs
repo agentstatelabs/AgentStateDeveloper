@@ -252,164 +252,32 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     let recency = gather_recency(200, 14.0);
 
     // ---- Build entry points + aggregate data ----------------------------
+    // Plan M t-003 (1.0.96): main candidate loop extracted to
+    // aggregate_candidate_data(). The 6 parallel accumulators (by_layer,
+    // design_invariants, known_hazards, validation_scenarios_ledger,
+    // effects_summary, file_scores) plus top_sym_id and seen_inv now live
+    // in CandidateAggregates. seen_inv is returned so the subsequent
+    // caller-invariant propagation pass dedups against the main loop.
     let layer_order = intent_layer_order(intent);
-    let raw_scores: Vec<f64> = candidates.iter().map(|(s, _)| *s).collect();
-    let confidences = confidence_scores(&raw_scores);
-    let mut by_layer: serde_json::Map<String, Value> = serde_json::Map::new();
-    let mut design_invariants: Vec<Value> = Vec::new();
-    let mut known_hazards: Vec<Value> = Vec::new();
-    let mut validation_scenarios_ledger: Vec<Value> = Vec::new();
-    let mut effects_summary: Vec<Value> = Vec::new();
-    let mut seen_inv: HashSet<String> = HashSet::new();
-    let mut seen_vs: HashSet<String> = HashSet::new();
-    let mut seen_effect: HashSet<String> = HashSet::new();
-    // Only include effects from symbols scoring ≥25% of the top score to reduce noise.
-    let effect_score_floor = candidates.first().map(|(s, _)| s * 0.25).unwrap_or(0.0);
-
-    // likely_edit_files: file → (score, layer, recency, top symbol qname, rationale)
-    // Plan A t-009: capturing the contributing symbol + match reasons so each
-    // suggested file carries a "why this file" hook. Files whose score is below
-    // the precision floor (25% of top) are dropped to reduce broad-query noise.
-    //
-    // Plan E t-006: shared helpers now live in
-    // `agentstatedeveloper_core::prepare_change` (FileScoreEntry,
-    // file_score_floor(), push_file_score()). The orchestration loop here is
-    // still duplicated with the MCP handler; Plan F will lift the full
-    // walk. Until then, prefer the core helpers when editing scoring logic.
-    let mut file_scores: Vec<(f64, String, String, Option<f64>, bool, String, String)> = Vec::new();
-    let mut seen_files: HashSet<String> = HashSet::new();
-    // ExampleFlow refinement #2 (1.0.83): use the core helper, which
-    // bumped the ratio from 0.25 → 0.40 to cut targeted-query noise.
-    // Closes the TODO at line 274 that pointed at this duplication.
-    let file_score_floor = agentstatedeveloper_core::file_score_floor(&candidates);
-
-    // Top entry point symbol id for impact BFS.
-    let mut top_sym_id: Option<String> = None;
-
-    for (idx, (score, qname)) in candidates.iter().enumerate() {
-        let conf = confidences.get(idx).copied().unwrap_or(0.5);
-        let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
-            Ok(Some(s)) => s,
-            _ => continue,
-        };
-        let tier = symbol_tier(&sym.file);
-        let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
-        let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
-        let rec = recency.get(&sym.file);
-        let last_touched_days = rec.and_then(|r| r.last_touched_days);
-        let hot = rec.map(|r| r.hot).unwrap_or(false);
-
-        if top_sym_id.is_none() {
-            top_sym_id = Some(sym.symbol_id.clone());
-        }
-
-        // Ledger entries (pulled up because match_reasons needs them).
-        let entries = ledger_store
-            .list_entries(&engine.ref_name, &sym.symbol_id)
-            .unwrap_or_default();
-
-        // File tracking — capture the contributing symbol + its top match
-        // reason so prepare-change can answer "why this file?".
-        if seen_files.insert(sym.file.clone()) && *score >= file_score_floor {
-            let reasons = explain_match(&sym, &tokens, &entries, hot);
-            let why = reasons
-                .first()
-                .cloned()
-                .unwrap_or_else(|| format!("contains symbol {}", sym.qname));
-            file_scores.push((
-                *score,
-                sym.file.clone(),
-                layer.to_string(),
-                last_touched_days,
-                hot,
-                sym.qname.clone(),
-                why,
-            ));
-        }
-        for entry in &entries {
-            let key = entry.summary.clone();
-            match entry.kind {
-                LedgerKind::Invariant => {
-                    if seen_inv.insert(key) {
-                        // 1.0.86: include entry_id so the three
-                        // downstream "duplicate" sections (preserve,
-                        // suggested_test_coverage, scenario_tests)
-                        // can reference by id instead of repeating
-                        // the summary text. ExampleFlow probe 2
-                        // confirmed all four sections emitted the
-                        // identical summary in different wrappers
-                        // — ~1500 chars of pure duplication.
-                        design_invariants.push(json!({
-                            "entry_id": entry.entry_id,
-                            "summary": entry.summary,
-                            "source": sym.qname,
-                        }));
-                    }
-                }
-                LedgerKind::Hazard => {
-                    known_hazards.push(json!({
-                        "summary": entry.summary,
-                        "source": sym.qname,
-                    }));
-                }
-                LedgerKind::ValidationScenario => {
-                    if seen_vs.insert(key) {
-                        validation_scenarios_ledger.push(json!({
-                            "scenario": entry.summary,
-                            "source": sym.qname,
-                        }));
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Effects — only from sufficiently-scoring candidates to reduce noise.
-        // Low-signal effects (throw, random, log, pure, time.read, time.sleep)
-        // are suppressed unless they are the only effects declared on the symbol.
-        if *score >= effect_score_floor {
-            if let Ok(Some(decl)) = effect_store.get_effects(&engine.ref_name, &sym.symbol_id) {
-                let has_high_signal = decl.declared.iter().any(|e| !e.effect.is_low_signal());
-                for eff in &decl.declared {
-                    if has_high_signal && eff.effect.is_low_signal() {
-                        continue;
-                    }
-                    let cat = eff.effect.as_str().to_string();
-                    let key = format!("{}:{}", cat, sym.qname);
-                    if seen_effect.insert(key) {
-                        effects_summary.push(json!({
-                            "category": cat,
-                            "source": sym.qname,
-                        }));
-                    }
-                }
-            }
-        }
-
-        // Add to by_layer.
-        let has_ledger = !entries.is_empty();
-        let match_reasons = explain_match(&sym, &tokens, &entries, hot);
-        let bucket = result_bucket(&sym.file, &match_reasons, has_ledger, hot);
-        let ep_val = json!({
-            "score": score,
-            "confidence": conf,
-            "bucket": bucket,
-            "match_reasons": match_reasons,
-            "qname": sym.qname,
-            "file": sym.file,
-            "line": sym.start.line,
-            "layer": layer,
-            "summary": summary,
-            "last_touched_days": last_touched_days,
-            "hot": hot,
-        });
-        by_layer
-            .entry(layer.to_string())
-            .or_insert_with(|| Value::Array(vec![]))
-            .as_array_mut()
-            .unwrap()
-            .push(ep_val);
-    }
+    let CandidateAggregates {
+        mut by_layer,
+        mut design_invariants,
+        known_hazards,
+        validation_scenarios_ledger,
+        effects_summary,
+        mut file_scores,
+        top_sym_id,
+        mut seen_inv,
+    } = aggregate_candidate_data(
+        &engine,
+        &index_store,
+        &ledger_store,
+        &effect_store,
+        &candidates,
+        &tokens,
+        &recency,
+        &layer_overrides,
+    );
 
     // Plan J t-001: invariant propagation from callers.
     //
@@ -2182,6 +2050,205 @@ fn compute_blast_radius(
         "callee_layer_distribution": callee_layers,
         "top_caller_chains": top_caller_chains,
     })
+}
+
+/// Plan M t-003 (1.0.96): main candidate-loop accumulators.
+///
+/// Holds the six parallel collections built up by the per-candidate
+/// scan plus the top symbol id (driver for downstream BFS) and the
+/// `seen_inv` dedup set (threaded into the subsequent caller-invariant
+/// propagation pass so both invariant sources share one namespace).
+struct CandidateAggregates {
+    by_layer: serde_json::Map<String, Value>,
+    design_invariants: Vec<Value>,
+    known_hazards: Vec<Value>,
+    validation_scenarios_ledger: Vec<Value>,
+    effects_summary: Vec<Value>,
+    file_scores: Vec<(f64, String, String, Option<f64>, bool, String, String)>,
+    top_sym_id: Option<String>,
+    seen_inv: HashSet<String>,
+}
+
+/// Plan M t-003 (1.0.96): main candidate loop extracted from run().
+///
+/// Iterates the ranked candidate list once, populating all six parallel
+/// accumulators:
+///   - `by_layer` — entry-point JSON grouped by classified layer
+///   - `design_invariants` — Invariant ledger entries, deduped on summary
+///   - `known_hazards` — Hazard ledger entries
+///   - `validation_scenarios_ledger` — ValidationScenario entries, deduped
+///   - `effects_summary` — declared effects (low-signal suppressed unless sole)
+///   - `file_scores` — per-file score row used by likely_edit_files
+///
+/// Plan E t-006 / Plan F TODO: this loop is still duplicated in the MCP
+/// handler. t-004 will lift the full walk to core::prepare_change so both
+/// surfaces share it.
+fn aggregate_candidate_data(
+    engine: &Engine,
+    index_store: &AsgIndexStore<'_>,
+    ledger_store: &AsgLedgerStore<'_>,
+    effect_store: &AsgEffectStore<'_>,
+    candidates: &[(f64, String)],
+    tokens: &[String],
+    recency: &HashMap<String, agentstatedeveloper_core::FileRecency>,
+    layer_overrides: &[(String, String)],
+) -> CandidateAggregates {
+    let raw_scores: Vec<f64> = candidates.iter().map(|(s, _)| *s).collect();
+    let confidences = confidence_scores(&raw_scores);
+    let mut by_layer: serde_json::Map<String, Value> = serde_json::Map::new();
+    let mut design_invariants: Vec<Value> = Vec::new();
+    let mut known_hazards: Vec<Value> = Vec::new();
+    let mut validation_scenarios_ledger: Vec<Value> = Vec::new();
+    let mut effects_summary: Vec<Value> = Vec::new();
+    let mut seen_inv: HashSet<String> = HashSet::new();
+    let mut seen_vs: HashSet<String> = HashSet::new();
+    let mut seen_effect: HashSet<String> = HashSet::new();
+    // Only include effects from symbols scoring ≥25% of the top score to reduce noise.
+    let effect_score_floor = candidates.first().map(|(s, _)| s * 0.25).unwrap_or(0.0);
+
+    // ExampleFlow refinement #2 (1.0.83): file_score_floor lives in core,
+    // bumped 0.25 → 0.40 to cut targeted-query noise.
+    let mut file_scores: Vec<(f64, String, String, Option<f64>, bool, String, String)> = Vec::new();
+    let mut seen_files: HashSet<String> = HashSet::new();
+    let file_score_floor = agentstatedeveloper_core::file_score_floor(candidates);
+
+    let mut top_sym_id: Option<String> = None;
+
+    for (idx, (score, qname)) in candidates.iter().enumerate() {
+        let conf = confidences.get(idx).copied().unwrap_or(0.5);
+        let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
+            Ok(Some(s)) => s,
+            _ => continue,
+        };
+        let tier = symbol_tier(&sym.file);
+        let layer = classify_layer_sym(&sym.file, &sym.qname, tier, layer_overrides);
+        let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
+        let rec = recency.get(&sym.file);
+        let last_touched_days = rec.and_then(|r| r.last_touched_days);
+        let hot = rec.map(|r| r.hot).unwrap_or(false);
+
+        if top_sym_id.is_none() {
+            top_sym_id = Some(sym.symbol_id.clone());
+        }
+
+        // Ledger entries (pulled up because match_reasons needs them).
+        let entries = ledger_store
+            .list_entries(&engine.ref_name, &sym.symbol_id)
+            .unwrap_or_default();
+
+        // File tracking — capture the contributing symbol + its top match
+        // reason so prepare-change can answer "why this file?".
+        if seen_files.insert(sym.file.clone()) && *score >= file_score_floor {
+            let reasons = explain_match(&sym, tokens, &entries, hot);
+            let why = reasons
+                .first()
+                .cloned()
+                .unwrap_or_else(|| format!("contains symbol {}", sym.qname));
+            file_scores.push((
+                *score,
+                sym.file.clone(),
+                layer.to_string(),
+                last_touched_days,
+                hot,
+                sym.qname.clone(),
+                why,
+            ));
+        }
+        for entry in &entries {
+            let key = entry.summary.clone();
+            match entry.kind {
+                LedgerKind::Invariant => {
+                    if seen_inv.insert(key) {
+                        // 1.0.86: include entry_id so the three
+                        // downstream "duplicate" sections (preserve,
+                        // suggested_test_coverage, scenario_tests)
+                        // can reference by id instead of repeating
+                        // the summary text. ExampleFlow probe 2
+                        // confirmed all four sections emitted the
+                        // identical summary in different wrappers
+                        // — ~1500 chars of pure duplication.
+                        design_invariants.push(json!({
+                            "entry_id": entry.entry_id,
+                            "summary": entry.summary,
+                            "source": sym.qname,
+                        }));
+                    }
+                }
+                LedgerKind::Hazard => {
+                    known_hazards.push(json!({
+                        "summary": entry.summary,
+                        "source": sym.qname,
+                    }));
+                }
+                LedgerKind::ValidationScenario => {
+                    if seen_vs.insert(key) {
+                        validation_scenarios_ledger.push(json!({
+                            "scenario": entry.summary,
+                            "source": sym.qname,
+                        }));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Effects — only from sufficiently-scoring candidates to reduce noise.
+        // Low-signal effects (throw, random, log, pure, time.read, time.sleep)
+        // are suppressed unless they are the only effects declared on the symbol.
+        if *score >= effect_score_floor {
+            if let Ok(Some(decl)) = effect_store.get_effects(&engine.ref_name, &sym.symbol_id) {
+                let has_high_signal = decl.declared.iter().any(|e| !e.effect.is_low_signal());
+                for eff in &decl.declared {
+                    if has_high_signal && eff.effect.is_low_signal() {
+                        continue;
+                    }
+                    let cat = eff.effect.as_str().to_string();
+                    let key = format!("{}:{}", cat, sym.qname);
+                    if seen_effect.insert(key) {
+                        effects_summary.push(json!({
+                            "category": cat,
+                            "source": sym.qname,
+                        }));
+                    }
+                }
+            }
+        }
+
+        // Add to by_layer.
+        let has_ledger = !entries.is_empty();
+        let match_reasons = explain_match(&sym, tokens, &entries, hot);
+        let bucket = result_bucket(&sym.file, &match_reasons, has_ledger, hot);
+        let ep_val = json!({
+            "score": score,
+            "confidence": conf,
+            "bucket": bucket,
+            "match_reasons": match_reasons,
+            "qname": sym.qname,
+            "file": sym.file,
+            "line": sym.start.line,
+            "layer": layer,
+            "summary": summary,
+            "last_touched_days": last_touched_days,
+            "hot": hot,
+        });
+        by_layer
+            .entry(layer.to_string())
+            .or_insert_with(|| Value::Array(vec![]))
+            .as_array_mut()
+            .unwrap()
+            .push(ep_val);
+    }
+
+    CandidateAggregates {
+        by_layer,
+        design_invariants,
+        known_hazards,
+        validation_scenarios_ledger,
+        effects_summary,
+        file_scores,
+        top_sym_id,
+        seen_inv,
+    }
 }
 
 /// Plan M t-003 (1.0.95): caller-invariant propagation extracted from run().
