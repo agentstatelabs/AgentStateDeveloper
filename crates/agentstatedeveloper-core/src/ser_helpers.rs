@@ -49,6 +49,42 @@ fn is_empty_signal(v: &Value) -> bool {
     }
 }
 
+/// Recursive variant of `drop_empty_top_level`. Walks every nested
+/// object and drops null/[]/{} children. Arrays' elements are
+/// recursed into (an object inside an array still gets cleaned)
+/// but the array itself is preserved at its length — position
+/// often matters in arrays.
+///
+/// ExampleFlow refinement #1 (1.0.84): applied selectively to
+/// `safe_change_recipe` in prepare-change responses. Without this,
+/// `safe_change_recipe.preserve:[]`, `reference_only:[]`,
+/// `likely_omitted_files:[]` etc. bloat the response on the
+/// common case where the recipe has nothing to preserve / nothing
+/// reference-only / nothing omitted.
+///
+/// Use sparingly outside of known-noisy subtrees — an empty array
+/// inside a less-known object COULD be load-bearing semantics
+/// ("explicit empty list" vs "no list"). For shapes you control
+/// and know to be noise, this is the right tool.
+pub fn drop_empty_recursive(v: Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            let cleaned: serde_json::Map<String, Value> = map
+                .into_iter()
+                .map(|(k, val)| (k, drop_empty_recursive(val)))
+                .filter(|(_, val)| !is_empty_signal(val))
+                .collect();
+            Value::Object(cleaned)
+        }
+        Value::Array(arr) => {
+            // Recurse into elements but don't drop empty array
+            // entries — position in arrays carries meaning.
+            Value::Array(arr.into_iter().map(drop_empty_recursive).collect())
+        }
+        other => other,
+    }
+}
+
 /// Skip a numeric counter when it's zero. Useful for fields like
 /// `surfaced`, `entries_applied`, etc. — zero on these means "nothing
 /// happened on this axis," which is the default state the agent can
@@ -138,5 +174,55 @@ mod tests {
         let v = serde_json::json!([1, 2, 3]);
         let out = drop_empty_top_level(v.clone());
         assert_eq!(out, v);
+    }
+
+    #[test]
+    fn drop_empty_recursive_strips_nested_empties() {
+        // ExampleFlow refinement #1 (1.0.84): the recursive
+        // variant walks into nested objects. safe_change_recipe
+        // shape — many empty sibling arrays inside the recipe
+        // object.
+        let v = serde_json::json!({
+            "safe_change_recipe": {
+                "inspect": [{"file": "a.py"}],
+                "preserve": [],
+                "reference_only": [],
+                "likely_omitted_files": [],
+                "blast_radius": {
+                    "total_callers": 95,
+                    "callee_layer_distribution": {},
+                }
+            }
+        });
+        let out = drop_empty_recursive(v);
+        let recipe = &out["safe_change_recipe"];
+        assert!(recipe["inspect"].is_array());
+        assert!(recipe.get("preserve").is_none(), "empty preserve dropped");
+        assert!(recipe.get("reference_only").is_none(), "empty ref_only dropped");
+        assert!(recipe.get("likely_omitted_files").is_none(), "empty likely_omitted dropped");
+        assert!(recipe["blast_radius"]["total_callers"].is_number(), "non-empty kept");
+        assert!(
+            recipe["blast_radius"].get("callee_layer_distribution").is_none(),
+            "nested empty object dropped"
+        );
+    }
+
+    #[test]
+    fn drop_empty_recursive_preserves_array_positions() {
+        // Arrays of objects: recurse INTO each element but don't
+        // drop empty elements (position matters).
+        let v = serde_json::json!({
+            "items": [
+                {"keep": 1, "drop_null": null},
+                {"keep": 2, "drop_empty_obj": {}}
+            ]
+        });
+        let out = drop_empty_recursive(v);
+        let items = out["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2, "array length preserved");
+        assert_eq!(items[0]["keep"], 1);
+        assert!(items[0].get("drop_null").is_none());
+        assert_eq!(items[1]["keep"], 2);
+        assert!(items[1].get("drop_empty_obj").is_none());
     }
 }

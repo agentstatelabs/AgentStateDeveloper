@@ -1424,7 +1424,14 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         })
         .collect();
 
-    let safe_change_recipe = json!({
+    // ExampleFlow refinement #1 (1.0.84): recursively drop empty
+    // sub-fields (preserve:[], reference_only:[],
+    // likely_omitted_files:[], nested empty layer_distribution maps,
+    // etc). This is a NESTED clean — top-level drop_empty in the
+    // outer json! block can't reach into safe_change_recipe's
+    // children. On a typical query without ledger annotations,
+    // strips ~200 chars of empty-array clutter from the recipe.
+    let safe_change_recipe = agentstatedeveloper_core::drop_empty_recursive(json!({
         "inspect": recipe_inspect,
         "preserve": recipe_preserve,
         "edit": recipe_edit,
@@ -1433,7 +1440,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         "manually_validate": recipe_manually_validate,
         "blast_radius": blast_radius,
         "likely_omitted_files": likely_omitted_files,
-    });
+    }));
 
     // Scoped suggestions for prepare-change: use edit files as top_qnames proxy.
     let edit_file_names: Vec<String> = likely_edit_files

@@ -4176,13 +4176,17 @@ impl AsdMcpServer {
                 "kind": "missing_test",
             }));
         }
-        let safe_change_recipe = serde_json::json!({
-            "inspect": recipe_inspect,
-            "preserve": recipe_preserve,
-            "edit": recipe_edit,
-            "run": recipe_run,
-            "manually_validate": recipe_manually_validate,
-        });
+        // ExampleFlow refinement #1 (1.0.84): recursively drop
+        // empty sub-fields. Matches CLI prepare_change handling.
+        let safe_change_recipe = agentstatedeveloper_core::drop_empty_recursive(
+            serde_json::json!({
+                "inspect": recipe_inspect,
+                "preserve": recipe_preserve,
+                "edit": recipe_edit,
+                "run": recipe_run,
+                "manually_validate": recipe_manually_validate,
+            }),
+        );
 
         let focus = intent_focus(intent);
         let layers_present_pc: std::collections::HashSet<&str> = file_scores
