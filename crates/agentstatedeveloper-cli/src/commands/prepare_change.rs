@@ -278,7 +278,10 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // walk. Until then, prefer the core helpers when editing scoring logic.
     let mut file_scores: Vec<(f64, String, String, Option<f64>, bool, String, String)> = Vec::new();
     let mut seen_files: HashSet<String> = HashSet::new();
-    let file_score_floor = candidates.first().map(|(s, _)| s * 0.25).unwrap_or(0.0);
+    // ExampleFlow refinement #2 (1.0.83): use the core helper, which
+    // bumped the ratio from 0.25 → 0.40 to cut targeted-query noise.
+    // Closes the TODO at line 274 that pointed at this duplication.
+    let file_score_floor = agentstatedeveloper_core::file_score_floor(&candidates);
 
     // Top entry point symbol id for impact BFS.
     let mut top_sym_id: Option<String> = None;

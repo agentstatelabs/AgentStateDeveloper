@@ -3767,8 +3767,15 @@ impl AsdMcpServer {
         let mut seen_vs: HashSet<String> = HashSet::new();
         let mut seen_effect: HashSet<String> = HashSet::new();
         let mut top_sym_id: Option<String> = None;
+        // Effects floor stays at 25% (broad signal — admit any
+        // symbol with even loosely-relevant effects).
         let effect_score_floor = candidates.first().map(|(s, _)| s * 0.25).unwrap_or(0.0);
-        let file_score_floor = effect_score_floor;
+        // ExampleFlow refinement #2 (1.0.83): file floor bumped to
+        // 40% via the core helper (was 0.25, shared with effects).
+        // Diverged because the noise-suppression need is asymmetric:
+        // surfacing one unrelated file is worse than missing one
+        // tangential effect.
+        let file_score_floor = agentstatedeveloper_core::file_score_floor(&candidates);
 
         for (score, qname) in &candidates {
             let sym = match index.get_symbol_by_qname(&ref_name, qname) {

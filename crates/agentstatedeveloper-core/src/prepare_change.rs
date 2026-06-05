@@ -30,12 +30,30 @@ pub struct FileScoreEntry {
     pub why: String,
 }
 
-/// Compute the precision floor for file scoring: 25% of the top candidate's
-/// score. Files scoring below this are dropped from `likely_edit_files` to
-/// keep prepare-change output focused. Returns 0.0 when `candidates` is empty
-/// so an empty input simply admits everything (well, nothing).
+/// Relative score floor for file inclusion in `likely_edit_files`.
+///
+/// ExampleFlow field-eval (2026-06-04, refinement #2): the prior 0.25
+/// floor (25% of top score) was too permissive on targeted queries.
+/// ExampleProj observation: a query like "ProjectManager save logic" with
+/// top BM25 ~10 would admit files scoring 2.5+, sweeping in
+/// project/session/UI files that share no query tokens but had hotness
+/// boost from recent edits. Raising to 0.40 cuts that noise while
+/// keeping legitimate secondary results on broader queries (the top
+/// candidate has to be substantially better than the cutoff for the
+/// cutoff to matter — broad queries with several near-equal candidates
+/// are unaffected because the floor scales with the top score).
+pub const FILE_SCORE_FLOOR_RATIO: f64 = 0.40;
+
+/// Compute the precision floor for file scoring: 40% of the top
+/// candidate's score (was 25% pre-ExampleFlow). Files scoring below
+/// this are dropped from `likely_edit_files`. Returns 0.0 when
+/// `candidates` is empty so an empty input simply admits everything
+/// (well, nothing).
 pub fn file_score_floor(candidates: &[(f64, String)]) -> f64 {
-    candidates.first().map(|(s, _)| s * 0.25).unwrap_or(0.0)
+    candidates
+        .first()
+        .map(|(s, _)| s * FILE_SCORE_FLOOR_RATIO)
+        .unwrap_or(0.0)
 }
 
 /// Append a file-score entry if `file` is not yet seen AND `score` is at or
@@ -102,14 +120,23 @@ mod tests {
     }
 
     #[test]
-    fn file_score_floor_is_25pct_of_top() {
+    fn file_score_floor_is_40pct_of_top() {
+        // ExampleFlow refinement #2 (1.0.83): floor bumped from 0.25
+        // to 0.40 to cut targeted-query noise. Top=40 → floor=16.
         let cands = vec![(40.0_f64, "a".into()), (5.0, "b".into())];
-        assert!((file_score_floor(&cands) - 10.0).abs() < 1e-9);
+        assert!((file_score_floor(&cands) - 16.0).abs() < 1e-9);
     }
 
     #[test]
     fn file_score_floor_empty_input_is_zero() {
         assert_eq!(file_score_floor(&[]), 0.0);
+    }
+
+    #[test]
+    fn file_score_floor_ratio_is_40pct() {
+        // Lock the constant so any future tuning re-touch is
+        // intentional and pinned in test diff.
+        assert!((FILE_SCORE_FLOOR_RATIO - 0.40).abs() < 1e-9);
     }
 
     #[test]
