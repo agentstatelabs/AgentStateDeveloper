@@ -79,6 +79,8 @@ pub fn build_router(
         .route("/symbols/{qname}/callers", get(get_symbol_callers))
         .route("/symbols/{qname}/callees", get(get_symbol_callees))
         .route("/ledger", get(list_ledger))
+        .route("/thinking", get(list_thinking))
+        .route("/symbols/{qname}/thinking", get(get_symbol_thinking))
         .route("/audit", get(list_audit))
         .route("/audit/verify", get(verify_audit))
         .route(
@@ -360,6 +362,11 @@ fn resolve_symbols_by_ids(
 #[derive(Debug, Deserialize)]
 struct LedgerQuery {
     tag: Option<String>,
+    /// Comma-separated `LedgerKind` names in snake_case (e.g.
+    /// `hypothesis,mental_model`). Unknown tokens are ignored — they can't
+    /// match any entry anyway, and we don't want a typo to 400 the whole
+    /// listing.
+    kind: Option<String>,
     /// Maximum entries to return (default 100, max 1000).
     #[serde(default)]
     limit: Option<usize>,
@@ -403,12 +410,112 @@ async fn list_ledger(
         entries.retain(|e| e.tags.iter().any(|t| t == tag));
     }
 
+    if let Some(raw) = q.kind.as_deref() {
+        let allowed: Vec<agentstatedeveloper_core::LedgerKind> = raw
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| {
+                // LedgerKind serializes snake_case, so round-trip via JSON
+                // to parse the user's token without writing a hand-rolled
+                // match against every variant.
+                serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
+            })
+            .collect();
+        if !allowed.is_empty() {
+            entries.retain(|e| allowed.contains(&e.kind));
+        } else {
+            // Caller passed `kind=` with only unknown tokens — return empty
+            // rather than the whole ledger, otherwise the filter is silent.
+            entries.clear();
+        }
+    }
+
     entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
     let offset = q.offset.unwrap_or(0);
     let limit = q.limit.unwrap_or(100).min(1000);
     let page: Vec<_> = entries.into_iter().skip(offset).take(limit).collect();
     Ok(Json(page))
+}
+
+// -----------------------------------------------------------------------------
+// Plan G / K — captured "thinking" projection
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct ThinkingQuery {
+    /// Comma-separated qnames to scan. When omitted, scans every qname in
+    /// the by-qname index — fine on real-world workspaces (low thousands of
+    /// symbols), but explicit qnames are always cheaper.
+    qnames: Option<String>,
+    /// Drop Hypothesis entries below this confidence. Defaults to
+    /// [`agentstatedeveloper_core::thinking::DEFAULT_CONFIDENCE_FLOOR`]
+    /// (0.3) so the floor stays consistent with the CLI / MCP.
+    min_confidence: Option<f64>,
+}
+
+/// `GET /api/v1/thinking?qnames=a,b,c&min_confidence=0.3` — projects Plan G
+/// thinking entries (hypotheses / mental models / open questions / failed
+/// attempts) for the given qnames. With no `qnames`, scans every indexed
+/// symbol. Response body is the `PriorThinking { entries, summary }` shape;
+/// callers use `summary.surfaced > 0` to decide whether to render.
+async fn list_thinking(
+    State(state): State<AppState>,
+    Query(q): Query<ThinkingQuery>,
+) -> Result<Json<agentstatedeveloper_core::thinking::PriorThinking>, ApiError> {
+    let engine = state.engine.lock().await;
+    let qnames = match q.qnames.as_deref() {
+        Some(raw) => raw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>(),
+        None => all_qnames(&engine)?,
+    };
+    let floor = q
+        .min_confidence
+        .unwrap_or(agentstatedeveloper_core::thinking::DEFAULT_CONFIDENCE_FLOOR);
+    let projection =
+        agentstatedeveloper_core::thinking::gather_prior_thinking(&engine, &qnames, floor);
+    Ok(Json(projection))
+}
+
+#[derive(Debug, Deserialize)]
+struct SymbolThinkingQuery {
+    min_confidence: Option<f64>,
+}
+
+/// `GET /api/v1/symbols/{qname}/thinking?min_confidence=…` — same projection
+/// scoped to one symbol. Lets the symbol detail page show an "inherited
+/// thinking" panel without pulling the whole workspace.
+async fn get_symbol_thinking(
+    State(state): State<AppState>,
+    Path(qname): Path<String>,
+    Query(q): Query<SymbolThinkingQuery>,
+) -> Result<Json<agentstatedeveloper_core::thinking::PriorThinking>, ApiError> {
+    let engine = state.engine.lock().await;
+    let floor = q
+        .min_confidence
+        .unwrap_or(agentstatedeveloper_core::thinking::DEFAULT_CONFIDENCE_FLOOR);
+    let projection = agentstatedeveloper_core::thinking::gather_prior_thinking(
+        &engine,
+        std::slice::from_ref(&qname),
+        floor,
+    );
+    Ok(Json(projection))
+}
+
+fn all_qnames(engine: &Engine) -> Result<Vec<String>, ApiError> {
+    let ref_name = engine.ref_name.clone();
+    let prefix = format!(
+        "{}/index/by-qname",
+        agentstatedeveloper_core::ASD_PATH_PREFIX
+    );
+    match engine.repo.get_tree(&ref_name, &prefix) {
+        Ok(serde_json::Value::Object(map)) => Ok(map.keys().cloned().collect()),
+        _ => Ok(Vec::new()),
+    }
 }
 
 // -----------------------------------------------------------------------------
