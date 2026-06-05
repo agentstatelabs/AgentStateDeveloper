@@ -70,6 +70,52 @@ checkout before merging.
 
 ---
 
+## Multi-stage filtering: cut at the stage the agent sees
+
+**When tuning a noise floor / cliff / quality threshold in a
+multi-stage pipeline, map the score distribution at EVERY stage
+before choosing where to cut.** The right idea applied at the
+wrong stage leaves the user-visible problem intact.
+
+ASD's `prepare-change` filters at three sequential stages:
+
+1. **Symbol candidates** from `find_candidates` — scored by FTS +
+   hybrid boost, before any per-file aggregation.
+2. **`file_scores`** — one entry per file (top contributing
+   symbol's score), built inside the candidate loop.
+3. **Post-recipe-split `likely_edit_files`** — `file_scores`
+   filtered against `recipe_edit` membership (files demoted to
+   `reference_only` by layer/feedback rules get cut here).
+
+The agent only ever sees stage 3. **Score distributions look
+different at each stage** because intermediate-score entries
+at one stage can disappear at the next (same-file siblings
+collapse to one entry; layer-mismatched files demote to
+reference-only).
+
+The 1.0.85 → 1.0.87 → 1.0.88 cliff-detection arc burned three
+field-test iterations before catching this. ExampleFlow's
+"Drift Pad scheduler sync" query had scores 42/31/19/18 at
+stage 3 — a clean cliff at 19/31=0.61 — but the same query at
+stage 1 looked like a smooth gradient (42/31/29/27/25/19/18,
+no consecutive pair below 0.70). Cliff detection at stage 1
+fired never. Stage 2 still missed because the
+soon-to-be-demoted intermediates were present. Stage 3 finally
+worked.
+
+Rule for any "noise floor" tuning: identify which stage the
+user sees, look at the actual distribution at THAT stage, and
+cut there. If filtering happens at multiple stages, you may
+need multiple cliff passes (1.0.88 keeps the pre-rebuild cliff
+AND adds the post-rebuild one as belt-and-suspenders).
+
+Same shape of failure as the calibration-table inversion: the
+math was right, the test data was right, the diagnostic was at
+the wrong layer. See DESIGN.md for the full 3-iteration arc on
+this specific cliff fix.
+
+---
+
 ## Worktrees + cargo install
 
 This repo uses git worktrees (`.claude/worktrees/<name>`). The
