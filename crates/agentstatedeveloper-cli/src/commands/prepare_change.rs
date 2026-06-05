@@ -16,7 +16,7 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
-    AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, FeedbackStore, FtsFilters, IndexStore, LedgerKind, LedgerStore, SearchFtsDb,
+    AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, FeedbackStore, FtsFilters, IndexStore, LedgerKind, LedgerStore, SearchFtsDb, Symbol,
     apply_feedback_adjustments, classify_file_role, classify_layer_sym, compute_trust_score,
     compute_uncertainty,
     confidence_scores, derive_cold_hints, detect_ambiguous_tokens, detect_possible_misses,
@@ -583,147 +583,25 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         .collect();
 
     // ---- Affected tests via BFS from the top entry point ----------------
-    let mut affected_tests: Vec<Value> = Vec::new();
-    if let Some(start_id) = top_sym_id {
-        let mut visited: HashSet<String> = HashSet::new();
-        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
-        let mut seen_test_names: HashSet<String> = HashSet::new();
-        visited.insert(start_id.clone());
-        queue.push_back((start_id, 0));
-        while let Some((sid, depth)) = queue.pop_front() {
-            if depth >= args.test_depth {
-                continue;
-            }
-            let callers = index_store
-                .get_callers(&engine.ref_name, &sid)
-                .unwrap_or_default();
-            for cid in callers {
-                if visited.contains(&cid) {
-                    continue;
-                }
-                visited.insert(cid.clone());
-                if let Some(s) = id_map.get(&cid) {
-                    if symbol_tier(&s.file) == 2 && seen_test_names.insert(s.qname.clone()) {
-                        // Use both qname words and doc comment words for behavioral matching
-                        // so "test_plays_silence_at_loop_end" and a doc saying "verifies
-                        // loop boundary" both surface the relevant invariant.
-                        let qname_words: Vec<String> = s
-                            .qname
-                            .split(|c: char| !c.is_alphabetic())
-                            .filter(|t| t.len() > 2)
-                            .map(|t| t.to_lowercase())
-                            .collect();
-                        let doc_words: Vec<String> = s
-                            .doc
-                            .as_deref()
-                            .unwrap_or("")
-                            .split(|c: char| !c.is_alphabetic())
-                            .filter(|t| t.len() > 2)
-                            .map(|t| t.to_lowercase())
-                            .collect();
-                        let test_tokens: Vec<&str> = qname_words
-                            .iter()
-                            .chain(doc_words.iter())
-                            .map(|s| s.as_str())
-                            .collect();
-                        let covers: Vec<&str> = design_invariants
-                            .iter()
-                            .filter_map(|inv| inv.get("summary").and_then(Value::as_str))
-                            .filter(|summary| {
-                                let sl = summary.to_lowercase();
-                                test_tokens.iter().any(|t| sl.contains(*t))
-                            })
-                            .collect();
-                        affected_tests.push(json!({
-                            "qname": s.qname,
-                            "file": s.file,
-                            "line": s.start.line,
-                            "covers_invariants": covers,
-                        }));
-                    }
-                    if depth + 1 < args.test_depth {
-                        queue.push_back((cid, depth + 1));
-                    }
-                }
-            }
-        }
-    }
+    // Plan M t-003 (1.0.93): extracted to gather_affected_tests().
+    let affected_tests = gather_affected_tests(
+        &engine,
+        &index_store,
+        &id_map,
+        top_sym_id.as_deref(),
+        args.test_depth,
+        &design_invariants,
+    );
 
     // ---- Blast-radius: caller/callee layer distribution + concrete call chains ----
-    let blast_radius = {
-        let mut caller_layers: HashMap<String, usize> = HashMap::new();
-        let mut callee_layers: HashMap<String, usize> = HashMap::new();
-        let mut total_callers = 0usize;
-        let mut total_callees = 0usize;
-        let top_sids: Vec<String> = candidates
-            .iter()
-            .take(5)
-            .filter_map(|(_, q)| {
-                index_store
-                    .get_symbol_by_qname(&engine.ref_name, q)
-                    .ok()
-                    .flatten()
-            })
-            .map(|s| s.symbol_id)
-            .collect();
-
-        // t-003: BFS tracking paths so we can emit concrete caller chains.
-        // Each path is stored root-first: [outer_caller, ..., direct_caller, our_symbol].
-        let mut top_caller_chains: Vec<Vec<String>> = Vec::new();
-
-        for sid in &top_sids {
-            let anchor_qname = id_map.get(sid).map(|s| s.qname.clone()).unwrap_or_default();
-            let mut visited: HashSet<String> = HashSet::new();
-            // Queue: (current_id, path_from_this_node_to_anchor)
-            let mut q: VecDeque<(String, Vec<String>)> = VecDeque::new();
-            visited.insert(sid.clone());
-            q.push_back((sid.clone(), vec![anchor_qname.clone()]));
-            while let Some((cid, path)) = q.pop_front() {
-                if path.len() > 4 {
-                    continue;
-                }
-                for caller_id in index_store
-                    .get_callers(&engine.ref_name, &cid)
-                    .unwrap_or_default()
-                {
-                    if visited.insert(caller_id.clone()) {
-                        if let Some(sym) = id_map.get(&caller_id) {
-                            let tier = symbol_tier(&sym.file);
-                            let layer =
-                                classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
-                            *caller_layers.entry(layer.to_string()).or_default() += 1;
-                            total_callers += 1;
-                            // Build path: prepend this caller.
-                            let mut new_path = vec![sym.qname.clone()];
-                            new_path.extend_from_slice(&path);
-                            if top_caller_chains.len() < 5 {
-                                top_caller_chains.push(new_path.clone());
-                            }
-                            q.push_back((caller_id, new_path));
-                        }
-                    }
-                }
-            }
-            for callee_id in index_store
-                .get_callees(&engine.ref_name, sid)
-                .unwrap_or_default()
-            {
-                if let Some(sym) = id_map.get(&callee_id) {
-                    let tier = symbol_tier(&sym.file);
-                    let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
-                    *callee_layers.entry(layer.to_string()).or_default() += 1;
-                    total_callees += 1;
-                }
-            }
-        }
-        json!({
-            "total_callers": total_callers,
-            "total_callees": total_callees,
-            "caller_layer_distribution": caller_layers,
-            "callee_layer_distribution": callee_layers,
-            "top_caller_chains": top_caller_chains,
-        })
-    };
+    // Plan M t-003 (1.0.93): extracted to compute_blast_radius().
+    let blast_radius = compute_blast_radius(
+        &engine,
+        &index_store,
+        &id_map,
+        &candidates,
+        &layer_overrides,
+    );
 
     // ---- Recent git touches for the top files (up to 3) ----------------
     let top_files: Vec<(String, usize)> = file_scores
@@ -2242,5 +2120,185 @@ fn compute_edit_precision(likely_edit_files: &[Value], sha: &str) -> Value {
         "precision": (precision * 1000.0).round() / 1000.0,
         "recall": (recall * 1000.0).round() / 1000.0,
         "f1": (f1 * 1000.0).round() / 1000.0,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Plan M t-003 (1.0.93): stage helpers extracted from run() body.
+//
+// Each fn here was inlined inside run() prior to 1.0.93. Extraction
+// keeps the orchestrator readable without changing behavior. State
+// flows through explicit args — no shared context struct (yet); each
+// helper takes only the inputs it needs and returns only the outputs
+// the orchestrator consumes.
+// ---------------------------------------------------------------------------
+
+/// BFS upward from the top entry-point symbol to collect test
+/// callers. For each tier-2 (test) symbol discovered, compute which
+/// design invariants the test's name + doc tokens cover.
+///
+/// Returns a Vec of `{qname, file, line, covers_invariants}` entries.
+fn gather_affected_tests(
+    engine: &Engine,
+    index_store: &AsgIndexStore,
+    id_map: &HashMap<String, Symbol>,
+    top_sym_id: Option<&str>,
+    test_depth: usize,
+    design_invariants: &[Value],
+) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    let Some(start_id) = top_sym_id else {
+        return out;
+    };
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+    let mut seen_test_names: HashSet<String> = HashSet::new();
+    visited.insert(start_id.to_string());
+    queue.push_back((start_id.to_string(), 0));
+    while let Some((sid, depth)) = queue.pop_front() {
+        if depth >= test_depth {
+            continue;
+        }
+        let callers = index_store
+            .get_callers(&engine.ref_name, &sid)
+            .unwrap_or_default();
+        for cid in callers {
+            if visited.contains(&cid) {
+                continue;
+            }
+            visited.insert(cid.clone());
+            if let Some(s) = id_map.get(&cid) {
+                if symbol_tier(&s.file) == 2 && seen_test_names.insert(s.qname.clone()) {
+                    // Use both qname words and doc comment words for
+                    // behavioral matching so a test named
+                    // "test_plays_silence_at_loop_end" AND a test
+                    // doc'd "verifies loop boundary" both surface
+                    // the relevant invariant.
+                    let qname_words: Vec<String> = s
+                        .qname
+                        .split(|c: char| !c.is_alphabetic())
+                        .filter(|t| t.len() > 2)
+                        .map(|t| t.to_lowercase())
+                        .collect();
+                    let doc_words: Vec<String> = s
+                        .doc
+                        .as_deref()
+                        .unwrap_or("")
+                        .split(|c: char| !c.is_alphabetic())
+                        .filter(|t| t.len() > 2)
+                        .map(|t| t.to_lowercase())
+                        .collect();
+                    let test_tokens: Vec<&str> = qname_words
+                        .iter()
+                        .chain(doc_words.iter())
+                        .map(|s| s.as_str())
+                        .collect();
+                    let covers: Vec<&str> = design_invariants
+                        .iter()
+                        .filter_map(|inv| inv.get("summary").and_then(Value::as_str))
+                        .filter(|summary| {
+                            let sl = summary.to_lowercase();
+                            test_tokens.iter().any(|t| sl.contains(*t))
+                        })
+                        .collect();
+                    out.push(json!({
+                        "qname": s.qname,
+                        "file": s.file,
+                        "line": s.start.line,
+                        "covers_invariants": covers,
+                    }));
+                }
+                if depth + 1 < test_depth {
+                    queue.push_back((cid, depth + 1));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// BFS upward from the top 5 candidate symbols to compute blast
+/// radius: caller/callee layer distribution + concrete top-5 caller
+/// chains. Path length capped at 4 to avoid runaway BFS on
+/// highly-connected modules.
+///
+/// Returns a single JSON object — embedded as `safe_change_recipe.
+/// blast_radius` in the prepare-change response.
+fn compute_blast_radius(
+    engine: &Engine,
+    index_store: &AsgIndexStore,
+    id_map: &HashMap<String, Symbol>,
+    candidates: &[(f64, String)],
+    layer_overrides: &[(String, String)],
+) -> Value {
+    let mut caller_layers: HashMap<String, usize> = HashMap::new();
+    let mut callee_layers: HashMap<String, usize> = HashMap::new();
+    let mut total_callers = 0usize;
+    let mut total_callees = 0usize;
+    let top_sids: Vec<String> = candidates
+        .iter()
+        .take(5)
+        .filter_map(|(_, q)| {
+            index_store
+                .get_symbol_by_qname(&engine.ref_name, q)
+                .ok()
+                .flatten()
+        })
+        .map(|s| s.symbol_id)
+        .collect();
+
+    // BFS tracking paths so we can emit concrete caller chains.
+    // Each path is root-first: [outer_caller, ..., direct_caller, our_symbol].
+    let mut top_caller_chains: Vec<Vec<String>> = Vec::new();
+
+    for sid in &top_sids {
+        let anchor_qname = id_map.get(sid).map(|s| s.qname.clone()).unwrap_or_default();
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut q: VecDeque<(String, Vec<String>)> = VecDeque::new();
+        visited.insert(sid.clone());
+        q.push_back((sid.clone(), vec![anchor_qname.clone()]));
+        while let Some((cid, path)) = q.pop_front() {
+            if path.len() > 4 {
+                continue;
+            }
+            for caller_id in index_store
+                .get_callers(&engine.ref_name, &cid)
+                .unwrap_or_default()
+            {
+                if visited.insert(caller_id.clone()) {
+                    if let Some(sym) = id_map.get(&caller_id) {
+                        let tier = symbol_tier(&sym.file);
+                        let layer =
+                            classify_layer_sym(&sym.file, &sym.qname, tier, layer_overrides);
+                        *caller_layers.entry(layer.to_string()).or_default() += 1;
+                        total_callers += 1;
+                        let mut new_path = vec![sym.qname.clone()];
+                        new_path.extend_from_slice(&path);
+                        if top_caller_chains.len() < 5 {
+                            top_caller_chains.push(new_path.clone());
+                        }
+                        q.push_back((caller_id, new_path));
+                    }
+                }
+            }
+        }
+        for callee_id in index_store
+            .get_callees(&engine.ref_name, sid)
+            .unwrap_or_default()
+        {
+            if let Some(sym) = id_map.get(&callee_id) {
+                let tier = symbol_tier(&sym.file);
+                let layer = classify_layer_sym(&sym.file, &sym.qname, tier, layer_overrides);
+                *callee_layers.entry(layer.to_string()).or_default() += 1;
+                total_callees += 1;
+            }
+        }
+    }
+    json!({
+        "total_callers": total_callers,
+        "total_callees": total_callees,
+        "caller_layer_distribution": caller_layers,
+        "callee_layer_distribution": callee_layers,
+        "top_caller_chains": top_caller_chains,
     })
 }
