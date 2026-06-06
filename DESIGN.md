@@ -1602,7 +1602,14 @@ you forget.
 
 ---
 
-## Plan M — Refactor pass (post-1.0.89 survey)
+## Plan M — Refactor pass (post-1.0.89 survey) — ✅ DONE (1.1.11)
+
+**Status: complete.** Shipped 1.0.91 → 1.1.11 over 11 commits. All
+seven tasks closed; t-005 and t-006 scoped to the highest-leverage
+extractions per their Med-High risk rating (see "Closure notes"
+below). Post-Plan-M regression sweep confirmed CLI ↔ MCP parity end-
+to-end on `prepare_change` and added direct test coverage for the
+lifted in-memory fallback path.
 
 Driven by a three-axis exploration survey run at 1.0.89 (file size,
 CLI ↔ MCP duplication, technical debt). The debt situation came
@@ -1618,15 +1625,65 @@ loop before the next.
 
 ### Task table
 
-| # | Title | Tier | Effort | Risk |
-|---|---|---|---|---|
-| t-001 | Lift `assemble_symbol_context()` so MCP `context_for` stops reimplementing CLI's helper | 1 | S | Low |
-| t-002 | Group `mcp_server.rs`'s 53 param structs into `mcp_params/` sub-modules | 1 | S | Low |
-| t-003 | Break `prepare_change.rs::run()` into staged functions (10 named steps) | 2 | M | Medium |
-| t-004 | Close Plan F TODO — lift `prepare_change` scoring walk to `core::prepare_change` | 2 | M | Medium |
-| t-005 | Probe.rs assertion-eval enum refactor (~400-line match → polymorphic) | 3 | M-L | Med-High |
-| t-006 | `candidates.rs::find_candidates()` pipeline-builder refactor | 3 | M-L | Medium |
-| t-007 | Add rationale comments to ~5 `let _ = expr` patterns missing context | 3 | XS | None |
+| # | Title | Tier | Effort | Risk | Status | Landed |
+|---|---|---|---|---|---|---|
+| t-001 | Lift `assemble_symbol_context()` so MCP `context_for` stops reimplementing CLI's helper | 1 | S | Low | ✅ | 1.0.91 |
+| t-002 | Group `mcp_server.rs`'s 53 param structs into `mcp_params/` sub-modules | 1 | S | Low | ✅ | 1.0.92 |
+| t-003 | Break `prepare_change.rs::run()` into staged functions (10 named steps) | 2 | M | Medium | ✅ | 1.0.93–1.0.97 |
+| t-004 | Close Plan F TODO — lift `prepare_change` scoring walk to `core::prepare_change` | 2 | M | Medium | ✅ | 1.0.98 |
+| t-005 | Probe.rs assertion-eval enum refactor (~400-line match → polymorphic) | 3 | M-L | Med-High | ✅ (scoped) | 1.0.100 |
+| t-006 | `candidates.rs::find_candidates()` pipeline-builder refactor | 3 | M-L | Medium | ✅ (scoped) | 1.0.101 |
+| t-007 | Add rationale comments to ~5 `let _ = expr` patterns missing context | 3 | XS | None | ✅ | 1.0.99 |
+
+### Closure notes
+
+**Wave 1 (t-001, t-002) shipped clean.** MCP `context_for` body
+dropped from ~262 to ~30 lines via the lifted `core::context`
+helper. `mcp_server.rs` shrank 7,543 → 6,632 lines via the
+`mcp_params` split.
+
+**Wave 2 (t-003, t-004) hit the biggest readability win.**
+`prepare_change::run()` shed ~470 lines across 5 commits as named
+staged helpers (`gather_affected_tests`, `compute_blast_radius`,
+`detect_test_gap`, `propagate_caller_invariants`,
+`aggregate_candidate_data`, `finalize_file_scores`). t-004 then
+lifted those into `core::prepare_change` as public API so the MCP
+handler shares them — closes the Plan F TODO. MCP `prepare_change`
+gained `bucket`, `confidence`, `match_reasons` on `entry_points` and
+`conflict_detail` on `likely_edit_files` (additive, no removals).
+
+**Wave 3 (t-005, t-006) scoped per risk rating.** Both were filed
+M-L effort / Med-High risk; doing them fully in one session against
+thinly-tested working code would have invited subtle regressions for
+modest comprehension payoff. Demonstrative subsets shipped:
+- **t-005**: nested `resolve_key` closure killed (duplicated module
+  `dot_path`); five longest match arms (≥34 lines each) extracted
+  into named private fns (`eval_qname_rank_lte`,
+  `eval_cluster_winner_kind_not`, `eval_cluster_winner_qname_contains`,
+  `eval_all_items_have_field`, `eval_file_field_contains`). Remaining
+  36 arms (all ≤28 lines) read cleanly inline; the extraction
+  pattern is documented at the helper block top for future
+  incremental progress.
+- **t-006**: in-memory fallback lifted into `fallback_in_memory_search`
+  as a private fn. The FTS pipeline stages (scoring loop, stem
+  injection, ledger-aware dedup) stay inline — naming the fallback
+  boundary tells future readers where to start when extracting more
+  pipeline stages. Direct test coverage added in 1.1.11 via four
+  integration tests against `Engine::open_in_memory()`.
+
+**1.1.11 follow-ups** (post-Plan-M parity sweep):
+- `asd-mcp` cwd-aware error: when `ASD_DB` is unset and the registry
+  can't resolve, the error now surfaces `./.asd-state.db`'s absolute
+  path as a copy-paste hint. Design intent (no silent cwd fallback)
+  preserved.
+- `find_candidates` fallback path got direct unit coverage closing
+  the gap that t-006 inherited from the pre-refactor code.
+
+**Version-numbering housekeeping** (1.1.1 / 1.1.10): the patch
+counter rolled past 99 during Plan M. Cargo+SemVer rejects leading
+zeros (`1.1.01` is invalid), so the workspace was bumped to 1.1.10
+to floor every subsequent patch at two digits without violating
+SemVer. Patch increments stay +0.0.01 going forward.
 
 ### Wave ordering
 
