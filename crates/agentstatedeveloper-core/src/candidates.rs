@@ -815,7 +815,23 @@ pub fn find_candidates(
         return scored;
     }
 
-    // --- Fallback: in-memory O(N) scoring ---
+    // Plan M t-006 (1.0.101): in-memory fallback extracted to a named pipeline stage.
+    fallback_in_memory_search(engine, tokens, filters, ledger_store, index_store, fts, depth)
+}
+
+/// Plan M t-006 (1.0.101): in-memory O(N) candidate scoring used when
+/// the FTS index is absent or empty. Lives behind a single fn so the
+/// FTS path in `find_candidates` stays readable and the fallback can
+/// be exercised by direct unit tests without spinning up a fake FTS.
+fn fallback_in_memory_search(
+    engine: &Engine,
+    tokens: &[String],
+    filters: &FtsFilters,
+    ledger_store: &AsgLedgerStore,
+    index_store: &AsgIndexStore,
+    fts: Option<&SearchFtsDb>,
+    depth: usize,
+) -> Vec<(f64, String)> {
     eprintln!("asd: FTS index not populated — falling back to in-memory search");
 
     let kind_filter = filters.kind.as_deref().map(|k| k.to_lowercase());
