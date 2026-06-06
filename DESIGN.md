@@ -1842,3 +1842,199 @@ lines (t-002), `prepare_change.rs::run()` becomes readable (t-003),
 the Plan F TODO is finally closed (t-004), and one ~60-line
 duplication mistake is fixed (t-001).
 
+## Plan N — Adoption engineering (post-graphify comparison)
+
+A head-to-head against graphify (60.6k stars, MIT, Python),
+Graphiti (Zep, ~25k stars, agent memory), and Microsoft GraphRAG
+surfaced the gap that's actually blocking ASD adoption: the
+**friction layer**, not the substance.
+
+ASD's primitives (LedgerEntry kinds, ASG-backed audit,
+prepare_change, effects + verification, feedback loop, scoring with
+cliff detection) are richer than graphify's graph + community
+clustering. But substance loses to friction every time, and
+graphify won 60k stars on three things ASD doesn't have yet:
+
+1. **One-command install** (`uv tool install graphifyy`)
+2. **A multiplier in the headline** ("71× / 49× / 79× fewer
+   tokens" — even though field reports indicate those numbers are
+   overblown)
+3. **Skill files installed into the target repo**, so the next
+   agent invocation already knows to use it
+
+Plan N is the actionable subset. **Adoption engineering, not
+feature work.** Sequenced so the highest-leverage adoption levers
+ship first.
+
+### Task table
+
+| # | Title | Wave | Effort | Risk |
+|---|---|---|---|---|
+| t-001 | Frictionless distribution: prebuilt binaries + Homebrew tap + curl\|sh installer (CTXone parity) | 1 | M | Low |
+| t-002 | "Paste-this-into-your-agent" install prompt — one-shot install via the agent the user is already in | 1 | S | Low |
+| t-003 | Provable token-reduction benchmark + user-viewable savings ledger | 1 | M | Low |
+| t-004 | `asd init --install-prompts` — drop `CLAUDE.md` / `AGENTS.md` / `.cursor/rules/asd.mdc` into target repo | 2 | S | Low |
+| t-005 | Multi-assistant installers: `asd install <claude\|codex\|cursor\|gemini>` | 2 | S | Low |
+| t-006 | Modular language adapters — Cargo features per language, no Swift bytes on a Python-only shop | 2 | S | Low |
+| t-007 | Automate the LLM-augmented extraction pass (currently agent-prompt-driven) | 3 | M | Medium |
+| t-008 | Brand the patterns — name "ledger anchor," "cliff cohort," "trust cliff," etc. consistently across docs + output | 3 | XS | None |
+
+### Wave ordering
+
+**Wave 1 — Headline + Distribution (the actual moat)**
+
+Three highest-leverage levers. If only Wave 1 lands, ASD has
+already cleared the friction bar graphify cleared with 60k stars.
+
+- **t-001 Frictionless distribution**: macOS + Linux prebuilt
+  binaries, Homebrew tap (`brew install AgentStateLabs/tap/asd`),
+  curl-pipe installer that detects platform and grabs the right
+  binary. CTXone has the curl|sh installer; mirror that pattern
+  and add a tap. Kill the `cargo install --path` precondition for
+  end users; keep it as the dev install path.
+
+  *Acceptance*: a fresh macOS or Linux box runs `brew install asd`
+  (or the curl|sh) and lands on a working `asd --version` in under
+  60 seconds, no Rust toolchain on the box.
+
+- **t-002 Paste-this-into-your-agent install prompt**: a single
+  copy-pasteable block users put into Claude Code / Codex / Cursor
+  that the agent itself executes to install + configure ASD. The
+  pattern is becoming common ("paste this prompt to install
+  <tool>"). Should download the binary, run `asd init`, register
+  the MCP server with the right config file, and confirm by
+  running a smoke command.
+
+  *Acceptance*: a user with no prior ASD context pastes the block
+  into their agent, and within ~30 seconds the agent reports
+  ASD installed + indexed + MCP connected, ready for
+  `asd_prepare_change`.
+
+- **t-003 Provable token-reduction benchmark + user-viewable
+  savings ledger**: define a reproducible methodology, ship a
+  command (`asd savings` or similar) that shows the user their
+  own measured savings on their own repo, and lead the README
+  with the conservative-but-defensible number from the benchmark.
+  graphify's 49–79× claims are overblown per recent field
+  commentary — ASD's pitch must hold up to scrutiny. Better to
+  publish "2.3× on average across N PR-shaped queries, here's the
+  methodology, here's how to reproduce on your repo" than a flashy
+  multiplier that gets dunked on.
+
+  *Acceptance*: a single `asd savings` invocation in any indexed
+  repo prints the measured ratio of (raw-folder context size) ÷
+  (ASD `prepare_change` output size) over a sample of recent
+  changes, with the methodology link. The same number is the lead
+  metric on the README.
+
+**Wave 2 — Onboarding + reach**
+
+- **t-004 `asd init --install-prompts`**: write
+  `<repo>/CLAUDE.md`, `<repo>/AGENTS.md`, and
+  `<repo>/.cursor/rules/asd.mdc` with concise nudges:
+  "Before any non-trivial edit, run `asd_prepare_change`. Before
+  assuming a symbol's behavior, run `asd_context_for`. Record
+  invariants you discover via `asd_invariant_add`." graphify ships
+  these via its installer; ASD must too. Files should be idempotent
+  and clearly attributed so users can edit/extend them.
+
+  *Acceptance*: running `asd init --install-prompts` in a repo
+  creates the three nudge files (or appends if they exist), all
+  containing a clearly delimited `<!-- asd:begin --> … <!--
+  asd:end -->` block so re-runs and upgrades are safe.
+
+- **t-005 Multi-assistant installers**: `asd install claude`,
+  `asd install codex`, `asd install cursor`, `asd install gemini`
+  each drop the assistant-specific MCP config + nudge file +
+  smoke verification. MCP standardizes the protocol but each
+  assistant has its own config file location and registration
+  format. Make it one command per tribe.
+
+  *Acceptance*: each installer subcommand modifies the right
+  config file (Claude Code: `~/.claude/config.json`; Cursor:
+  `.cursor/mcp.json` or workspace settings; Codex: `codex.json`;
+  Gemini CLI: appropriate location), preserves existing entries,
+  and prints what it did + how to undo.
+
+- **t-006 Modular language adapters**: a Swift-only shop
+  shouldn't carry Kotlin + Ruby + Go + Java + C# bytes in their
+  binary. Cargo features per language (`--features python,swift`)
+  with a sensible default bundle (top 3-4 by usage). The release
+  pipeline emits per-language binaries plus an `asd-full` for
+  everything. Per t-006 user input: "We should be separating. We
+  don't want to ship all language artifacts."
+
+  *Acceptance*: `cargo build --no-default-features --features
+  python` produces a binary that has only the Python adapter.
+  Default release ships the most-used adapters. `asd-full` ships
+  separately for users who want everything.
+
+**Wave 3 — Polish**
+
+- **t-007 Automate the LLM-augmented extraction pass**: ASD has
+  LLM-augmented ledger discovery in the latest release, but it's
+  agent-prompt-driven — the user has to manually ask the agent to
+  run it. Wire it up as a first-class subcommand (`asd enrich` or
+  similar) that drives the LLM pass over a configurable scope and
+  appends the discoveries to the ledger with appropriate provenance
+  tags. Opt-in only; respects API-key absence by no-op'ing.
+
+  *Acceptance*: `asd enrich --scope <name>` runs the extraction,
+  reports what it found, asks for confirmation per finding (or
+  auto-commits with `--yes`), and tags each entry with
+  `source: llm_enrich` for trust scoring.
+
+- **t-008 Brand the patterns**: ASD's structural ranking is real
+  and good (cliff detection, ledger-anchor pass, hybrid_boost,
+  file_score_floor, cohort cuts) but the names are flat. graphify
+  used "god nodes" + "Leiden" + "PageRank" to make standard graph
+  theory feel premium. ASD's equivalents deserve a naming pass:
+  "Trust Cliff," "Ledger Anchor," "Cohort Cut" — already in use
+  partially, but inconsistent across docs / source / output.
+  Single source-of-truth glossary, then a sweep.
+
+  *Acceptance*: glossary section in DESIGN.md or a dedicated
+  `GLOSSARY.md`; output keys and doc-comments referencing the
+  canonical names; one-pass `grep` shows no stale alternates.
+
+### Done when
+
+Wave 1 closed. Adoption is a delta function — three things have to
+work together (install, install prompt, headline metric) for the
+funnel to convert. Waves 2 and 3 are leverage multipliers but
+secondary; if Wave 1 lands and the metric holds up, ASD's adoption
+curve should change shape.
+
+### Filed but not in this plan
+
+These came out of the same comparison but are explicitly **not**
+Plan N work:
+
+- **Bi-temporal ledger model** (Graphiti pattern). The append-only
+  ledger with supersede works for now. Revisit if validity-window
+  use cases surface.
+- **Published latency SLO** (Graphiti P95 300ms). Internal probes
+  cover this; no external commitment needed yet.
+- **Human-facing view layer**. CTXone is the view layer. ASD and
+  CTXone are at different layers of the stack — ASD is
+  change-time agent context, CTXone is human-time exploration.
+  Both save tokens. Neither is a planning tool. ASD does not
+  need a second view layer.
+- **OSS-as-funnel re-architecture**. ASD already trends toward
+  "good OSS with paid pro features"; the BSL-1.1 + `asd-pro`
+  split holds. No restructure.
+- **Cost cautionary tale**. GraphRAG's $33K indexing cost is
+  the failure mode ASD already avoids by being local-first /
+  no-API-key in the core path. Continue holding that line.
+
+## Plan O (placeholder) — Enterprise vertical positioning
+
+Filed as a follow-up to Plan N's external-facing work. GraphRAG's
+enterprise traction in regulated verticals (healthcare, legal —
+documents requiring structural + audit-trail reasoning) is the
+playbook to study. ASD's chain-signed audit + policy gate are
+already enterprise-shaped; the missing piece is positioning,
+naming, and vertical-specific case studies. Defer until Plan N
+has shipped Wave 1 + Wave 2 — there's no point on
+vertical messaging until the install funnel converts.
+
