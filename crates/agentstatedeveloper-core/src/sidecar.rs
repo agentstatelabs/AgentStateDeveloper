@@ -716,6 +716,10 @@ pub fn hydrate_from_dir(
                             entry.entry_id, rebind.to_symbol_id
                         ),
                     );
+                    // Best-effort during rebind replay. A failure here
+                    // leaves the ledger-by-symbol index slightly stale;
+                    // the next `asd repair` reconciles it. Hydrate must
+                    // keep going so the rest of the sidecar lands.
                     let _ = repo.set_json(ref_name, &idx_path, &idx_val, idx_opts);
 
                     let old_path =
@@ -725,6 +729,9 @@ pub fn hydrate_from_dir(
                         IntentCategory::Refine,
                         format!("remove stale entry {} after rebind replay", entry.entry_id),
                     );
+                    // Best-effort: same rationale as set_json above —
+                    // a leftover entry at the old path is cleanable via
+                    // `asd repair` and must not abort hydrate.
                     let _ = repo.delete(ref_name, &old_path, opts);
                 }
             }
@@ -754,10 +761,16 @@ pub fn hydrate_from_dir(
     // Stamp meta/hydrated-at so sidecar_lifecycle_state() can return Hydrated.
     // Also clear any stale fresh-reset sentinel — the hydrate supersedes it.
     let meta_dir = root.join("meta");
+    // Best-effort: if the hydrated-at stamp fails to write, lifecycle
+    // state falls back to "Stale" on the next status check — annoying
+    // but not corruption. We've already done the real work above; don't
+    // surface a hydrate failure for a metadata side effect.
     let _ = write_text_atomic(
         &meta_dir.join("hydrated-at"),
         &format!("{}\n", chrono::Utc::now().to_rfc3339()),
     );
+    // Idempotent cleanup: the sentinel may not exist (most hydrates
+    // are non-reset), and a removal error here can't undo the hydrate.
     let _ = fs::remove_file(meta_dir.join("fresh-reset"));
 
     Ok(HydrateSummary {

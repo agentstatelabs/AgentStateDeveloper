@@ -155,6 +155,9 @@ fn save_snapshot(path: &PathBuf, snapshot: &Value) {
     if history.len() > 100 {
         history.drain(..history.len() - 100);
     }
+    // Best-effort: scorecard history is observability metadata. A
+    // write failure (read-only fs, disk full) shouldn't fail the
+    // user-facing scorecard command — the score is already printed.
     let _ = std::fs::write(
         path,
         serde_json::to_string_pretty(&history).unwrap_or_default(),

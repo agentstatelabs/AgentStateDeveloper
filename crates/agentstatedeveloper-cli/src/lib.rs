@@ -26,6 +26,9 @@ pub use config::Config;
 static AUDIT_SINK_OVERRIDE: OnceLock<Arc<dyn AuditSink>> = OnceLock::new();
 
 pub fn set_audit_sink_override(sink: Arc<dyn AuditSink>) {
+    // First-write-wins: OnceLock::set returns Err if already initialized.
+    // `asd-pro` installs once at startup; later calls (test re-init, etc.)
+    // are intentional no-ops — the first sink remains authoritative.
     let _ = AUDIT_SINK_OVERRIDE.set(sink);
 }
 
@@ -38,6 +41,8 @@ pub(crate) fn audit_sink_override() -> Option<Arc<dyn AuditSink>> {
 static RATIFY_OVERRIDE: OnceLock<Arc<dyn RatifyOps>> = OnceLock::new();
 
 pub fn set_ratify_ops_override(ratify: Arc<dyn RatifyOps>) {
+    // First-write-wins (see set_audit_sink_override): the OSS->pro
+    // installer runs once; double-set is a no-op by design.
     let _ = RATIFY_OVERRIDE.set(ratify);
 }
 
