@@ -101,7 +101,9 @@ pub use search_fts::{
 pub use ser_helpers::{drop_empty_recursive, drop_empty_top_level};
 pub use context::assemble_symbol_context;
 pub use prepare_change::{
-    CLIFF_RATIO_THRESHOLD, FILE_SCORE_FLOOR_RATIO, cliff_cutoff_index, file_score_floor,
+    CLIFF_RATIO_THRESHOLD, CandidateAggregates, FILE_SCORE_FLOOR_RATIO, FileScoreTuple,
+    aggregate_candidate_data, cliff_cutoff_index, dirty_files_for_change, explain_conflict_risk,
+    file_score_floor, finalize_file_scores, propagate_caller_invariants,
 };
 pub use sidecar::{
     HydrateSummary, SidecarState, SyncSummary, hydrate_from_dir, mark_fresh_reset, prune_sidecar,

@@ -2975,208 +2975,42 @@ impl AsdMcpServer {
 
         let recency = gather_recency(200, 14.0);
         let layer_order = intent_layer_order(intent);
-        let mut by_layer: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
-        let mut design_invariants: Vec<serde_json::Value> = Vec::new();
-        let mut known_hazards: Vec<serde_json::Value> = Vec::new();
-        let mut validation_scenarios_ledger: Vec<serde_json::Value> = Vec::new();
-        let mut effects_summary: Vec<serde_json::Value> = Vec::new();
-        // Plan A t-009: file_scores carries (score, file, layer, days, hot,
-        // top_symbol, why) so each suggested file can answer "why this file?".
-        // Files below 25% of top score are dropped to reduce broad-query noise.
-        //
-        // Plan E t-006: shared helpers live in
-        // `agentstatedeveloper_core::prepare_change` (FileScoreEntry,
-        // file_score_floor(), push_file_score()). The orchestration loop
-        // below is still duplicated with the CLI handler; Plan F lifts the
-        // full walk. Prefer the core helpers when editing scoring logic.
-        let mut file_scores: Vec<(f64, String, String, Option<f64>, bool, String, String)> =
-            Vec::new();
-        let mut seen_files: HashSet<String> = HashSet::new();
-        let mut seen_inv: HashSet<String> = HashSet::new();
-        let mut seen_vs: HashSet<String> = HashSet::new();
-        let mut seen_effect: HashSet<String> = HashSet::new();
-        let mut top_sym_id: Option<String> = None;
-        // Effects floor stays at 25% (broad signal — admit any
-        // symbol with even loosely-relevant effects).
-        let effect_score_floor = candidates.first().map(|(s, _)| s * 0.25).unwrap_or(0.0);
-        // ExampleFlow refinement #2 (1.0.83): file floor bumped to
-        // 40% via the core helper (was 0.25, shared with effects).
-        // Diverged because the noise-suppression need is asymmetric:
-        // surfacing one unrelated file is worse than missing one
-        // tangential effect.
-        let file_score_floor = agentstatedeveloper_core::file_score_floor(&candidates);
 
-        for (score, qname) in &candidates {
-            let sym = match index.get_symbol_by_qname(&ref_name, qname) {
-                Ok(Some(s)) => s,
-                _ => continue,
-            };
-            let tier = symbol_tier(&sym.file);
-            let layer = classify_layer_sym(&sym.file, &sym.qname, tier, &layer_overrides);
-            let summary = extract_summary(sym.doc.as_deref(), sym.signature.as_deref());
-            let rec = recency.get(&sym.file);
-            let ltd = rec.and_then(|r| r.last_touched_days);
-            let hot = rec.map(|r| r.hot).unwrap_or(false);
-            if top_sym_id.is_none() {
-                top_sym_id = Some(sym.symbol_id.clone());
-            }
-            let entries = ledger_store
-                .list_entries(&ref_name, &sym.symbol_id)
-                .unwrap_or_default();
-            if seen_files.insert(sym.file.clone()) && *score >= file_score_floor {
-                let reasons = explain_match(&sym, &tokens, &entries, hot);
-                let why = reasons
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| format!("contains symbol {}", sym.qname));
-                file_scores.push((
-                    *score,
-                    sym.file.clone(),
-                    layer.to_string(),
-                    ltd,
-                    hot,
-                    sym.qname.clone(),
-                    why,
-                ));
-            }
-            for entry in &entries {
-                match entry.kind {
-                    LedgerKind::Invariant => {
-                        if seen_inv.insert(entry.summary.clone()) {
-                            // 1.0.86: include entry_id so downstream
-                            // sections (preserve, suggested_test_coverage,
-                            // scenario_tests) can ref instead of duplicate.
-                            design_invariants.push(serde_json::json!({
-                                "entry_id": entry.entry_id,
-                                "summary": entry.summary,
-                                "source": sym.qname,
-                            }));
-                        }
-                    }
-                    LedgerKind::Hazard => {
-                        known_hazards.push(
-                            serde_json::json!({ "summary": entry.summary, "source": sym.qname }),
-                        );
-                    }
-                    LedgerKind::ValidationScenario => {
-                        if seen_vs.insert(entry.summary.clone()) {
-                            validation_scenarios_ledger.push(serde_json::json!({ "scenario": entry.summary, "source": sym.qname }));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if *score >= effect_score_floor {
-                if let Ok(Some(decl)) = effect_store.get_effects(&ref_name, &sym.symbol_id) {
-                    let has_high_signal = decl.declared.iter().any(|e| !e.effect.is_low_signal());
-                    for eff in &decl.declared {
-                        if has_high_signal && eff.effect.is_low_signal() {
-                            continue;
-                        }
-                        let cat = eff.effect.as_str().to_string();
-                        let key = format!("{}:{}", cat, sym.qname);
-                        if seen_effect.insert(key) {
-                            effects_summary
-                                .push(serde_json::json!({ "category": cat, "source": sym.qname }));
-                        }
-                    }
-                }
-            }
-            let ep = serde_json::json!({
-                "score": score, "qname": sym.qname, "file": sym.file,
-                "line": sym.start.line, "layer": layer, "summary": summary,
-                "last_touched_days": ltd, "hot": hot,
-            });
-            by_layer
-                .entry(layer.to_string())
-                .or_insert_with(|| serde_json::Value::Array(vec![]))
-                .as_array_mut()
-                .unwrap()
-                .push(ep);
-        }
-
-        // Plan J t-001: invariant propagation from direct callers.
-        // See the CLI handler in commands/prepare_change.rs for the
-        // full rationale; this mirror keeps the MCP `prepare_change`
-        // tool surface symmetric.
-        let mut candidate_sym_ids_pc: Vec<(String, String)> = Vec::new();
-        for (_, qname) in candidates.iter() {
-            if let Ok(Some(s)) = index.get_symbol_by_qname(&ref_name, qname) {
-                candidate_sym_ids_pc.push((s.symbol_id, s.qname));
-            }
-        }
-        let mut caller_ids_seen_pc: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut caller_visit_order_pc: Vec<(String, String)> = Vec::new();
-        for (cand_sym_id, _) in &candidate_sym_ids_pc {
-            let direct_callers = index
-                .get_callers(&ref_name, cand_sym_id)
-                .unwrap_or_default();
-            for caller_id in direct_callers {
-                if candidate_sym_ids_pc.iter().any(|(sid, _)| sid == &caller_id) {
-                    continue;
-                }
-                if caller_ids_seen_pc.insert(caller_id.clone()) {
-                    caller_visit_order_pc.push((cand_sym_id.clone(), caller_id));
-                }
-            }
-        }
-        let caller_id_strs: Vec<&str> = caller_visit_order_pc
-            .iter()
-            .map(|(_, cid)| cid.as_str())
-            .collect();
-        let caller_resolved = SearchFtsDb::open(&db_path)
-            .ok()
-            .map(|fts| fts.resolve_symbol_ids_bulk(&caller_id_strs))
-            .unwrap_or_default();
-        // Fallback qname lookup when FTS cache is cold (fresh post-
-        // import, or test fixtures writing edges directly). Builds
-        // the reverse index once via a single qname-tree walk.
-        let need_fallback_pc = caller_visit_order_pc
-            .iter()
-            .any(|(_, cid)| !caller_resolved.contains_key(cid.as_str()));
-        let fallback_id_to_qname_pc: std::collections::HashMap<String, String> =
-            if need_fallback_pc {
-                let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-                match engine.repo.get_tree(&ref_name, &prefix) {
-                    Ok(serde_json::Value::Object(m)) => m
-                        .into_iter()
-                        .filter_map(|(qn, v)| {
-                            v.get("symbol_id")
-                                .and_then(|v| v.as_str())
-                                .map(|sid| (sid.to_string(), qn))
-                        })
-                        .collect(),
-                    _ => std::collections::HashMap::new(),
-                }
-            } else {
-                std::collections::HashMap::new()
-            };
-        for (_cand_sym_id, caller_id) in &caller_visit_order_pc {
-            let caller_qname = caller_resolved
-                .get(caller_id.as_str())
-                .map(|r| r.qname.as_str())
-                .or_else(|| fallback_id_to_qname_pc.get(caller_id).map(String::as_str));
-            let Some(caller_qname) = caller_qname else {
-                continue;
-            };
-            let caller_entries = ledger_store
-                .list_entries(&ref_name, caller_id)
-                .unwrap_or_default();
-            for entry in caller_entries {
-                if !matches!(entry.kind, LedgerKind::Invariant) {
-                    continue;
-                }
-                if seen_inv.insert(entry.summary.clone()) {
-                    // 1.0.86: include entry_id (see other push site).
-                    design_invariants.push(serde_json::json!({
-                        "entry_id": entry.entry_id,
-                        "summary": entry.summary,
-                        "source": caller_qname,
-                        "from_caller": true,
-                    }));
-                }
-            }
-        }
+        // Plan M t-004 (1.0.98): scoring walk lifted to
+        // agentstatedeveloper_core::prepare_change. Single source of
+        // truth shared with the CLI handler. MCP entry_points now
+        // include confidence/bucket/match_reasons (previously
+        // CLI-only) and likely_edit_files carries conflict_detail —
+        // additive enrichments, no field removals.
+        let agg = agentstatedeveloper_core::aggregate_candidate_data(
+            &engine,
+            &index,
+            &ledger_store,
+            &effect_store,
+            &candidates,
+            &tokens,
+            &recency,
+            &layer_overrides,
+        );
+        let agentstatedeveloper_core::CandidateAggregates {
+            mut by_layer,
+            mut design_invariants,
+            known_hazards,
+            validation_scenarios_ledger,
+            effects_summary,
+            mut file_scores,
+            top_sym_id,
+            mut seen_inv,
+        } = agg;
+        let propagated = agentstatedeveloper_core::propagate_caller_invariants(
+            &engine,
+            &index,
+            &ledger_store,
+            &db_path,
+            &candidates,
+            &mut seen_inv,
+        );
+        design_invariants.extend(propagated);
 
         // Reorder by_layer.
         let mut ordered: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
@@ -3186,38 +3020,12 @@ impl AsdMcpServer {
             }
         }
 
-        file_scores.sort_by(|a, b| {
-            b.4.cmp(&a.4)
-                .then_with(|| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal))
-        });
-        // 1.0.87: file-level cliff detection (mirrors CLI prepare_change).
-        let mut score_only_sorted: Vec<f64> = file_scores.iter().map(|f| f.0).collect();
-        score_only_sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-        let cliff_cut = agentstatedeveloper_core::cliff_cutoff_index(
-            score_only_sorted.iter().copied(),
-        );
-        if cliff_cut < file_scores.len() {
-            let cutoff_score = score_only_sorted[cliff_cut - 1];
-            file_scores.retain(|f| f.0 >= cutoff_score);
-        }
         let dirty_files_pc = git_dirty_files();
-        let likely_edit_files: Vec<serde_json::Value> = file_scores
-            .iter()
-            .map(|(score, file, layer, days, hot, top_symbol, why)| {
-                // Plan J t-003: use the unified core classifier so
-                // CLI and MCP agree on the role taxonomy (was
-                // inline-divergent before — MCP missed fixture /
-                // script / generated / view / viewmodel).
-                let file_role = agentstatedeveloper_core::classify_file_role(file);
-                let conflict_risk = dirty_files_pc.contains(file.as_str());
-                serde_json::json!({
-                    "file": file, "layer": layer, "score": score,
-                    "last_touched_days": days, "hot": hot,
-                    "file_role": file_role, "conflict_risk": conflict_risk,
-                    "top_symbol": top_symbol, "why": why,
-                })
-            })
-            .collect();
+        let likely_edit_files = agentstatedeveloper_core::finalize_file_scores(
+            &mut file_scores,
+            &dirty_files_pc,
+            true,
+        );
 
         // Affected tests via BFS from top entry point.
         let mut affected_tests: Vec<serde_json::Value> = Vec::new();
