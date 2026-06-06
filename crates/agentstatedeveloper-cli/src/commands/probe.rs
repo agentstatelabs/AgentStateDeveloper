@@ -1634,16 +1634,10 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
 
     let kind = map.get("kind").and_then(|v| v.as_str()).unwrap_or("");
 
-    // Resolve a possibly dotted key path (e.g. "safe_change_recipe.reference_only") into
-    // the nested Value.
-    fn resolve_key<'a>(output: &'a Value, key: &str) -> Option<&'a Value> {
-        let mut cur = output;
-        for part in key.split('.') {
-            cur = cur.get(part)?;
-        }
-        Some(cur)
-    }
-
+    // Plan M t-005 (1.0.100): the previous nested `resolve_key` closure
+    // was a duplicate of the module-level `dot_path` helper. Calling
+    // `dot_path` directly avoids the dup. Both walk dot-separated key
+    // paths and return Option<&Value>; semantics are identical.
     let empty_arr: Vec<Value> = Vec::new();
 
     match kind {
@@ -1652,7 +1646,7 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
             let key = str_field(map, "key")?;
             let field = str_field(map, "field")?;
             let value = str_field(map, "value")?;
-            let arr = resolve_key(output, key)
+            let arr = dot_path(output, key)
                 .and_then(|v| v.as_array())
                 .unwrap_or(&empty_arr);
             let found: Vec<&str> = arr
@@ -1675,7 +1669,7 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
             let key = str_field(map, "key")?;
             let field = str_field(map, "field")?;
             let value = str_field(map, "value")?;
-            let arr = resolve_key(output, key)
+            let arr = dot_path(output, key)
                 .and_then(|v| v.as_array())
                 .unwrap_or(&empty_arr);
             let found = arr.iter().any(|item| {
@@ -1694,33 +1688,7 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         }
 
         // qname_rank_lte: result whose qname contains `fragment` is at rank ≤ max_rank (1-based).
-        "qname_rank_lte" => {
-            let fragment = str_field(map, "fragment")?;
-            let max_rank = u64_field(map, "max_rank")?;
-            let results = output
-                .get("results")
-                .and_then(|v| v.as_array())
-                .unwrap_or(&empty_arr);
-            let pos = results.iter().position(|r| {
-                r.get("qname")
-                    .and_then(|v| v.as_str())
-                    .map_or(false, |q| q.contains(fragment))
-            });
-            match pos {
-                Some(idx) if (idx as u64 + 1) <= max_rank => Ok(()),
-                Some(idx) => Err(format!(
-                    "qname_rank_lte: {:?} found at rank {} (max_rank={})",
-                    fragment,
-                    idx + 1,
-                    max_rank
-                )),
-                None => Err(format!(
-                    "qname_rank_lte: no result qname contains {:?} (checked {} results)",
-                    fragment,
-                    results.len()
-                )),
-            }
-        }
+        "qname_rank_lte" => eval_qname_rank_lte(map, output),
 
         // Plan J t-019: qname_rank_eq — strict variant of
         // qname_rank_lte. Passes ONLY when the matching qname is at
@@ -1775,77 +1743,8 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
             }
         }
 
-        // cluster_winner_kind_not: cluster_debug entry whose doc_file contains `doc_stem`
-        // must not have winner qname containing `kind_not` (e.g. "Tests").
-        "cluster_winner_kind_not" => {
-            let doc_stem = str_field(map, "doc_stem")?;
-            let kind_not = str_field(map, "kind_not")?;
-            let dbg = output
-                .get("cluster_debug")
-                .and_then(|v| v.as_array())
-                .unwrap_or(&empty_arr);
-            let entry = dbg.iter().find(|e| {
-                e.get("doc_file")
-                    .and_then(|v| v.as_str())
-                    .map_or(false, |f| {
-                        f.to_lowercase().contains(&doc_stem.to_lowercase())
-                    })
-            });
-            match entry {
-                None => Err(format!(
-                    "cluster_winner_kind_not: no cluster_debug entry matches doc_stem {:?}",
-                    doc_stem
-                )),
-                Some(e) => {
-                    let winner = e.get("winner_selected").unwrap_or(&Value::Null);
-                    let qname = winner.get("qname").and_then(|v| v.as_str()).unwrap_or("");
-                    if qname.contains(kind_not) {
-                        Err(format!(
-                            "cluster_winner_kind_not: winner {:?} contains {:?}",
-                            qname, kind_not
-                        ))
-                    } else {
-                        Ok(())
-                    }
-                }
-            }
-        }
-
-        // cluster_winner_qname_contains: cluster_debug entry whose doc_file contains `doc_stem`
-        // must have winner qname containing `fragment`.
-        "cluster_winner_qname_contains" => {
-            let doc_stem = str_field(map, "doc_stem")?;
-            let fragment = str_field(map, "fragment")?;
-            let dbg = output
-                .get("cluster_debug")
-                .and_then(|v| v.as_array())
-                .unwrap_or(&empty_arr);
-            let entry = dbg.iter().find(|e| {
-                e.get("doc_file")
-                    .and_then(|v| v.as_str())
-                    .map_or(false, |f| {
-                        f.to_lowercase().contains(&doc_stem.to_lowercase())
-                    })
-            });
-            match entry {
-                None => Err(format!(
-                    "cluster_winner_qname_contains: no cluster_debug entry matches doc_stem {:?}",
-                    doc_stem
-                )),
-                Some(e) => {
-                    let winner = e.get("winner_selected").unwrap_or(&Value::Null);
-                    let qname = winner.get("qname").and_then(|v| v.as_str()).unwrap_or("");
-                    if qname.to_lowercase().contains(&fragment.to_lowercase()) {
-                        Ok(())
-                    } else {
-                        Err(format!(
-                            "cluster_winner_qname_contains: winner {:?} does not contain {:?}",
-                            qname, fragment
-                        ))
-                    }
-                }
-            }
-        }
+        "cluster_winner_kind_not" => eval_cluster_winner_kind_not(map, output),
+        "cluster_winner_qname_contains" => eval_cluster_winner_qname_contains(map, output),
 
         // no_duplicate_summaries: no two suggested_entries share the same summary text.
         "no_duplicate_summaries" => {
@@ -2511,89 +2410,14 @@ fn eval_assert(assert: &toml::Value, output: &Value) -> Result<(), String> {
         // all_items_have_field: every object in a dot-path array has `field` non-null/non-empty.
         // Required: array (dot-path to array), field (field name within each item).
         // Example: { kind = "all_items_have_field", array = "likely_edit_files", field = "rationale" }
-        "all_items_have_field" => {
-            let array_path = str_field(map, "array")?;
-            let field = str_field(map, "field")?;
-            let arr = dot_path(output, array_path)
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            if arr.is_empty() {
-                // Empty array trivially passes (nothing to check).
-                return Ok(());
-            }
-            let missing: Vec<String> = arr
-                .iter()
-                .filter_map(|item| {
-                    let present = item
-                        .get(field)
-                        .map(|v| !v.is_null() && v.as_str().map_or(true, |s| !s.is_empty()))
-                        .unwrap_or(false);
-                    if !present {
-                        Some(
-                            item.get("file")
-                                .and_then(Value::as_str)
-                                .unwrap_or("?")
-                                .to_string(),
-                        )
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if missing.is_empty() {
-                Ok(())
-            } else {
-                Err(format!(
-                    "all_items_have_field: {} items in {} missing field {:?}: {:?}",
-                    missing.len(),
-                    array_path,
-                    field,
-                    &missing[..missing.len().min(5)]
-                ))
-            }
-        }
+        "all_items_have_field" => eval_all_items_have_field(map, output),
 
         // file_field_contains: in a dot-path array, find item whose "file" contains file_fragment,
         // then check that item's `field` contains the substring `value_contains`.
         // Required: array (dot-path), file_fragment (string), field (string), value_contains (string).
         // Example: { kind = "file_field_contains", array = "safe_change_recipe.reference_only",
         //            file_fragment = "WaveformCanvas", field = "rationale", value_contains = "surface" }
-        "file_field_contains" => {
-            let array_path = str_field(map, "array")?;
-            let file_fragment = str_field(map, "file_fragment")?;
-            let field = str_field(map, "field")?;
-            let value_contains = str_field(map, "value_contains")?;
-            let arr = dot_path(output, array_path)
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let item = arr.iter().find(|item| {
-                item.get("file")
-                    .and_then(Value::as_str)
-                    .map_or(false, |f| f.contains(file_fragment))
-            });
-            match item {
-                None => Err(format!(
-                    "file_field_contains: no item with file containing {:?} found in {}",
-                    file_fragment, array_path
-                )),
-                Some(item) => {
-                    let val = item.get(field).and_then(Value::as_str).unwrap_or("");
-                    if val.contains(value_contains) {
-                        Ok(())
-                    } else {
-                        Err(format!(
-                            "file_field_contains: item {:?}.{} = {:?} does not contain {:?}",
-                            item.get("file").and_then(Value::as_str).unwrap_or("?"),
-                            field,
-                            val,
-                            value_contains
-                        ))
-                    }
-                }
-            }
-        }
+        "file_field_contains" => eval_file_field_contains(map, output),
 
         // json_field_present: dot-path field must exist and be non-null.
         // Required: field (dot-path string).
@@ -3229,6 +3053,208 @@ fn add_probe(cfg: &Config, args: ProbeAddArgs) -> Result<()> {
     std::fs::write(&path, &content)?;
     println!("Added probe {:?} to {}", args.name, path.display());
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Plan M t-005 (1.0.100): extracted assertion evaluators.
+//
+// `eval_assert` (above) is a 1000-line dispatch over 41 assertion kinds.
+// The five longest arms have been lifted into private fns so the dispatch
+// match is readable at a glance and each eval is testable in isolation.
+//
+// Pattern for future arm extraction: each helper takes (map, output) and
+// returns the same Result<(), String>. The dispatcher arm becomes a
+// single-line `"<kind>" => eval_<kind>(map, output),`. No closures
+// capture `empty_arr` — each helper declares its own when needed.
+// ---------------------------------------------------------------------------
+
+fn eval_qname_rank_lte(
+    map: &toml::map::Map<String, toml::Value>,
+    output: &Value,
+) -> Result<(), String> {
+    let fragment = str_field(map, "fragment")?;
+    let max_rank = u64_field(map, "max_rank")?;
+    let empty_arr: Vec<Value> = Vec::new();
+    let results = output
+        .get("results")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&empty_arr);
+    let pos = results.iter().position(|r| {
+        r.get("qname")
+            .and_then(|v| v.as_str())
+            .map_or(false, |q| q.contains(fragment))
+    });
+    match pos {
+        Some(idx) if (idx as u64 + 1) <= max_rank => Ok(()),
+        Some(idx) => Err(format!(
+            "qname_rank_lte: {:?} found at rank {} (max_rank={})",
+            fragment,
+            idx + 1,
+            max_rank
+        )),
+        None => Err(format!(
+            "qname_rank_lte: no result qname contains {:?} (checked {} results)",
+            fragment,
+            results.len()
+        )),
+    }
+}
+
+fn eval_cluster_winner_kind_not(
+    map: &toml::map::Map<String, toml::Value>,
+    output: &Value,
+) -> Result<(), String> {
+    let doc_stem = str_field(map, "doc_stem")?;
+    let kind_not = str_field(map, "kind_not")?;
+    let empty_arr: Vec<Value> = Vec::new();
+    let dbg = output
+        .get("cluster_debug")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&empty_arr);
+    let entry = dbg.iter().find(|e| {
+        e.get("doc_file")
+            .and_then(|v| v.as_str())
+            .map_or(false, |f| f.to_lowercase().contains(&doc_stem.to_lowercase()))
+    });
+    match entry {
+        None => Err(format!(
+            "cluster_winner_kind_not: no cluster_debug entry matches doc_stem {:?}",
+            doc_stem
+        )),
+        Some(e) => {
+            let winner = e.get("winner_selected").unwrap_or(&Value::Null);
+            let qname = winner.get("qname").and_then(|v| v.as_str()).unwrap_or("");
+            if qname.contains(kind_not) {
+                Err(format!(
+                    "cluster_winner_kind_not: winner {:?} contains {:?}",
+                    qname, kind_not
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+fn eval_cluster_winner_qname_contains(
+    map: &toml::map::Map<String, toml::Value>,
+    output: &Value,
+) -> Result<(), String> {
+    let doc_stem = str_field(map, "doc_stem")?;
+    let fragment = str_field(map, "fragment")?;
+    let empty_arr: Vec<Value> = Vec::new();
+    let dbg = output
+        .get("cluster_debug")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&empty_arr);
+    let entry = dbg.iter().find(|e| {
+        e.get("doc_file")
+            .and_then(|v| v.as_str())
+            .map_or(false, |f| f.to_lowercase().contains(&doc_stem.to_lowercase()))
+    });
+    match entry {
+        None => Err(format!(
+            "cluster_winner_qname_contains: no cluster_debug entry matches doc_stem {:?}",
+            doc_stem
+        )),
+        Some(e) => {
+            let winner = e.get("winner_selected").unwrap_or(&Value::Null);
+            let qname = winner.get("qname").and_then(|v| v.as_str()).unwrap_or("");
+            if qname.to_lowercase().contains(&fragment.to_lowercase()) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "cluster_winner_qname_contains: winner {:?} does not contain {:?}",
+                    qname, fragment
+                ))
+            }
+        }
+    }
+}
+
+fn eval_all_items_have_field(
+    map: &toml::map::Map<String, toml::Value>,
+    output: &Value,
+) -> Result<(), String> {
+    let array_path = str_field(map, "array")?;
+    let field = str_field(map, "field")?;
+    let arr = dot_path(output, array_path)
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if arr.is_empty() {
+        // Empty array trivially passes (nothing to check).
+        return Ok(());
+    }
+    let missing: Vec<String> = arr
+        .iter()
+        .filter_map(|item| {
+            let present = item
+                .get(field)
+                .map(|v| !v.is_null() && v.as_str().map_or(true, |s| !s.is_empty()))
+                .unwrap_or(false);
+            if !present {
+                Some(
+                    item.get("file")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?")
+                        .to_string(),
+                )
+            } else {
+                None
+            }
+        })
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "all_items_have_field: {} items in {} missing field {:?}: {:?}",
+            missing.len(),
+            array_path,
+            field,
+            &missing[..missing.len().min(5)]
+        ))
+    }
+}
+
+fn eval_file_field_contains(
+    map: &toml::map::Map<String, toml::Value>,
+    output: &Value,
+) -> Result<(), String> {
+    let array_path = str_field(map, "array")?;
+    let file_fragment = str_field(map, "file_fragment")?;
+    let field = str_field(map, "field")?;
+    let value_contains = str_field(map, "value_contains")?;
+    let arr = dot_path(output, array_path)
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let item = arr.iter().find(|item| {
+        item.get("file")
+            .and_then(Value::as_str)
+            .map_or(false, |f| f.contains(file_fragment))
+    });
+    match item {
+        None => Err(format!(
+            "file_field_contains: no item with file containing {:?} found in {}",
+            file_fragment, array_path
+        )),
+        Some(item) => {
+            let val = item.get(field).and_then(Value::as_str).unwrap_or("");
+            if val.contains(value_contains) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "file_field_contains: item {:?}.{} = {:?} does not contain {:?}",
+                    item.get("file").and_then(Value::as_str).unwrap_or("?"),
+                    field,
+                    val,
+                    value_contains
+                ))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
