@@ -92,28 +92,60 @@ async fn main() -> Result<()> {
 /// empty, or has no active entry — we deliberately do NOT silently fall back
 /// to `./.asd-state.db`, because that masks misconfiguration with what looks
 /// like a successful startup on the wrong db.
+///
+/// 1.1.11 (parity regression follow-up): when `./.asd-state.db` exists in
+/// the cwd, the error includes the absolute path so the operator can copy-
+/// paste it into `ASD_DB=...`. Detection only, no silent fallback — the
+/// design intent above stands.
 fn resolve_db_from_registry() -> Result<PathBuf> {
     use agentstatedeveloper_core::registry::Registry;
 
+    let cwd_hint = cwd_db_hint();
     let reg = Registry::load().context(
-        "ASD_DB not set and could not read repo registry. Run `asd repo add` then \
-         `asd repo use <name>`, or start with ASD_DB=<path>.",
+        cwd_aware_error("ASD_DB not set and could not read repo registry.", &cwd_hint),
     )?;
     if let Some(active) = reg.active() {
         tracing::info!(name = %active.name, "resolved db from registry active repo");
         return Ok(active.path.clone());
     }
     let known: Vec<String> = reg.list().iter().map(|e| e.name.clone()).collect();
-    let hint = if known.is_empty() {
-        "Registry is empty. Run `asd repo add` then `asd repo use <name>`, \
-         or start with ASD_DB=<path>."
-            .to_string()
+    let base = if known.is_empty() {
+        "Registry is empty.".to_string()
     } else {
         format!(
-            "No active repo. Run `asd repo use <name>` (known: {}), \
-             or start with ASD_DB=<path>.",
+            "No active repo. Run `asd repo use <name>` (known: {}).",
             known.join(", ")
         )
     };
-    Err(anyhow::anyhow!(hint))
+    Err(anyhow::anyhow!(cwd_aware_error(&base, &cwd_hint)))
+}
+
+/// If `./.asd-state.db` exists in cwd, return its absolute path as a hint
+/// for the error message. Returns None when no such file exists or the cwd
+/// cannot be resolved.
+fn cwd_db_hint() -> Option<PathBuf> {
+    let candidate = std::env::current_dir().ok()?.join(".asd-state.db");
+    if candidate.is_file() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+/// Build the "ASD_DB not set" error message. When the operator clearly
+/// has an indexed db at `./.asd-state.db`, surface that exact path so
+/// the recovery step is a literal copy-paste.
+fn cwd_aware_error(base: &str, cwd_hint: &Option<PathBuf>) -> String {
+    match cwd_hint {
+        Some(p) => format!(
+            "{base} Detected ./.asd-state.db at the current working \
+             directory — start with `ASD_DB={}` to use it, or run \
+             `asd repo add` then `asd repo use <name>` to register it.",
+            p.display()
+        ),
+        None => format!(
+            "{base} Run `asd repo add` then `asd repo use <name>`, \
+             or start with ASD_DB=<path>."
+        ),
+    }
 }
