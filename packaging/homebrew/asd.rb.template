@@ -1,0 +1,72 @@
+# frozen_string_literal: true
+
+# AgentStateDeveloper (ASD) Homebrew formula template.
+#
+# Plan N t-001 (1.1.13): the release workflow renders this template for
+# each tag by substituting:
+#
+#   {{VERSION}}               — release version without leading 'v' (e.g. "1.1.13")
+#   {{URL_DARWIN_ARM64}}      — macOS arm64 tarball URL
+#   {{SHA_DARWIN_ARM64}}      — macOS arm64 tarball sha256
+#   {{URL_DARWIN_X86_64}}     — macOS x86_64 tarball URL
+#   {{SHA_DARWIN_X86_64}}     — macOS x86_64 tarball sha256
+#   {{URL_LINUX_X86_64}}      — Linux x86_64 tarball URL
+#   {{SHA_LINUX_X86_64}}      — Linux x86_64 tarball sha256
+#   {{URL_LINUX_ARM64}}       — Linux arm64 tarball URL
+#   {{SHA_LINUX_ARM64}}       — Linux arm64 tarball sha256
+#
+# The rendered output goes to agentstatelabs/homebrew-tap/Formula/asd.rb.
+
+class Asd < Formula
+  desc "Code-level context and audit overlay for agent-authored code"
+  homepage "https://github.com/agentstatelabs/asd"
+  version "{{VERSION}}"
+  license "BUSL-1.1"
+
+  on_macos do
+    on_arm do
+      url "{{URL_DARWIN_ARM64}}"
+      sha256 "{{SHA_DARWIN_ARM64}}"
+    end
+    on_intel do
+      url "{{URL_DARWIN_X86_64}}"
+      sha256 "{{SHA_DARWIN_X86_64}}"
+    end
+  end
+
+  on_linux do
+    on_intel do
+      url "{{URL_LINUX_X86_64}}"
+      sha256 "{{SHA_LINUX_X86_64}}"
+    end
+    on_arm do
+      url "{{URL_LINUX_ARM64}}"
+      sha256 "{{SHA_LINUX_ARM64}}"
+    end
+  end
+
+  def install
+    bin.install "asd"
+    bin.install "asd-mcp"
+    bin.install "asd-serve"
+  end
+
+  def caveats
+    <<~EOS
+      AgentStateDeveloper is installed. Next steps:
+
+        asd index .              # Index the current repo
+        asd install claude       # Register MCP with Claude Code
+        asd install cursor       # ...or Cursor / codex / gemini
+        asd prepare-change "..." # First context query
+
+      Docs:  https://github.com/agentstatelabs/asd#readme
+      MCP:   uses ASD_DB env var or `asd repo use <name>` (registry-tracked).
+    EOS
+  end
+
+  test do
+    assert_match "asd", shell_output("#{bin}/asd --version")
+    assert_match "asd-mcp", shell_output("#{bin}/asd-mcp --version 2>&1", 0..1)
+  end
+end

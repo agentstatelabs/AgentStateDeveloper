@@ -1,0 +1,141 @@
+# Release workflow — Plan N t-001 (1.1.13)
+#
+# Triggered on tag push (v*.*.*). Builds asd, asd-mcp, asd-serve for four
+# targets (mac arm64/x86_64, linux x86_64/arm64, windows x86_64), uploads
+# them in two layouts:
+#
+#   1. Flat per-binary downloads (for install.sh / install.ps1):
+#        releases/download/<TAG>/<bin>-<TARGET>
+#        releases/download/<TAG>/<bin>-<TARGET>.exe
+#
+#   2. Tarballs (for Homebrew):
+#        releases/download/<TAG>/asd-<VERSION>-<TARGET>.tar.gz
+#        (contains asd, asd-mcp, asd-serve at top level)
+#
+# After the release publishes, the homebrew-tap workflow (separate file)
+# computes sha256 sums and renders packaging/homebrew/asd.rb.template into
+# the agentstatelabs/homebrew-tap repo.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+            ext: ""
+          - target: x86_64-apple-darwin
+            os: macos-13
+            ext: ""
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            ext: ""
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+            ext: ""
+            cross: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-2022
+            ext: ".exe"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Linux arm64 needs cross-compiler. Other targets build natively.
+      - name: install cross toolchain (linux-arm64 only)
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: build asd
+        run: cargo build --release --locked --target ${{ matrix.target }} -p agentstatedeveloper-cli
+
+      - name: build asd-mcp + asd-serve
+        run: cargo build --release --locked --target ${{ matrix.target }} -p agentstatedeveloper-mcp
+
+      - name: stage artifacts (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -eu
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          TGT="${{ matrix.target }}"
+          STAGE="staging/$TGT"
+          mkdir -p "$STAGE"
+          cp "target/${TGT}/release/asd"       "$STAGE/asd"
+          cp "target/${TGT}/release/asd-mcp"   "$STAGE/asd-mcp"
+          cp "target/${TGT}/release/asd-serve" "$STAGE/asd-serve"
+          # Tarball for Homebrew
+          ( cd "$STAGE" && tar -czf "../../asd-${VERSION}-${TGT}.tar.gz" asd asd-mcp asd-serve )
+          # Flat per-binary names for install.sh
+          cp "$STAGE/asd"       "asd-${TGT}"
+          cp "$STAGE/asd-mcp"   "asd-mcp-${TGT}"
+          cp "$STAGE/asd-serve" "asd-serve-${TGT}"
+          ls -la asd* *.tar.gz
+
+      - name: stage artifacts (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $Tag = $env:GITHUB_REF_NAME
+          $Version = $Tag.TrimStart('v')
+          $Tgt = "${{ matrix.target }}"
+          # Flat per-binary names for install.ps1
+          Copy-Item "target/$Tgt/release/asd.exe"       "asd-$Tgt.exe"
+          Copy-Item "target/$Tgt/release/asd-mcp.exe"   "asd-mcp-$Tgt.exe"
+          Copy-Item "target/$Tgt/release/asd-serve.exe" "asd-serve-$Tgt.exe"
+          # Zip for Windows users who want a bundle
+          Compress-Archive -Path asd-$Tgt.exe,asd-mcp-$Tgt.exe,asd-serve-$Tgt.exe `
+                           -DestinationPath "asd-$Version-$Tgt.zip"
+          Get-ChildItem asd*
+
+      - name: upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: asd-${{ matrix.target }}
+          path: |
+            asd-*${{ matrix.target }}*
+            *.tar.gz
+            *.zip
+
+  publish:
+    name: publish github release
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: list staged artifacts
+        run: ls -la dist
+
+      - name: publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: false

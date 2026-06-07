@@ -8,6 +8,32 @@ all checked into git so they travel with every clone.
 
 ## Install
 
+### macOS / Linux — one-liner
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/agentstatelabs/asd/main/install.sh | sh
+```
+
+Drops `asd`, `asd-mcp`, and `asd-serve` in `~/.local/bin` and prompts
+to add it to your `PATH` if it isn't already. Optional environment
+overrides: `ASD_VERSION=v1.1.13`, `INSTALL_DIR=/usr/local/bin`.
+
+### macOS / Linux — Homebrew
+
+```bash
+brew install agentstatelabs/tap/asd
+```
+
+### Windows — PowerShell
+
+```powershell
+iwr https://raw.githubusercontent.com/agentstatelabs/asd/main/install.ps1 | iex
+```
+
+Installs to `%LOCALAPPDATA%\asd\bin` and adds it to your user `PATH`.
+
+### From source (Rust toolchain required)
+
 ```bash
 cargo install --path crates/agentstatedeveloper-cli   # installs asd
 cargo install --path crates/agentstatedeveloper-mcp   # installs asd-mcp + asd-serve
@@ -15,6 +41,14 @@ cargo install --path crates/agentstatedeveloper-mcp   # installs asd-mcp + asd-s
 
 > **Note:** the crate name `asd` on crates.io is taken by an unrelated diff tool.
 > Install from source using the commands above.
+
+### Uninstall
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/agentstatelabs/asd/main/uninstall.sh | sh
+# or:
+brew uninstall asd
+```
 
 ## What it does
 
