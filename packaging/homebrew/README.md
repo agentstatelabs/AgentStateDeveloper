@@ -1,19 +1,20 @@
 # Homebrew tap
 
-ASD distributes via Homebrew once the release workflow publishes a
-rendered `asd.rb` to the `agentstatelabs/homebrew-tap` repository.
+ASD distributes via Homebrew. The release pipeline publishes binaries to
+`agentstatelabs/agentstatedeveloper-releases` and an automated workflow
+renders `Formula/asd.rb` into `agentstatelabs/homebrew-agentstatedeveloper`.
 
 ## For users
 
 ```bash
-brew tap agentstatelabs/tap
+brew tap agentstatelabs/agentstatedeveloper
 brew install asd
 ```
 
 Or in one step:
 
 ```bash
-brew install agentstatelabs/tap/asd
+brew install agentstatelabs/agentstatedeveloper/asd
 ```
 
 Upgrades:
@@ -27,50 +28,57 @@ Uninstall:
 
 ```bash
 brew uninstall asd
-brew untap agentstatelabs/tap
+brew untap agentstatelabs/agentstatedeveloper
 ```
 
-## For maintainers
+## Pipeline architecture
 
-1. **Create the tap repository once.** A GitHub repo at
-   `agentstatelabs/homebrew-tap` with this structure:
-
-   ```
-   homebrew-tap/
-   └── Formula/
-       └── asd.rb
-   ```
-
-2. **Create a PAT** with repo write access to
-   `agentstatelabs/homebrew-tap` and save it as the
-   `HOMEBREW_TAP_TOKEN` secret on the main ASD repo.
-
-3. **Enable the `homebrew-tap` release workflow.** On every tag push
-   it should:
-   - read the freshly-published GitHub release,
-   - compute `sha256` sums for each macOS / Linux tarball,
-   - render `asd.rb.template` with those values,
-   - commit `Formula/asd.rb` to the tap repo.
+```
+  GitLab origin  ──CI: fmt/clippy/build/test (.gitlab-ci.yml)
+       │
+       └─ mirror ──► agentstatelabs/AgentStateDeveloper (private GitHub)
+                          │
+                          └─ tag push (v*) ──► release.yml
+                                                 │
+                                                 ├─ builds 4 platform tarballs
+                                                 ├─ publishes to ──► agentstatelabs/agentstatedeveloper-releases (public)
+                                                 └─ triggers ───────► homebrew-tap.yml
+                                                                          │
+                                                                          ├─ sha256 each tarball
+                                                                          ├─ render asd.rb.template
+                                                                          └─ commit to ──► agentstatelabs/homebrew-agentstatedeveloper (public)
+```
 
 ## Release artifact naming
 
-The template expects tarballs named with the Rust target triple:
+Each tag publishes one tarball per platform target to
+`agentstatelabs/agentstatedeveloper-releases`:
 
 | Platform | Tarball name |
 |---|---|
-| macOS arm64 | `asd-{VERSION}-aarch64-apple-darwin.tar.gz` |
-| macOS x86_64 | `asd-{VERSION}-x86_64-apple-darwin.tar.gz` |
-| Linux x86_64 | `asd-{VERSION}-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux arm64 | `asd-{VERSION}-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS arm64 | `asd-{TAG}-aarch64-apple-darwin.tar.gz` |
+| macOS x86_64 | `asd-{TAG}-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64 | `asd-{TAG}-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux arm64 | `asd-{TAG}-aarch64-unknown-linux-gnu.tar.gz` |
 
-Each tarball must contain three binaries at the top level:
-`asd`, `asd-mcp`, `asd-serve`.
+(`{TAG}` includes the leading `v`, e.g. `v1.1.14`.)
 
-The curl-piped `install.sh` consumes a slightly different layout — flat
-per-binary downloads at
-`releases/download/{TAG}/{bin}-{TARGET}` without the tarball wrapper.
-The release CI publishes both formats so users can pick either
-distribution channel.
+Each tarball contains a single top-level directory
+`asd-{TAG}-{TARGET}/` with three executables at its root:
+`asd`, `asd-mcp`, `asd-serve`. `tar -xzf … --strip-components=1`
+flattens it for the curl-piped installer; Homebrew's auto-strip handles
+it natively.
+
+## Required secrets
+
+The workflows expect two PATs:
+
+| Secret | Used by | Scope needed |
+|---|---|---|
+| `RELEASES_REPO_TOKEN` | `release.yml` | `repo` write access to `agentstatelabs/agentstatedeveloper-releases` |
+| `HOMEBREW_TAP_TOKEN`  | `homebrew-tap.yml` | `repo` write access to `agentstatelabs/homebrew-agentstatedeveloper` |
+
+Stored as repo secrets on the private main repo.
 
 ## Template substitutions
 
@@ -78,21 +86,20 @@ distribution channel.
 
 | Placeholder | Example |
 |---|---|
-| `{{VERSION}}` | `1.1.13` |
-| `{{URL_DARWIN_ARM64}}` | `https://github.com/agentstatelabs/asd/releases/download/v1.1.13/asd-1.1.13-aarch64-apple-darwin.tar.gz` |
-| `{{SHA_DARWIN_ARM64}}` | `abc123…` |
-| `{{URL_DARWIN_X86_64}}` | (matching Intel URL) |
-| `{{SHA_DARWIN_X86_64}}` | (sha256) |
-| `{{URL_LINUX_X86_64}}` | (Linux x86_64 URL) |
-| `{{SHA_LINUX_X86_64}}` | (sha256) |
-| `{{URL_LINUX_ARM64}}` | (Linux arm64 URL) |
-| `{{SHA_LINUX_ARM64}}` | (sha256) |
+| `{{VERSION}}` | `1.1.14` |
+| `{{TAG}}` | `v1.1.14` |
+| `{{URL_DARWIN_ARM64}}` | `https://github.com/agentstatelabs/agentstatedeveloper-releases/releases/download/v1.1.14/asd-v1.1.14-aarch64-apple-darwin.tar.gz` |
+| `{{SHA_DARWIN_ARM64}}` | (sha256 sum, 64 hex chars) |
+| `{{URL_DARWIN_X86_64}}` / `{{SHA_DARWIN_X86_64}}` | (matching Intel pair) |
+| `{{URL_LINUX_X86_64}}` / `{{SHA_LINUX_X86_64}}` | (Linux x86_64 pair) |
+| `{{URL_LINUX_ARM64}}` / `{{SHA_LINUX_ARM64}}` | (Linux arm64 pair) |
 
-The template does NOT include Windows — Homebrew is macOS and Linux only.
-Windows users should use `install.ps1`.
+Windows is NOT in the template — Homebrew is macOS/Linux only. Windows
+users use `install.ps1`. (Windows builds are not yet in the release
+matrix; add when needed.)
 
 ## Why a tap and not Homebrew core?
 
 ASD is on the BSL-1.1 license, which Homebrew-core would not accept
-without further review. A tap keeps distribution clean and under
+without further review. A tap keeps distribution clean and under our
 control, identical to CTXone's pattern.

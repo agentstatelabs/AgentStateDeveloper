@@ -1,20 +1,27 @@
-# Release workflow — Plan N t-001 (1.1.13)
+# Release workflow — Plan N t-001 (1.1.14)
 #
-# Triggered on tag push (v*.*.*). Builds asd, asd-mcp, asd-serve for four
-# targets (mac arm64/x86_64, linux x86_64/arm64, windows x86_64), uploads
-# them in two layouts:
+# Triggered on tag push (v*.*.*). Builds asd / asd-mcp / asd-serve for
+# four targets (mac arm64/x86_64, linux x86_64/arm64), packages each as
+# a tarball matching the existing v1.0.93 convention:
 #
-#   1. Flat per-binary downloads (for install.sh / install.ps1):
-#        releases/download/<TAG>/<bin>-<TARGET>
-#        releases/download/<TAG>/<bin>-<TARGET>.exe
+#   asd-<TAG>-<TARGET>/{asd,asd-mcp,asd-serve}
+#   → asd-<TAG>-<TARGET>.tar.gz
 #
-#   2. Tarballs (for Homebrew):
-#        releases/download/<TAG>/asd-<VERSION>-<TARGET>.tar.gz
-#        (contains asd, asd-mcp, asd-serve at top level)
+# Publishes the four tarballs to the SEPARATE public mirror repo
+# `agentstatelabs/agentstatedeveloper-releases` using a PAT
+# (RELEASES_REPO_TOKEN). The source repo can stay private; only the
+# release assets are public.
 #
-# After the release publishes, the homebrew-tap workflow (separate file)
-# computes sha256 sums and renders packaging/homebrew/asd.rb.template into
-# the agentstatelabs/homebrew-tap repo.
+# Pipeline: GitLab CI (.gitlab-ci.yml) builds/tests on push; mirror to
+# this GitHub repo for release; tag push fires this workflow; after
+# release publishes, homebrew-tap.yml renders + commits the formula.
+#
+# Required secret: RELEASES_REPO_TOKEN (PAT with `repo` write to
+# agentstatelabs/agentstatedeveloper-releases).
+#
+# Windows is intentionally NOT in the matrix today — the v1.0.93
+# baseline didn't include it and install.ps1 handles "no Windows
+# release yet" gracefully. Add a windows-latest entry when ready.
 
 name: release
 
@@ -22,6 +29,9 @@ on:
   push:
     tags:
       - "v*.*.*"
+
+env:
+  RELEASES_REPO: agentstatelabs/agentstatedeveloper-releases
 
 jobs:
   build:
@@ -33,20 +43,13 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             os: macos-14
-            ext: ""
           - target: x86_64-apple-darwin
             os: macos-13
-            ext: ""
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
-            ext: ""
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-22.04
-            ext: ""
             cross: true
-          - target: x86_64-pc-windows-msvc
-            os: windows-2022
-            ext: ".exe"
     steps:
       - uses: actions/checkout@v4
 
@@ -55,8 +58,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # Linux arm64 needs cross-compiler. Other targets build natively.
-      - name: install cross toolchain (linux-arm64 only)
+      - name: install aarch64 cross-toolchain (linux-arm64 only)
         if: matrix.cross
         run: |
           sudo apt-get update
@@ -69,61 +71,33 @@ jobs:
       - name: build asd-mcp + asd-serve
         run: cargo build --release --locked --target ${{ matrix.target }} -p agentstatedeveloper-mcp
 
-      - name: stage artifacts (unix)
-        if: runner.os != 'Windows'
+      - name: stage + tarball
         shell: bash
         run: |
           set -eu
           TAG="${GITHUB_REF_NAME}"
-          VERSION="${TAG#v}"
           TGT="${{ matrix.target }}"
-          STAGE="staging/$TGT"
-          mkdir -p "$STAGE"
-          cp "target/${TGT}/release/asd"       "$STAGE/asd"
-          cp "target/${TGT}/release/asd-mcp"   "$STAGE/asd-mcp"
-          cp "target/${TGT}/release/asd-serve" "$STAGE/asd-serve"
-          # Tarball for Homebrew
-          ( cd "$STAGE" && tar -czf "../../asd-${VERSION}-${TGT}.tar.gz" asd asd-mcp asd-serve )
-          # Flat per-binary names for install.sh
-          cp "$STAGE/asd"       "asd-${TGT}"
-          cp "$STAGE/asd-mcp"   "asd-mcp-${TGT}"
-          cp "$STAGE/asd-serve" "asd-serve-${TGT}"
-          ls -la asd* *.tar.gz
+          STAGE_DIR="asd-${TAG}-${TGT}"
+          mkdir -p "$STAGE_DIR"
+          cp "target/${TGT}/release/asd"       "$STAGE_DIR/asd"
+          cp "target/${TGT}/release/asd-mcp"   "$STAGE_DIR/asd-mcp"
+          cp "target/${TGT}/release/asd-serve" "$STAGE_DIR/asd-serve"
+          tar -czf "${STAGE_DIR}.tar.gz" "$STAGE_DIR"
+          ls -la "${STAGE_DIR}.tar.gz"
+          sha256sum "${STAGE_DIR}.tar.gz"
 
-      - name: stage artifacts (windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $Tag = $env:GITHUB_REF_NAME
-          $Version = $Tag.TrimStart('v')
-          $Tgt = "${{ matrix.target }}"
-          # Flat per-binary names for install.ps1
-          Copy-Item "target/$Tgt/release/asd.exe"       "asd-$Tgt.exe"
-          Copy-Item "target/$Tgt/release/asd-mcp.exe"   "asd-mcp-$Tgt.exe"
-          Copy-Item "target/$Tgt/release/asd-serve.exe" "asd-serve-$Tgt.exe"
-          # Zip for Windows users who want a bundle
-          Compress-Archive -Path asd-$Tgt.exe,asd-mcp-$Tgt.exe,asd-serve-$Tgt.exe `
-                           -DestinationPath "asd-$Version-$Tgt.zip"
-          Get-ChildItem asd*
-
-      - name: upload artifacts
+      - name: upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: asd-${{ matrix.target }}
-          path: |
-            asd-*${{ matrix.target }}*
-            *.tar.gz
-            *.zip
+          path: asd-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
 
   publish:
-    name: publish github release
+    name: publish to agentstatedeveloper-releases
     needs: build
     runs-on: ubuntu-22.04
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@v4
-
       - name: download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -133,9 +107,13 @@ jobs:
       - name: list staged artifacts
         run: ls -la dist
 
-      - name: publish release
+      - name: publish cross-repo release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          repository: ${{ env.RELEASES_REPO }}
+          token: ${{ secrets.RELEASES_REPO_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          name: asd ${{ github.ref_name }}
           generate_release_notes: true
-          fail_on_unmatched_files: false
+          files: dist/*.tar.gz
+          fail_on_unmatched_files: true

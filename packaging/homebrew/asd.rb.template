@@ -2,10 +2,11 @@
 
 # AgentStateDeveloper (ASD) Homebrew formula template.
 #
-# Plan N t-001 (1.1.13): the release workflow renders this template for
+# Plan N t-001 (1.1.14): the release workflow renders this template for
 # each tag by substituting:
 #
-#   {{VERSION}}               — release version without leading 'v' (e.g. "1.1.13")
+#   {{VERSION}}               — release version without leading 'v' (e.g. "1.1.14")
+#   {{TAG}}                   — release tag including 'v' (e.g. "v1.1.14")
 #   {{URL_DARWIN_ARM64}}      — macOS arm64 tarball URL
 #   {{SHA_DARWIN_ARM64}}      — macOS arm64 tarball sha256
 #   {{URL_DARWIN_X86_64}}     — macOS x86_64 tarball URL
@@ -15,13 +16,14 @@
 #   {{URL_LINUX_ARM64}}       — Linux arm64 tarball URL
 #   {{SHA_LINUX_ARM64}}       — Linux arm64 tarball sha256
 #
-# The rendered output goes to agentstatelabs/homebrew-tap/Formula/asd.rb.
+# The rendered output goes to:
+#   agentstatelabs/homebrew-agentstatedeveloper/Formula/asd.rb
 
 class Asd < Formula
-  desc "Code-level context and audit overlay for agent-authored code"
-  homepage "https://github.com/agentstatelabs/asd"
+  desc "AgentStateDeveloper — semantic state layer + read API for AI agents on code"
+  homepage "https://github.com/agentstatelabs/agentstatedeveloper"
   version "{{VERSION}}"
-  license "BUSL-1.1"
+  license "BSL-1.1"
 
   on_macos do
     on_arm do
@@ -55,18 +57,19 @@ class Asd < Formula
     <<~EOS
       AgentStateDeveloper is installed. Next steps:
 
-        asd index .              # Index the current repo
-        asd install claude       # Register MCP with Claude Code
-        asd install cursor       # ...or Cursor / codex / gemini
-        asd prepare-change "..." # First context query
+        cd <your-project>
+        asd init                  # one-time setup + git hooks
+        asd index .               # index the codebase
+        asd repo add --activate   # register with the shared registry
 
-      Docs:  https://github.com/agentstatelabs/asd#readme
-      MCP:   uses ASD_DB env var or `asd repo use <name>` (registry-tracked).
+      Then any tool wired to `asd-mcp` (Claude Desktop, Claude Code, Codex)
+      will see this repo as its active context.
+
+      Docs: https://github.com/agentstatelabs/agentstatedeveloper
     EOS
   end
 
   test do
     assert_match "asd", shell_output("#{bin}/asd --version")
-    assert_match "asd-mcp", shell_output("#{bin}/asd-mcp --version 2>&1", 0..1)
   end
 end

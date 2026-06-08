@@ -1,44 +1,39 @@
 #!/bin/sh
 # AgentStateDeveloper (ASD) installer
 #
-# Downloads the latest `asd`, `asd-mcp`, and `asd-serve` binaries for your
-# platform and drops them in $INSTALL_DIR (default: ~/.local/bin).
+# Downloads the platform-specific release tarball from the
+# agentstatelabs/agentstatedeveloper-releases public mirror, extracts
+# asd / asd-mcp / asd-serve, and drops them in $INSTALL_DIR
+# (default: ~/.local/bin).
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/agentstatelabs/asd/main/install.sh | sh
-#   # or pipe with a specific version / install dir:
-#   ASD_VERSION=v1.1.13 INSTALL_DIR=/usr/local/bin sh install.sh
+#   curl -fsSL https://raw.githubusercontent.com/agentstatelabs/AgentStateDeveloper/main/install.sh | sh
+#
+#   # pin a version + custom dir:
+#   ASD_VERSION=v1.1.14 INSTALL_DIR=/usr/local/bin \
+#     sh -c "$(curl -fsSL https://raw.githubusercontent.com/agentstatelabs/AgentStateDeveloper/main/install.sh)"
 #
 # Environment:
-#   ASD_VERSION         — release tag to install (default: latest)
+#   ASD_VERSION         — release tag to install (default: latest, e.g. "v1.1.14")
 #   INSTALL_DIR         — target directory (default: ~/.local/bin)
-#   ASD_RELEASE_BASE    — base URL for release artifacts. Defaults to the
-#                         public GitHub mirror; override when fetching from
-#                         the GitLab origin or a private CDN.
+#   ASD_RELEASES_REPO   — GitHub repo hosting release artifacts
+#                         (default: agentstatelabs/agentstatedeveloper-releases)
 #
-# Plan N t-001 (1.1.13): frictionless distribution. CTXone parity.
+# Plan N t-001 (1.1.14): frictionless distribution. CTXone parity.
 set -e
 
 # ─── Configuration ──────────────────────────────────────────────────────────
-GITHUB_REPO="${ASD_GITHUB_REPO:-agentstatelabs/asd}"
-ASD_RELEASE_BASE="${ASD_RELEASE_BASE:-https://github.com/${GITHUB_REPO}}"
+RELEASES_REPO="${ASD_RELEASES_REPO:-agentstatelabs/agentstatedeveloper-releases}"
+SOURCE_REPO="agentstatelabs/AgentStateDeveloper"
 INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
 BINS="asd asd-mcp asd-serve"
 
 # ─── Pretty output ──────────────────────────────────────────────────────────
-BOLD=''
-DIM=''
-GREEN=''
-YELLOW=''
-CYAN=''
-RESET=''
+BOLD=''; DIM=''; GREEN=''; YELLOW=''; CYAN=''; RESET=''
 if [ -t 1 ]; then
-    BOLD=$(printf '\033[1m')
-    DIM=$(printf '\033[2m')
-    GREEN=$(printf '\033[32m')
-    YELLOW=$(printf '\033[33m')
-    CYAN=$(printf '\033[36m')
-    RESET=$(printf '\033[0m')
+    BOLD=$(printf '\033[1m'); DIM=$(printf '\033[2m')
+    GREEN=$(printf '\033[32m'); YELLOW=$(printf '\033[33m')
+    CYAN=$(printf '\033[36m'); RESET=$(printf '\033[0m')
 fi
 
 say()  { printf "%s\n" "$1"; }
@@ -76,18 +71,18 @@ if [ -n "$ASD_VERSION" ]; then
     TAG="$ASD_VERSION"
     info "Using pinned version: ${TAG}"
 else
-    info "Resolving latest release..."
-    TAG=$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null \
+    info "Resolving latest release from ${RELEASES_REPO}..."
+    TAG=$(curl -fsSL "https://api.github.com/repos/${RELEASES_REPO}/releases/latest" 2>/dev/null \
         | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' \
         | head -1)
     if [ -z "$TAG" ]; then
-        warn "Could not resolve latest release from ${GITHUB_REPO}."
+        warn "Could not resolve latest release from ${RELEASES_REPO}."
         say ""
-        say "Either no releases are published yet, or the repo URL needs"
-        say "configuring. To build from source:"
+        say "Build from source instead:"
         say ""
-        say "  ${DIM}git clone https://github.com/${GITHUB_REPO}.git${RESET}"
-        say "  ${DIM}cd asd && cargo install --path crates/agentstatedeveloper-cli${RESET}"
+        say "  ${DIM}git clone https://github.com/${SOURCE_REPO}.git${RESET}"
+        say "  ${DIM}cd AgentStateDeveloper${RESET}"
+        say "  ${DIM}cargo install --path crates/agentstatedeveloper-cli${RESET}"
         say "  ${DIM}cargo install --path crates/agentstatedeveloper-mcp${RESET}"
         say ""
         die "Aborting install."
@@ -95,20 +90,31 @@ else
     info "Latest is ${TAG}"
 fi
 
-# ─── Download each binary ───────────────────────────────────────────────────
+# ─── Download + extract the tarball ────────────────────────────────────────
+TARBALL="asd-${TAG}-${TARGET}.tar.gz"
+URL="https://github.com/${RELEASES_REPO}/releases/download/${TAG}/${TARBALL}"
+TMP=$(mktemp -d -t asd-install.XXXXXX)
+trap 'rm -rf "$TMP"' EXIT
+
 say ""
-say "${BOLD}Downloading ${TAG}...${RESET}"
+say "${BOLD}Downloading ${TAG} (${TARGET})...${RESET}"
+info "${URL}"
+if ! curl -fsSL "$URL" -o "${TMP}/${TARBALL}"; then
+    die "Download failed. Check that ${TARGET} is included in this release."
+fi
+
+info "Extracting..."
+# Tarballs are structured as asd-<TAG>-<TARGET>/{asd,asd-mcp,asd-serve}
+# Use --strip-components=1 to flatten the top-level directory.
+if ! tar -xzf "${TMP}/${TARBALL}" -C "$TMP" --strip-components=1; then
+    die "Extraction failed."
+fi
+
 for BIN in $BINS; do
-    URL="${ASD_RELEASE_BASE}/releases/download/${TAG}/${BIN}-${TARGET}"
-    DEST="${INSTALL_DIR}/${BIN}"
-    info "${BIN}"
-    if ! curl -fsSL "$URL" -o "$DEST"; then
-        warn "Failed to download ${BIN} from ${URL}"
-        warn "(the release may not include this binary for ${TARGET})"
-        rm -f "$DEST"
-        die "Aborting install."
+    if [ ! -f "${TMP}/${BIN}" ]; then
+        die "Tarball is missing ${BIN} — release artifact is malformed."
     fi
-    chmod +x "$DEST"
+    install -m 0755 "${TMP}/${BIN}" "${INSTALL_DIR}/${BIN}"
     ok "${BIN}"
 done
 
@@ -117,8 +123,7 @@ ok "Installed to ${INSTALL_DIR}"
 
 # ─── PATH check ─────────────────────────────────────────────────────────────
 case ":$PATH:" in
-    *":${INSTALL_DIR}:"*)
-        ;;
+    *":${INSTALL_DIR}:"*) ;;
     *)
         say ""
         warn "${INSTALL_DIR} is not on your PATH. Add this to your shell rc:"
@@ -130,10 +135,10 @@ esac
 # ─── Smoke check ────────────────────────────────────────────────────────────
 say ""
 if "${INSTALL_DIR}/asd" --version >/dev/null 2>&1; then
-    VERSION=$("${INSTALL_DIR}/asd" --version | head -1)
-    ok "${VERSION}"
+    VERSION_LINE=$("${INSTALL_DIR}/asd" --version | head -1)
+    ok "${VERSION_LINE}"
 else
-    warn "asd installed but --version probe failed. Try running ${INSTALL_DIR}/asd --version manually."
+    warn "asd installed but --version probe failed. Run ${INSTALL_DIR}/asd --version manually."
 fi
 
 # ─── Next steps ─────────────────────────────────────────────────────────────
@@ -143,10 +148,11 @@ say "  ${DIM}# Index a repo${RESET}"
 say "  asd index ."
 say ""
 say "  ${DIM}# Register with your agent's MCP config${RESET}"
-say "  asd install claude    ${DIM}# or codex, cursor, gemini${RESET}"
+say "  asd install claude    ${DIM}# or codex, cursor, gemini (Plan N t-005)${RESET}"
 say ""
 say "  ${DIM}# First context query${RESET}"
 say "  asd prepare-change \"<describe your change>\""
 say ""
-say "Docs: https://github.com/${GITHUB_REPO}#readme"
+say "Docs:     https://github.com/${SOURCE_REPO}#readme"
+say "Releases: https://github.com/${RELEASES_REPO}/releases"
 say ""

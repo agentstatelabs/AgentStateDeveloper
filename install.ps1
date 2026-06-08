@@ -1,25 +1,24 @@
 # AgentStateDeveloper (ASD) Windows installer
 #
 # Usage (PowerShell):
-#   Invoke-WebRequest https://raw.githubusercontent.com/agentstatelabs/asd/main/install.ps1 | Invoke-Expression
-#   # or, shorter:
-#   iwr https://raw.githubusercontent.com/agentstatelabs/asd/main/install.ps1 | iex
+#   iwr https://raw.githubusercontent.com/agentstatelabs/AgentStateDeveloper/main/install.ps1 | iex
 #
-# Downloads asd.exe / asd-mcp.exe / asd-serve.exe from the latest GitHub
-# release and drops them in %LOCALAPPDATA%\asd\bin, which it adds to your
-# user PATH.
+# Downloads the platform-specific tarball from the
+# agentstatelabs/agentstatedeveloper-releases mirror, extracts the binaries,
+# and drops them in %LOCALAPPDATA%\asd\bin (added to your user PATH).
 #
 # Environment:
-#   $env:ASD_VERSION       — release tag to install (default: latest)
-#   $env:ASD_GITHUB_REPO   — override the GitHub repo path (default: agentstatelabs/asd)
+#   $env:ASD_VERSION         — release tag to install (default: latest, e.g. "v1.1.14")
+#   $env:ASD_RELEASES_REPO   — GitHub repo hosting release artifacts
+#                              (default: agentstatelabs/agentstatedeveloper-releases)
 #
-# Plan N t-001 (1.1.13): frictionless distribution. CTXone parity.
+# Plan N t-001 (1.1.14): frictionless distribution. CTXone parity.
 
 $ErrorActionPreference = "Stop"
 
-$Repo = if ($env:ASD_GITHUB_REPO) { $env:ASD_GITHUB_REPO } else { "agentstatelabs/asd" }
+$ReleasesRepo = if ($env:ASD_RELEASES_REPO) { $env:ASD_RELEASES_REPO } else { "agentstatelabs/agentstatedeveloper-releases" }
+$SourceRepo = "agentstatelabs/AgentStateDeveloper"
 $InstallDir = Join-Path $env:LOCALAPPDATA "asd\bin"
-$Bins = @("asd", "asd-mcp", "asd-serve")
 
 Write-Host ""
 Write-Host "AgentStateDeveloper installer (Windows)" -ForegroundColor Cyan
@@ -51,18 +50,18 @@ if ($env:ASD_VERSION) {
     $Tag = $env:ASD_VERSION
     Write-Host "  Pinned: $Tag"
 } else {
-    Write-Host "Fetching latest release..."
+    Write-Host "Fetching latest release from $ReleasesRepo..."
     try {
-        $Tag = (Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest").tag_name
+        $Tag = (Invoke-RestMethod -Uri "https://api.github.com/repos/$ReleasesRepo/releases/latest").tag_name
     } catch {
-        Write-Error "Could not fetch latest release. Check network or set ASD_GITHUB_REPO."
+        Write-Error "Could not fetch latest release. Check network or set ASD_RELEASES_REPO."
         exit 1
     }
     if (-not $Tag) {
         Write-Host "No releases found. Build from source:" -ForegroundColor Yellow
         Write-Host ""
-        Write-Host "  git clone https://github.com/$Repo.git"
-        Write-Host "  cd asd"
+        Write-Host "  git clone https://github.com/$SourceRepo.git"
+        Write-Host "  cd AgentStateDeveloper"
         Write-Host "  cargo install --path crates/agentstatedeveloper-cli"
         Write-Host "  cargo install --path crates/agentstatedeveloper-mcp"
         exit 1
@@ -70,22 +69,42 @@ if ($env:ASD_VERSION) {
     Write-Host "  Latest: $Tag"
 }
 
-# ─── Download each binary ───────────────────────────────────────────────────
-Write-Host ""
-Write-Host "Installing ASD $Tag..." -ForegroundColor Cyan
+# ─── Download + extract the tarball ────────────────────────────────────────
+$Tarball = "asd-$Tag-$Target.tar.gz"
+$Url = "https://github.com/$ReleasesRepo/releases/download/$Tag/$Tarball"
+$Tmp = Join-Path $env:TEMP "asd-install-$Tag"
+New-Item -ItemType Directory -Force -Path $Tmp | Out-Null
 
-foreach ($bin in $Bins) {
-    $Url = "https://github.com/$Repo/releases/download/$Tag/$bin-$Target.exe"
-    $Dest = Join-Path $InstallDir "$bin.exe"
-    Write-Host "  - $bin.exe"
-    try {
-        Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
-    } catch {
-        Write-Error "Failed to download $Url"
-        Write-Host "  (the release may not include this binary for $Target)" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "Downloading $Tag..." -ForegroundColor Cyan
+Write-Host "  $Url"
+try {
+    Invoke-WebRequest -Uri $Url -OutFile (Join-Path $Tmp $Tarball) -UseBasicParsing
+} catch {
+    Write-Error "Failed to download $Url"
+    Write-Host "  (the release may not include a Windows binary yet)" -ForegroundColor Yellow
+    Write-Host "  Build from source: see the docs at https://github.com/$SourceRepo" -ForegroundColor Yellow
+    exit 1
+}
+
+# tar is available on Windows 10 1803+ / Windows 11 by default.
+Write-Host "  Extracting..."
+& tar -xzf (Join-Path $Tmp $Tarball) -C $Tmp --strip-components=1
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Extraction failed (tar exit $LASTEXITCODE)."
+    exit 1
+}
+
+foreach ($bin in @("asd.exe", "asd-mcp.exe", "asd-serve.exe")) {
+    $src = Join-Path $Tmp $bin
+    if (-not (Test-Path $src)) {
+        Write-Error "Tarball is missing $bin — release artifact is malformed."
         exit 1
     }
+    Copy-Item -Force $src (Join-Path $InstallDir $bin)
 }
+
+Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
 
 Write-Host ""
 Write-Host "Installed to $InstallDir" -ForegroundColor Green
@@ -105,17 +124,17 @@ if ($PathEntries -notcontains $InstallDir) {
     Write-Host "(already on PATH)" -ForegroundColor DarkGray
 }
 
-# ─── Next steps ─────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "Get started:" -ForegroundColor Cyan
 Write-Host "  # Index a repo"
 Write-Host "  asd index ."
 Write-Host ""
 Write-Host "  # Register with your agent's MCP config"
-Write-Host "  asd install claude    # or codex, cursor, gemini"
+Write-Host "  asd install claude    # or codex, cursor, gemini (Plan N t-005)"
 Write-Host ""
 Write-Host "  # First context query"
 Write-Host '  asd prepare-change "<describe your change>"'
 Write-Host ""
-Write-Host "Docs: https://github.com/$Repo#readme"
+Write-Host "Docs:     https://github.com/$SourceRepo#readme"
+Write-Host "Releases: https://github.com/$ReleasesRepo/releases"
 Write-Host ""

@@ -1,61 +1,99 @@
-# Homebrew tap update workflow — Plan N t-001 (1.1.13)
+# Homebrew tap update workflow — Plan N t-001 (1.1.14)
 #
-# After the release workflow publishes binaries, this job:
-#   1. Reads the freshly-published GitHub release for the pushed tag.
-#   2. Computes sha256 sums for each macOS / Linux tarball.
-#   3. Renders packaging/homebrew/asd.rb.template with version + URLs + shas.
-#   4. Commits Formula/asd.rb to the agentstatelabs/homebrew-tap repo via the
-#      HOMEBREW_TAP_TOKEN secret.
+# Fires after release.yml publishes a release to
+# agentstatelabs/agentstatedeveloper-releases. Because that release lives
+# in a DIFFERENT repo than this workflow, we trigger off the local tag
+# push (release.yml runs first in the same workflow_run group), then
+# fetch the tarballs from the releases repo.
 #
-# Requires:
-#   - The release artifacts from release.yml are already published.
-#   - HOMEBREW_TAP_TOKEN is a PAT with write access to agentstatelabs/homebrew-tap.
+# Steps:
+#   1. Resolve the tag's tarball URLs in the releases repo.
+#   2. sha256 each tarball.
+#   3. Render packaging/homebrew/asd.rb.template with version + URLs + shas.
+#   4. Commit Formula/asd.rb to agentstatelabs/homebrew-agentstatedeveloper.
+#
+# Required secret:
+#   HOMEBREW_TAP_TOKEN — PAT with `repo` write access to
+#                         agentstatelabs/homebrew-agentstatedeveloper.
 
 name: homebrew-tap
 
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: ["release"]
+    types: [completed]
+
+env:
+  RELEASES_REPO: agentstatelabs/agentstatedeveloper-releases
+  TAP_REPO: agentstatelabs/homebrew-agentstatedeveloper
 
 jobs:
   update-tap:
     runs-on: ubuntu-22.04
-    if: startsWith(github.event.release.tag_name, 'v')
+    if: ${{ github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v') }}
     steps:
       - name: checkout main repo (for template)
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: resolve tag
+        id: tag
+        run: |
+          TAG="${{ github.event.workflow_run.head_branch }}"
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}"     >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: wait for release assets to appear
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          # The cross-repo release publish may take a few seconds after
+          # release.yml's `publish` job reports success. Poll briefly.
+          for i in 1 2 3 4 5 6; do
+            if gh release view "${{ steps.tag.outputs.tag }}" \
+                 --repo "$RELEASES_REPO" \
+                 --json assets --jq '.assets | length' 2>/dev/null \
+                 | grep -qE '^[1-9]'; then
+              echo "assets present on attempt $i"
+              exit 0
+            fi
+            echo "  waiting for release assets... (attempt $i)"
+            sleep 10
+          done
+          echo "release ${{ steps.tag.outputs.tag }} has no assets after 60s" >&2
+          exit 1
 
       - name: compute sha256 of each tarball
         id: shas
-        shell: bash
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
-          VERSION="${TAG#v}"
-          BASE="https://github.com/${{ github.repository }}/releases/download/${TAG}"
+          BASE="https://github.com/${RELEASES_REPO}/releases/download/${TAG}"
 
           fetch_sha() {
             local target="$1"
-            local url="${BASE}/asd-${VERSION}-${target}.tar.gz"
+            local url="${BASE}/asd-${TAG}-${target}.tar.gz"
             local sha
             sha=$(curl -fsSL "$url" | sha256sum | awk '{print $1}')
-            echo "${target}=${sha}"
-            echo "${target//-/_}_url=${url}" >> "$GITHUB_OUTPUT"
-            echo "${target//-/_}_sha=${sha}" >> "$GITHUB_OUTPUT"
+            local key="${target//-/_}"
+            echo "${key}_url=${url}"  >> "$GITHUB_OUTPUT"
+            echo "${key}_sha=${sha}"  >> "$GITHUB_OUTPUT"
+            echo "  ${target}: ${sha}"
           }
           fetch_sha aarch64-apple-darwin
           fetch_sha x86_64-apple-darwin
           fetch_sha x86_64-unknown-linux-gnu
           fetch_sha aarch64-unknown-linux-gnu
 
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
       - name: render formula
         run: |
           mkdir -p rendered/Formula
           sed \
-            -e "s|{{VERSION}}|${{ steps.shas.outputs.version }}|g" \
+            -e "s|{{VERSION}}|${{ steps.tag.outputs.version }}|g" \
+            -e "s|{{TAG}}|${{ steps.tag.outputs.tag }}|g" \
             -e "s|{{URL_DARWIN_ARM64}}|${{ steps.shas.outputs.aarch64_apple_darwin_url }}|g" \
             -e "s|{{SHA_DARWIN_ARM64}}|${{ steps.shas.outputs.aarch64_apple_darwin_sha }}|g" \
             -e "s|{{URL_DARWIN_X86_64}}|${{ steps.shas.outputs.x86_64_apple_darwin_url }}|g" \
@@ -65,37 +103,24 @@ jobs:
             -e "s|{{URL_LINUX_ARM64}}|${{ steps.shas.outputs.aarch64_unknown_linux_gnu_url }}|g" \
             -e "s|{{SHA_LINUX_ARM64}}|${{ steps.shas.outputs.aarch64_unknown_linux_gnu_sha }}|g" \
             packaging/homebrew/asd.rb.template > rendered/Formula/asd.rb
+          echo ""
+          echo "--- rendered Formula/asd.rb ---"
           cat rendered/Formula/asd.rb
 
-      - name: push to tap repo
-        uses: peter-evans/repository-dispatch@v3
-        # Fallback: most teams use a checkout+commit pair. Doing it inline
-        # here keeps everything in one workflow.
-        with:
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          repository: agentstatelabs/homebrew-tap
-          event-type: update-asd-formula
-          client-payload: |
-            {
-              "version": "${{ steps.shas.outputs.version }}",
-              "formula_content_base64": "${{ steps.shas.outputs.version }}"
-            }
-
-      # Direct push variant (simpler, no remote dispatch handler required):
-      - name: clone tap and commit
+      - name: clone tap repo + commit
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
           git config --global user.name  "asd-release-bot"
           git config --global user.email "release-bot@agentstatelabs.com"
-          git clone "https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/agentstatelabs/homebrew-tap.git" tap
+          git clone "https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/${TAP_REPO}.git" tap
           mkdir -p tap/Formula
           cp rendered/Formula/asd.rb tap/Formula/asd.rb
           cd tap
           git add Formula/asd.rb
           if git diff --cached --quiet; then
-            echo "no change to commit"
+            echo "no change to commit (formula unchanged)"
           else
             git commit -m "asd ${TAG}"
             git push

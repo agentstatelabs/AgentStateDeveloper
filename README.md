@@ -8,29 +8,32 @@ all checked into git so they travel with every clone.
 
 ## Install
 
+### macOS / Linux — Homebrew (recommended)
+
+```bash
+brew install agentstatelabs/agentstatedeveloper/asd
+```
+
+Installs `asd`, `asd-mcp`, and `asd-serve`. Upgrades via `brew upgrade asd`.
+
 ### macOS / Linux — one-liner
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/agentstatelabs/asd/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/agentstatelabs/AgentStateDeveloper/main/install.sh | sh
 ```
 
-Drops `asd`, `asd-mcp`, and `asd-serve` in `~/.local/bin` and prompts
-to add it to your `PATH` if it isn't already. Optional environment
-overrides: `ASD_VERSION=v1.1.13`, `INSTALL_DIR=/usr/local/bin`.
-
-### macOS / Linux — Homebrew
-
-```bash
-brew install agentstatelabs/tap/asd
-```
+Drops the three binaries in `~/.local/bin`. Optional overrides:
+`ASD_VERSION=v1.1.14`, `INSTALL_DIR=/usr/local/bin`.
 
 ### Windows — PowerShell
 
 ```powershell
-iwr https://raw.githubusercontent.com/agentstatelabs/asd/main/install.ps1 | iex
+iwr https://raw.githubusercontent.com/agentstatelabs/AgentStateDeveloper/main/install.ps1 | iex
 ```
 
 Installs to `%LOCALAPPDATA%\asd\bin` and adds it to your user `PATH`.
+(Windows binaries are not yet in the release matrix — falls back to
+"build from source" until added.)
 
 ### From source (Rust toolchain required)
 
@@ -45,7 +48,7 @@ cargo install --path crates/agentstatedeveloper-mcp   # installs asd-mcp + asd-s
 ### Uninstall
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/agentstatelabs/asd/main/uninstall.sh | sh
+curl -fsSL https://raw.githubusercontent.com/agentstatelabs/AgentStateDeveloper/main/uninstall.sh | sh
 # or:
 brew uninstall asd
 ```
