@@ -71,14 +71,32 @@ it natively.
 
 ## Required secrets
 
-The workflows expect two PATs:
+The workflows expect three tokens on the private main repo
+(`agentstatelabs/AgentStateDeveloper`):
 
-| Secret | Used by | Scope needed |
-|---|---|---|
-| `RELEASES_REPO_TOKEN` | `release.yml` | `repo` write access to `agentstatelabs/agentstatedeveloper-releases` |
-| `HOMEBREW_TAP_TOKEN`  | `homebrew-tap.yml` | `repo` write access to `agentstatelabs/homebrew-agentstatedeveloper` |
+| Secret | Used by | What it is | Scope |
+|---|---|---|---|
+| `GITLAB_TOKEN` | `release.yml` (every matrix job, before `cargo build`) | **GitLab PAT** (not GitHub) | `read_repository` on `github.com/agentstatelabs/agentstategraph` — the workspace pulls ASG from there via a tagged git dep |
+| `RELEASES_REPO_TOKEN` | `release.yml` (publish job) | GitHub fine-grained PAT | `repo Contents: read/write` on `agentstatelabs/agentstatedeveloper-releases` |
+| `HOMEBREW_TAP_TOKEN`  | `homebrew-tap.yml` | GitHub fine-grained PAT | `repo Contents: read/write` on `agentstatelabs/homebrew-agentstatedeveloper` |
 
-Stored as repo secrets on the private main repo.
+### Creating `GITLAB_TOKEN`
+
+On `github.com`:
+1. **User Settings → Access Tokens** (personal token) — or
+   **agentstategraph → Settings → Access Tokens** (project deploy token, scoped narrower)
+2. Scopes: `read_repository` (read-only is enough to fetch the tagged dep)
+3. Copy the token and add it to GitHub:
+   ```bash
+   echo "<gitlab-token>" | gh secret set GITLAB_TOKEN \
+     --repo agentstatelabs/AgentStateDeveloper
+   ```
+
+The workflow uses the token as the password in HTTP basic auth via
+`https://oauth2:<token>@github.com/` and forces cargo
+through the git CLI (`CARGO_NET_GIT_FETCH_WITH_CLI=true`) so the
+rewrite is honored. This mirrors the `CI_JOB_TOKEN` pattern in
+`.gitlab-ci.yml`.
 
 ## Template substitutions
 
