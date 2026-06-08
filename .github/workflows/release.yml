@@ -58,6 +58,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Belt-and-suspenders for cross targets: dtolnay/rust-toolchain
+      # historically misses the std for arm64 linux when invoked from
+      # an x86_64 host. `rustup target add` is idempotent.
+      - name: ensure rust std for ${{ matrix.target }}
+        run: rustup target add ${{ matrix.target }}
+
       - name: install aarch64 cross-toolchain (linux-arm64 only)
         if: matrix.cross
         run: |
@@ -106,7 +112,13 @@ jobs:
           cp "target/${TGT}/release/asd-serve" "$STAGE_DIR/asd-serve"
           tar -czf "${STAGE_DIR}.tar.gz" "$STAGE_DIR"
           ls -la "${STAGE_DIR}.tar.gz"
-          sha256sum "${STAGE_DIR}.tar.gz"
+          # macOS runners ship `shasum -a 256` instead of `sha256sum`,
+          # so prefer the portable construct.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${STAGE_DIR}.tar.gz"
+          else
+            shasum -a 256 "${STAGE_DIR}.tar.gz"
+          fi
 
       - name: upload artifact
         uses: actions/upload-artifact@v4
