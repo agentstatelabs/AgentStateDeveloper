@@ -11,10 +11,17 @@ all checked into git so they travel with every clone.
 ### macOS / Linux — Homebrew (recommended)
 
 ```bash
-brew install agentstatelabs/agentstatedeveloper/asd
+brew tap agentstatelabs/agentstatedeveloper
+brew trust agentstatelabs/agentstatedeveloper   # one-time, third-party-tap trust
+brew install asd
 ```
 
 Installs `asd`, `asd-mcp`, and `asd-serve`. Upgrades via `brew upgrade asd`.
+
+> Recent Homebrew requires explicit `brew trust` for third-party taps.
+> If you skip the trust step you'll see `Warning: Skipping … because it
+> is not trusted` on `brew update` — the install will still succeed
+> until then, but updates are silent no-ops.
 
 ### macOS / Linux — one-liner
 
@@ -23,17 +30,14 @@ curl -fsSL https://raw.githubusercontent.com/agentstatelabs/AgentStateDeveloper/
 ```
 
 Drops the three binaries in `~/.local/bin`. Optional overrides:
-`ASD_VERSION=v1.1.14`, `INSTALL_DIR=/usr/local/bin`.
+`ASD_VERSION=v1.1.19`, `INSTALL_DIR=/usr/local/bin`.
 
-### Windows — PowerShell
+### Windows
 
-```powershell
-iwr https://raw.githubusercontent.com/agentstatelabs/AgentStateDeveloper/main/install.ps1 | iex
-```
-
-Installs to `%LOCALAPPDATA%\asd\bin` and adds it to your user `PATH`.
-(Windows binaries are not yet in the release matrix — falls back to
-"build from source" until added.)
+Windows binaries are not yet in the release matrix. Build from source
+(see below) or use WSL2 + the macOS/Linux one-liner. An `install.ps1`
+shipped against a future Windows-enabled release will live at
+`raw.githubusercontent.com/agentstatelabs/AgentStateDeveloper/main/install.ps1`.
 
 ### From source (Rust toolchain required)
 
