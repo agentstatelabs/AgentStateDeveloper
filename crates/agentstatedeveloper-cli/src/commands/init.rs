@@ -7,6 +7,10 @@
 //! them automatically. Pass `--no-hooks` to skip hook installation.
 
 use std::fs;
+// Plan N t-001 (1.1.23): Unix-only — `PermissionsExt::from_mode` is gated
+// to unix targets. On Windows the chmod is a no-op (git executes hooks
+// regardless of file mode), so we just skip the call rather than emulate.
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -285,6 +289,9 @@ fn install_hooks(root: &Path) -> Result<()> {
         fs::write(&path, hook.script)
             .with_context(|| format!("failed to write hook {}", path.display()))?;
         // Make executable (owner + group + other execute bits).
+        // Windows: no-op — Git for Windows ignores file mode and runs
+        // hooks via the configured shell regardless.
+        #[cfg(unix)]
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
             .with_context(|| format!("failed to chmod {}", path.display()))?;
         installed.push(hook);
