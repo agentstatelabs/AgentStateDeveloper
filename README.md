@@ -32,12 +32,19 @@ curl -fsSL https://raw.githubusercontent.com/agentstatelabs/AgentStateDeveloper/
 Drops the three binaries in `~/.local/bin`. Optional overrides:
 `ASD_VERSION=v1.1.19`, `INSTALL_DIR=/usr/local/bin`.
 
-### Windows
+### Windows — PowerShell
 
-Windows binaries are not yet in the release matrix. Build from source
-(see below) or use WSL2 + the macOS/Linux one-liner. An `install.ps1`
-shipped against a future Windows-enabled release will live at
-`raw.githubusercontent.com/agentstatelabs/AgentStateDeveloper/main/install.ps1`.
+```powershell
+iwr https://raw.githubusercontent.com/agentstatelabs/AgentStateDeveloper/main/install.ps1 | iex
+```
+
+Installs `asd.exe`, `asd-mcp.exe`, and `asd-serve.exe` to
+`%LOCALAPPDATA%\asd\bin` and adds it to your user `PATH`. Open a fresh
+PowerShell after the install so the new PATH takes effect.
+
+> Windows binaries are built for `x86_64-pc-windows-msvc`. ARM64 Windows
+> isn't a release target yet — the x86_64 binaries run under Windows
+> ARM emulation in the interim.
 
 ### From source (Rust toolchain required)
 

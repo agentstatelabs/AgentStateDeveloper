@@ -43,17 +43,27 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             os: macos-14
+            ext: ""
           # Cross-compile x86_64-apple-darwin from arm64 macOS. `macos-13`
           # (Intel) is GitHub's most-contended runner class — jobs sit
           # queued for hours. The Apple toolchain cross-compiles between
           # mac architectures natively; rustup target add covers the std.
           - target: x86_64-apple-darwin
             os: macos-14
+            ext: ""
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
+            ext: ""
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-22.04
+            ext: ""
             cross: true
+          # Windows: cargo's MSVC target works natively on windows-latest.
+          # Git Bash ships with the runner so the bash-shelled stage step
+          # works as-is; binaries get a `.exe` suffix via matrix.ext.
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            ext: ".exe"
     steps:
       - uses: actions/checkout@v4
 
@@ -105,15 +115,18 @@ jobs:
 
       - name: stage + tarball
         shell: bash
+        env:
+          EXT: ${{ matrix.ext }}
         run: |
           set -eu
           TAG="${GITHUB_REF_NAME}"
           TGT="${{ matrix.target }}"
           STAGE_DIR="asd-${TAG}-${TGT}"
           mkdir -p "$STAGE_DIR"
-          cp "target/${TGT}/release/asd"       "$STAGE_DIR/asd"
-          cp "target/${TGT}/release/asd-mcp"   "$STAGE_DIR/asd-mcp"
-          cp "target/${TGT}/release/asd-serve" "$STAGE_DIR/asd-serve"
+          # ${EXT} is ".exe" on Windows, empty everywhere else.
+          cp "target/${TGT}/release/asd${EXT}"       "$STAGE_DIR/asd${EXT}"
+          cp "target/${TGT}/release/asd-mcp${EXT}"   "$STAGE_DIR/asd-mcp${EXT}"
+          cp "target/${TGT}/release/asd-serve${EXT}" "$STAGE_DIR/asd-serve${EXT}"
           tar -czf "${STAGE_DIR}.tar.gz" "$STAGE_DIR"
           ls -la "${STAGE_DIR}.tar.gz"
           # macOS runners ship `shasum -a 256` instead of `sha256sum`,
