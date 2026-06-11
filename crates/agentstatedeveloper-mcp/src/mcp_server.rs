@@ -2638,7 +2638,7 @@ impl AsdMcpServer {
     // -- Scratch tools -------------------------------------------------------
 
     #[tool(
-        description = "Write a new draft scratch entry. Scratch entries are local-only working notes scoped to a symbol/workflow/session. No policy gate — write freely. Returns { scratch_id, status }."
+        description = "Write a new draft scratch entry. Scratch entries are local-only working notes scoped to a symbol/workflow/session. No policy gate — write freely. Returns { scratch_id, status }.\n\nSet planning=true to write pre-implementation design notes: the 'planning' tag is added automatically, and the symbol name does not need to exist in the index yet (useful for naming planned modules or interfaces before any code is written)."
     )]
     async fn scratch_write(&self, params: Parameters<ScratchWriteParams>) -> String {
         let p = params.0;
@@ -2646,20 +2646,34 @@ impl AsdMcpServer {
         let ref_name = engine.ref_name.clone();
         let store = AsgScratchStore { repo: &engine.repo };
 
+        let is_planning = p.planning.unwrap_or(false);
+
         let mut entry = ScratchEntry::new(&p.content, "asd-mcp");
         entry.workflow = p.workflow;
         entry.tags = p.tags.unwrap_or_default();
+
+        if is_planning && !entry.tags.contains(&"planning".to_string()) {
+            entry.tags.push("planning".to_string());
+        }
 
         if let Some(ttl_h) = p.ttl_hours {
             entry.expires_at = Some(chrono::Utc::now() + chrono::Duration::hours(ttl_h));
         }
 
-        // Resolve --symbol to symbol_id.
+        // Resolve symbol to symbol_id. In planning mode, an unresolved qname
+        // is stored as the workflow name (prefixed) rather than an error.
         if let Some(ref qname) = p.symbol {
             let index = AsgIndexStore::from_engine(&engine);
             match index.get_symbol_by_qname(&ref_name, qname) {
                 Ok(Some(sym)) => {
                     entry.symbol_id = Some(sym.symbol_id);
+                }
+                Ok(None) if is_planning => {
+                    // Symbol doesn't exist yet — store the intended qname as
+                    // the workflow so it's filterable and visible in scratch_list.
+                    if entry.workflow.is_none() {
+                        entry.workflow = Some(format!("planned:{qname}"));
+                    }
                 }
                 Ok(None) => return err_json(&format!("symbol not found: {qname}")),
                 Err(e) => return err_json(&e.to_string()),
@@ -2670,6 +2684,7 @@ impl AsdMcpServer {
             Ok(stored) => serde_json::to_string(&serde_json::json!({
                 "scratch_id": stored.scratch_id,
                 "status": "draft",
+                "planning": is_planning,
             }))
             .unwrap_or_else(|_| "{}".to_string()),
             Err(e) => err_json(&e.to_string()),

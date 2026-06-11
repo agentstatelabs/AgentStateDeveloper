@@ -568,6 +568,7 @@ pub struct ScratchWriteParams {
     /// Working notes content (markdown OK).
     pub content: String,
     /// Optional: qualified name of the symbol to attach this note to.
+    /// In planning mode, the symbol does not need to exist yet.
     #[serde(default)]
     pub symbol: Option<String>,
     /// Optional: named investigation context (e.g. "tracing-sync-bug").
@@ -579,6 +580,12 @@ pub struct ScratchWriteParams {
     /// Optional: freeform tags.
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    /// When true, marks this entry as pre-implementation planning notes.
+    /// Adds the "planning" tag automatically. Unresolved symbol names are
+    /// stored as-is rather than causing an error — useful for naming planned
+    /// symbols that do not exist in the index yet.
+    #[serde(default)]
+    pub planning: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]

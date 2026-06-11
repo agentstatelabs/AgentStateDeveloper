@@ -2038,3 +2038,144 @@ naming, and vertical-specific case studies. Defer until Plan N
 has shipped Wave 1 + Wave 2 — there's no point on
 vertical messaging until the install funnel converts.
 
+---
+
+## Plan P — Forward planning layer (pre-implementation agent context)
+
+### Motivation
+
+ASD's semantic layer is indexer-first: everything it knows is derived
+from existing code. The payoff scales with codebase size and participant
+count — the larger the team and the longer the implementation arc, the
+more coherent output agents produce when working from structured context.
+
+The missing direction: **planning before code exists**. An agent that
+must declare planned symbols, effects, and invariants before writing
+a line is less likely to produce an implementation that contradicts
+itself mid-session or loses intent across sessions.
+
+**Tier rationale:**
+- `scratch_write --planning` (shipped in 1.1.x): zero-schema-change,
+  single-agent, ephemeral. Covers the most common case.
+- Full virtual-symbol registry (this plan): team/enterprise feature.
+  Payoff multiplies with parallel agents, multi-week arcs, and
+  human↔agent handoffs. Build when a team user asks for it with
+  a real use case — signal: "I planned this in session 1 and session
+  3 has no idea what I decided."
+
+### Core concept: the `planned` artifact tier
+
+Today ledger entries are `observed` (derived from code) or `declared`
+(manually asserted about existing symbols). Add a third tier: `planned`
+— assertions about symbols that do not exist yet.
+
+```
+planned    → code written → reindex → implemented  (gap closed)
+planned    → no code      → reindex → gap surfaced  (still open)
+```
+
+This closes the loop: `asd reindex` diffs the planned symbol graph
+against what was actually indexed and surfaces gaps automatically.
+
+### Task table
+
+| id    | title                                    | status  | wave |
+|-------|------------------------------------------|---------|------|
+| t-001 | Virtual symbol registry                  | backlog | 1    |
+| t-002 | `planned` ledger tier + schema           | backlog | 1    |
+| t-003 | `asd plan propose` CLI command           | backlog | 1    |
+| t-004 | `prepare_change` planning intent         | backlog | 2    |
+| t-005 | Reindex gap detection + report           | backlog | 2    |
+| t-006 | `scratch_promote` → planned tier         | backlog | 2    |
+| t-007 | Contract verification pass               | backlog | 3    |
+| t-008 | Dependency ordering for planned symbols  | backlog | 3    |
+| t-009 | Policy gate extension for planned tier   | backlog | 3    |
+| t-010 | Multi-agent coordination protocol        | backlog | 4    |
+
+### Wave ordering
+
+**Wave 1 — Virtual symbol registry and planned tier schema**
+
+t-001: Add `PlannedSymbol` to the schema. Fields mirror `Symbol` but
+`file`/`start`/`end` are `Option` (not yet known). Store at
+`/asd/v1/planned/<symbol_fp>`. No indexer dependency — written
+directly by the agent via a new `plan_propose` MCP tool.
+
+t-002: Extend `LedgerKind` / entry schema with `status: planned`.
+Planned entries attach to either a real `symbol_id` or a
+`planned_symbol_id`. Policy gate passes through by default (planned
+entries are low-stakes; no code is changed).
+
+t-003: `asd plan propose <qname> [--kind function|module|...] [--effect ...] [--invariant ...]`
+CLI entry point. Stores a `PlannedSymbol` and seeds its ledger with
+the declared effects and invariants. MCP tool `plan_propose` mirrors
+this.
+
+**Wave 2 — Tooling integration and gap detection**
+
+t-004: `prepare_change --intent planning` mode. When no indexed symbols
+match the query, fall back to the planned symbol registry and return
+planned entry points. Agents get the same structured output format
+regardless of whether code exists yet.
+
+t-005: `asd reindex` post-pass: for each `PlannedSymbol`, check if a
+real symbol with matching qname now exists. Emit a gap report:
+`still_planned`, `implemented`, `name_drift` (planned vs. actual qname
+differ). Surface in `asd status`.
+
+t-006: `scratch_promote` gains a `--planned` flag: instead of requiring
+a real ledger `entry_id`, promotes the scratch entry to a
+`PlannedSymbol` + planned ledger entry. This is the natural upgrade
+path from today's `scratch_write --planning` workflow.
+
+**Wave 3 — Contract verification and dependency ordering**
+
+t-007: After reindex, for each `implemented` symbol (gap closed),
+compare its observed effects against the planned effects declared in
+t-001. Emit mismatches as `contract_drift` ledger entries. Surface
+in `asd scorecard` as a new `planning` dimension.
+
+t-008: Given a set of planned symbols with declared dependencies (via
+invariants that reference other planned qnames), emit an implementation
+sequence: which module to write first. CLI: `asd plan order`.
+
+t-009: Policy gate extension — allow teams to require approval before
+a planned symbol can be marked `implemented` (i.e., before the gap
+is silently closed). Useful for regulated codebases where planned
+contracts are also compliance artifacts.
+
+**Wave 4 — Multi-agent coordination**
+
+t-010: Two agents working on different planned symbols in parallel can
+each `scratch_write --planning` against the same planned qname. A
+coordination protocol surfaces conflicts (same planned symbol with
+conflicting declared effects). Requires the sidecar or a shared ref
+as the coordination point.
+
+### Acceptance
+
+The feature is useful when this scenario works end-to-end:
+
+1. Agent A (session 1): `plan_propose PaymentProcessor::charge --effect db.write --invariant "never charges twice"`
+2. Agent B (session 2, different context window): `prepare_change "implement charge endpoint"` → returns `PaymentProcessor::charge` as an entry point with its planned effects and invariants.
+3. Agent B implements the function and runs `asd reindex`.
+4. `asd status` shows `PaymentProcessor::charge: gap closed`.
+5. `asd scorecard --drill_down planning` shows contract drift if the
+   observed effect set differs from what was declared in step 1.
+
+### What's NOT in this plan
+
+- **Human-facing planning UI**: ASD is agent context, not a project
+  management tool. Planned symbols are machine-readable artifacts for
+  agents, not Gantt charts for humans.
+- **Automatic symbol inference from prose**: tempting but out of scope.
+  The agent declares the planned symbol explicitly; ASD does not try
+  to parse a spec document.
+- **Cross-repo planned symbols**: single-repo scope for now.
+
+### Done when
+
+Wave 1 + Wave 2 ship and the acceptance scenario above passes against
+a real multi-session implementation (dogfood: plan a new ASD feature
+in ASD before writing the code).
+
