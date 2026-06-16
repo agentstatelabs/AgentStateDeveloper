@@ -792,7 +792,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             let view_demote = surface_demote || broad_demote || anchor_missing_demote;
             matches!(f["file_role"].as_str(), Some("example") | Some("reference"))
                 || (f["file_role"].as_str() == Some("impl") && wrong_layer_files.contains(file))
-                || (f["file_role"].as_str() == Some("impl") && view_demote)
+                || view_demote
         })
         .cloned()
         .collect();
