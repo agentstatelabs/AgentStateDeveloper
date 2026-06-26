@@ -1,5 +1,12 @@
 //! `asd mcp` — install, uninstall, and inspect the asd-mcp server
-//! registration in known agent tools (Claude Code, Claude Desktop, Cursor).
+//! registration in known agent tools.
+//!
+//! All tools currently registered share the de-facto-standard config shape: a
+//! JSON file with a top-level `mcpServers` object keyed by server name, each
+//! entry `{ command, args, env }`. New tools that follow that convention are a
+//! one-line addition to [`TOOLS`]. Tools with a divergent shape (TOML configs,
+//! a `context_servers`/`servers` key, or a different entry layout) need the
+//! `Tool` model generalized first — tracked as a follow-up slice.
 
 use std::path::{Path, PathBuf};
 
@@ -7,6 +14,9 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 
 use crate::config::Config;
+
+/// The server name asd registers itself under inside `mcpServers`.
+const SERVER_NAME: &str = "asd";
 
 // ---------------------------------------------------------------------------
 // Known tools
@@ -30,7 +40,25 @@ const TOOLS: &[Tool] = &[
         name: "cursor",
         config_path_fn: cursor_config_path,
     },
+    Tool {
+        name: "gemini-cli",
+        config_path_fn: gemini_cli_config_path,
+    },
+    Tool {
+        name: "windsurf",
+        config_path_fn: windsurf_config_path,
+    },
 ];
+
+/// Comma-separated list of registered tool names, for help text and errors.
+/// Derived from [`TOOLS`] so it can never drift out of sync.
+fn valid_tool_names() -> String {
+    TOOLS
+        .iter()
+        .map(|t| t.name)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 fn home() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
@@ -51,6 +79,14 @@ fn claude_desktop_config_path() -> Option<PathBuf> {
 
 fn cursor_config_path() -> Option<PathBuf> {
     Some(home()?.join(".cursor/mcp.json"))
+}
+
+fn gemini_cli_config_path() -> Option<PathBuf> {
+    Some(home()?.join(".gemini/settings.json"))
+}
+
+fn windsurf_config_path() -> Option<PathBuf> {
+    Some(home()?.join(".codeium/windsurf/mcp_config.json"))
 }
 
 // ---------------------------------------------------------------------------
@@ -76,8 +112,8 @@ pub struct InstallArgs {
     #[arg(long)]
     pub db: Option<PathBuf>,
 
-    /// Only install for a specific tool (claude-code, claude-desktop, cursor).
-    /// Installs into all detected tools when omitted.
+    /// Only install for a specific tool (see `asd mcp status` for the full
+    /// list of known tools). Installs into all detected tools when omitted.
     #[arg(long)]
     pub tool: Option<String>,
 }
@@ -194,6 +230,31 @@ fn tools_to_process(tool_filter: Option<&str>) -> Vec<&'static Tool> {
         .collect()
 }
 
+/// Insert (or overwrite) the asd server entry under `mcpServers` in `cfg`.
+/// Returns `true` if an asd entry was already present (i.e. this was an update).
+fn upsert_server(cfg: &mut serde_json::Value, entry: &serde_json::Value) -> Result<bool> {
+    let servers = cfg
+        .as_object_mut()
+        .context("config root is not an object")?
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    let servers = servers
+        .as_object_mut()
+        .context("mcpServers is not an object")?;
+    let already = servers.contains_key(SERVER_NAME);
+    servers.insert(SERVER_NAME.to_string(), entry.clone());
+    Ok(already)
+}
+
+/// Remove the asd server entry from `mcpServers` in `cfg`.
+/// Returns `true` if an entry was present and removed.
+fn remove_server(cfg: &mut serde_json::Value) -> bool {
+    cfg.get_mut("mcpServers")
+        .and_then(|s| s.as_object_mut())
+        .map(|m| m.remove(SERVER_NAME).is_some())
+        .unwrap_or(false)
+}
+
 // ---------------------------------------------------------------------------
 // install
 // ---------------------------------------------------------------------------
@@ -210,10 +271,7 @@ fn install(args: InstallArgs) -> Result<()> {
     let tools = tools_to_process(args.tool.as_deref());
 
     if tools.is_empty() {
-        anyhow::bail!(
-            "unknown tool {:?}; valid: claude-code, claude-desktop, cursor",
-            args.tool
-        );
+        anyhow::bail!("unknown tool {:?}; valid: {}", args.tool, valid_tool_names());
     }
 
     let entry = mcp_entry(&asd_mcp, &db_path);
@@ -225,18 +283,7 @@ fn install(args: InstallArgs) -> Result<()> {
         };
 
         let mut cfg = read_config(&cfg_path)?;
-        let servers = cfg
-            .as_object_mut()
-            .context("config root is not an object")?
-            .entry("mcpServers")
-            .or_insert_with(|| serde_json::json!({}));
-
-        let already = servers.get("asd").is_some();
-        servers
-            .as_object_mut()
-            .context("mcpServers is not an object")?
-            .insert("asd".to_string(), entry.clone());
-
+        let already = upsert_server(&mut cfg, &entry)?;
         write_config(&cfg_path, &cfg)?;
 
         if already {
@@ -274,10 +321,7 @@ fn uninstall(args: UninstallArgs) -> Result<()> {
     let tools = tools_to_process(args.tool.as_deref());
 
     if tools.is_empty() {
-        anyhow::bail!(
-            "unknown tool {:?}; valid: claude-code, claude-desktop, cursor",
-            args.tool
-        );
+        anyhow::bail!("unknown tool {:?}; valid: {}", args.tool, valid_tool_names());
     }
 
     let mut removed = 0usize;
@@ -291,11 +335,7 @@ fn uninstall(args: UninstallArgs) -> Result<()> {
         }
 
         let mut cfg = read_config(&cfg_path)?;
-        let was_present = cfg
-            .get_mut("mcpServers")
-            .and_then(|s| s.as_object_mut())
-            .map(|m| m.remove("asd").is_some())
-            .unwrap_or(false);
+        let was_present = remove_server(&mut cfg);
 
         if was_present {
             write_config(&cfg_path, &cfg)?;
@@ -347,7 +387,7 @@ fn status() -> Result<()> {
         }
 
         let cfg = read_config(&cfg_path).unwrap_or_default();
-        let entry = cfg.get("mcpServers").and_then(|s| s.get("asd"));
+        let entry = cfg.get("mcpServers").and_then(|s| s.get(SERVER_NAME));
 
         match entry {
             Some(e) => {
@@ -370,4 +410,83 @@ fn status() -> Result<()> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_names_are_unique() {
+        let mut names: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
+        let count = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), count, "duplicate tool name in TOOLS");
+    }
+
+    #[test]
+    fn registry_includes_new_wave() {
+        let names: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
+        for expected in ["claude-code", "claude-desktop", "cursor", "gemini-cli", "windsurf"] {
+            assert!(names.contains(&expected), "TOOLS missing {expected}");
+        }
+        // valid_tool_names() is derived from TOOLS, so it must list them too.
+        let listed = valid_tool_names();
+        assert!(listed.contains("gemini-cli") && listed.contains("windsurf"));
+    }
+
+    #[test]
+    fn mcp_entry_has_expected_shape() {
+        let entry = mcp_entry(Path::new("/usr/local/bin/asd-mcp"), Path::new("/repo/.asd-state.db"));
+        assert_eq!(entry["command"], "/usr/local/bin/asd-mcp");
+        assert!(entry["args"].as_array().unwrap().is_empty());
+        assert_eq!(entry["env"]["ASD_DB"], "/repo/.asd-state.db");
+    }
+
+    #[test]
+    fn upsert_into_empty_config_creates_entry() {
+        let mut cfg = serde_json::json!({});
+        let entry = mcp_entry(Path::new("/bin/asd-mcp"), Path::new("/db"));
+        let already = upsert_server(&mut cfg, &entry).unwrap();
+        assert!(!already, "fresh insert should not report already-present");
+        assert_eq!(cfg["mcpServers"]["asd"]["command"], "/bin/asd-mcp");
+    }
+
+    #[test]
+    fn upsert_is_idempotent_and_reports_update() {
+        let mut cfg = serde_json::json!({});
+        let entry = mcp_entry(Path::new("/bin/asd-mcp"), Path::new("/db"));
+        assert!(!upsert_server(&mut cfg, &entry).unwrap());
+        // Second insert overwrites and reports the prior presence.
+        assert!(upsert_server(&mut cfg, &entry).unwrap());
+        assert_eq!(cfg["mcpServers"].as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn upsert_preserves_sibling_servers() {
+        let mut cfg = serde_json::json!({
+            "mcpServers": { "other": { "command": "x" } },
+            "someOtherKey": 1
+        });
+        let entry = mcp_entry(Path::new("/bin/asd-mcp"), Path::new("/db"));
+        upsert_server(&mut cfg, &entry).unwrap();
+        assert_eq!(cfg["mcpServers"]["other"]["command"], "x");
+        assert_eq!(cfg["someOtherKey"], 1);
+        assert!(cfg["mcpServers"]["asd"].is_object());
+    }
+
+    #[test]
+    fn remove_returns_false_when_absent_true_when_present() {
+        let mut cfg = serde_json::json!({});
+        assert!(!remove_server(&mut cfg), "nothing to remove");
+        let entry = mcp_entry(Path::new("/bin/asd-mcp"), Path::new("/db"));
+        upsert_server(&mut cfg, &entry).unwrap();
+        assert!(remove_server(&mut cfg), "should remove the asd entry");
+        assert!(!remove_server(&mut cfg), "second remove is a no-op");
+    }
 }
