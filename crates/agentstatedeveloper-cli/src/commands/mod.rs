@@ -1,4 +1,5 @@
 pub mod annotate_commit;
+pub mod architecture;
 pub mod audit;
 pub mod brief;
 pub mod checklist;

@@ -273,6 +273,10 @@ pub enum Command {
     /// this repo, show in-repo matched edges, and `--export` a service manifest.
     Endpoints(commands::endpoints::EndpointsArgs),
 
+    /// One-call "orient me" overview: languages, packages, layers, routes, and
+    /// call-graph hotspots for a cold agent. Supports --agent.
+    Architecture(commands::architecture::ArchitectureArgs),
+
     /// Record and list search-quality feedback verdicts for (query, symbol) pairs.
     #[command(subcommand)]
     Feedback(commands::feedback::FeedbackCmd),
@@ -368,6 +372,7 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::PrepareChange(args) => prepare_change::run(cfg, args),
         Command::Since(args) => since::run(cfg, args),
         Command::Endpoints(args) => endpoints::run(cfg, args),
+        Command::Architecture(args) => architecture::run(cfg, args),
         Command::Feedback(sub) => feedback::run(cfg, sub),
         Command::AnnotateCommit(args) => annotate_commit::run(cfg, args),
         Command::TaskClose(args) => task_close::run(cfg, args),
