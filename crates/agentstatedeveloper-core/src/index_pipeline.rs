@@ -83,6 +83,11 @@ pub struct IndexSummary {
     /// a workspace qname. Includes stdlib (minus a known allowlist),
     /// third-party, and dynamic — treat as a "static-resolution gap"
     /// signal, not a bug count.
+    /// t-002: cross-service endpoints (HTTP routes/clients, pub-sub) detected
+    /// and written to the endpoint registry this run.
+    pub service_endpoints: usize,
+    /// t-002 slice 4: intra-process data-flow edges (arg→param) written this run.
+    pub dataflow_edges: usize,
     pub dropped_call_edges: usize,
     /// Top unresolved calls, capped at 5 for display.
     pub sample_unresolved: Vec<crate::adapter::UnresolvedCall>,
@@ -124,6 +129,13 @@ pub fn run_index(
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."))
     };
+
+    // t-002: this repo's stable id for cross-service endpoints — an explicit
+    // ASD_REPO_ID override, else the normalized git origin URL, else dir name.
+    let repo_id = crate::cross_service::resolve_repo_id(
+        std::env::var("ASD_REPO_ID").ok().as_deref(),
+        &index_root,
+    );
 
     // -----------------------------------------------------------------------
     // Pass 1: parse symbols + effects, assemble complete subtrees in memory,
@@ -408,6 +420,19 @@ pub fn run_index(
     }
     // Plan L t-006: aggregate unresolved-call hints across all files.
     let mut all_unresolved: Vec<crate::adapter::UnresolvedCall> = Vec::new();
+    // t-002: cross-service endpoints, enriched with repo + symbol identity.
+    let mut all_endpoints: Vec<crate::cross_service::ServiceEndpoint> = Vec::new();
+    // t-002 slice 4: data-flow edges. Resolve callee param names from signatures.
+    let mut all_dataflow: Vec<crate::dataflow::DataFlowEdge> = Vec::new();
+    let qname_params: HashMap<String, Vec<String>> = file_ctxs
+        .iter()
+        .flat_map(|ctx| ctx.parsed.iter())
+        .filter_map(|p| {
+            p.signature
+                .as_ref()
+                .map(|sig| (p.qname.clone(), crate::dataflow::parse_params(sig)))
+        })
+        .collect();
     for ctx in &file_ctxs {
         let edges =
             ctx.adapter
@@ -421,6 +446,30 @@ pub fn run_index(
             &ctx.parsed,
             &workspace,
         ));
+        // Cross-service endpoint detection. The adapter names each endpoint's
+        // owner by qname; resolve it to a symbol_id and stamp this repo's id.
+        for det in
+            ctx.adapter
+                .infer_service_endpoints(&ctx.file_str, &ctx.source, &ctx.parsed)
+        {
+            if let Some(sym_id) = qname_to_sym_id.get(&det.owner_qname) {
+                all_endpoints.push(det.into_endpoint(&repo_id, sym_id));
+            }
+        }
+        // Data-flow (arg→param). Resolve symbol identity + the callee's param
+        // name from its signature; unresolved sites are dropped.
+        for det in
+            ctx.adapter
+                .extract_dataflow(&ctx.file_str, &ctx.source, &ctx.parsed, &workspace)
+        {
+            if let Some(edge) = crate::dataflow::resolve_edge(
+                &det,
+                |q| qname_to_sym_id.get(q).cloned(),
+                |q| qname_params.get(q).cloned(),
+            ) {
+                all_dataflow.push(edge);
+            }
+        }
     }
 
     let mut callees_of: HashMap<String, Vec<String>> = HashMap::new();
@@ -478,6 +527,49 @@ pub fn run_index(
         repo.spec_set_json(spec2, "/asd/v1/index/callers", &Value::Object(callers_tree))
             .map_err(|e| AsdError::Other(e.to_string()))?;
     }
+
+    // t-002: endpoint registry, nested contract_hash → repo_id → symbol_id →
+    // ServiceEndpoint, so endpoints sharing a contract (from any repo, once
+    // manifests are imported) collapse under one prefix for matching.
+    let mut endpoints_tree: serde_json::Map<String, Value> = serde_json::Map::new();
+    for ep in &all_endpoints {
+        let ch = crate::cross_service::contract_hash(&ep.contract);
+        let by_repo = endpoints_tree
+            .entry(ch)
+            .or_insert_with(|| Value::Object(Default::default()))
+            .as_object_mut()
+            .expect("contract bucket is an object");
+        let by_sym = by_repo
+            .entry(ep.repo_id.clone())
+            .or_insert_with(|| Value::Object(Default::default()))
+            .as_object_mut()
+            .expect("repo bucket is an object");
+        by_sym.insert(
+            ep.symbol_id.clone(),
+            serde_json::to_value(ep).unwrap_or(Value::Null),
+        );
+    }
+    if !endpoints_tree.is_empty() {
+        repo.spec_set_json(spec2, "/asd/v1/index/endpoints", &Value::Object(endpoints_tree))
+            .map_err(|e| AsdError::Other(e.to_string()))?;
+    }
+
+    // t-002 slice 4: data-flow registry, keyed by source symbol_id →
+    // [DataFlowEdge].
+    let mut dataflow_tree: serde_json::Map<String, Value> = serde_json::Map::new();
+    for edge in &all_dataflow {
+        dataflow_tree
+            .entry(edge.from_symbol_id.clone())
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("dataflow bucket is an array")
+            .push(serde_json::to_value(edge).unwrap_or(Value::Null));
+    }
+    if !dataflow_tree.is_empty() {
+        repo.spec_set_json(spec2, "/asd/v1/index/dataflow", &Value::Object(dataflow_tree))
+            .map_err(|e| AsdError::Other(e.to_string()))?;
+    }
+
     let opts2 = CommitOptions::new(
         agent_id,
         IntentCategory::Refine,
@@ -674,6 +766,8 @@ pub fn run_index(
             v.truncate(5);
             v
         },
+        service_endpoints: all_endpoints.len(),
+        dataflow_edges: all_dataflow.len(),
         dropped_call_edges: all_unresolved.len(),
         sample_unresolved: {
             let mut v = all_unresolved;

@@ -10,6 +10,10 @@ use agentstatedeveloper_core::adapter::{
     CallEdge, DynamicDispatchHint, LanguageAdapter, ParsedSymbol, UnresolvedCall,
     WorkspaceSymbols,
 };
+use agentstatedeveloper_core::cross_service::{
+    DetectedEndpoint, Direction, Transport, http_contract,
+};
+use agentstatedeveloper_core::dataflow::DetectedDataFlow;
 use agentstatedeveloper_core::error::{AsdError, Result};
 use agentstatedeveloper_core::schema::{Effect, EffectCategory, SymbolKind};
 use serde_json::json;
@@ -54,6 +58,25 @@ impl LanguageAdapter for PythonAdapter {
 
     fn infer_effects(&self, _source: &str, symbol: &ParsedSymbol) -> Vec<Effect> {
         infer_effects_from_body(&symbol.body)
+    }
+
+    fn infer_service_endpoints(
+        &self,
+        file: &str,
+        source: &str,
+        symbols: &[ParsedSymbol],
+    ) -> Vec<DetectedEndpoint> {
+        infer_service_endpoints_in_python(file, source, symbols)
+    }
+
+    fn extract_dataflow(
+        &self,
+        file: &str,
+        source: &str,
+        symbols: &[ParsedSymbol],
+        _workspace: &WorkspaceSymbols,
+    ) -> Vec<DetectedDataFlow> {
+        infer_dataflow_in_python(file, source, symbols)
     }
 
     fn extract_call_edges(
@@ -451,6 +474,400 @@ fn extract_class_signature(node: Node<'_>, src: &[u8], name: &str) -> Option<Str
         }
     }
     Some(format!("class {name}"))
+}
+
+// -----------------------------------------------------------------------------
+// Cross-service endpoint detection (t-002)
+//
+// Heuristic, line-based, matching the substring style of effect inference.
+// Inbound: FastAPI/Flask route decorators. Outbound: requests/httpx client
+// calls with a literal URL. Non-literal URLs (f-strings, variables) are skipped
+// — without a literal we can't form a contract that would match a server route.
+// Session/client-object calls and Django url routing are known coverage gaps.
+// -----------------------------------------------------------------------------
+
+const HTTP_VERBS: &[&str] = &["get", "post", "put", "patch", "delete", "head", "options"];
+
+fn infer_service_endpoints_in_python(
+    file: &str,
+    source: &str,
+    symbols: &[ParsedSymbol],
+) -> Vec<DetectedEndpoint> {
+    let mut out = Vec::new();
+    for (idx, raw) in source.lines().enumerate() {
+        let line_no = (idx + 1) as u32;
+        let line = raw.trim();
+
+        // Inbound: route decorators (@app.get("/x"), @app.route("/x", methods=[...])).
+        for (method, path, conf) in parse_route_decorator(line) {
+            if let Some(owner) = owner_for_decorator(symbols, line_no) {
+                out.push(DetectedEndpoint {
+                    transport: Transport::Http,
+                    direction: Direction::Inbound,
+                    contract: http_contract(&method, &path),
+                    owner_qname: owner.qname.clone(),
+                    file: file.to_string(),
+                    line: line_no,
+                    confidence: conf,
+                    note: None,
+                });
+            }
+        }
+
+        // Outbound: requests/httpx client calls with a literal URL.
+        for (method, url, conf) in parse_client_calls(line) {
+            if let Some(owner) = owner_for_body_line(symbols, line_no) {
+                out.push(DetectedEndpoint {
+                    transport: Transport::Http,
+                    direction: Direction::Outbound,
+                    contract: http_contract(&method, &url),
+                    owner_qname: owner.qname.clone(),
+                    file: file.to_string(),
+                    line: line_no,
+                    confidence: conf,
+                    note: None,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The symbol whose line range contains `line`, innermost (largest start_line)
+/// when nested (class + method).
+fn owner_for_body_line(symbols: &[ParsedSymbol], line: u32) -> Option<&ParsedSymbol> {
+    symbols
+        .iter()
+        .filter(|s| s.start_line <= line && line <= s.end_line)
+        .max_by_key(|s| s.start_line)
+}
+
+/// The symbol a decorator on `line` decorates: the symbol containing the line,
+/// else the nearest `def` starting just below it (decorators stack within a few
+/// lines of the definition).
+fn owner_for_decorator(symbols: &[ParsedSymbol], line: u32) -> Option<&ParsedSymbol> {
+    if let Some(s) = owner_for_body_line(symbols, line) {
+        return Some(s);
+    }
+    symbols
+        .iter()
+        .filter(|s| s.start_line > line && s.start_line <= line + 6)
+        .min_by_key(|s| s.start_line)
+}
+
+/// Parse a route decorator line into `(METHOD, path, confidence)` pairs.
+/// `@x.get("/p")` → one entry; `@x.route("/p", methods=["GET","POST"])` → one
+/// per method (default GET when `methods=` is absent).
+fn parse_route_decorator(line: &str) -> Vec<(String, String, f64)> {
+    let Some(rest) = line.strip_prefix('@') else {
+        return Vec::new();
+    };
+    // Need an `obj.attr(` shape.
+    let Some(paren) = rest.find('(') else {
+        return Vec::new();
+    };
+    let callee = rest[..paren].trim();
+    let args = &rest[paren + 1..];
+    let Some(attr) = callee.rsplit('.').next() else {
+        return Vec::new();
+    };
+    // The attribute must be on something (a.b), not a bare `@decorator(`.
+    if !callee.contains('.') {
+        return Vec::new();
+    }
+    let attr = attr.trim();
+
+    if HTTP_VERBS.contains(&attr) {
+        if let Some(path) = first_string_arg(args) {
+            return vec![(attr.to_uppercase(), path, 0.95)];
+        }
+        return Vec::new();
+    }
+    if attr == "route" {
+        let Some(path) = first_string_arg(args) else {
+            return Vec::new();
+        };
+        let methods = methods_kwarg(args);
+        let methods = if methods.is_empty() {
+            vec!["GET".to_string()]
+        } else {
+            methods
+        };
+        return methods
+            .into_iter()
+            .map(|m| (m, path.clone(), 0.9))
+            .collect();
+    }
+    Vec::new()
+}
+
+/// Parse requests/httpx client calls on a line into `(METHOD, url, confidence)`.
+/// Handles `requests.get("u")`, `httpx.post('u')`, and
+/// `requests.request("POST", "u")`. Only literal URLs are returned.
+fn parse_client_calls(line: &str) -> Vec<(String, String, f64)> {
+    let mut out = Vec::new();
+    for module in ["requests.", "httpx."] {
+        let mut search_from = 0usize;
+        while let Some(rel) = line[search_from..].find(module) {
+            let start = search_from + rel;
+            // Must be a call boundary, not a substring of a longer identifier.
+            let preceded_ok = start == 0
+                || !line[..start]
+                    .chars()
+                    .next_back()
+                    .map(|c| c.is_alphanumeric() || c == '_' || c == '.')
+                    .unwrap_or(false);
+            let after = &line[start + module.len()..];
+            search_from = start + module.len();
+            if !preceded_ok {
+                continue;
+            }
+            let Some(paren) = after.find('(') else {
+                continue;
+            };
+            let attr = after[..paren].trim();
+            let args = &after[paren + 1..];
+            if HTTP_VERBS.contains(&attr) {
+                if let Some(url) = first_string_arg(args) {
+                    out.push((attr.to_uppercase(), url, 0.9));
+                }
+            } else if attr == "request" {
+                // requests.request("POST", "url", ...)
+                let parts = first_two_string_args(args);
+                if let (Some(method), Some(url)) = parts {
+                    out.push((method.to_uppercase(), url, 0.9));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Extract the first string literal from an argument list. Returns `None` for
+/// f-strings / b-strings (dynamic) so we never form a bogus contract; r-strings
+/// (raw) are accepted. Leading whitespace and a `url=` kwarg name are skipped.
+fn first_string_arg(args: &str) -> Option<String> {
+    let s = args.trim_start();
+    // Skip a leading `name=` kwarg label (e.g. url=, path=).
+    let s = match s.find('=') {
+        Some(eq)
+            if s[..eq]
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_')
+                && !s[..eq].is_empty()
+                && s.as_bytes().get(eq + 1) != Some(&b'=') =>
+        {
+            s[eq + 1..].trim_start()
+        }
+        _ => s,
+    };
+    read_string_literal(s)
+}
+
+fn first_two_string_args(args: &str) -> (Option<String>, Option<String>) {
+    let first = read_string_literal(args.trim_start());
+    // Advance past the first literal + comma, then read the second.
+    let Some(comma) = args.find(',') else {
+        return (first, None);
+    };
+    let second = first_string_arg(&args[comma + 1..]);
+    (first, second)
+}
+
+/// Read a leading string literal, rejecting f/b-string prefixes. Returns the
+/// inner text (without quotes).
+fn read_string_literal(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    // Allow a raw-string prefix `r`/`R`; reject f/b (dynamic / bytes).
+    if let Some(&c) = bytes.first() {
+        match c {
+            b'r' | b'R' => i = 1,
+            b'f' | b'F' | b'b' | b'B' => return None,
+            _ => {}
+        }
+    }
+    let quote = *bytes.get(i)?;
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+    let inner = &s[i + 1..];
+    let end = inner.find(quote as char)?;
+    Some(inner[..end].to_string())
+}
+
+/// Parse a `methods=["GET", "POST"]` (or `=('GET',)`) kwarg into upper-cased
+/// method names.
+fn methods_kwarg(args: &str) -> Vec<String> {
+    let Some(pos) = args.find("methods") else {
+        return Vec::new();
+    };
+    let after = &args[pos + "methods".len()..];
+    let after = after.trim_start();
+    let Some(after) = after.strip_prefix('=') else {
+        return Vec::new();
+    };
+    // Take up to the closing bracket/paren of the list.
+    let after = after.trim_start();
+    let open = after.chars().next();
+    let close = match open {
+        Some('[') => ']',
+        Some('(') => ')',
+        _ => return Vec::new(),
+    };
+    let Some(end) = after.find(close) else {
+        return Vec::new();
+    };
+    let list = &after[1..end];
+    let mut out = Vec::new();
+    let mut rest = list;
+    while let Some(m) = read_string_literal(rest.trim_start()) {
+        out.push(m.to_uppercase());
+        match rest.find(',') {
+            Some(c) => rest = &rest[c + 1..],
+            None => break,
+        }
+    }
+    out
+}
+
+// -----------------------------------------------------------------------------
+// Data-flow detection (t-002 slice 4)
+//
+// Conservative arg→param detection: only same-file function calls whose
+// arguments are ALL bare identifiers. High precision over recall — cross-file
+// resolution, method calls, literals, and kwargs are deliberately skipped
+// (tracked as follow-up). The pipeline maps each arg position to the callee's
+// parameter name from its signature.
+// -----------------------------------------------------------------------------
+
+fn infer_dataflow_in_python(
+    file: &str,
+    source: &str,
+    symbols: &[ParsedSymbol],
+) -> Vec<DetectedDataFlow> {
+    use std::collections::HashMap;
+
+    // Same-file function simple-name → qname. A name defined more than once is
+    // ambiguous (mapped to None) and never resolved.
+    let mut name_to_qname: HashMap<&str, Option<String>> = HashMap::new();
+    for s in symbols {
+        if s.kind == SymbolKind::Function {
+            let last = s.qname.rsplit('.').next().unwrap_or(s.qname.as_str());
+            name_to_qname
+                .entry(last)
+                .and_modify(|e| *e = None)
+                .or_insert_with(|| Some(s.qname.clone()));
+        }
+    }
+
+    let mut out = Vec::new();
+    for (idx, raw) in source.lines().enumerate() {
+        let line_no = (idx + 1) as u32;
+        for (callee_name, args) in simple_calls(raw) {
+            let Some(Some(callee_qname)) = name_to_qname.get(callee_name.as_str()) else {
+                continue;
+            };
+            let Some(owner) = owner_for_body_line(symbols, line_no) else {
+                continue;
+            };
+            for (i, arg) in args.iter().enumerate() {
+                out.push(DetectedDataFlow {
+                    caller_qname: owner.qname.clone(),
+                    callee_qname: callee_qname.clone(),
+                    arg_index: i,
+                    arg: arg.clone(),
+                    file: file.to_string(),
+                    line: line_no,
+                    confidence: 0.7,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Find `name(args)` call sites on a line where the callee is a bare function
+/// (not a method) and every argument is a simple identifier. Returns
+/// `(callee_name, [arg_idents])`.
+fn simple_calls(line: &str) -> Vec<(String, Vec<String>)> {
+    let t = line.trim_start();
+    if t.starts_with("def ")
+        || t.starts_with("async def ")
+        || t.starts_with("class ")
+        || t.starts_with('@')
+        || t.starts_with('#')
+    {
+        return Vec::new();
+    }
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '(' {
+            // Capture the identifier ending right before '('.
+            let mut start = i;
+            while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
+                start -= 1;
+            }
+            let is_method = start > 0 && chars[start - 1] == '.';
+            let name: String = chars[start..i].iter().collect();
+            let valid = name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_');
+            if !is_method && valid {
+                if let Some(close) = matching_close(&chars, i) {
+                    let inner: String = chars[i + 1..close].iter().collect();
+                    if let Some(args) = simple_args(&inner) {
+                        out.push((name, args));
+                    }
+                    i = close;
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+fn matching_close(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut i = open;
+    while i < chars.len() {
+        match chars[i] {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// `Some(args)` only when every comma-separated argument is a bare identifier
+/// (no nested calls, literals, operators, or kwargs) and there is at least one.
+fn simple_args(inner: &str) -> Option<Vec<String>> {
+    let inner = inner.trim();
+    if inner.is_empty() {
+        return None;
+    }
+    let mut args = Vec::new();
+    for part in inner.split(',') {
+        let p = part.trim();
+        let is_ident = p.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+            && p.chars().all(|c| c.is_alphanumeric() || c == '_');
+        if !is_ident || matches!(p, "True" | "False" | "None" | "self" | "cls") {
+            return None;
+        }
+        args.push(p.to_string());
+    }
+    Some(args)
 }
 
 // -----------------------------------------------------------------------------
@@ -2654,5 +3071,145 @@ def foo():
                 .any(|e| e.callee_qname == "crucible.agents.base.make_decision"),
             "expected cross-module edge to crucible.agents.base.make_decision; got {edges:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod service_endpoint_tests {
+    use super::*;
+    use agentstatedeveloper_core::adapter::LanguageAdapter;
+
+    fn detect(src: &str) -> Vec<DetectedEndpoint> {
+        let a = PythonAdapter;
+        let symbols = a.parse_symbols("app.py", src).unwrap();
+        a.infer_service_endpoints("app.py", src, &symbols)
+    }
+
+    fn inbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
+        eps.iter().filter(|e| e.direction == Direction::Inbound).collect()
+    }
+    fn outbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
+        eps.iter().filter(|e| e.direction == Direction::Outbound).collect()
+    }
+
+    #[test]
+    fn fastapi_decorator_route_is_inbound() {
+        let src = "@app.get(\"/charge\")\ndef charge():\n    return 1\n";
+        let eps = detect(src);
+        let inb = inbound(&eps);
+        assert_eq!(inb.len(), 1, "{eps:?}");
+        assert_eq!(inb[0].contract, "http:GET /charge");
+        assert!(inb[0].owner_qname.ends_with("charge"), "owner: {}", inb[0].owner_qname);
+        assert!(inb[0].confidence > 0.9);
+    }
+
+    #[test]
+    fn flask_route_with_methods_emits_one_per_method() {
+        let src = "@app.route(\"/items\", methods=[\"GET\", \"POST\"])\ndef items():\n    pass\n";
+        let eps = detect(src);
+        let mut got: Vec<String> = inbound(&eps).iter().map(|e| e.contract.clone()).collect();
+        got.sort();
+        assert_eq!(got, vec!["http:GET /items".to_string(), "http:POST /items".to_string()]);
+    }
+
+    #[test]
+    fn flask_route_defaults_to_get() {
+        let src = "@app.route(\"/ping\")\ndef ping():\n    pass\n";
+        let eps = detect(src);
+        let inb = inbound(&eps);
+        assert_eq!(inb.len(), 1);
+        assert_eq!(inb[0].contract, "http:GET /ping");
+    }
+
+    #[test]
+    fn requests_client_call_is_outbound() {
+        let src = "def pay():\n    requests.post(\"https://payments.svc/charge\", json=x)\n";
+        let eps = detect(src);
+        let out = outbound(&eps);
+        assert_eq!(out.len(), 1, "{eps:?}");
+        assert_eq!(out[0].contract, "http:POST /charge");
+        assert!(out[0].owner_qname.ends_with("pay"), "owner: {}", out[0].owner_qname);
+    }
+
+    #[test]
+    fn requests_request_method_first_arg() {
+        let src = "def f():\n    httpx.request(\"DELETE\", \"https://api/things/{id}\")\n";
+        let eps = detect(src);
+        let out = outbound(&eps);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].contract, "http:DELETE /things/{}");
+    }
+
+    #[test]
+    fn non_literal_urls_are_skipped() {
+        // A variable and an f-string can't form a usable contract.
+        let src = "def f():\n    requests.get(url)\n    requests.get(f\"/u/{i}\")\n";
+        let eps = detect(src);
+        assert!(outbound(&eps).is_empty(), "{eps:?}");
+    }
+
+    #[test]
+    fn import_line_is_not_a_client_call() {
+        let src = "import requests\n\ndef f():\n    return 1\n";
+        assert!(detect(src).is_empty());
+    }
+
+    #[test]
+    fn client_and_server_contracts_match_for_matching_endpoint() {
+        // The whole point: an outbound client contract equals the inbound server
+        // contract for the same logical endpoint, so match_edges would link them.
+        let server = detect("@app.get(\"/users/{id}\")\ndef get_user(id):\n    pass\n");
+        let client = detect("def fetch():\n    requests.get(\"https://users.svc/users/:id\")\n");
+        assert_eq!(inbound(&server)[0].contract, outbound(&client)[0].contract);
+        assert_eq!(inbound(&server)[0].contract, "http:GET /users/{}");
+    }
+}
+
+#[cfg(test)]
+mod dataflow_tests {
+    use super::*;
+    use agentstatedeveloper_core::adapter::{LanguageAdapter, WorkspaceSymbols};
+
+    fn detect(src: &str) -> Vec<DetectedDataFlow> {
+        let a = PythonAdapter;
+        let symbols = a.parse_symbols("m.py", src).unwrap();
+        a.extract_dataflow("m.py", src, &symbols, &WorkspaceSymbols::default())
+    }
+
+    #[test]
+    fn same_file_call_maps_positional_args() {
+        let src = "def helper(a, b):\n    return a\n\ndef caller():\n    helper(x, y)\n";
+        let df = detect(src);
+        assert_eq!(df.len(), 2, "{df:?}");
+        assert!(df.iter().all(|d| d.callee_qname.ends_with("helper")));
+        assert!(df.iter().all(|d| d.caller_qname.ends_with("caller")));
+        let args: Vec<(usize, String)> = df.iter().map(|d| (d.arg_index, d.arg.clone())).collect();
+        assert!(args.contains(&(0, "x".to_string())));
+        assert!(args.contains(&(1, "y".to_string())));
+    }
+
+    #[test]
+    fn method_calls_are_skipped() {
+        let src = "def caller():\n    obj.helper(x)\n";
+        assert!(detect(src).is_empty(), "{:?}", detect(src));
+    }
+
+    #[test]
+    fn unknown_or_cross_file_callee_skipped() {
+        // helper isn't defined in this file → not resolved (cross-file is a follow-up).
+        let src = "def caller():\n    helper(x)\n";
+        assert!(detect(src).is_empty());
+    }
+
+    #[test]
+    fn non_identifier_args_are_skipped() {
+        let src = "def helper(a):\n    pass\n\ndef caller():\n    helper(\"lit\")\n    helper(g(x))\n    helper(a + b)\n";
+        assert!(detect(src).is_empty(), "{:?}", detect(src));
+    }
+
+    #[test]
+    fn ambiguous_callee_name_skipped() {
+        let src = "def helper(a):\n    pass\n\ndef helper(b):\n    pass\n\ndef caller():\n    helper(x)\n";
+        assert!(detect(src).is_empty(), "{:?}", detect(src));
     }
 }

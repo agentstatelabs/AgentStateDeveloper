@@ -287,6 +287,32 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
         l.line(&done_msg);
     }
 
+    // t-002: surface cross-service endpoints detected this run.
+    if summary.service_endpoints > 0 {
+        let ep_msg = format!(
+            "{} cross-service endpoint{} detected (see `asd endpoints`).",
+            summary.service_endpoints,
+            if summary.service_endpoints == 1 { "" } else { "s" }
+        );
+        eprintln!("{}", ep_msg);
+        if let Some(l) = &mut log {
+            l.line(&ep_msg);
+        }
+    }
+
+    // t-002 slice 4: surface intra-process data-flow edges (arg→param).
+    if summary.dataflow_edges > 0 {
+        let df_msg = format!(
+            "{} data-flow edge{} (arg→param) detected.",
+            summary.dataflow_edges,
+            if summary.dataflow_edges == 1 { "" } else { "s" }
+        );
+        eprintln!("{}", df_msg);
+        if let Some(l) = &mut log {
+            l.line(&df_msg);
+        }
+    }
+
     // Plan L t-005: surface dynamic-dispatch warnings so agents know
     // which call paths the static walker couldn't resolve.
     if summary.dynamic_dispatch_sites > 0 {

@@ -10,6 +10,8 @@ pub mod brief;
 pub mod calibration;
 pub mod candidates;
 pub mod context;
+pub mod cross_service;
+pub mod dataflow;
 pub mod ser_helpers;
 pub mod conclusions_export;
 pub mod thinking;
@@ -53,6 +55,14 @@ pub use candidates::{
     kind_str, load_exclude_sets, load_scope_aliases, matches_any_path_glob, parse_query,
     query_tokens, resolve_exclude_set, resolve_scope,
     result_bucket, suggest_better_queries, suggest_scoped_queries,
+};
+pub use cross_service::{
+    CrossServiceEdge, DetectedEndpoint, Direction, EndpointRef, ServiceEndpoint, ServiceManifest,
+    Transport, contract_hash, endpoints_from_tree, http_contract, match_edges, normalize_repo_id,
+    pubsub_contract, resolve_repo_id,
+};
+pub use dataflow::{
+    DataFlowEdge, DataFlowKind, DetectedDataFlow, edges_from_tree, parse_params, resolve_edge,
 };
 pub use doc_adapters::{adapt_document, is_doc_file};
 pub use effects::{AsgEffectStore, EffectStore};

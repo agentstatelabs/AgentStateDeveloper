@@ -28,6 +28,36 @@ pub fn effects_reverse_index_path(effect: &str, symbol_id: &str) -> String {
     format!("{}/index/effects-rev/{}/{}", ASD_ROOT, effect, symbol_id)
 }
 
+// ---------------------------------------------------------------------------
+// Cross-service edge paths (t-002)
+//
+// Service endpoints (HTTP routes/clients, pub-sub emit/listen) are indexed by a
+// hash of their normalized *contract key* so endpoints from any repo that share
+// a contract collapse under one prefix — the cross-service analog of the
+// effects-rev reverse index. The contract hash (not the raw key) is used as a
+// path segment to keep keys path-safe (raw keys contain '/', ':', spaces).
+// ---------------------------------------------------------------------------
+
+/// All endpoints (local + imported) for one contract live under this prefix.
+pub fn endpoint_contract_prefix(contract_hash: &str) -> String {
+    format!("{}/index/endpoints/{}", ASD_ROOT, contract_hash)
+}
+
+/// A single endpoint record, namespaced by repo_id so same-contract endpoints
+/// from different repos never collide.
+pub fn endpoint_path(contract_hash: &str, repo_id: &str, symbol_id: &str) -> String {
+    format!(
+        "{}/index/endpoints/{}/{}/{}",
+        ASD_ROOT, contract_hash, repo_id, symbol_id
+    )
+}
+
+/// This repo's exported service manifest (the unit other repos import to match
+/// contracts cross-repo).
+pub fn service_manifest_path() -> String {
+    format!("{}/meta/service-manifest", ASD_ROOT)
+}
+
 pub fn ledger_entry_path(symbol_id: &str, entry_id: &str) -> String {
     format!("{}/ledger/{}/{}", ASD_ROOT, symbol_id, entry_id)
 }
