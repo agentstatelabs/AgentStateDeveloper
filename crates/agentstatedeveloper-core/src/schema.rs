@@ -1187,4 +1187,33 @@ mod runtime_evidence_tests {
         };
         assert!((ev.confidence() - derive(0.5, 4, 1)).abs() < 1e-12);
     }
+
+    #[test]
+    fn effect_decl_persists_runtime_and_is_backward_compatible() {
+        // New field survives a serde round-trip (the effect store serializes
+        // EffectDecl to JSON in git + the SQLite cache).
+        let d = EffectDecl {
+            symbol_id: "s".into(),
+            declared: Vec::new(),
+            transitive: Vec::new(),
+            verification: None,
+            confidence: Some(0.83),
+            runtime: Some(RuntimeEvidence {
+                confirmations: 3,
+                contradictions: 1,
+                prior: 0.5,
+                last_trace_id: Some("trc_1".into()),
+                last_observed_at: Utc::now(),
+            }),
+            matched_policy: None,
+        };
+        let back: EffectDecl = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        let rt = back.runtime.expect("runtime survives round-trip");
+        assert_eq!((rt.confirmations, rt.contradictions, rt.prior), (3, 1, 0.5));
+
+        // Existing records written before this field must still deserialize.
+        let old = r#"{"symbol_id":"s","declared":[],"transitive":[],"confidence":0.5}"#;
+        let parsed: EffectDecl = serde_json::from_str(old).unwrap();
+        assert!(parsed.runtime.is_none());
+    }
 }

@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, EffectCategory, EffectStore, Engine, IndexStore, Mismatch,
-    Verification, VerificationSource, VerificationStatus, paths,
+    RuntimeEvidence, Verification, VerificationSource, VerificationStatus, paths,
 };
 
 use crate::config::Config;
@@ -172,6 +172,19 @@ pub fn run(cfg: &Config, args: TraceArgs) -> Result<()> {
             mismatches: mismatches.clone(),
         });
 
+        // Fold this run into the accumulated runtime confidence.
+        let contradicted = mismatches.iter().any(|m| m.kind == "undeclared");
+        let observed_real = obs
+            .observed_effects
+            .iter()
+            .any(|e| e.effect != EffectCategory::Pure);
+        let declared_real = decl
+            .declared
+            .iter()
+            .any(|e| e.effect != EffectCategory::Pure);
+        let outcome =
+            fold_runtime_evidence(&mut decl, declared_real, observed_real, contradicted, &trace_id);
+
         effect_store.put_effects(&engine.ref_name, &symbol.symbol_id, &decl, &cfg.agent_id)?;
 
         updates.push(json!({
@@ -181,6 +194,13 @@ pub fn run(cfg: &Config, args: TraceArgs) -> Result<()> {
                 VerificationStatus::Mismatch => "mismatch",
                 VerificationStatus::Unverified => "unverified",
             },
+            "runtime_outcome": outcome,
+            "confidence": decl.confidence,
+            "runtime_evidence": decl.runtime.as_ref().map(|r| json!({
+                "confirmations": r.confirmations,
+                "contradictions": r.contradictions,
+                "prior": r.prior,
+            })),
             "mismatches": mismatches,
         }));
     }
@@ -198,6 +218,55 @@ pub fn run(cfg: &Config, args: TraceArgs) -> Result<()> {
         std::process::exit(status.code().unwrap_or(1));
     }
     Ok(())
+}
+
+/// Fold one runtime observation into a symbol's accumulated runtime evidence,
+/// updating its derived confidence in place. Returns the outcome label.
+///
+/// Outcomes (see [`RuntimeEvidence`] for the absence-safety rationale):
+///   - `"contradiction"` — `contradicted` is true: an effect was observed that
+///     wasn't declared. Demotes confidence.
+///   - `"confirmation"` — not contradicted AND there is positive evidence: a
+///     real (non-Pure) effect was observed, or a pure declaration ran and
+///     produced nothing (`!declared_real`). Promotes confidence.
+///   - `"neutral"` — not contradicted but no positive evidence (a declared
+///     effect simply wasn't exercised). Confidence is left unchanged — absence
+///     of observation is not evidence of absence.
+fn fold_runtime_evidence(
+    decl: &mut agentstatedeveloper_core::EffectDecl,
+    declared_real: bool,
+    observed_real: bool,
+    contradicted: bool,
+    trace_id: &str,
+) -> &'static str {
+    let outcome = if contradicted {
+        "contradiction"
+    } else if observed_real || !declared_real {
+        "confirmation"
+    } else {
+        "neutral"
+    };
+
+    if outcome != "neutral" {
+        let mut rt = decl.runtime.take().unwrap_or_else(|| RuntimeEvidence {
+            confirmations: 0,
+            contradictions: 0,
+            prior: decl.confidence.unwrap_or(RuntimeEvidence::NEUTRAL_PRIOR),
+            last_trace_id: None,
+            last_observed_at: Utc::now(),
+        });
+        if outcome == "confirmation" {
+            rt.confirmations += 1;
+        } else {
+            rt.contradictions += 1;
+        }
+        rt.last_trace_id = Some(trace_id.to_string());
+        rt.last_observed_at = Utc::now();
+        decl.confidence = Some(rt.confidence());
+        decl.runtime = Some(rt);
+    }
+
+    outcome
 }
 
 /// Locate `asd_tracer.py`. Tries:
@@ -231,4 +300,93 @@ fn locate_tracer() -> Result<PathBuf> {
     Err(anyhow!(
         "could not find tools/asd_tracer.py — run from the repo root or install the tracer alongside the binary"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentstatedeveloper_core::EffectDecl;
+
+    fn decl_with(prior: Option<f64>) -> EffectDecl {
+        EffectDecl {
+            symbol_id: "sym".into(),
+            declared: Vec::new(),
+            transitive: Vec::new(),
+            verification: None,
+            confidence: prior,
+            runtime: None,
+            matched_policy: None,
+        }
+    }
+
+    // --- classification truth table -------------------------------------
+
+    #[test]
+    fn contradiction_always_wins() {
+        let mut d = decl_with(None);
+        // Even with positive observation, an undeclared effect ⇒ contradiction.
+        assert_eq!(fold_runtime_evidence(&mut d, true, true, true, "t"), "contradiction");
+    }
+
+    #[test]
+    fn observed_real_effect_is_confirmation() {
+        let mut d = decl_with(None);
+        assert_eq!(fold_runtime_evidence(&mut d, true, true, false, "t"), "confirmation");
+    }
+
+    #[test]
+    fn pure_declared_pure_observed_is_confirmation() {
+        let mut d = decl_with(None);
+        // declared_real=false (pure), observed_real=false, not contradicted.
+        assert_eq!(fold_runtime_evidence(&mut d, false, false, false, "t"), "confirmation");
+    }
+
+    #[test]
+    fn declared_effect_not_exercised_is_neutral() {
+        let mut d = decl_with(Some(0.5));
+        // declared_real=true but nothing observed and no contradiction ⇒ absence.
+        let outcome = fold_runtime_evidence(&mut d, true, false, false, "t");
+        assert_eq!(outcome, "neutral");
+        // Neutral must not create runtime evidence or move confidence.
+        assert!(d.runtime.is_none());
+        assert_eq!(d.confidence, Some(0.5));
+    }
+
+    // --- folding into confidence ----------------------------------------
+
+    #[test]
+    fn confirmation_raises_contradiction_lowers_from_prior() {
+        let mut d = decl_with(Some(0.5));
+        fold_runtime_evidence(&mut d, true, true, false, "t1"); // confirm
+        let after_confirm = d.confidence.unwrap();
+        assert!(after_confirm > 0.5);
+        assert_eq!(d.runtime.as_ref().unwrap().confirmations, 1);
+        assert_eq!(d.runtime.as_ref().unwrap().prior, 0.5);
+
+        fold_runtime_evidence(&mut d, true, false, true, "t2"); // contradict
+        assert!(d.confidence.unwrap() < after_confirm);
+        assert_eq!(d.runtime.as_ref().unwrap().contradictions, 1);
+        // Prior stays frozen across ingests.
+        assert_eq!(d.runtime.as_ref().unwrap().prior, 0.5);
+        assert_eq!(d.runtime.as_ref().unwrap().last_trace_id.as_deref(), Some("t2"));
+    }
+
+    #[test]
+    fn prior_seeds_from_static_confidence_else_neutral() {
+        // No static confidence ⇒ neutral 0.5 prior is captured on first evidence.
+        let mut d = decl_with(None);
+        fold_runtime_evidence(&mut d, true, true, false, "t");
+        assert_eq!(d.runtime.as_ref().unwrap().prior, RuntimeEvidence::NEUTRAL_PRIOR);
+    }
+
+    #[test]
+    fn neutral_then_confirmation_still_seeds_prior_from_static() {
+        let mut d = decl_with(Some(0.8));
+        // A neutral run leaves everything untouched...
+        assert_eq!(fold_runtime_evidence(&mut d, true, false, false, "t0"), "neutral");
+        assert!(d.runtime.is_none());
+        // ...so the first decisive run still captures the static prior.
+        fold_runtime_evidence(&mut d, true, true, false, "t1");
+        assert_eq!(d.runtime.as_ref().unwrap().prior, 0.8);
+    }
 }
