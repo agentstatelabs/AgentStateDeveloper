@@ -109,6 +109,41 @@ pub struct ServiceManifest {
     pub endpoints: Vec<ServiceEndpoint>,
 }
 
+/// An endpoint detected by a language adapter, before the index pipeline
+/// enriches it with this repo's `repo_id` and the owning symbol's `symbol_id`.
+/// Adapters work in qnames, so a [`DetectedEndpoint`] names its owner by qname.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetectedEndpoint {
+    pub transport: Transport,
+    pub direction: Direction,
+    pub contract: String,
+    /// qname of the symbol that owns this endpoint — the route handler, or the
+    /// function containing the client call.
+    pub owner_qname: String,
+    pub file: String,
+    pub line: u32,
+    pub confidence: f64,
+    pub note: Option<String>,
+}
+
+impl DetectedEndpoint {
+    /// Promote to a full [`ServiceEndpoint`] once repo + symbol identity resolve.
+    pub fn into_endpoint(self, repo_id: &str, symbol_id: &str) -> ServiceEndpoint {
+        ServiceEndpoint {
+            transport: self.transport,
+            direction: self.direction,
+            contract: self.contract,
+            repo_id: repo_id.to_string(),
+            symbol_id: symbol_id.to_string(),
+            qname: self.owner_qname,
+            file: self.file,
+            line: self.line,
+            confidence: self.confidence,
+            note: self.note,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Contract normalization
 // ---------------------------------------------------------------------------
