@@ -269,6 +269,10 @@ pub enum Command {
     /// any symbol names upfront. Supports --agent, --intent, --depth.
     Since(commands::since::SinceArgs),
 
+    /// List cross-service endpoints (HTTP routes/clients, pub-sub) detected in
+    /// this repo, show in-repo matched edges, and `--export` a service manifest.
+    Endpoints(commands::endpoints::EndpointsArgs),
+
     /// Record and list search-quality feedback verdicts for (query, symbol) pairs.
     #[command(subcommand)]
     Feedback(commands::feedback::FeedbackCmd),
@@ -363,6 +367,7 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Invariant(sub) => invariant::run(cfg, sub),
         Command::PrepareChange(args) => prepare_change::run(cfg, args),
         Command::Since(args) => since::run(cfg, args),
+        Command::Endpoints(args) => endpoints::run(cfg, args),
         Command::Feedback(sub) => feedback::run(cfg, sub),
         Command::AnnotateCommit(args) => annotate_commit::run(cfg, args),
         Command::TaskClose(args) => task_close::run(cfg, args),

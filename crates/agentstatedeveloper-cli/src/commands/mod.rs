@@ -4,6 +4,7 @@ pub mod brief;
 pub mod checklist;
 pub mod conclusions;
 pub mod context_for;
+pub mod endpoints;
 pub mod feedback;
 pub mod graph;
 pub mod hooks;
