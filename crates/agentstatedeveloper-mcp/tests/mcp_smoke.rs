@@ -88,6 +88,7 @@ fn prime_db(db_path: &std::path::Path) {
                     mismatches: Vec::new(),
                 }),
                 confidence: None,
+                runtime: None,
                 matched_policy: None,
             };
             effect_store

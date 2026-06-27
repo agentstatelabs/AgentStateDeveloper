@@ -264,6 +264,7 @@ pub fn run_index(
                         mismatches: Vec::new(),
                     }),
                     confidence: None,
+                    runtime: None,
                     matched_policy: None,
                 })
                 .map_err(|e| AsdError::Other(e.to_string()))?,

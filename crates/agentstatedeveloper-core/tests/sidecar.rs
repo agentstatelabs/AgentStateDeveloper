@@ -58,6 +58,7 @@ fn seed_engine(e: &Engine) -> (Symbol, EffectDecl, LedgerEntry) {
             mismatches: Vec::new(),
         }),
         confidence: Some(0.9),
+        runtime: None,
         matched_policy: None,
     };
     let effects = AsgEffectStore::new(&e.repo);

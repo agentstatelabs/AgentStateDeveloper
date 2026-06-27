@@ -49,6 +49,7 @@ pub fn run(cfg: &Config, args: VerifyEffectsArgs) -> Result<()> {
             transitive: Vec::new(),
             verification: None,
             confidence: None,
+            runtime: None,
             matched_policy: None,
         });
 

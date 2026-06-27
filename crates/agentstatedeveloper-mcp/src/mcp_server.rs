@@ -2305,6 +2305,7 @@ impl AsdMcpServer {
                 .unwrap_or_default(),
             verification: existing.as_ref().and_then(|d| d.verification.clone()),
             confidence: existing.as_ref().and_then(|d| d.confidence),
+            runtime: existing.as_ref().and_then(|d| d.runtime.clone()),
             matched_policy: matched_policy.clone(),
         };
 
@@ -5184,6 +5185,7 @@ impl AsdMcpServer {
                 transitive: Vec::new(),
                 verification: None,
                 confidence: None,
+                runtime: None,
                 matched_policy: None,
             });
 

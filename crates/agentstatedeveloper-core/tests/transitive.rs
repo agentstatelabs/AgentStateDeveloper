@@ -48,6 +48,7 @@ fn put_simple_effect_decl(engine: &Engine, symbol_id: &str, declared: Vec<Effect
         transitive: Vec::new(),
         verification: None,
         confidence: None,
+        runtime: None,
         matched_policy: None,
     };
     store

@@ -96,6 +96,7 @@ fn seed_source_engine(db: &Path) -> (usize, usize, usize, usize) {
         transitive: vec![],
         verification: None,
         confidence: None,
+        runtime: None,
         matched_policy: None,
     };
     let eff_b = EffectDecl {
@@ -104,6 +105,7 @@ fn seed_source_engine(db: &Path) -> (usize, usize, usize, usize) {
         transitive: vec![],
         verification: None,
         confidence: None,
+        runtime: None,
         matched_policy: None,
     };
     effects.put_effects(&engine.ref_name, "sym_a", &eff_a, "alice").unwrap();

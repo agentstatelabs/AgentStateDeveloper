@@ -318,8 +318,73 @@ pub struct EffectDecl {
     pub verification: Option<Verification>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f64>,
+    /// Accumulated runtime-trace evidence. When present, `confidence` is
+    /// re-derived from it on each `asd trace` ingest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<RuntimeEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_policy: Option<String>,
+}
+
+/// Accumulated runtime-trace evidence for a symbol's declared effects.
+///
+/// Each `asd trace` ingest classifies the run as either a **confirmation**
+/// (every observed effect was already declared) or a **positive contradiction**
+/// (an effect was observed at runtime that was NOT declared). A declared effect
+/// that simply wasn't exercised is *not* a contradiction — absence of
+/// observation is not evidence of absence — so it never lowers confidence.
+///
+/// `EffectDecl.confidence` is then re-derived from these counts via
+/// [`RuntimeEvidence::derive_confidence`], seeded by the static `prior` so that
+/// with zero runtime evidence the confidence equals the prior, each
+/// confirmation pulls it toward 1.0, and each contradiction toward 0.0.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeEvidence {
+    /// Traces whose observed effects were all already declared.
+    pub confirmations: u64,
+    /// Traces that observed an effect not present in the declaration.
+    pub contradictions: u64,
+    /// Static/policy confidence captured at the first runtime observation. Used
+    /// as the prior the runtime evidence updates, and frozen thereafter so the
+    /// derivation stays reproducible from (prior, confirmations, contradictions).
+    pub prior: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_trace_id: Option<String>,
+    pub last_observed_at: DateTime<Utc>,
+}
+
+impl RuntimeEvidence {
+    /// Pseudo-count weight given to the static prior. With zero runtime
+    /// evidence the derived confidence equals the prior; each confirmation
+    /// pulls it toward 1.0 and each contradiction toward 0.0, with the prior
+    /// worth `PRIOR_STRENGTH` observations of resistance.
+    pub const PRIOR_STRENGTH: f64 = 2.0;
+
+    /// Neutral prior used when no static/policy confidence is available.
+    pub const NEUTRAL_PRIOR: f64 = 0.5;
+
+    /// Derive a confidence in `[0, 1]` from the static prior and accumulated
+    /// counts. This is a Laplace-smoothed success rate (equivalently the mean of
+    /// a Beta posterior) with the prior seeded as `PRIOR_STRENGTH`
+    /// pseudo-observations:
+    ///
+    /// ```text
+    /// confidence = (prior*S + confirmations) / (S + confirmations + contradictions)
+    /// ```
+    ///
+    /// With `confirmations == contradictions == 0` this returns `prior` exactly.
+    pub fn derive_confidence(prior: f64, confirmations: u64, contradictions: u64) -> f64 {
+        let p0 = prior.clamp(0.0, 1.0);
+        let s = Self::PRIOR_STRENGTH;
+        let alpha = p0 * s + confirmations as f64;
+        let total = s + confirmations as f64 + contradictions as f64;
+        alpha / total
+    }
+
+    /// Confidence derived from this evidence record.
+    pub fn confidence(&self) -> f64 {
+        Self::derive_confidence(self.prior, self.confirmations, self.contradictions)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1041,5 +1106,85 @@ mod plan_b_schema_tests {
             .map(|t| t.as_str())
             .collect();
         assert_eq!(boosts, vec!["package-boundary", "performance-critical"]);
+    }
+}
+
+#[cfg(test)]
+mod runtime_evidence_tests {
+    //! t-001: runtime-trace → confidence derivation. Confidence is derived from
+    //! accumulated confirmation/contradiction counts, seeded by the static prior.
+    //! Absence of observation is handled at the classification layer (it never
+    //! becomes a contradiction), so these tests only cover the count math.
+
+    use super::*;
+
+    fn derive(prior: f64, conf: u64, contra: u64) -> f64 {
+        RuntimeEvidence::derive_confidence(prior, conf, contra)
+    }
+
+    #[test]
+    fn zero_evidence_equals_prior() {
+        // With no runtime observations the confidence is exactly the prior.
+        for p in [0.0, 0.2, 0.5, 0.8, 1.0] {
+            assert!((derive(p, 0, 0) - p).abs() < 1e-9, "prior {p} not preserved");
+        }
+    }
+
+    #[test]
+    fn confirmations_raise_contradictions_lower() {
+        let prior = 0.5;
+        assert!(derive(prior, 3, 0) > prior, "confirmations should raise");
+        assert!(derive(prior, 0, 3) < prior, "contradictions should lower");
+    }
+
+    #[test]
+    fn monotonic_in_each_count() {
+        let prior = 0.6;
+        // Adding a confirmation never lowers; adding a contradiction never raises.
+        for n in 0..20 {
+            assert!(derive(prior, n + 1, 0) >= derive(prior, n, 0));
+            assert!(derive(prior, 0, n + 1) <= derive(prior, 0, n));
+        }
+    }
+
+    #[test]
+    fn always_within_unit_interval() {
+        for &p in &[-1.0, 0.0, 0.3, 1.0, 2.0] {
+            for conf in [0u64, 1, 50, 10_000] {
+                for contra in [0u64, 1, 50, 10_000] {
+                    let c = derive(p, conf, contra);
+                    assert!((0.0..=1.0).contains(&c), "out of range: {c} for {p},{conf},{contra}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn evidence_overwhelms_prior_asymptotically() {
+        // A confident-but-wrong prior is dragged down by sustained contradiction.
+        let c = derive(0.9, 0, 1_000);
+        assert!(c < 0.05, "1000 contradictions should crush a 0.9 prior, got {c}");
+        // And confirmations push a low prior toward 1.0.
+        let c2 = derive(0.1, 1_000, 0);
+        assert!(c2 > 0.95, "1000 confirmations should lift a 0.1 prior, got {c2}");
+    }
+
+    #[test]
+    fn balanced_evidence_trends_to_half() {
+        // Equal confirmations/contradictions wash out toward 0.5 regardless of prior.
+        let c = derive(0.9, 500, 500);
+        assert!((c - 0.5).abs() < 0.02, "balanced evidence should near 0.5, got {c}");
+    }
+
+    #[test]
+    fn confidence_method_matches_free_fn() {
+        let ev = RuntimeEvidence {
+            confirmations: 4,
+            contradictions: 1,
+            prior: 0.5,
+            last_trace_id: Some("trc_x".into()),
+            last_observed_at: Utc::now(),
+        };
+        assert!((ev.confidence() - derive(0.5, 4, 1)).abs() < 1e-12);
     }
 }
