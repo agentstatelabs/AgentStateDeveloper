@@ -44,6 +44,35 @@ This prevents paid features from being extracted from the open binary at rest �
 the OSS binary has no code paths for Team/Enterprise behavior; it only has
 runtime stubs that surface upgrade messages.
 
+### Tier split for the competitive-harvest work
+
+The competitive-harvest plan (idea harvest vs codebase-memory-mcp + rtk) is
+split across tiers by one principle: **single-repo intelligence is OSS (the
+adoption driver — solo dev on a laptop); cross-repo/federation is Team;
+org-scale registry + governance + audit is Enterprise.** The split obeys the
+dual-binary rule — cross-repo code never lands in the OSS binary.
+
+**Cross-service edges (the worked example):**
+
+- **OSS** — `ServiceEndpoint` model, contract normalizers, adapter detection
+  (`infer_service_endpoints`), in-repo outbound↔inbound matching, manifest
+  *export*, and in-repo cross-service edges surfaced in `impact`/`context_for`.
+  All in `core`. A solo dev sees the HTTP edges *within* their service and gets
+  an interoperable manifest. (CTXone plan `competitive-harvest`.)
+- **Team** — manifest *import* + cross-repo contract matching across a team's
+  repos; cross-repo dead-endpoint detection; portfolio architecture overview.
+  Lives in `asd-pro`. (CTXone plan `competitive-harvest-team`.)
+- **Enterprise** — Postgres-backed org-wide endpoint registry; the
+  cross-service governance gate (a change to an inbound contract with N
+  downstream consumers → `require_approval` via ratify); SIEM export of
+  cross-service blast radius. (CTXone plan `competitive-harvest-enterprise`.)
+
+The same lens applies to the rest of the harvest: confidence loop, single-repo
+architecture overview, dead-code, clustering, tee-recovery, agent-tool support
+are OSS; their cross-repo variants are Team; org-wide dashboards and
+policy-governed rollout are Enterprise. The full task breakdown lives in the
+three CTXone plans above; this section is the durable rationale.
+
 ## ASG path convention
 
 One ASG repo per target codebase. Paths under that repo:
