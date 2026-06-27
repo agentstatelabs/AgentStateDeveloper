@@ -1,5 +1,12 @@
 //! `asd mcp` — install, uninstall, and inspect the asd-mcp server
-//! registration in known agent tools (Claude Code, Claude Desktop, Cursor).
+//! registration in known agent tools.
+//!
+//! All tools currently registered share the de-facto-standard config shape: a
+//! JSON file with a top-level `mcpServers` object keyed by server name, each
+//! entry `{ command, args, env }`. New tools that follow that convention are a
+//! one-line addition to [`TOOLS`]. Tools with a divergent shape (TOML configs,
+//! a `context_servers`/`servers` key, or a different entry layout) need the
+//! `Tool` model generalized first — tracked as a follow-up slice.
 
 use std::path::{Path, PathBuf};
 
@@ -8,29 +15,119 @@ use clap::{Args, Subcommand};
 
 use crate::config::Config;
 
+/// The server name asd registers itself under inside `mcpServers`.
+const SERVER_NAME: &str = "asd";
+
 // ---------------------------------------------------------------------------
 // Known tools
 // ---------------------------------------------------------------------------
 
+/// Serialization format of a tool's config file. JSON tools share a single
+/// `serde_json::Value` read/insert/write path; TOML tools are edited with
+/// `toml_edit` to preserve the user's comments and key ordering.
+#[derive(Clone, Copy, PartialEq)]
+enum ConfigFormat {
+    Json,
+    Toml,
+}
+
+/// Shape of a single server entry under the tool's server map. The server map
+/// itself is an object keyed by server name; only the per-entry fields differ.
+#[derive(Clone, Copy)]
+enum EntryStyle {
+    /// `{ command, args, env }` — the de-facto standard (Claude*, Cursor,
+    /// Gemini CLI, Windsurf, Cline, Codex).
+    Standard,
+    /// Zed `context_servers`: standard fields plus `"source": "custom"`.
+    ZedCustom,
+    /// VS Code `servers`: standard fields plus `"type": "stdio"`.
+    VsCodeStdio,
+}
+
 struct Tool {
     name: &'static str,
     config_path_fn: fn() -> Option<PathBuf>,
+    format: ConfigFormat,
+    /// Top-level key holding the server map.
+    servers_key: &'static str,
+    entry_style: EntryStyle,
 }
 
 const TOOLS: &[Tool] = &[
     Tool {
         name: "claude-code",
         config_path_fn: claude_code_config_path,
+        format: ConfigFormat::Json,
+        servers_key: "mcpServers",
+        entry_style: EntryStyle::Standard,
     },
     Tool {
         name: "claude-desktop",
         config_path_fn: claude_desktop_config_path,
+        format: ConfigFormat::Json,
+        servers_key: "mcpServers",
+        entry_style: EntryStyle::Standard,
     },
     Tool {
         name: "cursor",
         config_path_fn: cursor_config_path,
+        format: ConfigFormat::Json,
+        servers_key: "mcpServers",
+        entry_style: EntryStyle::Standard,
+    },
+    Tool {
+        name: "gemini-cli",
+        config_path_fn: gemini_cli_config_path,
+        format: ConfigFormat::Json,
+        servers_key: "mcpServers",
+        entry_style: EntryStyle::Standard,
+    },
+    Tool {
+        name: "windsurf",
+        config_path_fn: windsurf_config_path,
+        format: ConfigFormat::Json,
+        servers_key: "mcpServers",
+        entry_style: EntryStyle::Standard,
+    },
+    Tool {
+        name: "zed",
+        config_path_fn: zed_config_path,
+        format: ConfigFormat::Json,
+        servers_key: "context_servers",
+        entry_style: EntryStyle::ZedCustom,
+    },
+    Tool {
+        name: "vscode",
+        config_path_fn: vscode_config_path,
+        format: ConfigFormat::Json,
+        servers_key: "servers",
+        entry_style: EntryStyle::VsCodeStdio,
+    },
+    Tool {
+        name: "cline",
+        config_path_fn: cline_config_path,
+        format: ConfigFormat::Json,
+        servers_key: "mcpServers",
+        entry_style: EntryStyle::Standard,
+    },
+    Tool {
+        name: "codex-cli",
+        config_path_fn: codex_cli_config_path,
+        format: ConfigFormat::Toml,
+        servers_key: "mcp_servers",
+        entry_style: EntryStyle::Standard,
     },
 ];
+
+/// Comma-separated list of registered tool names, for help text and errors.
+/// Derived from [`TOOLS`] so it can never drift out of sync.
+fn valid_tool_names() -> String {
+    TOOLS
+        .iter()
+        .map(|t| t.name)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 fn home() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
@@ -51,6 +148,43 @@ fn claude_desktop_config_path() -> Option<PathBuf> {
 
 fn cursor_config_path() -> Option<PathBuf> {
     Some(home()?.join(".cursor/mcp.json"))
+}
+
+fn gemini_cli_config_path() -> Option<PathBuf> {
+    Some(home()?.join(".gemini/settings.json"))
+}
+
+fn windsurf_config_path() -> Option<PathBuf> {
+    Some(home()?.join(".codeium/windsurf/mcp_config.json"))
+}
+
+fn zed_config_path() -> Option<PathBuf> {
+    Some(home()?.join(".config/zed/settings.json"))
+}
+
+/// VS Code user-profile MCP config (`mcp.json`, top-level `servers`).
+fn vscode_config_path() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    return Some(home()?.join("Library/Application Support/Code/User/mcp.json"));
+    #[cfg(target_os = "linux")]
+    return Some(home()?.join(".config/Code/User/mcp.json"));
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    return None;
+}
+
+/// Cline stores MCP settings in the VS Code extension's globalStorage.
+fn cline_config_path() -> Option<PathBuf> {
+    let rel = "globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json";
+    #[cfg(target_os = "macos")]
+    return Some(home()?.join("Library/Application Support/Code/User").join(rel));
+    #[cfg(target_os = "linux")]
+    return Some(home()?.join(".config/Code/User").join(rel));
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    return None;
+}
+
+fn codex_cli_config_path() -> Option<PathBuf> {
+    Some(home()?.join(".codex/config.toml"))
 }
 
 // ---------------------------------------------------------------------------
@@ -76,8 +210,8 @@ pub struct InstallArgs {
     #[arg(long)]
     pub db: Option<PathBuf>,
 
-    /// Only install for a specific tool (claude-code, claude-desktop, cursor).
-    /// Installs into all detected tools when omitted.
+    /// Only install for a specific tool (see `asd mcp status` for the full
+    /// list of known tools). Installs into all detected tools when omitted.
     #[arg(long)]
     pub tool: Option<String>,
 }
@@ -177,14 +311,27 @@ fn write_config(path: &Path, value: &serde_json::Value) -> Result<()> {
     std::fs::write(path, out).with_context(|| format!("write {}", path.display()))
 }
 
-fn mcp_entry(asd_mcp_bin: &Path, db_path: &Path) -> serde_json::Value {
-    serde_json::json!({
+/// Build the server entry for a tool, applying any style-specific extra fields
+/// on top of the standard `{ command, args, env }` body.
+fn build_entry(style: EntryStyle, asd_mcp_bin: &Path, db_path: &Path) -> serde_json::Value {
+    let mut entry = serde_json::json!({
         "command": asd_mcp_bin.to_string_lossy(),
         "args": [],
         "env": {
             "ASD_DB": db_path.to_string_lossy()
         }
-    })
+    });
+    let obj = entry.as_object_mut().expect("entry is an object");
+    match style {
+        EntryStyle::Standard => {}
+        EntryStyle::ZedCustom => {
+            obj.insert("source".to_string(), serde_json::json!("custom"));
+        }
+        EntryStyle::VsCodeStdio => {
+            obj.insert("type".to_string(), serde_json::json!("stdio"));
+        }
+    }
+    entry
 }
 
 fn tools_to_process(tool_filter: Option<&str>) -> Vec<&'static Tool> {
@@ -192,6 +339,137 @@ fn tools_to_process(tool_filter: Option<&str>) -> Vec<&'static Tool> {
         .iter()
         .filter(|t| tool_filter.map_or(true, |f| t.name == f))
         .collect()
+}
+
+/// Insert (or overwrite) the asd server entry under `servers_key` in `cfg`.
+/// Returns `true` if an asd entry was already present (i.e. this was an update).
+fn upsert_server(
+    cfg: &mut serde_json::Value,
+    servers_key: &str,
+    entry: &serde_json::Value,
+) -> Result<bool> {
+    let servers = cfg
+        .as_object_mut()
+        .context("config root is not an object")?
+        .entry(servers_key)
+        .or_insert_with(|| serde_json::json!({}));
+    let servers = servers
+        .as_object_mut()
+        .with_context(|| format!("{servers_key} is not an object"))?;
+    let already = servers.contains_key(SERVER_NAME);
+    servers.insert(SERVER_NAME.to_string(), entry.clone());
+    Ok(already)
+}
+
+/// Remove the asd server entry from `servers_key` in `cfg`.
+/// Returns `true` if an entry was present and removed.
+fn remove_server(cfg: &mut serde_json::Value, servers_key: &str) -> bool {
+    cfg.get_mut(servers_key)
+        .and_then(|s| s.as_object_mut())
+        .map(|m| m.remove(SERVER_NAME).is_some())
+        .unwrap_or(false)
+}
+
+// --- TOML path (toml_edit, format-preserving) ------------------------------
+
+/// Insert/overwrite the asd server entry in a TOML config, preserving the rest
+/// of the document (comments, ordering, other tables). Returns whether an asd
+/// entry already existed. Used for Codex CLI's `~/.codex/config.toml`.
+fn toml_upsert_server(
+    path: &Path,
+    servers_key: &str,
+    asd_mcp: &Path,
+    db_path: &Path,
+) -> Result<bool> {
+    use toml_edit::{value, Array, DocumentMut, Item, Table};
+
+    let mut doc = if path.exists() {
+        std::fs::read_to_string(path)
+            .with_context(|| format!("read {}", path.display()))?
+            .parse::<DocumentMut>()
+            .with_context(|| format!("parse TOML in {}", path.display()))?
+    } else {
+        DocumentMut::new()
+    };
+
+    let servers = doc
+        .as_table_mut()
+        .entry(servers_key)
+        .or_insert(Item::Table(Table::new()))
+        .as_table_mut()
+        .with_context(|| format!("{servers_key} is not a table"))?;
+    // Render as `[mcp_servers.asd]` headers rather than an explicit, empty
+    // `[mcp_servers]` parent.
+    servers.set_implicit(true);
+
+    let already = servers.contains_key(SERVER_NAME);
+
+    let mut entry = Table::new();
+    entry["command"] = value(asd_mcp.to_string_lossy().into_owned());
+    entry["args"] = value(Array::new());
+    let mut env = Table::new();
+    env["ASD_DB"] = value(db_path.to_string_lossy().into_owned());
+    entry["env"] = Item::Table(env);
+    servers[SERVER_NAME] = Item::Table(entry);
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create dirs for {}", path.display()))?;
+    }
+    std::fs::write(path, doc.to_string()).with_context(|| format!("write {}", path.display()))?;
+    Ok(already)
+}
+
+/// Remove the asd server entry from a TOML config, preserving the rest.
+/// Returns `true` if an entry was present and removed.
+fn toml_remove_server(path: &Path, servers_key: &str) -> Result<bool> {
+    use toml_edit::DocumentMut;
+
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut doc = std::fs::read_to_string(path)
+        .with_context(|| format!("read {}", path.display()))?
+        .parse::<DocumentMut>()
+        .with_context(|| format!("parse TOML in {}", path.display()))?;
+    let removed = doc
+        .get_mut(servers_key)
+        .and_then(|i| i.as_table_mut())
+        .map(|t| t.remove(SERVER_NAME).is_some())
+        .unwrap_or(false);
+    if removed {
+        std::fs::write(path, doc.to_string())
+            .with_context(|| format!("write {}", path.display()))?;
+    }
+    Ok(removed)
+}
+
+/// Read the registered asd entry's `(command, ASD_DB)` from a config file of
+/// either format, if present. Read-only — used by `status`.
+fn read_registered_entry(
+    path: &Path,
+    format: ConfigFormat,
+    servers_key: &str,
+) -> Option<(String, String)> {
+    match format {
+        ConfigFormat::Json => {
+            let cfg = read_config(path).ok()?;
+            let e = cfg.get(servers_key)?.get(SERVER_NAME)?;
+            let cmd = e.get("command")?.as_str()?.to_string();
+            let db = e.get("env")?.get("ASD_DB")?.as_str()?.to_string();
+            Some((cmd, db))
+        }
+        ConfigFormat::Toml => {
+            let doc = std::fs::read_to_string(path)
+                .ok()?
+                .parse::<toml_edit::DocumentMut>()
+                .ok()?;
+            let e = doc.get(servers_key)?.get(SERVER_NAME)?;
+            let cmd = e.get("command")?.as_str()?.to_string();
+            let db = e.get("env")?.get("ASD_DB")?.as_str()?.to_string();
+            Some((cmd, db))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -210,13 +488,9 @@ fn install(args: InstallArgs) -> Result<()> {
     let tools = tools_to_process(args.tool.as_deref());
 
     if tools.is_empty() {
-        anyhow::bail!(
-            "unknown tool {:?}; valid: claude-code, claude-desktop, cursor",
-            args.tool
-        );
+        anyhow::bail!("unknown tool {:?}; valid: {}", args.tool, valid_tool_names());
     }
 
-    let entry = mcp_entry(&asd_mcp, &db_path);
     let mut installed = 0usize;
 
     for tool in &tools {
@@ -224,20 +498,18 @@ fn install(args: InstallArgs) -> Result<()> {
             continue;
         };
 
-        let mut cfg = read_config(&cfg_path)?;
-        let servers = cfg
-            .as_object_mut()
-            .context("config root is not an object")?
-            .entry("mcpServers")
-            .or_insert_with(|| serde_json::json!({}));
-
-        let already = servers.get("asd").is_some();
-        servers
-            .as_object_mut()
-            .context("mcpServers is not an object")?
-            .insert("asd".to_string(), entry.clone());
-
-        write_config(&cfg_path, &cfg)?;
+        let already = match tool.format {
+            ConfigFormat::Json => {
+                let entry = build_entry(tool.entry_style, &asd_mcp, &db_path);
+                let mut cfg = read_config(&cfg_path)?;
+                let already = upsert_server(&mut cfg, tool.servers_key, &entry)?;
+                write_config(&cfg_path, &cfg)?;
+                already
+            }
+            ConfigFormat::Toml => {
+                toml_upsert_server(&cfg_path, tool.servers_key, &asd_mcp, &db_path)?
+            }
+        };
 
         if already {
             eprintln!("  {} updated  {}", tool.name, cfg_path.display());
@@ -274,10 +546,7 @@ fn uninstall(args: UninstallArgs) -> Result<()> {
     let tools = tools_to_process(args.tool.as_deref());
 
     if tools.is_empty() {
-        anyhow::bail!(
-            "unknown tool {:?}; valid: claude-code, claude-desktop, cursor",
-            args.tool
-        );
+        anyhow::bail!("unknown tool {:?}; valid: {}", args.tool, valid_tool_names());
     }
 
     let mut removed = 0usize;
@@ -290,15 +559,19 @@ fn uninstall(args: UninstallArgs) -> Result<()> {
             continue;
         }
 
-        let mut cfg = read_config(&cfg_path)?;
-        let was_present = cfg
-            .get_mut("mcpServers")
-            .and_then(|s| s.as_object_mut())
-            .map(|m| m.remove("asd").is_some())
-            .unwrap_or(false);
+        let was_present = match tool.format {
+            ConfigFormat::Json => {
+                let mut cfg = read_config(&cfg_path)?;
+                let present = remove_server(&mut cfg, tool.servers_key);
+                if present {
+                    write_config(&cfg_path, &cfg)?;
+                }
+                present
+            }
+            ConfigFormat::Toml => toml_remove_server(&cfg_path, tool.servers_key)?,
+        };
 
         if was_present {
-            write_config(&cfg_path, &cfg)?;
             eprintln!("  {} removed  {}", tool.name, cfg_path.display());
             removed += 1;
         } else {
@@ -346,17 +619,8 @@ fn status() -> Result<()> {
             continue;
         }
 
-        let cfg = read_config(&cfg_path).unwrap_or_default();
-        let entry = cfg.get("mcpServers").and_then(|s| s.get("asd"));
-
-        match entry {
-            Some(e) => {
-                let cmd = e.get("command").and_then(|v| v.as_str()).unwrap_or("?");
-                let db = e
-                    .get("env")
-                    .and_then(|v| v.get("ASD_DB"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
+        match read_registered_entry(&cfg_path, tool.format, tool.servers_key) {
+            Some((cmd, db)) => {
                 eprintln!("  ✓ {}  command={}  ASD_DB={}", tool.name, cmd, db);
             }
             None => {
@@ -370,4 +634,186 @@ fn status() -> Result<()> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_names_are_unique() {
+        let mut names: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
+        let count = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), count, "duplicate tool name in TOOLS");
+    }
+
+    #[test]
+    fn registry_includes_all_tools() {
+        let names: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
+        for expected in [
+            "claude-code",
+            "claude-desktop",
+            "cursor",
+            "gemini-cli",
+            "windsurf",
+            "zed",
+            "vscode",
+            "cline",
+            "codex-cli",
+        ] {
+            assert!(names.contains(&expected), "TOOLS missing {expected}");
+        }
+        // valid_tool_names() is derived from TOOLS, so it must list them too.
+        let listed = valid_tool_names();
+        assert!(listed.contains("zed") && listed.contains("vscode") && listed.contains("cline"));
+        assert!(listed.contains("codex-cli"));
+    }
+
+    fn std_entry() -> serde_json::Value {
+        build_entry(
+            EntryStyle::Standard,
+            Path::new("/bin/asd-mcp"),
+            Path::new("/db"),
+        )
+    }
+
+    #[test]
+    fn standard_entry_has_expected_shape() {
+        let entry = build_entry(
+            EntryStyle::Standard,
+            Path::new("/usr/local/bin/asd-mcp"),
+            Path::new("/repo/.asd-state.db"),
+        );
+        assert_eq!(entry["command"], "/usr/local/bin/asd-mcp");
+        assert!(entry["args"].as_array().unwrap().is_empty());
+        assert_eq!(entry["env"]["ASD_DB"], "/repo/.asd-state.db");
+        // No style markers on the standard entry.
+        assert!(entry.get("source").is_none() && entry.get("type").is_none());
+    }
+
+    #[test]
+    fn divergent_entry_styles_add_their_marker() {
+        let zed = build_entry(EntryStyle::ZedCustom, Path::new("/bin/asd-mcp"), Path::new("/db"));
+        assert_eq!(zed["source"], "custom");
+        assert_eq!(zed["command"], "/bin/asd-mcp"); // standard body still present
+
+        let vscode = build_entry(EntryStyle::VsCodeStdio, Path::new("/bin/asd-mcp"), Path::new("/db"));
+        assert_eq!(vscode["type"], "stdio");
+        assert_eq!(vscode["env"]["ASD_DB"], "/db");
+    }
+
+    #[test]
+    fn upsert_uses_the_tools_servers_key() {
+        // Zed nests under context_servers, not mcpServers.
+        let mut cfg = serde_json::json!({});
+        let entry = build_entry(EntryStyle::ZedCustom, Path::new("/bin/asd-mcp"), Path::new("/db"));
+        let already = upsert_server(&mut cfg, "context_servers", &entry).unwrap();
+        assert!(!already);
+        assert_eq!(cfg["context_servers"]["asd"]["source"], "custom");
+        assert!(cfg.get("mcpServers").is_none(), "must not touch mcpServers");
+    }
+
+    #[test]
+    fn upsert_into_empty_config_creates_entry() {
+        let mut cfg = serde_json::json!({});
+        let already = upsert_server(&mut cfg, "mcpServers", &std_entry()).unwrap();
+        assert!(!already, "fresh insert should not report already-present");
+        assert_eq!(cfg["mcpServers"]["asd"]["command"], "/bin/asd-mcp");
+    }
+
+    #[test]
+    fn upsert_is_idempotent_and_reports_update() {
+        let mut cfg = serde_json::json!({});
+        assert!(!upsert_server(&mut cfg, "mcpServers", &std_entry()).unwrap());
+        // Second insert overwrites and reports the prior presence.
+        assert!(upsert_server(&mut cfg, "mcpServers", &std_entry()).unwrap());
+        assert_eq!(cfg["mcpServers"].as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn upsert_preserves_sibling_servers() {
+        let mut cfg = serde_json::json!({
+            "servers": { "other": { "command": "x" } },
+            "someOtherKey": 1
+        });
+        upsert_server(&mut cfg, "servers", &std_entry()).unwrap();
+        assert_eq!(cfg["servers"]["other"]["command"], "x");
+        assert_eq!(cfg["someOtherKey"], 1);
+        assert!(cfg["servers"]["asd"].is_object());
+    }
+
+    #[test]
+    fn remove_returns_false_when_absent_true_when_present() {
+        let mut cfg = serde_json::json!({});
+        assert!(!remove_server(&mut cfg, "mcpServers"), "nothing to remove");
+        upsert_server(&mut cfg, "mcpServers", &std_entry()).unwrap();
+        assert!(remove_server(&mut cfg, "mcpServers"), "should remove the asd entry");
+        assert!(!remove_server(&mut cfg, "mcpServers"), "second remove is a no-op");
+    }
+
+    fn temp_toml(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("asd_mcp_test_{}_{}", std::process::id(), tag));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("config.toml")
+    }
+
+    #[test]
+    fn toml_upsert_preserves_comments_and_siblings() {
+        let path = temp_toml("preserve");
+        std::fs::write(
+            &path,
+            "# hand-written codex config\nmodel = \"o3\"\n\n[mcp_servers.other]\ncommand = \"x\"\n",
+        )
+        .unwrap();
+
+        let already =
+            toml_upsert_server(&path, "mcp_servers", Path::new("/bin/asd-mcp"), Path::new("/db"))
+                .unwrap();
+        assert!(!already, "fresh insert");
+
+        let txt = std::fs::read_to_string(&path).unwrap();
+        assert!(txt.contains("# hand-written codex config"), "comment kept");
+        assert!(txt.contains("model = \"o3\""), "sibling setting kept");
+        assert!(txt.contains("[mcp_servers.other]"), "sibling server kept");
+        assert!(txt.contains("[mcp_servers.asd]"), "asd table written");
+        assert!(txt.contains("ASD_DB"), "env written");
+
+        // Read-only accessor sees the registration.
+        let (cmd, db) = read_registered_entry(&path, ConfigFormat::Toml, "mcp_servers").unwrap();
+        assert_eq!(cmd, "/bin/asd-mcp");
+        assert_eq!(db, "/db");
+
+        // Idempotent: second upsert reports already-present.
+        assert!(
+            toml_upsert_server(&path, "mcp_servers", Path::new("/bin/asd-mcp"), Path::new("/db"))
+                .unwrap()
+        );
+
+        // Remove leaves the rest of the document intact.
+        assert!(toml_remove_server(&path, "mcp_servers").unwrap());
+        let txt2 = std::fs::read_to_string(&path).unwrap();
+        assert!(!txt2.contains("[mcp_servers.asd]"), "asd removed");
+        assert!(txt2.contains("# hand-written codex config"), "comment survives removal");
+        assert!(txt2.contains("[mcp_servers.other]"), "sibling survives removal");
+        assert!(!toml_remove_server(&path, "mcp_servers").unwrap(), "second remove no-op");
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn toml_upsert_creates_file_when_absent() {
+        let path = temp_toml("create");
+        let _ = std::fs::remove_file(&path);
+        toml_upsert_server(&path, "mcp_servers", Path::new("/bin/asd-mcp"), Path::new("/db"))
+            .unwrap();
+        let (cmd, _db) = read_registered_entry(&path, ConfigFormat::Toml, "mcp_servers").unwrap();
+        assert_eq!(cmd, "/bin/asd-mcp");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
 }

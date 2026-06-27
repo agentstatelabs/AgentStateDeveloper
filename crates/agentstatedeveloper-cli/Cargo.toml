@@ -21,6 +21,9 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+# Format-preserving TOML editing for agent config files (e.g. Codex
+# ~/.codex/config.toml) so we never strip a user's comments/ordering.
+toml_edit = "0.22"
 tokio = { workspace = true }
 chrono = { workspace = true }
 directories = { workspace = true }
