@@ -4037,6 +4037,28 @@ pub fn effect_detail_reason(decl: Option<&crate::schema::EffectDecl>) -> String 
     if decl.declared.is_empty() {
         return "no effects declared".to_string();
     }
+    // Runtime-trace evidence is the strongest signal (real execution observed
+    // the effects), so it takes precedence in the badge when present. The
+    // derived confidence already folds the static prior + accumulated counts.
+    if let Some(rt) = &decl.runtime {
+        let total = rt.confirmations + rt.contradictions;
+        if total > 0 {
+            let verdict = if rt.contradictions == 0 {
+                "runtime-verified"
+            } else {
+                "runtime-contested"
+            };
+            return format!(
+                "{} — confidence {:.2} ({}✓/{}✗ over {} trace{})",
+                verdict,
+                rt.confidence(),
+                rt.confirmations,
+                rt.contradictions,
+                total,
+                if total == 1 { "" } else { "s" },
+            );
+        }
+    }
     let Some(ref v) = decl.verification else {
         return format!(
             "effects declared ({} effect{}) but not verified — run 'asd verify-effects'",
@@ -4067,6 +4089,95 @@ pub fn effect_detail_reason(decl: Option<&crate::schema::EffectDecl>) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- effect_detail_reason: runtime-trace badge (t-001 slice 3) -------
+
+    fn decl_with_runtime(conf: u64, contra: u64, prior: f64) -> crate::schema::EffectDecl {
+        use crate::schema::*;
+        EffectDecl {
+            symbol_id: "s".into(),
+            declared: vec![Effect::new(EffectCategory::IoNetOut)],
+            transitive: vec![],
+            // Runtime ingest also sets a RuntimeTracer verification; the badge
+            // must prefer the richer runtime evidence over this.
+            verification: Some(Verification {
+                by: VerificationSource::RuntimeTracer,
+                at: chrono::Utc::now(),
+                status: if contra == 0 {
+                    VerificationStatus::Ok
+                } else {
+                    VerificationStatus::Mismatch
+                },
+                mismatches: vec![],
+            }),
+            confidence: Some(RuntimeEvidence::derive_confidence(prior, conf, contra)),
+            runtime: Some(RuntimeEvidence {
+                confirmations: conf,
+                contradictions: contra,
+                prior,
+                last_trace_id: Some("trc".into()),
+                last_observed_at: chrono::Utc::now(),
+            }),
+            matched_policy: None,
+        }
+    }
+
+    #[test]
+    fn effect_detail_runtime_verified_badge() {
+        let label = effect_detail_reason(Some(&decl_with_runtime(5, 0, 0.5)));
+        assert!(label.starts_with("runtime-verified"), "got: {label}");
+        assert!(label.contains("5✓/0✗"), "got: {label}");
+        assert!(label.contains("over 5 traces"), "got: {label}");
+        assert!(label.contains("confidence 0."), "got: {label}");
+    }
+
+    #[test]
+    fn effect_detail_runtime_contested_when_contradictions() {
+        let label = effect_detail_reason(Some(&decl_with_runtime(2, 3, 0.5)));
+        assert!(label.starts_with("runtime-contested"), "got: {label}");
+        assert!(label.contains("2✓/3✗"), "got: {label}");
+    }
+
+    #[test]
+    fn effect_detail_single_trace_is_singular() {
+        let label = effect_detail_reason(Some(&decl_with_runtime(1, 0, 0.5)));
+        assert!(label.contains("over 1 trace)"), "expected singular, got: {label}");
+    }
+
+    #[test]
+    fn effect_detail_runtime_takes_precedence_over_static_label() {
+        // Static verification is Ok, but the runtime badge (with confidence)
+        // must win over the plain "ok — verified by ..." label.
+        let label = effect_detail_reason(Some(&decl_with_runtime(3, 0, 0.6)));
+        assert!(!label.starts_with("ok — verified"), "static label leaked: {label}");
+    }
+
+    #[test]
+    fn effect_detail_falls_back_to_static_without_runtime() {
+        use crate::schema::*;
+        let decl = EffectDecl {
+            symbol_id: "s".into(),
+            declared: vec![Effect::new(EffectCategory::IoNetOut)],
+            transitive: vec![],
+            verification: Some(Verification {
+                by: VerificationSource::StaticChecker,
+                at: chrono::Utc::now(),
+                status: VerificationStatus::Ok,
+                mismatches: vec![],
+            }),
+            confidence: None,
+            runtime: None,
+            matched_policy: None,
+        };
+        let label = effect_detail_reason(Some(&decl));
+        // Existing renderer lowercases the Debug name ("StaticChecker" → "staticchecker").
+        assert!(label.starts_with("ok — verified by staticchecker"), "got: {label}");
+    }
+
+    #[test]
+    fn effect_detail_none_and_empty() {
+        assert_eq!(effect_detail_reason(None), "no effects declared");
+    }
 
     // Plan J t-005 / 1.0.79 token economy: consistent → returns Null.
     // Callers omit the field entirely; agent infers "indexes agree"
