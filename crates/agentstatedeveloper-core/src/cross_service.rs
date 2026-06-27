@@ -308,6 +308,32 @@ fn git_origin_url(cwd: &std::path::Path) -> Option<String> {
     }
 }
 
+/// Flatten the on-disk endpoint registry tree
+/// (`contract_hash → repo_id → symbol_id → ServiceEndpoint`) into a flat list.
+/// Malformed entries are skipped.
+pub fn endpoints_from_tree(tree: &serde_json::Value) -> Vec<ServiceEndpoint> {
+    let mut out = Vec::new();
+    let Some(by_contract) = tree.as_object() else {
+        return out;
+    };
+    for by_repo in by_contract.values() {
+        let Some(by_repo) = by_repo.as_object() else {
+            continue;
+        };
+        for by_sym in by_repo.values() {
+            let Some(by_sym) = by_sym.as_object() else {
+                continue;
+            };
+            for ep in by_sym.values() {
+                if let Ok(e) = serde_json::from_value::<ServiceEndpoint>(ep.clone()) {
+                    out.push(e);
+                }
+            }
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Matching
 // ---------------------------------------------------------------------------
@@ -497,6 +523,21 @@ mod tests {
         ];
         let edges = match_edges(&eps);
         assert_eq!(edges.len(), 2, "both consumers link to the one handler");
+    }
+
+    #[test]
+    fn endpoints_from_tree_flattens_registry() {
+        // Mirror the on-disk shape: contract_hash → repo_id → symbol_id → endpoint.
+        let e = ep(Direction::Inbound, &http_contract("POST", "/charge"), "pay", 0.9);
+        let tree = serde_json::json!({
+            contract_hash(&e.contract): { "pay": { "sym_1": serde_json::to_value(&e).unwrap() } }
+        });
+        let got = endpoints_from_tree(&tree);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].contract, "http:POST /charge");
+        // Malformed/empty trees yield nothing rather than panicking.
+        assert!(endpoints_from_tree(&serde_json::Value::Null).is_empty());
+        assert!(endpoints_from_tree(&serde_json::json!({"h": {"r": {"s": 42}}})).is_empty());
     }
 
     #[test]

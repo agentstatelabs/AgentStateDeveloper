@@ -57,8 +57,8 @@ pub use candidates::{
 };
 pub use cross_service::{
     CrossServiceEdge, DetectedEndpoint, Direction, EndpointRef, ServiceEndpoint, ServiceManifest,
-    Transport, contract_hash, http_contract, match_edges, normalize_repo_id, pubsub_contract,
-    resolve_repo_id,
+    Transport, contract_hash, endpoints_from_tree, http_contract, match_edges, normalize_repo_id,
+    pubsub_contract, resolve_repo_id,
 };
 pub use doc_adapters::{adapt_document, is_doc_file};
 pub use effects::{AsgEffectStore, EffectStore};

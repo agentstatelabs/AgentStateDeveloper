@@ -209,9 +209,55 @@ pub fn assemble_symbol_context(
         Vec::new()
     };
 
+    // Cross-service edges (t-002): if this symbol owns any HTTP/pub-sub
+    // endpoint, surface its endpoints and the matched edges so blast radius
+    // crosses the service boundary. Omitted entirely when the symbol has none
+    // (token economy). In-repo matches only; cross-repo is a Team-tier feature.
+    let cross_service = {
+        let tree = engine
+            .repo
+            .get_tree(&engine.ref_name, "/asd/v1/index/endpoints")
+            .unwrap_or(Value::Null);
+        let all = crate::cross_service::endpoints_from_tree(&tree);
+        let mine: Vec<&crate::cross_service::ServiceEndpoint> =
+            all.iter().filter(|e| e.symbol_id == symbol.symbol_id).collect();
+        if mine.is_empty() {
+            None
+        } else {
+            let edges = crate::cross_service::match_edges(&all);
+            let touching: Vec<Value> = edges
+                .iter()
+                .filter(|e| {
+                    e.from.symbol_id == symbol.symbol_id || e.to.symbol_id == symbol.symbol_id
+                })
+                .map(|e| {
+                    let is_handler = e.to.symbol_id == symbol.symbol_id;
+                    let peer = if is_handler { &e.from } else { &e.to };
+                    json!({
+                        "role": if is_handler { "handler" } else { "consumer" },
+                        "contract": e.contract,
+                        "peer_qname": peer.qname,
+                        "peer_repo": peer.repo_id,
+                        "cross_repo": e.cross_repo,
+                        "confidence": e.confidence,
+                    })
+                })
+                .collect();
+            Some(json!({
+                "endpoints": mine.iter().map(|e| json!({
+                    "transport": e.transport,
+                    "direction": e.direction,
+                    "contract": e.contract,
+                    "confidence": e.confidence,
+                })).collect::<Vec<_>>(),
+                "edges": touching,
+            }))
+        }
+    };
+
     // Invariants and hazards are anti-footgun guards — surface them
     // first so agents see them before the call-graph details.
-    Ok(json!({
+    let mut out = json!({
         "symbol": sym_val,
         "invariants": invariants,
         "hazards": hazards,
@@ -227,5 +273,9 @@ pub fn assemble_symbol_context(
         "effects_detail": effects_detail,
         "proofs": proofs,
         "decisions_and_notes": other_ledger,
-    }))
+    });
+    if let Some(cs) = cross_service {
+        out["cross_service"] = cs;
+    }
+    Ok(out)
 }

@@ -12,9 +12,9 @@ use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine, IndexStore, LedgerKind,
-    LedgerStore, classify_layer_sym, estimate_tokens, git_dirty_files, glob_match, intent_focus,
-    load_layer_overrides, matches_any_path_glob, parse_intent, propose_test_path, resolve_scope,
-    stale_warning, symbol_tier, trim_for_agent,
+    LedgerStore, classify_layer_sym, endpoints_from_tree, estimate_tokens, git_dirty_files,
+    glob_match, intent_focus, load_layer_overrides, match_edges, matches_any_path_glob,
+    parse_intent, propose_test_path, resolve_scope, stale_warning, symbol_tier, trim_for_agent,
 };
 
 use crate::commands::graph::build_id_map;
@@ -283,6 +283,40 @@ pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
     }
 
     let focus = intent_focus(intent);
+    // Cross-service edges (t-002): in-repo service-boundary peers of the target,
+    // so blast radius includes HTTP/pub-sub consumers, not just call-graph
+    // callers. Null when the target owns no endpoint. (In-repo only — cross-repo
+    // is a Team-tier feature.)
+    let cross_service = {
+        let tree = engine
+            .repo
+            .get_tree(&engine.ref_name, "/asd/v1/index/endpoints")
+            .unwrap_or(Value::Null);
+        let all = endpoints_from_tree(&tree);
+        if all.iter().any(|e| e.symbol_id == symbol.symbol_id) {
+            let rows: Vec<Value> = match_edges(&all)
+                .iter()
+                .filter(|e| {
+                    e.from.symbol_id == symbol.symbol_id || e.to.symbol_id == symbol.symbol_id
+                })
+                .map(|e| {
+                    let is_handler = e.to.symbol_id == symbol.symbol_id;
+                    let peer = if is_handler { &e.from } else { &e.to };
+                    json!({
+                        "role": if is_handler { "handler" } else { "consumer" },
+                        "contract": e.contract,
+                        "peer_qname": peer.qname,
+                        "cross_repo": e.cross_repo,
+                        "confidence": e.confidence,
+                    })
+                })
+                .collect();
+            Value::Array(rows)
+        } else {
+            Value::Null
+        }
+    };
+
     let out = json!({
         "symbol": sym_val,
         "layer": layer,
@@ -299,6 +333,7 @@ pub fn run(cfg: &Config, args: ImpactArgs) -> Result<()> {
         "known_bugs": all_known_bugs,
         "effects": effects_out,
         "callers": caller_rows,
+        "cross_service": cross_service,
         "affected_tests": affected_test_rows,
         "recently_touched": recently_touched,
     });
