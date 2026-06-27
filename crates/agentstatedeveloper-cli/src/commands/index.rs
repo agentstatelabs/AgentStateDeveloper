@@ -300,6 +300,19 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
         }
     }
 
+    // t-002 slice 4: surface intra-process data-flow edges (arg→param).
+    if summary.dataflow_edges > 0 {
+        let df_msg = format!(
+            "{} data-flow edge{} (arg→param) detected.",
+            summary.dataflow_edges,
+            if summary.dataflow_edges == 1 { "" } else { "s" }
+        );
+        eprintln!("{}", df_msg);
+        if let Some(l) = &mut log {
+            l.line(&df_msg);
+        }
+    }
+
     // Plan L t-005: surface dynamic-dispatch warnings so agents know
     // which call paths the static walker couldn't resolve.
     if summary.dynamic_dispatch_sites > 0 {

@@ -277,5 +277,33 @@ pub fn assemble_symbol_context(
     if let Some(cs) = cross_service {
         out["cross_service"] = cs;
     }
+
+    // Data-flow (t-002 slice 4): values flowing into this symbol's params
+    // (incoming) and out of its call args (outgoing). Omitted when empty.
+    let dataflow = {
+        let tree = engine
+            .repo
+            .get_tree(&engine.ref_name, "/asd/v1/index/dataflow")
+            .unwrap_or(Value::Null);
+        let all = crate::dataflow::edges_from_tree(&tree);
+        let incoming: Vec<Value> = all
+            .iter()
+            .filter(|e| e.to_symbol_id == symbol.symbol_id)
+            .map(|e| json!({ "param": e.param, "from_arg": e.arg, "from_qname": e.from_qname }))
+            .collect();
+        let outgoing: Vec<Value> = all
+            .iter()
+            .filter(|e| e.from_symbol_id == symbol.symbol_id)
+            .map(|e| json!({ "arg": e.arg, "to_param": e.param, "to_qname": e.to_qname }))
+            .collect();
+        if incoming.is_empty() && outgoing.is_empty() {
+            None
+        } else {
+            Some(json!({ "incoming": incoming, "outgoing": outgoing }))
+        }
+    };
+    if let Some(df) = dataflow {
+        out["dataflow"] = df;
+    }
     Ok(out)
 }

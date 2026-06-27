@@ -13,6 +13,7 @@ use agentstatedeveloper_core::adapter::{
 use agentstatedeveloper_core::cross_service::{
     DetectedEndpoint, Direction, Transport, http_contract,
 };
+use agentstatedeveloper_core::dataflow::DetectedDataFlow;
 use agentstatedeveloper_core::error::{AsdError, Result};
 use agentstatedeveloper_core::schema::{Effect, EffectCategory, SymbolKind};
 use serde_json::json;
@@ -66,6 +67,16 @@ impl LanguageAdapter for PythonAdapter {
         symbols: &[ParsedSymbol],
     ) -> Vec<DetectedEndpoint> {
         infer_service_endpoints_in_python(file, source, symbols)
+    }
+
+    fn extract_dataflow(
+        &self,
+        file: &str,
+        source: &str,
+        symbols: &[ParsedSymbol],
+        _workspace: &WorkspaceSymbols,
+    ) -> Vec<DetectedDataFlow> {
+        infer_dataflow_in_python(file, source, symbols)
     }
 
     fn extract_call_edges(
@@ -718,6 +729,145 @@ fn methods_kwarg(args: &str) -> Vec<String> {
         }
     }
     out
+}
+
+// -----------------------------------------------------------------------------
+// Data-flow detection (t-002 slice 4)
+//
+// Conservative arg→param detection: only same-file function calls whose
+// arguments are ALL bare identifiers. High precision over recall — cross-file
+// resolution, method calls, literals, and kwargs are deliberately skipped
+// (tracked as follow-up). The pipeline maps each arg position to the callee's
+// parameter name from its signature.
+// -----------------------------------------------------------------------------
+
+fn infer_dataflow_in_python(
+    file: &str,
+    source: &str,
+    symbols: &[ParsedSymbol],
+) -> Vec<DetectedDataFlow> {
+    use std::collections::HashMap;
+
+    // Same-file function simple-name → qname. A name defined more than once is
+    // ambiguous (mapped to None) and never resolved.
+    let mut name_to_qname: HashMap<&str, Option<String>> = HashMap::new();
+    for s in symbols {
+        if s.kind == SymbolKind::Function {
+            let last = s.qname.rsplit('.').next().unwrap_or(s.qname.as_str());
+            name_to_qname
+                .entry(last)
+                .and_modify(|e| *e = None)
+                .or_insert_with(|| Some(s.qname.clone()));
+        }
+    }
+
+    let mut out = Vec::new();
+    for (idx, raw) in source.lines().enumerate() {
+        let line_no = (idx + 1) as u32;
+        for (callee_name, args) in simple_calls(raw) {
+            let Some(Some(callee_qname)) = name_to_qname.get(callee_name.as_str()) else {
+                continue;
+            };
+            let Some(owner) = owner_for_body_line(symbols, line_no) else {
+                continue;
+            };
+            for (i, arg) in args.iter().enumerate() {
+                out.push(DetectedDataFlow {
+                    caller_qname: owner.qname.clone(),
+                    callee_qname: callee_qname.clone(),
+                    arg_index: i,
+                    arg: arg.clone(),
+                    file: file.to_string(),
+                    line: line_no,
+                    confidence: 0.7,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Find `name(args)` call sites on a line where the callee is a bare function
+/// (not a method) and every argument is a simple identifier. Returns
+/// `(callee_name, [arg_idents])`.
+fn simple_calls(line: &str) -> Vec<(String, Vec<String>)> {
+    let t = line.trim_start();
+    if t.starts_with("def ")
+        || t.starts_with("async def ")
+        || t.starts_with("class ")
+        || t.starts_with('@')
+        || t.starts_with('#')
+    {
+        return Vec::new();
+    }
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '(' {
+            // Capture the identifier ending right before '('.
+            let mut start = i;
+            while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
+                start -= 1;
+            }
+            let is_method = start > 0 && chars[start - 1] == '.';
+            let name: String = chars[start..i].iter().collect();
+            let valid = name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_');
+            if !is_method && valid {
+                if let Some(close) = matching_close(&chars, i) {
+                    let inner: String = chars[i + 1..close].iter().collect();
+                    if let Some(args) = simple_args(&inner) {
+                        out.push((name, args));
+                    }
+                    i = close;
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+fn matching_close(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut i = open;
+    while i < chars.len() {
+        match chars[i] {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// `Some(args)` only when every comma-separated argument is a bare identifier
+/// (no nested calls, literals, operators, or kwargs) and there is at least one.
+fn simple_args(inner: &str) -> Option<Vec<String>> {
+    let inner = inner.trim();
+    if inner.is_empty() {
+        return None;
+    }
+    let mut args = Vec::new();
+    for part in inner.split(',') {
+        let p = part.trim();
+        let is_ident = p.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+            && p.chars().all(|c| c.is_alphanumeric() || c == '_');
+        if !is_ident || matches!(p, "True" | "False" | "None" | "self" | "cls") {
+            return None;
+        }
+        args.push(p.to_string());
+    }
+    Some(args)
 }
 
 // -----------------------------------------------------------------------------
@@ -3012,5 +3162,54 @@ mod service_endpoint_tests {
         let client = detect("def fetch():\n    requests.get(\"https://users.svc/users/:id\")\n");
         assert_eq!(inbound(&server)[0].contract, outbound(&client)[0].contract);
         assert_eq!(inbound(&server)[0].contract, "http:GET /users/{}");
+    }
+}
+
+#[cfg(test)]
+mod dataflow_tests {
+    use super::*;
+    use agentstatedeveloper_core::adapter::{LanguageAdapter, WorkspaceSymbols};
+
+    fn detect(src: &str) -> Vec<DetectedDataFlow> {
+        let a = PythonAdapter;
+        let symbols = a.parse_symbols("m.py", src).unwrap();
+        a.extract_dataflow("m.py", src, &symbols, &WorkspaceSymbols::default())
+    }
+
+    #[test]
+    fn same_file_call_maps_positional_args() {
+        let src = "def helper(a, b):\n    return a\n\ndef caller():\n    helper(x, y)\n";
+        let df = detect(src);
+        assert_eq!(df.len(), 2, "{df:?}");
+        assert!(df.iter().all(|d| d.callee_qname.ends_with("helper")));
+        assert!(df.iter().all(|d| d.caller_qname.ends_with("caller")));
+        let args: Vec<(usize, String)> = df.iter().map(|d| (d.arg_index, d.arg.clone())).collect();
+        assert!(args.contains(&(0, "x".to_string())));
+        assert!(args.contains(&(1, "y".to_string())));
+    }
+
+    #[test]
+    fn method_calls_are_skipped() {
+        let src = "def caller():\n    obj.helper(x)\n";
+        assert!(detect(src).is_empty(), "{:?}", detect(src));
+    }
+
+    #[test]
+    fn unknown_or_cross_file_callee_skipped() {
+        // helper isn't defined in this file → not resolved (cross-file is a follow-up).
+        let src = "def caller():\n    helper(x)\n";
+        assert!(detect(src).is_empty());
+    }
+
+    #[test]
+    fn non_identifier_args_are_skipped() {
+        let src = "def helper(a):\n    pass\n\ndef caller():\n    helper(\"lit\")\n    helper(g(x))\n    helper(a + b)\n";
+        assert!(detect(src).is_empty(), "{:?}", detect(src));
+    }
+
+    #[test]
+    fn ambiguous_callee_name_skipped() {
+        let src = "def helper(a):\n    pass\n\ndef helper(b):\n    pass\n\ndef caller():\n    helper(x)\n";
+        assert!(detect(src).is_empty(), "{:?}", detect(src));
     }
 }

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::cross_service::DetectedEndpoint;
+use crate::dataflow::DetectedDataFlow;
 use crate::error::Result;
 use crate::schema::{Effect, SymbolKind};
 
@@ -218,6 +219,22 @@ pub trait LanguageAdapter: Send + Sync {
         _source: &str,
         _symbols: &[ParsedSymbol],
     ) -> Vec<DetectedEndpoint> {
+        Vec::new()
+    }
+
+    /// Detect intra-process data-flow sites (`arg → param` at call sites) in a
+    /// file. Returns [`DetectedDataFlow`] naming caller/callee by qname plus the
+    /// argument and its position; the index pipeline resolves the callee's
+    /// parameter name and symbol identity. Default: empty — adapters opt in.
+    ///
+    /// See [`crate::dataflow`] for the model.
+    fn extract_dataflow(
+        &self,
+        _file: &str,
+        _source: &str,
+        _symbols: &[ParsedSymbol],
+        _workspace: &WorkspaceSymbols,
+    ) -> Vec<DetectedDataFlow> {
         Vec::new()
     }
 
