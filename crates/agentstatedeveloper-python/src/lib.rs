@@ -11,7 +11,7 @@ use agentstatedeveloper_core::adapter::{
     WorkspaceSymbols,
 };
 use agentstatedeveloper_core::cross_service::{
-    DetectedEndpoint, Direction, Transport, http_contract,
+    DetectedEndpoint, Direction, Transport, http_contract, pubsub_contract,
 };
 use agentstatedeveloper_core::dataflow::DetectedDataFlow;
 use agentstatedeveloper_core::error::{AsdError, Result};
@@ -527,6 +527,78 @@ fn infer_service_endpoints_in_python(
                     confidence: conf,
                     note: None,
                 });
+            }
+        }
+
+        // Pub-sub (Celery): a @shared_task/@app.task def is a listener; the task
+        // function's name is the contract. `name.delay()/.apply_async()` is the
+        // emit. The two match by task name.
+        if is_celery_task_decorator(line) {
+            if let Some(owner) = owner_for_decorator(symbols, line_no) {
+                let task = simple_name(&owner.qname);
+                out.push(DetectedEndpoint {
+                    transport: Transport::PubSub,
+                    direction: Direction::Inbound,
+                    contract: pubsub_contract(task),
+                    owner_qname: owner.qname.clone(),
+                    file: file.to_string(),
+                    line: line_no,
+                    confidence: 0.85,
+                    note: Some("celery task".into()),
+                });
+            }
+        }
+        for task in parse_celery_emits(line) {
+            if let Some(owner) = owner_for_body_line(symbols, line_no) {
+                out.push(DetectedEndpoint {
+                    transport: Transport::PubSub,
+                    direction: Direction::Outbound,
+                    contract: pubsub_contract(&task),
+                    owner_qname: owner.qname.clone(),
+                    file: file.to_string(),
+                    line: line_no,
+                    confidence: 0.6,
+                    note: Some("celery emit".into()),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Last dotted segment of a qname (`a.b.process_order` → `process_order`).
+fn simple_name(qname: &str) -> &str {
+    qname.rsplit('.').next().unwrap_or(qname)
+}
+
+/// `@shared_task`, `@app.task`, `@celery.task(bind=True)`, `@<x>.task` — Celery
+/// task definitions (which act as message consumers).
+fn is_celery_task_decorator(line: &str) -> bool {
+    let Some(body) = line.strip_prefix('@') else {
+        return false;
+    };
+    let head = body.split('(').next().unwrap_or(body).trim();
+    head == "shared_task" || head == "task" || head.ends_with(".task")
+}
+
+/// Task names invoked via `<name>.delay(` / `<name>.apply_async(`.
+fn parse_celery_emits(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for suffix in [".delay(", ".apply_async("] {
+        let mut from = 0;
+        while let Some(rel) = line[from..].find(suffix) {
+            let pos = from + rel;
+            from = pos + suffix.len();
+            let name: String = line[..pos]
+                .chars()
+                .rev()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            if !name.is_empty() && !out.contains(&name) {
+                out.push(name);
             }
         }
     }
@@ -3211,5 +3283,54 @@ mod dataflow_tests {
     fn ambiguous_callee_name_skipped() {
         let src = "def helper(a):\n    pass\n\ndef helper(b):\n    pass\n\ndef caller():\n    helper(x)\n";
         assert!(detect(src).is_empty(), "{:?}", detect(src));
+    }
+}
+
+#[cfg(test)]
+mod pubsub_tests {
+    use super::*;
+    use agentstatedeveloper_core::adapter::LanguageAdapter;
+
+    fn detect(src: &str) -> Vec<DetectedEndpoint> {
+        let a = PythonAdapter;
+        let symbols = a.parse_symbols("tasks.py", src).unwrap();
+        a.infer_service_endpoints("tasks.py", src, &symbols)
+    }
+    fn ps(eps: &[DetectedEndpoint], dir: Direction) -> Vec<&DetectedEndpoint> {
+        eps.iter()
+            .filter(|e| e.transport == Transport::PubSub && e.direction == dir)
+            .collect()
+    }
+
+    #[test]
+    fn shared_task_is_a_listener() {
+        let eps = detect("@shared_task\ndef process_order(o):\n    return o\n");
+        let inb = ps(&eps, Direction::Inbound);
+        assert_eq!(inb.len(), 1, "{eps:?}");
+        assert_eq!(inb[0].contract, "topic:process_order");
+    }
+
+    #[test]
+    fn delay_call_is_an_emit() {
+        let eps = detect("def caller():\n    process_order.delay(payload)\n");
+        let outb = ps(&eps, Direction::Outbound);
+        assert_eq!(outb.len(), 1);
+        assert_eq!(outb[0].contract, "topic:process_order");
+    }
+
+    #[test]
+    fn listener_and_emit_share_one_contract() {
+        let src = "@app.task(bind=True)\ndef send_email(addr):\n    pass\n\ndef trigger():\n    send_email.apply_async((a,))\n";
+        let eps = detect(src);
+        assert_eq!(ps(&eps, Direction::Inbound)[0].contract, ps(&eps, Direction::Outbound)[0].contract);
+        assert_eq!(ps(&eps, Direction::Inbound)[0].contract, "topic:send_email");
+    }
+
+    #[test]
+    fn non_celery_decorator_is_not_a_listener() {
+        // @property / @app.get(...) must not register as a pub-sub listener.
+        assert!(ps(&detect("@property\ndef value(self):\n    return 1\n"), Direction::Inbound).is_empty());
+        let http = detect("@app.get(\"/x\")\ndef h():\n    pass\n");
+        assert!(ps(&http, Direction::Inbound).is_empty());
     }
 }
