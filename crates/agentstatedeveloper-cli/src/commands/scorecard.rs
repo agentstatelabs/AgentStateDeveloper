@@ -19,8 +19,8 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
-    AsgEffectStore, AsgFeedbackStore, EffectStore, Engine, FeedbackStore, glob_match,
-    resolve_scope,
+    AsgEffectStore, AsgFeedbackStore, EffectStore, Engine, FeedbackStore, estimate_tokens,
+    glob_match, resolve_scope,
     schema::{LedgerEntry, LedgerKind, Symbol, VerificationStatus},
 };
 
@@ -269,6 +269,12 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
     let mut total_ledger_entries = 0usize;
     let mut ctx_tagged_entries = 0usize;
 
+    // t-006: estimated token economy (internal metric). Sum ASD's structured
+    // per-symbol cost; track per-file length (max symbol end-line) for the
+    // source-read baseline. Cheap — derived from the index, no file reads.
+    let mut structured_tokens = 0usize;
+    let mut file_max_line: HashMap<&str, u32> = HashMap::new();
+
     for sym in &scored_syms {
         let has_verified =
             if let Ok(Some(decl)) = effect_store.get_effects(&engine.ref_name, &sym.symbol_id) {
@@ -282,6 +288,18 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
         if has_verified {
             verified_count += 1;
         }
+
+        // Token economy: structured cost = what ASD surfaces for this symbol
+        // (qname + signature + first doc line) vs reading its source file.
+        let record = format!(
+            "{} {} {}",
+            sym.qname,
+            sym.signature.as_deref().unwrap_or(""),
+            sym.doc.as_deref().unwrap_or("").lines().next().unwrap_or("")
+        );
+        structured_tokens += estimate_tokens(&record);
+        let f = file_max_line.entry(sym.file.as_str()).or_insert(0);
+        *f = (*f).max(sym.end.line);
 
         let entries = ledger_by_sym
             .get(&sym.symbol_id)
@@ -447,6 +465,32 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
         "scope": if scoped { json!(paths_filter) } else { json!(null) },
     });
 
+    // t-006: estimated token economy. Source-read baseline = file length
+    // (max symbol end-line) × a rough source density. Internal estimate only.
+    const TOKENS_PER_LINE: usize = 9;
+    let source_read_tokens: usize =
+        file_max_line.values().map(|&l| l as usize * TOKENS_PER_LINE).sum();
+    let reduction_pct = if source_read_tokens > 0 {
+        (1.0 - structured_tokens as f64 / source_read_tokens as f64) * 100.0
+    } else {
+        0.0
+    };
+    let ratio_x = if structured_tokens > 0 {
+        source_read_tokens as f64 / structured_tokens as f64
+    } else {
+        0.0
+    };
+    let token_economy = json!({
+        "note": "Internal estimate — NOT a published benchmark and NOT measured per query. \
+                 Compares ASD's structured per-symbol index cost (qname + signature + first doc \
+                 line) against reading the source files those symbols live in (file length \
+                 estimated from symbol line spans).",
+        "structured_tokens": structured_tokens,
+        "source_read_tokens_est": source_read_tokens,
+        "reduction_pct": (reduction_pct * 10.0).round() / 10.0,
+        "ratio_x": (ratio_x * 10.0).round() / 10.0,
+    });
+
     let details = json!({
         "total_symbols": total_symbols,
         "verified_effects": verified_count,
@@ -465,6 +509,7 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
             "scores": snapshot["scores"].clone(),  // kept for history compat
             "data_quality": data_quality,
             "details": details,
+            "token_economy": token_economy,
         });
         if need_drill {
             let total_gaps = drill_rows.len();
@@ -554,6 +599,10 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
     println!("Feedback entries:   {}", feedback_count);
     println!("Ledger entries:     {}", total_ledger_entries);
     println!("CTX-tagged:         {}", ctx_tagged_entries);
+    println!(
+        "Token economy:      ~{:.1}x vs source ({} index tok vs ~{} source tok, est.)",
+        ratio_x, structured_tokens, source_read_tokens
+    );
 
     if let Some(ref note) = sparse_note {
         println!("\nNote: {note}");
