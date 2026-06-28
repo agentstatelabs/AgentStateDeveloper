@@ -281,6 +281,10 @@ pub enum Command {
     /// Excludes route handlers, tests, and main/dunder methods. Supports --agent.
     DeadCode(commands::dead_code::DeadCodeArgs),
 
+    /// Read test-runner output on stdin; emit a compact failures-only summary
+    /// (cargo/pytest parsed precisely, others via generic scan). Supports --agent.
+    TestSummary(commands::test_summary::TestSummaryArgs),
+
     /// Record and list search-quality feedback verdicts for (query, symbol) pairs.
     #[command(subcommand)]
     Feedback(commands::feedback::FeedbackCmd),
@@ -378,6 +382,7 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Endpoints(args) => endpoints::run(cfg, args),
         Command::Architecture(args) => architecture::run(cfg, args),
         Command::DeadCode(args) => dead_code::run(cfg, args),
+        Command::TestSummary(args) => test_summary::run(cfg, args),
         Command::Feedback(sub) => feedback::run(cfg, sub),
         Command::AnnotateCommit(args) => annotate_commit::run(cfg, args),
         Command::TaskClose(args) => task_close::run(cfg, args),

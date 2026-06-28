@@ -6,6 +6,7 @@ pub mod checklist;
 pub mod conclusions;
 pub mod context_for;
 pub mod dead_code;
+pub mod test_summary;
 pub mod endpoints;
 pub mod feedback;
 pub mod graph;
