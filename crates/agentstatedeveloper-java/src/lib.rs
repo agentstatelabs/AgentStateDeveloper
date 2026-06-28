@@ -9,6 +9,9 @@ use std::collections::{HashMap, HashSet};
 use agentstatedeveloper_core::adapter::{
     CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols,
 };
+use agentstatedeveloper_core::cross_service::{
+    DetectedEndpoint, Direction, Transport, http_contract,
+};
 use agentstatedeveloper_core::error::{AsdError, Result};
 use agentstatedeveloper_core::schema::{Effect, EffectCategory, SymbolKind};
 use serde_json::json;
@@ -53,6 +56,15 @@ impl LanguageAdapter for JavaAdapter {
 
     fn infer_effects(&self, _source: &str, symbol: &ParsedSymbol) -> Vec<Effect> {
         infer_effects_from_body(&symbol.body)
+    }
+
+    fn infer_service_endpoints(
+        &self,
+        file: &str,
+        source: &str,
+        symbols: &[ParsedSymbol],
+    ) -> Vec<DetectedEndpoint> {
+        infer_service_endpoints_in_java(file, source, symbols)
     }
 
     fn extract_call_edges(
@@ -325,6 +337,222 @@ fn extract_first_string_literal(s: &str) -> Option<String> {
         j += 1;
     }
     None
+}
+
+// -----------------------------------------------------------------------------
+// Cross-service endpoint detection (t-014) — Spring MVC + RestTemplate
+//
+// Inbound: method mappings (@GetMapping/@PostMapping/… and
+// @RequestMapping(method=RequestMethod.X)) combined with the controller's
+// class-level @RequestMapping prefix. Outbound: RestTemplate getForObject/
+// postForObject/put/delete/exchange. WebClient's fluent builder is deferred.
+// -----------------------------------------------------------------------------
+
+const MAPPING_VERB: &[(&str, &str)] = &[
+    ("GetMapping", "GET"),
+    ("PostMapping", "POST"),
+    ("PutMapping", "PUT"),
+    ("DeleteMapping", "DELETE"),
+    ("PatchMapping", "PATCH"),
+];
+
+fn infer_service_endpoints_in_java(
+    file: &str,
+    source: &str,
+    symbols: &[ParsedSymbol],
+) -> Vec<DetectedEndpoint> {
+    let prefix = java_class_prefix(source);
+    let mut out = Vec::new();
+    for (idx, raw) in source.lines().enumerate() {
+        let line_no = (idx + 1) as u32;
+        let line = raw.trim();
+
+        for (method, sub) in java_method_mappings(line) {
+            if let Some(owner) = owner_for_annotation(symbols, line_no) {
+                out.push(DetectedEndpoint {
+                    transport: Transport::Http,
+                    direction: Direction::Inbound,
+                    contract: http_contract(&method, &join_path(&prefix, &sub)),
+                    owner_qname: owner.qname.clone(),
+                    file: file.to_string(),
+                    line: line_no,
+                    confidence: 0.9,
+                    note: None,
+                });
+            }
+        }
+        for (method, url) in java_clients(line) {
+            if let Some(owner) = owner_for_body_line(symbols, line_no) {
+                out.push(DetectedEndpoint {
+                    transport: Transport::Http,
+                    direction: Direction::Outbound,
+                    contract: http_contract(&method, &url),
+                    owner_qname: owner.qname.clone(),
+                    file: file.to_string(),
+                    line: line_no,
+                    confidence: 0.85,
+                    note: None,
+                });
+            }
+        }
+    }
+    out
+}
+
+fn owner_for_body_line(symbols: &[ParsedSymbol], line: u32) -> Option<&ParsedSymbol> {
+    symbols
+        .iter()
+        .filter(|s| s.start_line <= line && line <= s.end_line)
+        .max_by_key(|s| s.start_line)
+}
+
+/// The method an annotation on `line` decorates: containing symbol, else the
+/// nearest method starting just below (annotations stack above the method).
+fn owner_for_annotation(symbols: &[ParsedSymbol], line: u32) -> Option<&ParsedSymbol> {
+    if let Some(s) = owner_for_body_line(symbols, line) {
+        return Some(s);
+    }
+    symbols
+        .iter()
+        .filter(|s| s.start_line > line && s.start_line <= line + 6)
+        .min_by_key(|s| s.start_line)
+}
+
+/// Class-level prefix: the first `@RequestMapping` with a path literal
+/// (heuristic — typically the controller annotation).
+fn java_class_prefix(source: &str) -> String {
+    for line in source.lines() {
+        let t = line.trim();
+        if t.starts_with("@RequestMapping") {
+            if let Some(p) = java_mapping_path(t) {
+                return p;
+            }
+        }
+        // Only annotations BEFORE the class declaration are class-level; stop
+        // so a method-level @RequestMapping isn't mistaken for the prefix.
+        if t.contains("class ") || t.contains("interface ") {
+            break;
+        }
+    }
+    String::new()
+}
+
+/// `(METHOD, sub_path)` for a method-level mapping annotation line.
+fn java_method_mappings(line: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (anno, method) in MAPPING_VERB {
+        if line.starts_with(&format!("@{anno}")) {
+            out.push((method.to_string(), java_mapping_path(line).unwrap_or_default()));
+        }
+    }
+    // @RequestMapping(method = RequestMethod.GET, value = "/x") at method level.
+    if line.starts_with("@RequestMapping") {
+        if let Some(m) = java_request_method(line) {
+            out.push((m, java_mapping_path(line).unwrap_or_default()));
+        }
+    }
+    out
+}
+
+/// Path from a mapping annotation: explicit `value=`/`path=`, else a bare
+/// leading string argument. `produces=`/`consumes=` strings are not paths.
+fn java_mapping_path(line: &str) -> Option<String> {
+    let open = line.find('(')?;
+    let args = &line[open + 1..];
+    for key in ["value", "path"] {
+        if let Some(p) = java_kv_string(args, key) {
+            return Some(p);
+        }
+    }
+    let a = args.trim_start();
+    if a.starts_with('"') {
+        return first_java_string(a);
+    }
+    None
+}
+
+/// String value of a `key = "…"` kwarg.
+fn java_kv_string(args: &str, key: &str) -> Option<String> {
+    let pos = args.find(key)?;
+    let rest = args[pos + key.len()..].trim_start();
+    let rest = rest.strip_prefix('=')?.trim_start();
+    first_java_string(rest)
+}
+
+fn java_request_method(line: &str) -> Option<String> {
+    let pos = line.find("RequestMethod.")?;
+    let verb: String = line[pos + "RequestMethod.".len()..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect();
+    (!verb.is_empty()).then(|| verb.to_uppercase())
+}
+
+fn join_path(prefix: &str, sub: &str) -> String {
+    let p = prefix.trim_end_matches('/');
+    let s = sub.trim_start_matches('/');
+    match (p.is_empty(), s.is_empty()) {
+        (true, true) => "/".to_string(),
+        (false, true) => p.to_string(),
+        (true, false) => format!("/{s}"),
+        (false, false) => format!("{p}/{s}"),
+    }
+}
+
+/// RestTemplate client calls. URLs must look like a URL (start with `/` or
+/// contain `://`) so generic `.put`/`.delete` on maps/lists don't match.
+fn java_clients(line: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let simple = [
+        ("getForObject", "GET"),
+        ("getForEntity", "GET"),
+        ("postForObject", "POST"),
+        ("postForEntity", "POST"),
+        ("put", "PUT"),
+        ("delete", "DELETE"),
+    ];
+    for (m, method) in simple {
+        let needle = format!(".{m}(");
+        if let Some(pos) = line.find(&needle) {
+            if let Some(url) = first_java_string(line[pos + needle.len()..].trim_start()) {
+                if looks_like_url(&url) {
+                    out.push((method.to_string(), url));
+                }
+            }
+        }
+    }
+    if let Some(pos) = line.find(".exchange(") {
+        let after = &line[pos + ".exchange(".len()..];
+        if let (Some(url), Some(m)) = (first_java_string(after.trim_start()), java_http_method(after)) {
+            if looks_like_url(&url) {
+                out.push((m, url));
+            }
+        }
+    }
+    out
+}
+
+fn java_http_method(s: &str) -> Option<String> {
+    let pos = s.find("HttpMethod.")?;
+    let verb: String = s[pos + "HttpMethod.".len()..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect();
+    (!verb.is_empty()).then(|| verb.to_uppercase())
+}
+
+fn looks_like_url(s: &str) -> bool {
+    s.starts_with('/') || s.contains("://")
+}
+
+fn first_java_string(s: &str) -> Option<String> {
+    let s = s.trim_start();
+    if !s.starts_with('"') {
+        return None;
+    }
+    let inner = &s[1..];
+    let end = inner.find('"')?;
+    Some(inner[..end].to_string())
 }
 
 fn infer_effects_from_body(body: &str) -> Vec<Effect> {
@@ -994,5 +1222,96 @@ public class ChargeService {
                 && e.callee_qname == "com.payments.ChargeService.charge"
         });
         assert!(found, "expected cross-module edge; got: {edges:?}");
+    }
+}
+
+#[cfg(test)]
+mod service_endpoint_tests {
+    use super::*;
+    use agentstatedeveloper_core::adapter::LanguageAdapter;
+
+    fn detect(src: &str) -> Vec<DetectedEndpoint> {
+        let a = JavaAdapter;
+        let symbols = a.parse_symbols("C.java", src).unwrap();
+        a.infer_service_endpoints("C.java", src, &symbols)
+    }
+    fn inbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
+        eps.iter().filter(|e| e.direction == Direction::Inbound).collect()
+    }
+    fn outbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
+        eps.iter().filter(|e| e.direction == Direction::Outbound).collect()
+    }
+
+    #[test]
+    fn spring_controller_prefix_plus_method_mappings() {
+        let src = "\
+@RestController
+@RequestMapping(\"/api/users\")
+public class UserController {
+  @GetMapping(\"/{id}\")
+  public User get(Long id) { return null; }
+
+  @PostMapping
+  public void create(User u) {}
+}
+";
+        let eps = detect(src);
+        let mut got: Vec<String> = inbound(&eps).iter().map(|e| e.contract.clone()).collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["http:GET /api/users/{}".to_string(), "http:POST /api/users".to_string()],
+            "{eps:?}"
+        );
+    }
+
+    #[test]
+    fn request_mapping_method_level_without_class_prefix() {
+        let src = "\
+public class C {
+  @RequestMapping(value = \"/x\", method = RequestMethod.DELETE)
+  public void d() {}
+}
+";
+        let eps = detect(src);
+        let inb = inbound(&eps);
+        assert_eq!(inb.len(), 1, "{eps:?}");
+        assert_eq!(inb[0].contract, "http:DELETE /x");
+    }
+
+    #[test]
+    fn rest_template_clients() {
+        let src = "\
+public class S {
+  void call() {
+    restTemplate.getForObject(\"https://users.svc/users/{id}\", User.class);
+    restTemplate.exchange(\"/items/{id}\", HttpMethod.PUT, req, Void.class);
+  }
+}
+";
+        let eps = detect(src);
+        let mut got: Vec<String> = outbound(&eps).iter().map(|e| e.contract.clone()).collect();
+        got.sort();
+        assert_eq!(got, vec!["http:GET /users/{}".to_string(), "http:PUT /items/{}".to_string()]);
+    }
+
+    #[test]
+    fn map_put_is_not_a_client_call() {
+        // `.put` on a Map with a non-URL key must not become an HTTP edge.
+        let src = "public class S {\n  void f() { cache.put(\"key\", value); }\n}\n";
+        assert!(outbound(&detect(src)).is_empty(), "{:?}", detect(src));
+    }
+
+    #[test]
+    fn java_server_matches_other_language_client() {
+        let server = detect(
+            "@RequestMapping(\"/api\")\npublic class C {\n  @GetMapping(\"/users/{id}\")\n  public User g() { return null; }\n}\n",
+        );
+        // Same contract a TS/Go client to /api/users/:id would produce.
+        assert_eq!(inbound(&server)[0].contract, "http:GET /api/users/{}");
+        assert_eq!(
+            inbound(&server)[0].contract,
+            http_contract("get", "https://svc/api/users/:id")
+        );
     }
 }
