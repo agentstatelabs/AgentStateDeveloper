@@ -5,15 +5,15 @@
 //! registry), and call-graph hotspots. Read-only. Functional clusters are
 //! approximated by layer for now; true community detection is plan task t-009.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::Result;
 use clap::Args;
 use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
-    Direction, Engine, classify_layer_sym, endpoints_from_tree, load_layer_overrides,
-    resolve_repo_id, symbol_tier,
+    Direction, Engine, classify_layer_sym, detect_communities, endpoints_from_tree,
+    load_layer_overrides, resolve_repo_id, symbol_tier,
 };
 
 use crate::commands::graph::build_id_map;
@@ -77,6 +77,10 @@ pub fn run(cfg: &Config, args: ArchitectureArgs) -> Result<()> {
         .filter(|e| e.direction == Direction::Outbound)
         .count();
 
+    // Functional clusters: call-graph communities (Louvain local-move), labeled
+    // by their dominant package + highest-degree representative.
+    let clusters = compute_clusters(&engine, &id_map, &degree, args.top);
+
     let repo_id = resolve_repo_id(std::env::var("ASD_REPO_ID").ok().as_deref(), &cwd());
 
     let out = json!({
@@ -85,9 +89,10 @@ pub fn run(cfg: &Config, args: ArchitectureArgs) -> Result<()> {
         "languages": sorted_counts(languages, usize::MAX),
         "packages": sorted_counts(packages, args.top),
         "layers": layers.iter().map(|(k, v)| json!({ "layer": k, "symbols": v })).collect::<Vec<_>>(),
+        "clusters": clusters,
         "routes": { "inbound": inbound, "outbound_consumers": outbound_count },
         "hotspots": hotspots,
-        "note": "functional clusters approximated by layer; community detection is task t-009",
+        "note": "clusters are call-graph communities (functional groups that call each other); layers are the orthogonal path-based view",
     });
 
     if args.agent {
@@ -125,6 +130,79 @@ fn symbol_degree(engine: &Engine) -> HashMap<String, usize> {
         }
     }
     degree
+}
+
+/// Functional clusters = call-graph communities, each labeled by its dominant
+/// package and highest-degree representative symbol. Singletons are dropped.
+fn compute_clusters(
+    engine: &Engine,
+    id_map: &HashMap<String, agentstatedeveloper_core::Symbol>,
+    degree: &HashMap<String, usize>,
+    top: usize,
+) -> Vec<Value> {
+    // Edges from the callees registry (each caller→callee pair; detect_communities
+    // treats them as undirected and dedups).
+    let tree = engine
+        .repo
+        .get_tree(&engine.ref_name, "/asd/v1/index/callees")
+        .unwrap_or(Value::Null);
+    let mut edges: Vec<(String, String)> = Vec::new();
+    let mut node_set: BTreeSet<String> = BTreeSet::new();
+    if let Some(obj) = tree.as_object() {
+        for (sym, v) in obj {
+            if let Some(arr) = v.get("callees").and_then(|a| a.as_array()) {
+                for c in arr.iter().filter_map(|c| c.as_str()) {
+                    node_set.insert(sym.clone());
+                    node_set.insert(c.to_string());
+                    edges.push((sym.clone(), c.to_string()));
+                }
+            }
+        }
+    }
+    if edges.is_empty() {
+        return Vec::new();
+    }
+    let nodes: Vec<String> = node_set.into_iter().collect();
+    let comm = detect_communities(&nodes, &edges);
+
+    let mut groups: HashMap<usize, Vec<&String>> = HashMap::new();
+    for (sym, c) in &comm {
+        groups.entry(*c).or_default().push(sym);
+    }
+
+    let mut clusters: Vec<(usize, Value)> = groups
+        .into_values()
+        .filter(|members| members.len() >= 2)
+        .map(|members| {
+            // Dominant package among members (ties → lexicographically smaller).
+            let mut pkg: HashMap<String, usize> = HashMap::new();
+            for m in &members {
+                if let Some(s) = id_map.get(*m) {
+                    *pkg.entry(package_of(&s.file)).or_default() += 1;
+                }
+            }
+            let package = pkg
+                .into_iter()
+                .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
+                .map(|(p, _)| p)
+                .unwrap_or_default();
+            // Representative = highest-degree member.
+            let representative = members
+                .iter()
+                .filter_map(|m| {
+                    id_map.get(*m).map(|s| (degree.get(*m).copied().unwrap_or(0), s.qname.clone()))
+                })
+                .max_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)))
+                .map(|(_, q)| q)
+                .unwrap_or_default();
+            (
+                members.len(),
+                json!({ "size": members.len(), "package": package, "representative": representative }),
+            )
+        })
+        .collect();
+    clusters.sort_by(|a, b| b.0.cmp(&a.0));
+    clusters.into_iter().take(top).map(|(_, v)| v).collect()
 }
 
 /// `[{name, count}]` sorted by count desc then name, truncated to `limit`.
@@ -188,6 +266,20 @@ fn print_human(out: &Value) {
     row("languages", &out["languages"]);
     row("layers", &out["layers"]);
     row("packages", &out["packages"]);
+
+    if let Some(cl) = out["clusters"].as_array() {
+        if !cl.is_empty() {
+            println!("  clusters (call-graph communities):");
+            for c in cl.iter().take(8) {
+                println!(
+                    "    {:>4} symbols  {}  (repr: {})",
+                    c["size"].as_u64().unwrap_or(0),
+                    c["package"].as_str().unwrap_or("?"),
+                    c["representative"].as_str().unwrap_or("?")
+                );
+            }
+        }
+    }
 
     let inbound = out["routes"]["inbound"].as_array().cloned().unwrap_or_default();
     println!(

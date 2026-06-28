@@ -9,6 +9,7 @@ pub mod audit;
 pub mod brief;
 pub mod calibration;
 pub mod candidates;
+pub mod community;
 pub mod context;
 pub mod cross_service;
 pub mod dataflow;
@@ -56,6 +57,7 @@ pub use candidates::{
     query_tokens, resolve_exclude_set, resolve_scope,
     result_bucket, suggest_better_queries, suggest_scoped_queries,
 };
+pub use community::detect_communities;
 pub use cross_service::{
     CrossServiceEdge, DetectedEndpoint, Direction, EndpointRef, ServiceEndpoint, ServiceManifest,
     Transport, contract_hash, endpoints_from_tree, http_contract, match_edges, normalize_repo_id,
