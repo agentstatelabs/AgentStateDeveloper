@@ -9,6 +9,9 @@ use std::collections::{HashMap, HashSet};
 use agentstatedeveloper_core::adapter::{
     CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols,
 };
+use agentstatedeveloper_core::cross_service::{
+    DetectedEndpoint, Direction, Transport, http_contract,
+};
 use agentstatedeveloper_core::error::{AsdError, Result};
 use agentstatedeveloper_core::schema::{Effect, EffectCategory, SymbolKind};
 use serde_json::json;
@@ -53,6 +56,15 @@ impl LanguageAdapter for RubyAdapter {
 
     fn infer_effects(&self, _source: &str, symbol: &ParsedSymbol) -> Vec<Effect> {
         infer_effects_from_body(&symbol.body)
+    }
+
+    fn infer_service_endpoints(
+        &self,
+        file: &str,
+        source: &str,
+        symbols: &[ParsedSymbol],
+    ) -> Vec<DetectedEndpoint> {
+        infer_service_endpoints_in_ruby(file, source, symbols)
     }
 
     fn extract_call_edges(
@@ -302,6 +314,117 @@ fn extract_first_string_arg(s: &str) -> Option<String> {
         j += 1;
     }
     None
+}
+
+// -----------------------------------------------------------------------------
+// Cross-service endpoint detection (t-014) — Sinatra / Rails routes + clients
+//
+// Inbound: a route DSL line `verb '/path' …` (Sinatra `get '/x' do`, Rails
+// `get '/x', to: ...`). Requiring the line to START with the verb keyword keeps
+// method calls like `obj.get('/x')` out. Outbound: RestClient/HTTParty
+// `.<verb>('url')`. Interpolated ("#{…}") strings are skipped.
+//
+// Limitation: Rails routes.rb routes live in a top-level `routes.draw` block
+// with no enclosing class/def, so there's no symbol to attribute them to and
+// they're dropped. Sinatra routes (inside the app class) attribute fine.
+// -----------------------------------------------------------------------------
+
+const VERBS: &[&str] = &["get", "post", "put", "patch", "delete"];
+
+fn infer_service_endpoints_in_ruby(
+    file: &str,
+    source: &str,
+    symbols: &[ParsedSymbol],
+) -> Vec<DetectedEndpoint> {
+    let mut out = Vec::new();
+    for (idx, raw) in source.lines().enumerate() {
+        let line_no = (idx + 1) as u32;
+        let line = raw.trim();
+
+        if let Some((method, path)) = ruby_route(line) {
+            if let Some(owner) = owner_for_body_line(symbols, line_no) {
+                out.push(DetectedEndpoint {
+                    transport: Transport::Http,
+                    direction: Direction::Inbound,
+                    contract: http_contract(&method, &path),
+                    owner_qname: owner.qname.clone(),
+                    file: file.to_string(),
+                    line: line_no,
+                    confidence: 0.85,
+                    note: None,
+                });
+            }
+        }
+        for (method, url) in ruby_clients(line) {
+            if let Some(owner) = owner_for_body_line(symbols, line_no) {
+                out.push(DetectedEndpoint {
+                    transport: Transport::Http,
+                    direction: Direction::Outbound,
+                    contract: http_contract(&method, &url),
+                    owner_qname: owner.qname.clone(),
+                    file: file.to_string(),
+                    line: line_no,
+                    confidence: 0.85,
+                    note: None,
+                });
+            }
+        }
+    }
+    out
+}
+
+fn owner_for_body_line(symbols: &[ParsedSymbol], line: u32) -> Option<&ParsedSymbol> {
+    symbols
+        .iter()
+        .filter(|s| s.start_line <= line && line <= s.end_line)
+        .max_by_key(|s| s.start_line)
+}
+
+/// Sinatra/Rails route: line starts with `verb '/path'`.
+fn ruby_route(line: &str) -> Option<(String, String)> {
+    for verb in VERBS {
+        if let Some(rest) = line.strip_prefix(&format!("{verb} ")) {
+            if let Some(path) = first_ruby_string(rest.trim_start()) {
+                if path.starts_with('/') {
+                    return Some((verb.to_uppercase(), path));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// RestClient/HTTParty client calls: `RestClient.get('url')` etc.
+fn ruby_clients(line: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for lib in ["RestClient", "HTTParty"] {
+        for verb in VERBS {
+            let needle = format!("{lib}.{verb}(");
+            if let Some(pos) = line.find(&needle) {
+                if let Some(url) = first_ruby_string(line[pos + needle.len()..].trim_start()) {
+                    out.push((verb.to_uppercase(), url));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// First `'…'` or `"…"` string literal; interpolated (`"#{…}"`) strings are
+/// rejected as dynamic.
+fn first_ruby_string(s: &str) -> Option<String> {
+    let s = s.trim_start();
+    let q = s.as_bytes().first().copied()?;
+    if q != b'\'' && q != b'"' {
+        return None;
+    }
+    let inner = &s[1..];
+    let end = inner.find(q as char)?;
+    let val = &inner[..end];
+    if q == b'"' && val.contains("#{") {
+        return None;
+    }
+    Some(val.to_string())
 }
 
 fn infer_effects_from_body(body: &str) -> Vec<Effect> {
@@ -1005,5 +1128,61 @@ end
             e.caller_qname.ends_with(".place_order") && e.callee_qname.ends_with(".charge")
         });
         assert!(found, "expected intra-class edge; got: {edges:?}");
+    }
+}
+
+#[cfg(test)]
+mod service_endpoint_tests {
+    use super::*;
+    use agentstatedeveloper_core::adapter::LanguageAdapter;
+
+    fn detect(src: &str) -> Vec<DetectedEndpoint> {
+        let a = RubyAdapter;
+        let symbols = a.parse_symbols("app.rb", src).unwrap();
+        a.infer_service_endpoints("app.rb", src, &symbols)
+    }
+    fn inbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
+        eps.iter().filter(|e| e.direction == Direction::Inbound).collect()
+    }
+    fn outbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
+        eps.iter().filter(|e| e.direction == Direction::Outbound).collect()
+    }
+
+    #[test]
+    fn sinatra_route_inbound() {
+        // Sinatra routes live inside the app class, so they attribute to it.
+        let sinatra = "class App < Sinatra::Base\n  get '/users/:id' do\n    body\n  end\nend\n";
+        let eps = detect(sinatra);
+        assert_eq!(inbound(&eps)[0].contract, "http:GET /users/{}", "{eps:?}");
+    }
+
+    #[test]
+    fn top_level_route_without_enclosing_symbol_is_dropped() {
+        // Rails routes.rb routes sit at top level (no class/def), so there's no
+        // symbol to attribute them to — a known limitation.
+        let rails = "Rails.application.routes.draw do\n  post '/charge', to: 'x#y'\nend\n";
+        assert!(inbound(&detect(rails)).is_empty(), "{:?}", detect(rails));
+    }
+
+    #[test]
+    fn method_call_get_is_not_a_route() {
+        // `obj.get('/x')` is a method call, not a route DSL line.
+        let src = "def f\n  cache.get('/x')\n  h.delete('key')\nend\n";
+        assert!(inbound(&detect(src)).is_empty(), "{:?}", detect(src));
+    }
+
+    #[test]
+    fn restclient_and_httparty_clients() {
+        let src = "def call\n  RestClient.get('https://users.svc/users/:id')\n  HTTParty.post('/charge', body)\nend\n";
+        let eps = detect(src);
+        let mut got: Vec<String> = outbound(&eps).iter().map(|e| e.contract.clone()).collect();
+        got.sort();
+        assert_eq!(got, vec!["http:GET /users/{}".to_string(), "http:POST /charge".to_string()]);
+    }
+
+    #[test]
+    fn interpolated_url_is_skipped() {
+        let src = "def call\n  RestClient.get(\"#{base}/users\")\nend\n";
+        assert!(outbound(&detect(src)).is_empty(), "{:?}", detect(src));
     }
 }
