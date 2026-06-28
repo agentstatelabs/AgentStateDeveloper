@@ -277,6 +277,10 @@ pub enum Command {
     /// call-graph hotspots for a cold agent. Supports --agent.
     Architecture(commands::architecture::ArchitectureArgs),
 
+    /// Functions/methods with no inbound call edges (candidate dead code).
+    /// Excludes route handlers, tests, and main/dunder methods. Supports --agent.
+    DeadCode(commands::dead_code::DeadCodeArgs),
+
     /// Record and list search-quality feedback verdicts for (query, symbol) pairs.
     #[command(subcommand)]
     Feedback(commands::feedback::FeedbackCmd),
@@ -373,6 +377,7 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Since(args) => since::run(cfg, args),
         Command::Endpoints(args) => endpoints::run(cfg, args),
         Command::Architecture(args) => architecture::run(cfg, args),
+        Command::DeadCode(args) => dead_code::run(cfg, args),
         Command::Feedback(sub) => feedback::run(cfg, sub),
         Command::AnnotateCommit(args) => annotate_commit::run(cfg, args),
         Command::TaskClose(args) => task_close::run(cfg, args),
