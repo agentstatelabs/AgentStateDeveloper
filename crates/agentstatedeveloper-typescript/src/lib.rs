@@ -16,6 +16,9 @@ use std::collections::{HashMap, HashSet};
 use agentstatedeveloper_core::adapter::{
     CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols,
 };
+use agentstatedeveloper_core::cross_service::{
+    DetectedEndpoint, Direction, Transport, http_contract,
+};
 use agentstatedeveloper_core::error::{AsdError, Result};
 use agentstatedeveloper_core::schema::{Effect, EffectCategory, SymbolKind};
 use serde_json::json;
@@ -71,6 +74,15 @@ impl LanguageAdapter for TypeScriptAdapter {
 
     fn infer_effects(&self, _source: &str, symbol: &ParsedSymbol) -> Vec<Effect> {
         infer_effects_from_body(&symbol.body)
+    }
+
+    fn infer_service_endpoints(
+        &self,
+        file: &str,
+        source: &str,
+        symbols: &[ParsedSymbol],
+    ) -> Vec<DetectedEndpoint> {
+        infer_service_endpoints_in_ts(file, source, symbols)
     }
 
     fn extract_call_edges(
@@ -477,6 +489,145 @@ fn find_child_by_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
         }
     }
     None
+}
+
+// -----------------------------------------------------------------------------
+// Cross-service endpoint detection (t-014)
+//
+// Heuristic, line-based, mirroring the Python detector. Inbound: Express/router
+// route registrations `x.get('/path', …)` where the path is a literal starting
+// with '/'. Outbound: `fetch('/url'[, {method}])` and `axios.<verb>('url')`.
+// Template-literal / variable URLs and Nest decorators (which need the
+// controller-prefix resolved) are skipped — tracked as follow-up.
+// -----------------------------------------------------------------------------
+
+const HTTP_VERBS: &[&str] = &["get", "post", "put", "patch", "delete", "head", "options"];
+
+fn infer_service_endpoints_in_ts(
+    file: &str,
+    source: &str,
+    symbols: &[ParsedSymbol],
+) -> Vec<DetectedEndpoint> {
+    let mut out = Vec::new();
+    for (idx, raw) in source.lines().enumerate() {
+        let line_no = (idx + 1) as u32;
+        let line = raw.trim();
+
+        for (method, path) in ts_routes(line) {
+            if let Some(owner) = owner_for_line(symbols, line_no) {
+                out.push(DetectedEndpoint {
+                    transport: Transport::Http,
+                    direction: Direction::Inbound,
+                    contract: http_contract(&method, &path),
+                    owner_qname: owner.qname.clone(),
+                    file: file.to_string(),
+                    line: line_no,
+                    confidence: 0.9,
+                    note: None,
+                });
+            }
+        }
+        for (method, url) in ts_clients(line) {
+            if let Some(owner) = owner_for_line(symbols, line_no) {
+                out.push(DetectedEndpoint {
+                    transport: Transport::Http,
+                    direction: Direction::Outbound,
+                    contract: http_contract(&method, &url),
+                    owner_qname: owner.qname.clone(),
+                    file: file.to_string(),
+                    line: line_no,
+                    confidence: 0.85,
+                    note: None,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Innermost symbol whose line range contains `line`.
+fn owner_for_line(symbols: &[ParsedSymbol], line: u32) -> Option<&ParsedSymbol> {
+    symbols
+        .iter()
+        .filter(|s| s.start_line <= line && line <= s.end_line)
+        .max_by_key(|s| s.start_line)
+}
+
+/// Express/router routes: `<obj>.<verb>('/path' …)`. Returns `(METHOD, path)`
+/// only when the first argument is a string literal starting with `/`.
+fn ts_routes(line: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for verb in HTTP_VERBS {
+        let needle = format!(".{verb}(");
+        let mut from = 0;
+        while let Some(rel) = line[from..].find(&needle) {
+            let start = from + rel;
+            from = start + needle.len();
+            if let Some(path) = first_ts_string(&line[start + needle.len()..]) {
+                if path.starts_with('/') {
+                    out.push((verb.to_uppercase(), path));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// HTTP client calls: `axios.<verb>('url')` and `fetch('url'[, {method}])`.
+fn ts_clients(line: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for verb in HTTP_VERBS {
+        let needle = format!("axios.{verb}(");
+        if let Some(pos) = line.find(&needle) {
+            if call_boundary_ok(line, pos) {
+                if let Some(url) = first_ts_string(&line[pos + needle.len()..]) {
+                    out.push((verb.to_uppercase(), url));
+                }
+            }
+        }
+    }
+    if let Some(pos) = line.find("fetch(") {
+        if call_boundary_ok(line, pos) {
+            let after = &line[pos + "fetch(".len()..];
+            if let Some(url) = first_ts_string(after) {
+                let method = ts_fetch_method(after).unwrap_or_else(|| "GET".to_string());
+                out.push((method, url));
+            }
+        }
+    }
+    out
+}
+
+/// True when the identifier at `pos` is a call boundary, not the tail of a
+/// longer identifier (e.g. `myfetch(` / `xaxios.`).
+fn call_boundary_ok(line: &str, pos: usize) -> bool {
+    pos == 0
+        || !line[..pos]
+            .chars()
+            .next_back()
+            .map(|c| c.is_alphanumeric() || c == '_' || c == '.')
+            .unwrap_or(false)
+}
+
+/// First single/double-quoted string literal. Template literals (backtick) are
+/// rejected — they're usually dynamic, so they can't form a stable contract.
+fn first_ts_string(s: &str) -> Option<String> {
+    let s = s.trim_start();
+    let q = s.as_bytes().first().copied()?;
+    if q != b'\'' && q != b'"' {
+        return None;
+    }
+    let inner = &s[1..];
+    let end = inner.find(q as char)?;
+    Some(inner[..end].to_string())
+}
+
+/// Pull the method out of a `fetch` options object: `method: 'POST'`.
+fn ts_fetch_method(args: &str) -> Option<String> {
+    let pos = args.find("method")?;
+    let rest = args[pos + "method".len()..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    first_ts_string(rest).map(|m| m.to_uppercase())
 }
 
 // -----------------------------------------------------------------------------
@@ -1627,5 +1778,77 @@ function f() {
         assert_eq!(resolve_module_specifier("../x", "src/a/b.ts"), "src.x");
         // bare 'react' stays 'react'
         assert_eq!(resolve_module_specifier("react", "src/a.ts"), "react");
+    }
+}
+
+#[cfg(test)]
+mod service_endpoint_tests {
+    use super::*;
+
+    fn detect(src: &str) -> Vec<DetectedEndpoint> {
+        let a = TypeScriptAdapter;
+        let symbols = a.parse_symbols("app.ts", src).unwrap();
+        a.infer_service_endpoints("app.ts", src, &symbols)
+    }
+    fn inbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
+        eps.iter().filter(|e| e.direction == Direction::Inbound).collect()
+    }
+    fn outbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
+        eps.iter().filter(|e| e.direction == Direction::Outbound).collect()
+    }
+
+    #[test]
+    fn express_route_is_inbound() {
+        let src = "function setup() {\n  app.get('/users/:id', (req, res) => res.send(1));\n}\n";
+        let eps = detect(src);
+        let inb = inbound(&eps);
+        assert_eq!(inb.len(), 1, "{eps:?}");
+        assert_eq!(inb[0].contract, "http:GET /users/{}");
+    }
+
+    #[test]
+    fn router_post_route() {
+        let src = "function reg() {\n  router.post('/charge', handler);\n}\n";
+        let inb_eps = detect(src);
+        let inb = inbound(&inb_eps);
+        assert_eq!(inb.len(), 1);
+        assert_eq!(inb[0].contract, "http:POST /charge");
+    }
+
+    #[test]
+    fn non_route_dot_get_is_ignored() {
+        // A map/cache .get whose arg isn't a path must not be a route.
+        let src = "function f() {\n  const v = cache.get('key');\n  store.delete('id123');\n}\n";
+        assert!(detect(src).is_empty(), "{:?}", detect(src));
+    }
+
+    #[test]
+    fn axios_and_fetch_clients_are_outbound() {
+        let src = "function call() {\n  axios.get('https://users.svc/users/:id');\n  fetch('/health');\n  fetch('/charge', { method: 'POST' });\n}\n";
+        let eps = detect(src);
+        let mut got: Vec<String> = outbound(&eps).iter().map(|e| e.contract.clone()).collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                "http:GET /health".to_string(),
+                "http:GET /users/{}".to_string(),
+                "http:POST /charge".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn template_literal_url_is_skipped() {
+        let src = "function f() {\n  fetch(`/users/${id}`);\n  axios.get(`/x/${y}`);\n}\n";
+        assert!(outbound(&detect(src)).is_empty(), "{:?}", detect(src));
+    }
+
+    #[test]
+    fn client_and_server_contracts_match() {
+        let server = detect("function s() { app.get('/users/:id', h); }");
+        let client = detect("function c() { axios.get('https://svc/users/{id}'); }");
+        assert_eq!(inbound(&server)[0].contract, outbound(&client)[0].contract);
+        assert_eq!(inbound(&server)[0].contract, "http:GET /users/{}");
     }
 }
