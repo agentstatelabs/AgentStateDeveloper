@@ -10,6 +10,9 @@ use std::collections::{HashMap, HashSet};
 use agentstatedeveloper_core::adapter::{
     CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols,
 };
+use agentstatedeveloper_core::cross_service::{
+    DetectedEndpoint, Direction, Transport, http_contract,
+};
 use agentstatedeveloper_core::error::{AsdError, Result};
 use agentstatedeveloper_core::schema::{Effect, EffectCategory, SymbolKind};
 use serde_json::json;
@@ -53,6 +56,15 @@ impl LanguageAdapter for CSharpAdapter {
 
     fn infer_effects(&self, _source: &str, symbol: &ParsedSymbol) -> Vec<Effect> {
         infer_effects_from_body(&symbol.body)
+    }
+
+    fn infer_service_endpoints(
+        &self,
+        file: &str,
+        source: &str,
+        symbols: &[ParsedSymbol],
+    ) -> Vec<DetectedEndpoint> {
+        infer_service_endpoints_in_csharp(file, source, symbols)
     }
 
     fn extract_call_edges(
@@ -307,6 +319,227 @@ fn extract_first_string_literal(s: &str) -> Option<String> {
         j += 1;
     }
     None
+}
+
+// -----------------------------------------------------------------------------
+// Cross-service endpoint detection (t-014) — ASP.NET Core
+//
+// Inbound: attribute controllers ([HttpGet("x")] … with the class-level
+// [Route("api/[controller]")] prefix; [controller] resolves to the controller
+// class name) and minimal APIs (app.MapGet("/x", …)). Outbound: HttpClient
+// GetAsync/PostAsync/…/GetFromJsonAsync<T>. Verbatim @"…" strings are literals;
+// interpolated $"…" are skipped.
+// -----------------------------------------------------------------------------
+
+const HTTP_ATTRS: &[(&str, &str)] = &[
+    ("HttpGet", "GET"),
+    ("HttpPost", "POST"),
+    ("HttpPut", "PUT"),
+    ("HttpDelete", "DELETE"),
+    ("HttpPatch", "PATCH"),
+];
+
+fn infer_service_endpoints_in_csharp(
+    file: &str,
+    source: &str,
+    symbols: &[ParsedSymbol],
+) -> Vec<DetectedEndpoint> {
+    let prefix = cs_class_prefix(source);
+    let mut out = Vec::new();
+    for (idx, raw) in source.lines().enumerate() {
+        let line_no = (idx + 1) as u32;
+        let line = raw.trim();
+
+        for (method, sub) in cs_method_attrs(line) {
+            if let Some(owner) = owner_for_annotation(symbols, line_no) {
+                out.push(DetectedEndpoint {
+                    transport: Transport::Http,
+                    direction: Direction::Inbound,
+                    contract: http_contract(&method, &join_path(&prefix, &sub)),
+                    owner_qname: owner.qname.clone(),
+                    file: file.to_string(),
+                    line: line_no,
+                    confidence: 0.9,
+                    note: None,
+                });
+            }
+        }
+        for (method, path) in cs_minimal_api(line) {
+            if let Some(owner) = owner_for_body_line(symbols, line_no) {
+                out.push(DetectedEndpoint {
+                    transport: Transport::Http,
+                    direction: Direction::Inbound,
+                    contract: http_contract(&method, &path),
+                    owner_qname: owner.qname.clone(),
+                    file: file.to_string(),
+                    line: line_no,
+                    confidence: 0.9,
+                    note: None,
+                });
+            }
+        }
+        for (method, url) in cs_clients(line) {
+            if let Some(owner) = owner_for_body_line(symbols, line_no) {
+                out.push(DetectedEndpoint {
+                    transport: Transport::Http,
+                    direction: Direction::Outbound,
+                    contract: http_contract(&method, &url),
+                    owner_qname: owner.qname.clone(),
+                    file: file.to_string(),
+                    line: line_no,
+                    confidence: 0.85,
+                    note: None,
+                });
+            }
+        }
+    }
+    out
+}
+
+fn owner_for_body_line(symbols: &[ParsedSymbol], line: u32) -> Option<&ParsedSymbol> {
+    symbols
+        .iter()
+        .filter(|s| s.start_line <= line && line <= s.end_line)
+        .max_by_key(|s| s.start_line)
+}
+
+fn owner_for_annotation(symbols: &[ParsedSymbol], line: u32) -> Option<&ParsedSymbol> {
+    if let Some(s) = owner_for_body_line(symbols, line) {
+        return Some(s);
+    }
+    symbols
+        .iter()
+        .filter(|s| s.start_line > line && s.start_line <= line + 6)
+        .min_by_key(|s| s.start_line)
+}
+
+/// Class-level `[Route("…")]` prefix; `[controller]` resolves to the controller
+/// class name (minus the `Controller` suffix).
+fn cs_class_prefix(source: &str) -> String {
+    let controller = cs_controller_name(source);
+    for line in source.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("[Route(") {
+            if let Some(p) = first_cs_string(rest) {
+                return p.replace("[controller]", &controller);
+            }
+        }
+        if t.contains("class ") {
+            break;
+        }
+    }
+    String::new()
+}
+
+fn cs_controller_name(source: &str) -> String {
+    for line in source.lines() {
+        if let Some(pos) = line.find("class ") {
+            let name: String = line[pos + 6..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            return name.strip_suffix("Controller").unwrap_or(&name).to_string();
+        }
+    }
+    String::new()
+}
+
+/// `(METHOD, sub_path)` for a method-level HTTP attribute line.
+fn cs_method_attrs(line: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (attr, method) in HTTP_ATTRS {
+        if line.starts_with(&format!("[{attr}")) {
+            let sub = line
+                .find('(')
+                .and_then(|o| first_cs_string(&line[o + 1..]))
+                .unwrap_or_default();
+            out.push((method.to_string(), sub));
+        }
+    }
+    out
+}
+
+/// Minimal-API routes `app.MapGet("/x", …)`.
+fn cs_minimal_api(line: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (m, method) in [("MapGet", "GET"), ("MapPost", "POST"), ("MapPut", "PUT"), ("MapDelete", "DELETE"), ("MapPatch", "PATCH")] {
+        if let Some(args) = cs_call_args(line, m) {
+            if let Some(path) = first_cs_string(args) {
+                if path.starts_with('/') {
+                    out.push((method.to_string(), path));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// HttpClient calls. URLs must look like a URL so unrelated `*Async` methods
+/// with a non-URL string argument don't match.
+fn cs_clients(line: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let methods = [
+        ("GetAsync", "GET"),
+        ("GetStringAsync", "GET"),
+        ("GetFromJsonAsync", "GET"),
+        ("PostAsync", "POST"),
+        ("PostAsJsonAsync", "POST"),
+        ("PutAsync", "PUT"),
+        ("PutAsJsonAsync", "PUT"),
+        ("DeleteAsync", "DELETE"),
+        ("PatchAsync", "PATCH"),
+    ];
+    for (m, method) in methods {
+        if let Some(args) = cs_call_args(line, m) {
+            if let Some(url) = first_cs_string(args) {
+                if looks_like_url(&url) {
+                    out.push((method.to_string(), url));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Returns the argument substring after `.method(` or `.method<…>(`.
+fn cs_call_args<'a>(line: &'a str, method: &str) -> Option<&'a str> {
+    let pos = line.find(&format!(".{method}"))?;
+    let mut rest = &line[pos + method.len() + 1..];
+    if rest.starts_with('<') {
+        let close = rest.find('>')?;
+        rest = &rest[close + 1..];
+    }
+    rest.strip_prefix('(')
+}
+
+fn join_path(prefix: &str, sub: &str) -> String {
+    let p = prefix.trim_end_matches('/');
+    let s = sub.trim_start_matches('/');
+    match (p.is_empty(), s.is_empty()) {
+        (true, true) => "/".to_string(),
+        (false, true) => p.to_string(),
+        (true, false) => format!("/{s}"),
+        (false, false) => format!("{p}/{s}"),
+    }
+}
+
+fn looks_like_url(s: &str) -> bool {
+    s.starts_with('/') || s.contains("://")
+}
+
+/// First string literal: `"…"` or verbatim `@"…"`. Interpolated `$"…"` → None.
+fn first_cs_string(s: &str) -> Option<String> {
+    let s = s.trim_start();
+    if s.starts_with('$') {
+        return None;
+    }
+    let offset = if s.starts_with("@\"") { 1 } else { 0 };
+    if s.as_bytes().get(offset).copied()? != b'"' {
+        return None;
+    }
+    let inner = &s[offset + 1..];
+    let end = inner.find('"')?;
+    Some(inner[..end].to_string())
 }
 
 fn infer_effects_from_body(body: &str) -> Vec<Effect> {
@@ -964,5 +1197,66 @@ namespace MyApp.Orders {
             e.caller_qname.ends_with(".PlaceOrder") && e.callee_qname.ends_with(".Charge")
         });
         assert!(found, "expected call edge to Charge; got: {edges:?}");
+    }
+}
+
+#[cfg(test)]
+mod service_endpoint_tests {
+    use super::*;
+    use agentstatedeveloper_core::adapter::LanguageAdapter;
+
+    fn detect(src: &str) -> Vec<DetectedEndpoint> {
+        let a = CSharpAdapter;
+        let symbols = a.parse_symbols("C.cs", src).unwrap();
+        a.infer_service_endpoints("C.cs", src, &symbols)
+    }
+    fn inbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
+        eps.iter().filter(|e| e.direction == Direction::Inbound).collect()
+    }
+    fn outbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
+        eps.iter().filter(|e| e.direction == Direction::Outbound).collect()
+    }
+
+    #[test]
+    fn attribute_controller_with_controller_token_prefix() {
+        let src = "\
+[ApiController]
+[Route(\"api/[controller]\")]
+public class UsersController : ControllerBase {
+    [HttpGet(\"{id}\")]
+    public IActionResult Get(int id) { return Ok(); }
+
+    [HttpPost]
+    public IActionResult Create() { return Ok(); }
+}
+";
+        let eps = detect(src);
+        let mut got: Vec<String> = inbound(&eps).iter().map(|e| e.contract.clone()).collect();
+        got.sort();
+        // [controller] → "Users" → normalized lowercase /api/users.
+        assert_eq!(got, vec!["http:GET /api/users/{}".to_string(), "http:POST /api/users".to_string()], "{eps:?}");
+    }
+
+    #[test]
+    fn minimal_api_routes() {
+        let src = "public class P {\n  void Cfg() {\n    app.MapGet(\"/health\", () => \"ok\");\n  }\n}\n";
+        let inb_eps = detect(src);
+        assert_eq!(inbound(&inb_eps)[0].contract, "http:GET /health");
+    }
+
+    #[test]
+    fn httpclient_clients_incl_generic() {
+        let src = "public class S {\n  async Task Call() {\n    await client.GetFromJsonAsync<User>(\"https://users.svc/users/{id}\");\n    await client.PostAsync(\"/charge\", body);\n  }\n}\n";
+        let eps = detect(src);
+        let mut got: Vec<String> = outbound(&eps).iter().map(|e| e.contract.clone()).collect();
+        got.sort();
+        assert_eq!(got, vec!["http:GET /users/{}".to_string(), "http:POST /charge".to_string()]);
+    }
+
+    #[test]
+    fn cs_server_matches_other_language_client() {
+        let server = detect("[Route(\"api/[controller]\")]\npublic class UsersController {\n  [HttpGet(\"{id}\")]\n  public IActionResult Get() { return Ok(); }\n}\n");
+        assert_eq!(inbound(&server)[0].contract, "http:GET /api/users/{}");
+        assert_eq!(inbound(&server)[0].contract, http_contract("get", "https://svc/api/users/:id"));
     }
 }
