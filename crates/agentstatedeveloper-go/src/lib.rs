@@ -10,6 +10,9 @@ use std::collections::{HashMap, HashSet};
 use agentstatedeveloper_core::adapter::{
     CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols,
 };
+use agentstatedeveloper_core::cross_service::{
+    DetectedEndpoint, Direction, Transport, http_contract,
+};
 use agentstatedeveloper_core::error::{AsdError, Result};
 use agentstatedeveloper_core::schema::{Effect, EffectCategory, SymbolKind};
 use serde_json::json;
@@ -54,6 +57,15 @@ impl LanguageAdapter for GoAdapter {
 
     fn infer_effects(&self, _source: &str, symbol: &ParsedSymbol) -> Vec<Effect> {
         infer_effects_from_body(&symbol.body)
+    }
+
+    fn infer_service_endpoints(
+        &self,
+        file: &str,
+        source: &str,
+        symbols: &[ParsedSymbol],
+    ) -> Vec<DetectedEndpoint> {
+        infer_service_endpoints_in_go(file, source, symbols)
     }
 
     fn extract_call_edges(
@@ -254,6 +266,169 @@ fn make_parsed_symbol(
         signature,
         doc: None,
     }
+}
+
+// -----------------------------------------------------------------------------
+// Cross-service endpoint detection (t-014)
+//
+// Inbound: chi/gin/echo route methods `r.Get("/p", …)` / `r.GET("/p", …)` with
+// a literal path starting with '/'. Outbound: stdlib `http.Get/Post/Head/
+// PostForm("url")` and `http.NewRequest[WithContext](… "METHOD", "url" …)`.
+// Go has no string interpolation, so backtick raw strings are literals too.
+// `http.HandleFunc` (no method) and client-object calls are skipped.
+// -----------------------------------------------------------------------------
+
+const VERBS: &[&str] = &["get", "post", "put", "patch", "delete", "head", "options"];
+
+fn infer_service_endpoints_in_go(
+    file: &str,
+    source: &str,
+    symbols: &[ParsedSymbol],
+) -> Vec<DetectedEndpoint> {
+    let mut out = Vec::new();
+    for (idx, raw) in source.lines().enumerate() {
+        let line_no = (idx + 1) as u32;
+        let line = raw.trim();
+
+        for (method, path) in go_routes(line) {
+            if let Some(owner) = owner_for_line(symbols, line_no) {
+                out.push(DetectedEndpoint {
+                    transport: Transport::Http,
+                    direction: Direction::Inbound,
+                    contract: http_contract(&method, &path),
+                    owner_qname: owner.qname.clone(),
+                    file: file.to_string(),
+                    line: line_no,
+                    confidence: 0.9,
+                    note: None,
+                });
+            }
+        }
+        for (method, url) in go_clients(line) {
+            if let Some(owner) = owner_for_line(symbols, line_no) {
+                out.push(DetectedEndpoint {
+                    transport: Transport::Http,
+                    direction: Direction::Outbound,
+                    contract: http_contract(&method, &url),
+                    owner_qname: owner.qname.clone(),
+                    file: file.to_string(),
+                    line: line_no,
+                    confidence: 0.85,
+                    note: None,
+                });
+            }
+        }
+    }
+    out
+}
+
+fn owner_for_line(symbols: &[ParsedSymbol], line: u32) -> Option<&ParsedSymbol> {
+    symbols
+        .iter()
+        .filter(|s| s.start_line <= line && line <= s.end_line)
+        .max_by_key(|s| s.start_line)
+}
+
+/// Router routes `<obj>.<Verb>("/path", …)` for both chi (`Get`) and gin/echo
+/// (`GET`) capitalizations; path must be a literal starting with '/'.
+fn go_routes(line: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for verb in VERBS {
+        for variant in [title_case(verb), verb.to_uppercase()] {
+            let needle = format!(".{variant}(");
+            let mut from = 0;
+            while let Some(rel) = line[from..].find(&needle) {
+                let start = from + rel;
+                from = start + needle.len();
+                if let Some(path) = first_go_string(&line[start + needle.len()..]) {
+                    if path.starts_with('/') {
+                        out.push((verb.to_uppercase(), path));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// stdlib HTTP clients: `http.Get/Post/Head/PostForm("url")` and
+/// `http.NewRequest[WithContext](… "METHOD", "url" …)`.
+fn go_clients(line: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (func, method) in [("Get", "GET"), ("Post", "POST"), ("Head", "HEAD"), ("PostForm", "POST")] {
+        let needle = format!("http.{func}(");
+        if let Some(pos) = line.find(&needle) {
+            if call_boundary_ok(line, pos) {
+                if let Some(url) = first_go_string(&line[pos + needle.len()..]) {
+                    out.push((method.to_string(), url));
+                }
+            }
+        }
+    }
+    for ctor in ["http.NewRequestWithContext(", "http.NewRequest("] {
+        if let Some(pos) = line.find(ctor) {
+            if call_boundary_ok(line, pos) {
+                // First two string literals = (METHOD, url); a leading ctx arg
+                // (NewRequestWithContext) isn't a string, so it's skipped.
+                let lits = go_string_literals(&line[pos + ctor.len()..], 2);
+                if let [m, u] = lits.as_slice() {
+                    out.push((m.to_uppercase(), u.clone()));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn call_boundary_ok(line: &str, pos: usize) -> bool {
+    pos == 0
+        || !line[..pos]
+            .chars()
+            .next_back()
+            .map(|c| c.is_alphanumeric() || c == '_' || c == '.')
+            .unwrap_or(false)
+}
+
+fn title_case(v: &str) -> String {
+    let mut c = v.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+/// First string literal if the argument list starts with one (`"…"` or raw
+/// `` `…` ``).
+fn first_go_string(s: &str) -> Option<String> {
+    let s = s.trim_start();
+    let q = s.as_bytes().first().copied()?;
+    if q != b'"' && q != b'`' {
+        return None;
+    }
+    let inner = &s[1..];
+    let end = inner.find(q as char)?;
+    Some(inner[..end].to_string())
+}
+
+/// Up to `max` string literals scanned left-to-right from `s`, skipping
+/// non-string args between them.
+fn go_string_literals(s: &str, max: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && out.len() < max {
+        let c = bytes[i];
+        if c == b'"' || c == b'`' {
+            if let Some(rel) = s[i + 1..].find(c as char) {
+                out.push(s[i + 1..i + 1 + rel].to_string());
+                i = i + 1 + rel + 1;
+                continue;
+            }
+            break;
+        }
+        i += 1;
+    }
+    out
 }
 
 // -----------------------------------------------------------------------------
@@ -995,5 +1170,74 @@ func main() {
             )),
             "expected main -> NewClient edge; got {pairs:?}",
         );
+    }
+}
+
+#[cfg(test)]
+mod service_endpoint_tests {
+    use super::*;
+
+    fn detect(src: &str) -> Vec<DetectedEndpoint> {
+        let a = GoAdapter;
+        let symbols = a.parse_symbols("svc.go", src).unwrap();
+        a.infer_service_endpoints("svc.go", src, &symbols)
+    }
+    fn inbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
+        eps.iter().filter(|e| e.direction == Direction::Inbound).collect()
+    }
+    fn outbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
+        eps.iter().filter(|e| e.direction == Direction::Outbound).collect()
+    }
+
+    #[test]
+    fn chi_and_gin_routes_inbound() {
+        let chi = "func setup(r chi.Router) {\n\tr.Get(\"/users/{id}\", getUser)\n}\n";
+        let inb = detect(chi);
+        let i = inbound(&inb);
+        assert_eq!(i.len(), 1, "{inb:?}");
+        assert_eq!(i[0].contract, "http:GET /users/{}");
+
+        let gin = "func reg(r *gin.Engine) {\n\tr.POST(\"/charge\", chargeHandler)\n}\n";
+        let g = detect(gin);
+        assert_eq!(inbound(&g)[0].contract, "http:POST /charge");
+    }
+
+    #[test]
+    fn non_route_method_call_ignored() {
+        // .Get on a map/cache without a path literal isn't a route.
+        let src = "func f() {\n\tv := cache.Get(\"key\")\n\t_ = v\n}\n";
+        assert!(detect(src).is_empty(), "{:?}", detect(src));
+    }
+
+    #[test]
+    fn http_clients_outbound() {
+        let src = "func call() {\n\thttp.Get(\"https://users.svc/users/{id}\")\n\thttp.Post(\"/charge\", \"application/json\", body)\n}\n";
+        let eps = detect(src);
+        let mut got: Vec<String> = outbound(&eps).iter().map(|e| e.contract.clone()).collect();
+        got.sort();
+        assert_eq!(got, vec!["http:GET /users/{}".to_string(), "http:POST /charge".to_string()]);
+    }
+
+    #[test]
+    fn new_request_method_and_url() {
+        let src = "func call() {\n\treq, _ := http.NewRequest(\"DELETE\", \"https://api/things/{id}\", nil)\n\t_ = req\n}\n";
+        let eps = detect(src);
+        assert_eq!(outbound(&eps)[0].contract, "http:DELETE /things/{}");
+    }
+
+    #[test]
+    fn new_request_with_context_skips_ctx_arg() {
+        let src = "func call(ctx context.Context) {\n\treq, _ := http.NewRequestWithContext(ctx, \"PUT\", \"/items/{id}\", nil)\n\t_ = req\n}\n";
+        let eps = detect(src);
+        assert_eq!(outbound(&eps)[0].contract, "http:PUT /items/{}");
+    }
+
+    #[test]
+    fn go_client_matches_python_server_contract() {
+        // Cross-language: a Go client contract equals a Python/Express route's.
+        let server = detect("func s(r chi.Router) { r.Get(\"/users/{id}\", h) }");
+        let client = detect("func c() { http.Get(\"https://svc/users/:id\") }");
+        assert_eq!(inbound(&server)[0].contract, outbound(&client)[0].contract);
+        assert_eq!(inbound(&server)[0].contract, "http:GET /users/{}");
     }
 }
