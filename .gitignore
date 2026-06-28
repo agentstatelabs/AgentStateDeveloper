@@ -10,6 +10,9 @@ build/
 target/
 examples/sample-py-repo/.asd-state.db
 .asd-state.db
+# Per-run scorecard history snapshots — generated state, not source.
+.asd-state.scorecard-history.json
+**/.asd-state.scorecard-history.json
 # SQLite WAL mode auxiliary files — never commit, regenerated on db open.
 .asd-state.db-shm
 .asd-state.db-wal
