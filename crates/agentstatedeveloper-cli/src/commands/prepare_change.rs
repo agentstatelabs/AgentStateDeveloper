@@ -1228,6 +1228,57 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         Value::Object(m)
     };
 
+    // t-004: stage-dump on low-confidence / empty results. The agent normally
+    // sees only `likely_edit_files` (the final, stage-3 list). When confidence
+    // is low or that list is empty, surface what the earlier filtering stages
+    // ranked and cut — so a missing-but-expected file is diagnosable instead of
+    // silently filtered. Reuses already-computed collections; null (and dropped
+    // by drop_empty_top_level) when not triggered. See CLAUDE.md "Multi-stage
+    // filtering: cut at the stage the agent sees".
+    let round3 = |x: f64| (x * 1000.0).round() / 1000.0;
+    let stage_dump = {
+        let low_conf = matches!(uncertainty.level.as_str(), "high" | "critical");
+        if low_conf || likely_edit_files.is_empty() {
+            let stage1: Vec<Value> = candidates
+                .iter()
+                .map(|(score, qname)| json!({ "score": round3(*score), "qname": qname }))
+                .collect();
+            let stage2: Vec<Value> = file_scores
+                .iter()
+                .map(|(score, file, layer, _days, _hot, sym, why)| {
+                    json!({
+                        "file": file,
+                        "score": round3(*score),
+                        "layer": layer,
+                        "top_symbol": sym,
+                        "why": why,
+                    })
+                })
+                .collect();
+            let demoted = safe_change_recipe
+                .get("reference_only")
+                .cloned()
+                .unwrap_or_else(|| json!([]));
+            json!({
+                "triggered_by": if likely_edit_files.is_empty() {
+                    "empty_edit_files"
+                } else {
+                    "low_confidence"
+                },
+                "uncertainty_level": uncertainty.level,
+                "note": "Agents normally see only likely_edit_files (the final stage-3 list). \
+                         This result is low-confidence or empty, so here is what the earlier \
+                         filtering stages ranked and cut. A file missing from likely_edit_files \
+                         but present below may have been demoted, not absent.",
+                "stage1_symbol_candidates": { "count": candidates.len(), "ranked": stage1 },
+                "stage2_surviving_files": stage2,
+                "stage3_demoted_to_reference_only": demoted,
+            })
+        } else {
+            Value::Null
+        }
+    };
+
     let out = json!({
         "description": args.description,
         "task_context": args.task_context,
@@ -1249,6 +1300,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         "validation_scenarios": validation_scenarios_ledger,
         "entry_points": { "by_layer": ordered_by_layer },
         "likely_edit_files": likely_edit_files,
+        "stage_dump": stage_dump,
         "affected_tests": affected_tests,
         "test_gap": test_gap,
         "proposed_test_path": proposed_test_path,
