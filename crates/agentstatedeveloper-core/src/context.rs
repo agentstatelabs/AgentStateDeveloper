@@ -65,6 +65,55 @@ pub fn assemble_symbol_context(
             .collect()
     };
 
+    // t-013: per-edge runtime confidence (callee_id → (confidence, static_known))
+    // for this symbol's outgoing edges, from the edge-evidence sidecar.
+    let edge_ev: HashMap<String, (f64, bool)> = {
+        let tree = engine
+            .repo
+            .get_tree(
+                &engine.ref_name,
+                &crate::paths::edge_evidence_from_prefix(&symbol.symbol_id),
+            )
+            .unwrap_or(Value::Null);
+        let mut m = HashMap::new();
+        if let Some(obj) = tree.as_object() {
+            for (callee_id, v) in obj {
+                if let Ok(ev) =
+                    serde_json::from_value::<crate::edge_confidence::EdgeEvidence>(v.clone())
+                {
+                    m.insert(callee_id.clone(), (ev.confidence(), ev.static_known));
+                }
+            }
+        }
+        m
+    };
+    let round2 = |x: f64| (x * 100.0).round() / 100.0;
+    // Callees, each annotated with edge_confidence when runtime evidence exists.
+    let callees_out: Vec<Value> = callee_ids
+        .iter()
+        .map(|id| {
+            let mut row = if let Some(s) = id_map.get(id) {
+                json!({ "qname": s.qname, "file": s.file, "line": s.start.line })
+            } else {
+                json!({ "symbol_id": id })
+            };
+            if let Some((conf, _)) = edge_ev.get(id) {
+                row["edge_confidence"] = json!(round2(*conf));
+            }
+            row
+        })
+        .collect();
+    // Runtime-only edges: calls observed at runtime but absent from the static
+    // graph (dynamic dispatch the walker missed).
+    let runtime_missed_callees: Vec<Value> = edge_ev
+        .iter()
+        .filter(|(_, (_, static_known))| !static_known)
+        .map(|(id, (conf, _))| {
+            let qname = id_map.get(id).map(|s| s.qname.clone()).unwrap_or_else(|| id.clone());
+            json!({ "qname": qname, "edge_confidence": round2(*conf) })
+        })
+        .collect();
+
     // Effects.
     let effects = effect_store.get_effects(&engine.ref_name, &symbol.symbol_id)?;
 
@@ -268,7 +317,7 @@ pub fn assemble_symbol_context(
         "covering_tests": covering_tests,
         "validation_scenarios": validation_scenarios,
         "callers": resolve(&caller_ids),
-        "callees": resolve(&callee_ids),
+        "callees": callees_out,
         "effects": effects,
         "effects_detail": effects_detail,
         "proofs": proofs,
@@ -304,6 +353,10 @@ pub fn assemble_symbol_context(
     };
     if let Some(df) = dataflow {
         out["dataflow"] = df;
+    }
+    // t-013: runtime-observed calls the static graph missed (omit when none).
+    if !runtime_missed_callees.is_empty() {
+        out["runtime_missed_callees"] = json!(runtime_missed_callees);
     }
     Ok(out)
 }

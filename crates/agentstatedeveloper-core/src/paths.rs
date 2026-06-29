@@ -67,6 +67,11 @@ pub fn edge_evidence_path(from_symbol_id: &str, to_symbol_id: &str) -> String {
     )
 }
 
+/// Prefix holding all outgoing edge-evidence records for `from_symbol_id`.
+pub fn edge_evidence_from_prefix(from_symbol_id: &str) -> String {
+    format!("{}/index/edge-evidence/{}", ASD_ROOT, from_symbol_id)
+}
+
 pub fn ledger_entry_path(symbol_id: &str, entry_id: &str) -> String {
     format!("{}/ledger/{}/{}", ASD_ROOT, symbol_id, entry_id)
 }
