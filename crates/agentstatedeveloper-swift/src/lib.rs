@@ -9,6 +9,9 @@ use std::collections::{HashMap, HashSet};
 use agentstatedeveloper_core::adapter::{
     CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols,
 };
+use agentstatedeveloper_core::cross_service::{
+    DetectedEndpoint, Direction, Transport, http_contract,
+};
 use agentstatedeveloper_core::error::{AsdError, Result};
 use agentstatedeveloper_core::schema::{Effect, EffectCategory, SymbolKind};
 use serde_json::json;
@@ -59,6 +62,15 @@ impl LanguageAdapter for SwiftAdapter {
 
     fn infer_effects(&self, _source: &str, symbol: &ParsedSymbol) -> Vec<Effect> {
         infer_effects_from_body(&symbol.body)
+    }
+
+    fn infer_service_endpoints(
+        &self,
+        file: &str,
+        source: &str,
+        symbols: &[ParsedSymbol],
+    ) -> Vec<DetectedEndpoint> {
+        infer_service_endpoints_in_swift(file, source, symbols)
     }
 
     fn extract_call_edges(
@@ -421,6 +433,106 @@ fn extract_first_string_literal(s: &str) -> Option<String> {
         j += 1;
     }
     None
+}
+
+// -----------------------------------------------------------------------------
+// Cross-service endpoint detection (t-015) — Vapor routes.
+//
+// Vapor routes are `app.<verb>(component, component, …)` where components are
+// string path segments (`"users"`, `":id"`), joined with '/'. A route is
+// distinguished from an ordinary `.get("key")` by a handler indicator: a
+// trailing `{` closure or a `use:` argument. Clients (URLSession) are indirect
+// and deferred.
+// -----------------------------------------------------------------------------
+
+const SW_VERBS: &[&str] = &["get", "post", "put", "patch", "delete"];
+
+fn infer_service_endpoints_in_swift(
+    file: &str,
+    source: &str,
+    symbols: &[ParsedSymbol],
+) -> Vec<DetectedEndpoint> {
+    let mut out = Vec::new();
+    for (idx, raw) in source.lines().enumerate() {
+        let line_no = (idx + 1) as u32;
+        let line = raw.trim();
+        if let Some((method, path)) = vapor_route(line) {
+            if let Some(owner) = sw_owner_for_body(symbols, line_no) {
+                out.push(DetectedEndpoint {
+                    transport: Transport::Http,
+                    direction: Direction::Inbound,
+                    contract: http_contract(&method, &path),
+                    owner_qname: owner.qname.clone(),
+                    file: file.to_string(),
+                    line: line_no,
+                    confidence: 0.85,
+                    note: None,
+                });
+            }
+        }
+    }
+    out
+}
+
+fn sw_owner_for_body(symbols: &[ParsedSymbol], line: u32) -> Option<&ParsedSymbol> {
+    symbols.iter().filter(|s| s.start_line <= line && line <= s.end_line).max_by_key(|s| s.start_line)
+}
+
+/// `app.get("users", ":id") { … }` → (GET, /users/:id). Requires a handler
+/// indicator (`use:` or a trailing `{`) so plain `.get("key")` isn't a route.
+fn vapor_route(line: &str) -> Option<(String, String)> {
+    for verb in SW_VERBS {
+        let needle = format!(".{verb}(");
+        let Some(pos) = line.find(&needle) else {
+            continue;
+        };
+        let args = &line[pos + needle.len()..];
+        // A route has a handler: a `use:` argument or a `{ … }` closure (which
+        // may be `{ req in` mid-line, not just a trailing brace).
+        let is_route = args.contains("use:") || args.contains('{');
+        if !is_route {
+            continue;
+        }
+        let comps = swift_path_components(args);
+        if comps.is_empty() {
+            continue;
+        }
+        return Some((verb.to_uppercase(), format!("/{}", comps.join("/"))));
+    }
+    None
+}
+
+/// Leading string-literal path components, stopping at the first non-string
+/// argument (`use:`, a closure, etc.).
+fn swift_path_components(args: &str) -> Vec<String> {
+    let mut comps = Vec::new();
+    for part in args.split(',') {
+        let p = part.trim();
+        if p.starts_with('"') {
+            match first_swift_string(p) {
+                Some(lit) => comps.push(lit),
+                None => break,
+            }
+        } else {
+            break;
+        }
+    }
+    comps
+}
+
+/// First `"…"` literal; rejects Swift interpolation `\(…)`.
+fn first_swift_string(s: &str) -> Option<String> {
+    let s = s.trim_start();
+    if !s.starts_with('"') {
+        return None;
+    }
+    let inner = &s[1..];
+    let end = inner.find('"')?;
+    let val = &inner[..end];
+    if val.contains("\\(") {
+        return None;
+    }
+    Some(val.to_string())
 }
 
 fn infer_effects_from_body(body: &str) -> Vec<Effect> {
@@ -1828,5 +1940,48 @@ extension AudioEngine {
                 .any(|q| q.ends_with("AudioEngine.start")),
             "self.start() not resolved in extension; edges: {from_restart:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod service_endpoint_tests {
+    use super::*;
+    use agentstatedeveloper_core::adapter::LanguageAdapter;
+
+    fn detect(src: &str) -> Vec<DetectedEndpoint> {
+        let a = SwiftAdapter;
+        let s = a.parse_symbols("routes.swift", src).unwrap();
+        a.infer_service_endpoints("routes.swift", src, &s)
+    }
+    fn inb(e: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
+        e.iter().filter(|e| e.direction == Direction::Inbound).collect()
+    }
+
+    #[test]
+    fn vapor_route_with_components() {
+        let src = "func routes(_ app: Application) throws {\n    app.get(\"users\", \":id\") { req in\n        return user\n    }\n}\n";
+        let eps = detect(src);
+        assert_eq!(inb(&eps)[0].contract, "http:GET /users/{}", "{eps:?}");
+    }
+
+    #[test]
+    fn vapor_post_with_use_handler() {
+        let src = "func routes(_ app: Application) throws {\n    app.post(\"charge\", use: chargeHandler)\n}\n";
+        let eps = detect(src);
+        assert_eq!(inb(&eps)[0].contract, "http:POST /charge");
+    }
+
+    #[test]
+    fn plain_get_without_handler_is_not_a_route() {
+        // dict.get("key") has no `use:`/trailing-`{`, so it isn't a route.
+        let src = "func f() {\n    let v = cache.get(\"key\")\n    _ = v\n}\n";
+        assert!(inb(&detect(src)).is_empty(), "{:?}", detect(src));
+    }
+
+    #[test]
+    fn swift_server_matches_other_language_client() {
+        let server = detect("func r(_ app: Application) throws {\n    app.get(\"users\", \":id\") { req in return u }\n}\n");
+        assert_eq!(inb(&server)[0].contract, http_contract("get", "https://svc/users/:id"));
+        assert_eq!(inb(&server)[0].contract, "http:GET /users/{}");
     }
 }
