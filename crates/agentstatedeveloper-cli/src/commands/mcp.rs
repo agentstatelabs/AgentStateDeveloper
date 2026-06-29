@@ -284,6 +284,12 @@ pub struct InstructionsArgs {
     /// Remove the managed ASD block instead of writing it.
     #[arg(long)]
     pub remove: bool,
+
+    /// Also add a non-blocking Claude Code PreToolUse hook (on Grep/Glob) to
+    /// the project's .claude/settings.json that nudges toward ASD's structured
+    /// search. Repo-scoped, not global. Honors --remove.
+    #[arg(long)]
+    pub hooks: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -862,7 +868,66 @@ fn instructions(args: InstructionsArgs) -> Result<()> {
         };
         eprintln!("  {verb} {rel}");
     }
+
+    if args.hooks {
+        let path = cwd.join(".claude/settings.json");
+        let mut settings = read_config(&path, ConfigFormat::Json)?;
+        if upsert_claude_hook(&mut settings, args.remove) {
+            write_config(&path, &settings)?;
+            let verb = if args.remove { "removed" } else { "added" };
+            eprintln!("  {verb} ASD PreToolUse hook in .claude/settings.json");
+        } else {
+            eprintln!("  .claude/settings.json — no change");
+        }
+    }
     Ok(())
+}
+
+/// Substring identifying ASD's hook entry (for idempotency / removal).
+const HOOK_MARKER: &str = "asd search / asd context-for";
+
+fn asd_hook_entry() -> serde_json::Value {
+    serde_json::json!({
+        "matcher": "Grep|Glob",
+        "hooks": [{
+            "type": "command",
+            "command": "echo 'ASD indexes this repo — prefer asd search / asd context-for for \
+                        structured answers, often cheaper than raw grep/glob.'"
+        }]
+    })
+}
+
+/// Add or remove ASD's non-blocking PreToolUse hook in a Claude settings value.
+/// Returns whether anything changed.
+fn upsert_claude_hook(settings: &mut serde_json::Value, remove: bool) -> bool {
+    let Some(obj) = settings.as_object_mut() else {
+        return false;
+    };
+    let hooks = obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(hooks) = hooks.as_object_mut() else {
+        return false;
+    };
+    let pre = hooks
+        .entry("PreToolUse")
+        .or_insert_with(|| serde_json::json!([]));
+    let Some(arr) = pre.as_array_mut() else {
+        return false;
+    };
+    let existing = arr.iter().position(|e| e.to_string().contains(HOOK_MARKER));
+    if remove {
+        if let Some(i) = existing {
+            arr.remove(i);
+            return true;
+        }
+        return false;
+    }
+    if existing.is_some() {
+        return false;
+    }
+    arr.push(asd_hook_entry());
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -908,6 +973,28 @@ mod tests {
         let without = upsert_block(&with, &instruction_body(), true);
         assert!(!without.contains(BLOCK_BEGIN));
         assert!(without.contains("# P") && without.contains("body"));
+    }
+
+    #[test]
+    fn claude_hook_add_idempotent_and_preserves_other_hooks() {
+        let mut s = serde_json::json!({
+            "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [] } ] },
+            "model": "x"
+        });
+        assert!(upsert_claude_hook(&mut s, false), "first add changes");
+        assert!(!upsert_claude_hook(&mut s, false), "second add is a no-op");
+        let arr = s["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 2, "ours added alongside the existing Bash hook");
+        assert_eq!(s["model"], "x", "unrelated settings preserved");
+    }
+
+    #[test]
+    fn claude_hook_remove() {
+        let mut s = serde_json::json!({});
+        upsert_claude_hook(&mut s, false);
+        assert!(upsert_claude_hook(&mut s, true), "remove changes");
+        assert!(s["hooks"]["PreToolUse"].as_array().unwrap().is_empty());
+        assert!(!upsert_claude_hook(&mut s, true), "second remove is a no-op");
     }
 
     #[test]
