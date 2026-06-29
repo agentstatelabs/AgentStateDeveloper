@@ -10,6 +10,9 @@ use std::collections::{HashMap, HashSet};
 use agentstatedeveloper_core::adapter::{
     CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols,
 };
+use agentstatedeveloper_core::cross_service::{
+    DetectedEndpoint, Direction, Transport, http_contract,
+};
 use agentstatedeveloper_core::error::{AsdError, Result};
 use agentstatedeveloper_core::schema::{Effect, EffectCategory, SymbolKind};
 use serde_json::json;
@@ -61,6 +64,15 @@ impl LanguageAdapter for KotlinAdapter {
 
     fn infer_effects(&self, _source: &str, symbol: &ParsedSymbol) -> Vec<Effect> {
         infer_effects_from_body(&symbol.body)
+    }
+
+    fn infer_service_endpoints(
+        &self,
+        file: &str,
+        source: &str,
+        symbols: &[ParsedSymbol],
+    ) -> Vec<DetectedEndpoint> {
+        infer_service_endpoints_in_kotlin(file, source, symbols)
     }
 
     fn extract_call_edges(
@@ -319,6 +331,204 @@ fn extract_first_string_literal(s: &str) -> Option<String> {
         j += 1;
     }
     None
+}
+
+// -----------------------------------------------------------------------------
+// Cross-service endpoint detection (t-015) — Spring (annotations, like Java) +
+// Ktor DSL routes. Outbound: Spring RestTemplate. Ktor-client (.get on an
+// object) is ambiguous and deferred.
+// -----------------------------------------------------------------------------
+
+const KT_HTTP_ATTRS: &[(&str, &str)] = &[
+    ("GetMapping", "GET"),
+    ("PostMapping", "POST"),
+    ("PutMapping", "PUT"),
+    ("DeleteMapping", "DELETE"),
+    ("PatchMapping", "PATCH"),
+];
+const KT_VERBS: &[&str] = &["get", "post", "put", "patch", "delete"];
+
+fn infer_service_endpoints_in_kotlin(
+    file: &str,
+    source: &str,
+    symbols: &[ParsedSymbol],
+) -> Vec<DetectedEndpoint> {
+    let prefix = kt_class_prefix(source);
+    let mut out = Vec::new();
+    for (idx, raw) in source.lines().enumerate() {
+        let line_no = (idx + 1) as u32;
+        let line = raw.trim();
+
+        // Spring annotation routes (owner = the function below the annotation).
+        for (method, sub) in kt_method_mappings(line) {
+            if let Some(owner) = kt_owner_for_annotation(symbols, line_no) {
+                out.push(mk_in(file, line_no, &http_contract(&method, &kt_join(&prefix, &sub)), owner));
+            }
+        }
+        // Ktor DSL route `get("/path") {` (owner = enclosing symbol).
+        if let Some((method, path)) = kt_ktor_route(line) {
+            if let Some(owner) = kt_owner_for_body(symbols, line_no) {
+                out.push(mk_in(file, line_no, &http_contract(&method, &path), owner));
+            }
+        }
+        // Spring RestTemplate clients.
+        for (method, url) in kt_clients(line) {
+            if let Some(owner) = kt_owner_for_body(symbols, line_no) {
+                out.push(mk_out(file, line_no, &http_contract(&method, &url), owner));
+            }
+        }
+    }
+    out
+}
+
+fn mk_in(file: &str, line: u32, contract: &str, owner: &ParsedSymbol) -> DetectedEndpoint {
+    DetectedEndpoint {
+        transport: Transport::Http,
+        direction: Direction::Inbound,
+        contract: contract.to_string(),
+        owner_qname: owner.qname.clone(),
+        file: file.to_string(),
+        line,
+        confidence: 0.9,
+        note: None,
+    }
+}
+fn mk_out(file: &str, line: u32, contract: &str, owner: &ParsedSymbol) -> DetectedEndpoint {
+    DetectedEndpoint {
+        transport: Transport::Http,
+        direction: Direction::Outbound,
+        contract: contract.to_string(),
+        owner_qname: owner.qname.clone(),
+        file: file.to_string(),
+        line,
+        confidence: 0.85,
+        note: None,
+    }
+}
+
+fn kt_owner_for_body(symbols: &[ParsedSymbol], line: u32) -> Option<&ParsedSymbol> {
+    symbols.iter().filter(|s| s.start_line <= line && line <= s.end_line).max_by_key(|s| s.start_line)
+}
+fn kt_owner_for_annotation(symbols: &[ParsedSymbol], line: u32) -> Option<&ParsedSymbol> {
+    if let Some(s) = kt_owner_for_body(symbols, line) {
+        return Some(s);
+    }
+    symbols.iter().filter(|s| s.start_line > line && s.start_line <= line + 6).min_by_key(|s| s.start_line)
+}
+
+fn kt_class_prefix(source: &str) -> String {
+    for line in source.lines() {
+        let t = line.trim();
+        if t.starts_with("@RequestMapping") {
+            if let Some(p) = kt_mapping_path(t) {
+                return p;
+            }
+        }
+        if t.contains("class ") || t.contains("interface ") {
+            break;
+        }
+    }
+    String::new()
+}
+
+fn kt_method_mappings(line: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (anno, method) in KT_HTTP_ATTRS {
+        if line.starts_with(&format!("@{anno}")) {
+            out.push((method.to_string(), kt_mapping_path(line).unwrap_or_default()));
+        }
+    }
+    if line.starts_with("@RequestMapping") {
+        if let Some(m) = kt_request_method(line) {
+            out.push((m, kt_mapping_path(line).unwrap_or_default()));
+        }
+    }
+    out
+}
+
+fn kt_mapping_path(line: &str) -> Option<String> {
+    let open = line.find('(')?;
+    let args = &line[open + 1..];
+    for key in ["value", "path"] {
+        if let Some(p) = kt_kv_string(args, key) {
+            return Some(p);
+        }
+    }
+    let a = args.trim_start();
+    if a.starts_with('"') {
+        return first_kt_string(a);
+    }
+    None
+}
+fn kt_kv_string(args: &str, key: &str) -> Option<String> {
+    let pos = args.find(key)?;
+    let rest = args[pos + key.len()..].trim_start().strip_prefix('=')?.trim_start();
+    first_kt_string(rest)
+}
+fn kt_request_method(line: &str) -> Option<String> {
+    let pos = line.find("RequestMethod.")?;
+    let v: String = line[pos + 14..].chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+    (!v.is_empty()).then(|| v.to_uppercase())
+}
+
+/// Ktor DSL: a line starting with `verb("/path"`.
+fn kt_ktor_route(line: &str) -> Option<(String, String)> {
+    for verb in KT_VERBS {
+        if let Some(rest) = line.strip_prefix(&format!("{verb}(")) {
+            if let Some(path) = first_kt_string(rest.trim_start()) {
+                if path.starts_with('/') {
+                    return Some((verb.to_uppercase(), path));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn kt_clients(line: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let simple = [
+        ("getForObject", "GET"), ("getForEntity", "GET"),
+        ("postForObject", "POST"), ("postForEntity", "POST"),
+    ];
+    for (m, method) in simple {
+        let needle = format!(".{m}(");
+        if let Some(pos) = line.find(&needle) {
+            if let Some(url) = first_kt_string(line[pos + needle.len()..].trim_start()) {
+                if kt_looks_like_url(&url) {
+                    out.push((method.to_string(), url));
+                }
+            }
+        }
+    }
+    out
+}
+fn kt_looks_like_url(s: &str) -> bool {
+    s.starts_with('/') || s.contains("://")
+}
+fn kt_join(prefix: &str, sub: &str) -> String {
+    let p = prefix.trim_end_matches('/');
+    let s = sub.trim_start_matches('/');
+    match (p.is_empty(), s.is_empty()) {
+        (true, true) => "/".to_string(),
+        (false, true) => p.to_string(),
+        (true, false) => format!("/{s}"),
+        (false, false) => format!("{p}/{s}"),
+    }
+}
+/// First `"…"` literal; rejects Kotlin string interpolation (`$`).
+fn first_kt_string(s: &str) -> Option<String> {
+    let s = s.trim_start();
+    if !s.starts_with('"') {
+        return None;
+    }
+    let inner = &s[1..];
+    let end = inner.find('"')?;
+    let val = &inner[..end];
+    if val.contains('$') {
+        return None;
+    }
+    Some(val.to_string())
 }
 
 fn infer_effects_from_body(body: &str) -> Vec<Effect> {
@@ -941,5 +1151,50 @@ class OrderService {
             e.caller_qname.ends_with(".placeOrder") && e.callee_qname.ends_with(".charge")
         });
         assert!(found, "expected intra-class edge; got: {edges:?}");
+    }
+}
+
+#[cfg(test)]
+mod service_endpoint_tests {
+    use super::*;
+    use agentstatedeveloper_core::adapter::LanguageAdapter;
+
+    fn detect(src: &str) -> Vec<DetectedEndpoint> {
+        let a = KotlinAdapter;
+        let s = a.parse_symbols("C.kt", src).unwrap();
+        a.infer_service_endpoints("C.kt", src, &s)
+    }
+    fn inb(e: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
+        e.iter().filter(|e| e.direction == Direction::Inbound).collect()
+    }
+    fn outb(e: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
+        e.iter().filter(|e| e.direction == Direction::Outbound).collect()
+    }
+
+    #[test]
+    fn spring_controller_prefix_plus_method() {
+        let src = "@RestController\n@RequestMapping(\"/api/users\")\nclass UserController {\n  @GetMapping(\"/{id}\")\n  fun get(id: Long): User { return user }\n}\n";
+        let eps = detect(src);
+        assert_eq!(inb(&eps)[0].contract, "http:GET /api/users/{}", "{eps:?}");
+    }
+
+    #[test]
+    fn ktor_dsl_route() {
+        let src = "fun Application.routes() {\n  routing {\n    get(\"/users/{id}\") {\n      call.respond(1)\n    }\n  }\n}\n";
+        let eps = detect(src);
+        assert_eq!(inb(&eps)[0].contract, "http:GET /users/{}", "{eps:?}");
+    }
+
+    #[test]
+    fn resttemplate_client_outbound() {
+        let src = "class S {\n  fun call() {\n    restTemplate.getForObject(\"https://users.svc/users/{id}\", User::class.java)\n  }\n}\n";
+        let eps = detect(src);
+        assert_eq!(outb(&eps)[0].contract, "http:GET /users/{}");
+    }
+
+    #[test]
+    fn map_get_is_not_a_route() {
+        let src = "fun f() {\n  val v = cache.get(\"key\")\n}\n";
+        assert!(inb(&detect(src)).is_empty(), "{:?}", detect(src));
     }
 }
