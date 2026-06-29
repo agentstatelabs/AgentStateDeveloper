@@ -13,6 +13,7 @@ pub mod community;
 pub mod context;
 pub mod cross_service;
 pub mod dataflow;
+pub mod edge_confidence;
 pub mod ser_helpers;
 pub mod conclusions_export;
 pub mod thinking;
@@ -67,6 +68,7 @@ pub use cross_service::{
 pub use dataflow::{
     DataFlowEdge, DataFlowKind, DetectedDataFlow, edges_from_tree, parse_params, resolve_edge,
 };
+pub use edge_confidence::EdgeEvidence;
 pub use doc_adapters::{adapt_document, is_doc_file};
 pub use effects::{AsgEffectStore, EffectStore};
 pub use engine::Engine;

@@ -58,6 +58,15 @@ pub fn service_manifest_path() -> String {
     format!("{}/meta/service-manifest", ASD_ROOT)
 }
 
+/// Per-edge runtime-confidence sidecar (t-013), keyed by from→to symbol id.
+/// Kept separate from the hot-path callees/callers lists.
+pub fn edge_evidence_path(from_symbol_id: &str, to_symbol_id: &str) -> String {
+    format!(
+        "{}/index/edge-evidence/{}/{}",
+        ASD_ROOT, from_symbol_id, to_symbol_id
+    )
+}
+
 pub fn ledger_entry_path(symbol_id: &str, entry_id: &str) -> String {
     format!("{}/ledger/{}/{}", ASD_ROOT, symbol_id, entry_id)
 }
