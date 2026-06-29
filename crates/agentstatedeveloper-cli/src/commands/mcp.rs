@@ -32,6 +32,10 @@ enum ConfigFormat {
     /// on read; the rewrite is plain JSON (comments are not preserved).
     Jsonc,
     Toml,
+    /// A config we won't auto-edit safely (e.g. Aider's hand-maintained
+    /// `.aider.conf.yml` — YAML with no comment-preserving editor). `asd mcp`
+    /// prints manual setup guidance instead of writing the file.
+    Manual,
 }
 
 /// Shape of a single server entry under the tool's server map. The server map
@@ -127,6 +131,20 @@ const TOOLS: &[Tool] = &[
         servers_key: "mcpServers",
         entry_style: EntryStyle::Standard,
     },
+    Tool {
+        name: "antigravity",
+        config_path_fn: antigravity_config_path,
+        format: ConfigFormat::Json,
+        servers_key: "mcpServers",
+        entry_style: EntryStyle::Standard,
+    },
+    Tool {
+        name: "aider",
+        config_path_fn: aider_config_path,
+        format: ConfigFormat::Manual,
+        servers_key: "mcp-servers",
+        entry_style: EntryStyle::Standard,
+    },
 ];
 
 /// Comma-separated list of registered tool names, for help text and errors.
@@ -200,6 +218,17 @@ fn codex_cli_config_path() -> Option<PathBuf> {
 /// Kilo Code (v7.0.33+) uses a JSONC config under XDG config.
 fn kilo_code_config_path() -> Option<PathBuf> {
     Some(home()?.join(".config/kilo/kilo.jsonc"))
+}
+
+/// Google Antigravity's global MCP config (separate from Gemini CLI's
+/// settings.json, though both live under ~/.gemini).
+fn antigravity_config_path() -> Option<PathBuf> {
+    Some(home()?.join(".gemini/config/mcp_config.json"))
+}
+
+/// Aider's config — YAML, hand-maintained, edited manually (see ConfigFormat::Manual).
+fn aider_config_path() -> Option<PathBuf> {
+    Some(home()?.join(".aider.conf.yml"))
 }
 
 // ---------------------------------------------------------------------------
@@ -532,6 +561,7 @@ fn read_registered_entry(
             let db = e.get("env")?.get("ASD_DB")?.as_str()?.to_string();
             Some((cmd, db))
         }
+        ConfigFormat::Manual => None,
     }
 }
 
@@ -555,11 +585,26 @@ fn install(args: InstallArgs) -> Result<()> {
     }
 
     let mut installed = 0usize;
+    let mut manual = 0usize;
 
     for tool in &tools {
         let Some(cfg_path) = (tool.config_path_fn)() else {
             continue;
         };
+
+        // Tools we won't auto-edit: print manual setup guidance and move on.
+        if tool.format == ConfigFormat::Manual {
+            manual += 1;
+            eprintln!("  {} — manual setup (not auto-edited):", tool.name);
+            eprintln!("      add an MCP server to {} with", cfg_path.display());
+            eprintln!("        command: {}", asd_mcp.display());
+            eprintln!("        env ASD_DB: {}", db_path.display());
+            eprintln!(
+                "      (key `{}`; see the tool's MCP docs for the exact schema)",
+                tool.servers_key
+            );
+            continue;
+        }
 
         let already = match tool.format {
             ConfigFormat::Json | ConfigFormat::Jsonc => {
@@ -572,6 +617,7 @@ fn install(args: InstallArgs) -> Result<()> {
             ConfigFormat::Toml => {
                 toml_upsert_server(&cfg_path, tool.servers_key, &asd_mcp, &db_path)?
             }
+            ConfigFormat::Manual => unreachable!("handled above"),
         };
 
         if already {
@@ -582,7 +628,7 @@ fn install(args: InstallArgs) -> Result<()> {
         installed += 1;
     }
 
-    if installed == 0 {
+    if installed == 0 && manual == 0 {
         eprintln!("No matching tool config files found.");
         eprintln!("Checked:");
         for tool in &tools {
@@ -618,6 +664,10 @@ fn uninstall(args: UninstallArgs) -> Result<()> {
         let Some(cfg_path) = (tool.config_path_fn)() else {
             continue;
         };
+        if tool.format == ConfigFormat::Manual {
+            eprintln!("  {} — remove the asd MCP server manually from {}", tool.name, cfg_path.display());
+            continue;
+        }
         if !cfg_path.exists() {
             continue;
         }
@@ -632,6 +682,7 @@ fn uninstall(args: UninstallArgs) -> Result<()> {
                 present
             }
             ConfigFormat::Toml => toml_remove_server(&cfg_path, tool.servers_key)?,
+            ConfigFormat::Manual => unreachable!("handled above"),
         };
 
         if was_present {
@@ -672,6 +723,11 @@ fn status() -> Result<()> {
             eprintln!("  ✗ {}  (unsupported platform)", tool.name);
             continue;
         };
+
+        if tool.format == ConfigFormat::Manual {
+            eprintln!("  ⚙ {}  manual setup ({})", tool.name, cfg_path.display());
+            continue;
+        }
 
         if !cfg_path.exists() {
             eprintln!(
@@ -730,6 +786,8 @@ mod tests {
             "cline",
             "codex-cli",
             "kilo-code",
+            "antigravity",
+            "aider",
         ] {
             assert!(names.contains(&expected), "TOOLS missing {expected}");
         }
@@ -737,6 +795,7 @@ mod tests {
         let listed = valid_tool_names();
         assert!(listed.contains("zed") && listed.contains("vscode") && listed.contains("cline"));
         assert!(listed.contains("codex-cli") && listed.contains("kilo-code"));
+        assert!(listed.contains("antigravity") && listed.contains("aider"));
     }
 
     #[test]
