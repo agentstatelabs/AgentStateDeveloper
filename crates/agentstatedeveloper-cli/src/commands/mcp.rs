@@ -245,6 +245,10 @@ pub enum McpCmd {
 
     /// Show asd-mcp registration status across known agent tools.
     Status(StatusArgs),
+
+    /// Inject (or refresh) a managed ASD usage block into the repo's agent
+    /// instruction files (AGENTS.md + CLAUDE.md by default).
+    Instructions(InstructionsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -270,6 +274,18 @@ pub struct UninstallArgs {
 #[derive(Debug, Args)]
 pub struct StatusArgs {}
 
+#[derive(Debug, Args)]
+pub struct InstructionsArgs {
+    /// Instruction files to write, repo-relative. Defaults to AGENTS.md +
+    /// CLAUDE.md (the most widely-read conventions). Repeatable.
+    #[arg(long)]
+    pub file: Vec<String>,
+
+    /// Remove the managed ASD block instead of writing it.
+    #[arg(long)]
+    pub remove: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -279,6 +295,7 @@ pub fn run(_cfg: &Config, cmd: McpCmd) -> Result<()> {
         McpCmd::Install(args) => install(args),
         McpCmd::Uninstall(args) => uninstall(args),
         McpCmd::Status(_) => status(),
+        McpCmd::Instructions(args) => instructions(args),
     }
 }
 
@@ -756,12 +773,142 @@ fn status() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// instructions — inject a managed ASD usage block into agent instruction files
+// ---------------------------------------------------------------------------
+
+const BLOCK_BEGIN: &str = "<!-- asd:begin (managed by `asd mcp instructions`) -->";
+const BLOCK_END: &str = "<!-- asd:end -->";
+
+/// The managed instruction block body (between the markers).
+fn instruction_body() -> String {
+    format!(
+        "{BLOCK_BEGIN}\n\
+         ## AgentStateDeveloper (ASD)\n\n\
+         This repo is indexed by ASD. Prefer its structured answers over grep + \
+         reading whole files:\n\n\
+         - `asd context-for <qname>` — signature, callers/callees, effects, invariants, ledger\n\
+         - `asd prepare-change \"<desc>\"` — files to edit, design invariants, affected tests, blast radius\n\
+         - `asd impact <qname>` / `asd since <sha>` — blast radius before editing / for PR review\n\
+         - `asd architecture` — languages, packages, layers, routes, hotspots, clusters\n\
+         - `asd search <query>` — ranked symbol search\n\n\
+         Re-index with `asd index` after changes. The same tools are available via the asd MCP server.\n\
+         {BLOCK_END}\n"
+    )
+}
+
+/// Insert or replace the managed block in `content`. Returns the new content.
+/// When `remove` is true, the block is stripped instead.
+fn upsert_block(content: &str, block: &str, remove: bool) -> String {
+    if let (Some(start), Some(end_idx)) = (content.find(BLOCK_BEGIN), content.find(BLOCK_END)) {
+        // Replace from BEGIN through END (plus the marker text).
+        let end = end_idx + BLOCK_END.len();
+        let before = content[..start].trim_end_matches('\n');
+        let after = content[end..].trim_start_matches('\n');
+        let mut out = String::new();
+        if !before.is_empty() {
+            out.push_str(before);
+            out.push_str("\n\n");
+        }
+        if !remove {
+            out.push_str(block);
+        }
+        if !after.is_empty() {
+            if !remove {
+                out.push('\n');
+            }
+            out.push_str(after);
+            out.push('\n');
+        }
+        out
+    } else if remove {
+        content.to_string()
+    } else if content.trim().is_empty() {
+        block.to_string()
+    } else {
+        format!("{}\n\n{block}", content.trim_end_matches('\n'))
+    }
+}
+
+fn instructions(args: InstructionsArgs) -> Result<()> {
+    let files = if args.file.is_empty() {
+        vec!["AGENTS.md".to_string(), "CLAUDE.md".to_string()]
+    } else {
+        args.file
+    };
+    let block = instruction_body();
+    let cwd = std::env::current_dir().context("cannot determine current directory")?;
+
+    for rel in &files {
+        let path = cwd.join(rel);
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        let had_block = existing.contains(BLOCK_BEGIN);
+        let updated = upsert_block(&existing, &block, args.remove);
+
+        if updated == existing {
+            eprintln!("  {rel} — no change");
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create dirs for {}", path.display()))?;
+        }
+        std::fs::write(&path, &updated).with_context(|| format!("write {}", path.display()))?;
+        let verb = if args.remove {
+            "removed ASD block from"
+        } else if had_block {
+            "refreshed ASD block in"
+        } else {
+            "added ASD block to"
+        };
+        eprintln!("  {verb} {rel}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upsert_block_appends_to_existing_content() {
+        let block = instruction_body();
+        let out = upsert_block("# My project\n\nNotes here.\n", &block, false);
+        assert!(out.starts_with("# My project"));
+        assert!(out.contains(BLOCK_BEGIN) && out.contains(BLOCK_END));
+        assert!(out.contains("asd context-for"));
+    }
+
+    #[test]
+    fn upsert_block_is_idempotent() {
+        let block = instruction_body();
+        let once = upsert_block("# P\n", &block, false);
+        let twice = upsert_block(&once, &block, false);
+        assert_eq!(once, twice, "re-running must not duplicate the block");
+        assert_eq!(twice.matches(BLOCK_BEGIN).count(), 1);
+    }
+
+    #[test]
+    fn upsert_block_refreshes_in_place() {
+        // An old/edited block between markers is replaced, surrounding text kept.
+        let stale = format!("# P\n\n{BLOCK_BEGIN}\nOLD\n{BLOCK_END}\n\n## After\n");
+        let out = upsert_block(&stale, &instruction_body(), false);
+        assert!(out.contains("# P") && out.contains("## After"));
+        assert!(!out.contains("OLD"));
+        assert!(out.contains("asd architecture"));
+        assert_eq!(out.matches(BLOCK_BEGIN).count(), 1);
+    }
+
+    #[test]
+    fn upsert_block_remove_strips_it() {
+        let with = upsert_block("# P\n\nbody\n", &instruction_body(), false);
+        let without = upsert_block(&with, &instruction_body(), true);
+        assert!(!without.contains(BLOCK_BEGIN));
+        assert!(without.contains("# P") && without.contains("body"));
+    }
 
     #[test]
     fn tool_names_are_unique() {
