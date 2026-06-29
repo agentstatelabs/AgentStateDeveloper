@@ -10,6 +10,9 @@ use std::collections::{HashMap, HashSet};
 use agentstatedeveloper_core::adapter::{
     CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols,
 };
+use agentstatedeveloper_core::cross_service::{
+    DetectedEndpoint, Direction, Transport, http_contract,
+};
 use agentstatedeveloper_core::error::{AsdError, Result};
 use agentstatedeveloper_core::schema::{Effect, EffectCategory, SymbolKind};
 use serde_json::json;
@@ -54,6 +57,15 @@ impl LanguageAdapter for RustAdapter {
 
     fn infer_effects(&self, _source: &str, symbol: &ParsedSymbol) -> Vec<Effect> {
         infer_effects_from_body(&symbol.body)
+    }
+
+    fn infer_service_endpoints(
+        &self,
+        file: &str,
+        source: &str,
+        symbols: &[ParsedSymbol],
+    ) -> Vec<DetectedEndpoint> {
+        infer_service_endpoints_in_rust(file, source, symbols)
     }
 
     fn extract_call_edges(
@@ -335,6 +347,175 @@ fn extract_fn_signature(node: Node<'_>, src: &[u8], name: &str) -> Option<String
 // -----------------------------------------------------------------------------
 // Effect inference
 // -----------------------------------------------------------------------------
+
+// -----------------------------------------------------------------------------
+// Cross-service endpoint detection (t-015) — actix + axum + reqwest.
+//
+// Inbound: actix attribute macros `#[get("/x")]`; axum `.route("/x",
+// get(h).post(h2))` (path from the first string arg, methods from the
+// method-router constructors). Outbound: reqwest `reqwest::get("url")` and
+// `client.get("url")` (the generic form requires a full URL with `://` so
+// `map.get("/k")` doesn't match). actix `web::scope` prefixes are deferred.
+// -----------------------------------------------------------------------------
+
+const RS_VERBS: &[&str] = &["get", "post", "put", "patch", "delete", "head"];
+
+fn infer_service_endpoints_in_rust(
+    file: &str,
+    source: &str,
+    symbols: &[ParsedSymbol],
+) -> Vec<DetectedEndpoint> {
+    let mut out = Vec::new();
+    for (idx, raw) in source.lines().enumerate() {
+        let line_no = (idx + 1) as u32;
+        let line = raw.trim();
+
+        // actix attribute macro `#[get("/x")]`.
+        if let Some((method, path)) = actix_route(line) {
+            if let Some(owner) = rs_owner_for_annotation(symbols, line_no) {
+                out.push(rs_in(file, line_no, &http_contract(&method, &path), owner));
+            }
+        }
+        // axum `.route("/x", get(h).post(h2))`.
+        for (method, path) in axum_routes(line) {
+            if let Some(owner) = rs_owner_for_body(symbols, line_no) {
+                out.push(rs_in(file, line_no, &http_contract(&method, &path), owner));
+            }
+        }
+        // reqwest clients.
+        for (method, url) in rust_clients(line) {
+            if let Some(owner) = rs_owner_for_body(symbols, line_no) {
+                out.push(rs_out(file, line_no, &http_contract(&method, &url), owner));
+            }
+        }
+    }
+    out
+}
+
+fn rs_in(file: &str, line: u32, contract: &str, owner: &ParsedSymbol) -> DetectedEndpoint {
+    DetectedEndpoint {
+        transport: Transport::Http,
+        direction: Direction::Inbound,
+        contract: contract.to_string(),
+        owner_qname: owner.qname.clone(),
+        file: file.to_string(),
+        line,
+        confidence: 0.9,
+        note: None,
+    }
+}
+fn rs_out(file: &str, line: u32, contract: &str, owner: &ParsedSymbol) -> DetectedEndpoint {
+    DetectedEndpoint {
+        transport: Transport::Http,
+        direction: Direction::Outbound,
+        contract: contract.to_string(),
+        owner_qname: owner.qname.clone(),
+        file: file.to_string(),
+        line,
+        confidence: 0.85,
+        note: None,
+    }
+}
+
+fn rs_owner_for_body(symbols: &[ParsedSymbol], line: u32) -> Option<&ParsedSymbol> {
+    symbols.iter().filter(|s| s.start_line <= line && line <= s.end_line).max_by_key(|s| s.start_line)
+}
+fn rs_owner_for_annotation(symbols: &[ParsedSymbol], line: u32) -> Option<&ParsedSymbol> {
+    if let Some(s) = rs_owner_for_body(symbols, line) {
+        return Some(s);
+    }
+    symbols.iter().filter(|s| s.start_line > line && s.start_line <= line + 6).min_by_key(|s| s.start_line)
+}
+
+fn actix_route(line: &str) -> Option<(String, String)> {
+    for verb in RS_VERBS {
+        if let Some(rest) = line.strip_prefix(&format!("#[{verb}(")) {
+            if let Some(path) = first_rust_string(rest.trim_start()) {
+                return Some((verb.to_uppercase(), path));
+            }
+        }
+    }
+    None
+}
+
+fn axum_routes(line: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let Some(pos) = line.find(".route(") else {
+        return out;
+    };
+    let args = &line[pos + ".route(".len()..];
+    let Some(path) = first_rust_string(args.trim_start()) else {
+        return out;
+    };
+    // Methods come from method-router constructors after the path: get(h).post(h2).
+    for verb in RS_VERBS {
+        if contains_call_token(args, verb) {
+            out.push((verb.to_uppercase(), path.clone()));
+        }
+    }
+    out
+}
+
+/// Whether `args` contains `<verb>(` at a word boundary (so handler names like
+/// `get_user(` don't match the `get` verb).
+fn contains_call_token(args: &str, verb: &str) -> bool {
+    let needle = format!("{verb}(");
+    let mut from = 0;
+    while let Some(rel) = args[from..].find(&needle) {
+        let at = from + rel;
+        let boundary = at == 0
+            || !args[..at]
+                .chars()
+                .next_back()
+                .map(|c| c.is_alphanumeric() || c == '_')
+                .unwrap_or(false);
+        if boundary {
+            return true;
+        }
+        from = at + needle.len();
+    }
+    false
+}
+
+fn rust_clients(line: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for verb in ["get", "post", "put", "patch", "delete"] {
+        // reqwest::get("url") — the path crate is a strong signal.
+        let q = format!("reqwest::{verb}(");
+        if let Some(pos) = line.find(&q) {
+            if let Some(url) = first_rust_string(line[pos + q.len()..].trim_start()) {
+                if rs_looks_like_url(&url) {
+                    out.push((verb.to_uppercase(), url));
+                }
+            }
+        }
+        // client.get("url") — generic; require a full URL to avoid map.get("/k").
+        let m = format!(".{verb}(");
+        if let Some(pos) = line.find(&m) {
+            if let Some(url) = first_rust_string(line[pos + m.len()..].trim_start()) {
+                if url.contains("://") {
+                    out.push((verb.to_uppercase(), url));
+                }
+            }
+        }
+    }
+    out
+}
+fn rs_looks_like_url(s: &str) -> bool {
+    s.starts_with('/') || s.contains("://")
+}
+
+/// First `"…"` or raw `r"…"` string literal.
+fn first_rust_string(s: &str) -> Option<String> {
+    let s = s.trim_start();
+    let s = if s.starts_with("r\"") { &s[1..] } else { s };
+    if !s.starts_with('"') {
+        return None;
+    }
+    let inner = &s[1..];
+    let end = inner.find('"')?;
+    Some(inner[..end].to_string())
+}
 
 fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     let mut effects: Vec<Effect> = Vec::new();
@@ -1168,5 +1349,55 @@ pub trait Store {
             qnames.contains(&"store.Store.load".to_string()),
             "got {qnames:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod service_endpoint_tests {
+    use super::*;
+    use agentstatedeveloper_core::adapter::LanguageAdapter;
+
+    fn detect(src: &str) -> Vec<DetectedEndpoint> {
+        let a = RustAdapter;
+        let s = a.parse_symbols("svc.rs", src).unwrap();
+        a.infer_service_endpoints("svc.rs", src, &s)
+    }
+    fn inb(e: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
+        e.iter().filter(|e| e.direction == Direction::Inbound).collect()
+    }
+    fn outb(e: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
+        e.iter().filter(|e| e.direction == Direction::Outbound).collect()
+    }
+
+    #[test]
+    fn actix_attribute_macro_route() {
+        let src = "#[get(\"/users/{id}\")]\nasync fn get_user(id: web::Path<u64>) -> impl Responder {\n    HttpResponse::Ok()\n}\n";
+        let eps = detect(src);
+        assert_eq!(inb(&eps)[0].contract, "http:GET /users/{}", "{eps:?}");
+    }
+
+    #[test]
+    fn axum_route_with_multiple_methods() {
+        let src = "fn app() -> Router {\n    Router::new().route(\"/users/:id\", get(get_user).post(create_user))\n}\n";
+        let eps = detect(src);
+        let mut got: Vec<String> = inb(&eps).iter().map(|e| e.contract.clone()).collect();
+        got.sort();
+        assert_eq!(got, vec!["http:GET /users/{}".to_string(), "http:POST /users/{}".to_string()], "{eps:?}");
+    }
+
+    #[test]
+    fn reqwest_clients_outbound() {
+        let src = "async fn call() {\n    reqwest::get(\"https://users.svc/users/{id}\").await.unwrap();\n    client.post(\"https://pay.svc/charge\").send().await.unwrap();\n}\n";
+        let eps = detect(src);
+        let mut got: Vec<String> = outb(&eps).iter().map(|e| e.contract.clone()).collect();
+        got.sort();
+        assert_eq!(got, vec!["http:GET /users/{}".to_string(), "http:POST /charge".to_string()]);
+    }
+
+    #[test]
+    fn map_get_with_path_key_is_not_a_client() {
+        // `.get("/k")` on a map (no `://`) must not be an HTTP client call.
+        let src = "fn f(m: HashMap<String, u8>) {\n    let _ = m.get(\"/k\");\n}\n";
+        assert!(outb(&detect(src)).is_empty(), "{:?}", detect(src));
     }
 }
