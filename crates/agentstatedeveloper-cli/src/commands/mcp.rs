@@ -22,12 +22,15 @@ const SERVER_NAME: &str = "asd";
 // Known tools
 // ---------------------------------------------------------------------------
 
-/// Serialization format of a tool's config file. JSON tools share a single
-/// `serde_json::Value` read/insert/write path; TOML tools are edited with
-/// `toml_edit` to preserve the user's comments and key ordering.
+/// Serialization format of a tool's config file. JSON/JSONC tools share the
+/// `serde_json::Value` read/insert/write path (JSONC strips comments on read);
+/// TOML tools are edited with `toml_edit` to preserve comments and ordering.
 #[derive(Clone, Copy, PartialEq)]
 enum ConfigFormat {
     Json,
+    /// JSON with comments (e.g. Kilo Code's kilo.jsonc). Comments are stripped
+    /// on read; the rewrite is plain JSON (comments are not preserved).
+    Jsonc,
     Toml,
 }
 
@@ -117,6 +120,13 @@ const TOOLS: &[Tool] = &[
         servers_key: "mcp_servers",
         entry_style: EntryStyle::Standard,
     },
+    Tool {
+        name: "kilo-code",
+        config_path_fn: kilo_code_config_path,
+        format: ConfigFormat::Jsonc,
+        servers_key: "mcpServers",
+        entry_style: EntryStyle::Standard,
+    },
 ];
 
 /// Comma-separated list of registered tool names, for help text and errors.
@@ -185,6 +195,11 @@ fn cline_config_path() -> Option<PathBuf> {
 
 fn codex_cli_config_path() -> Option<PathBuf> {
     Some(home()?.join(".codex/config.toml"))
+}
+
+/// Kilo Code (v7.0.33+) uses a JSONC config under XDG config.
+fn kilo_code_config_path() -> Option<PathBuf> {
+    Some(home()?.join(".config/kilo/kilo.jsonc"))
 }
 
 // ---------------------------------------------------------------------------
@@ -292,13 +307,61 @@ fn resolve_db(override_db: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-/// Read a JSON config file, returning an empty object if it doesn't exist.
-fn read_config(path: &Path) -> Result<serde_json::Value> {
+/// Read a JSON/JSONC config file, returning an empty object if it doesn't
+/// exist. For JSONC, comments are stripped (string-aware) before parsing.
+fn read_config(path: &Path, format: ConfigFormat) -> Result<serde_json::Value> {
     if !path.exists() {
         return Ok(serde_json::json!({}));
     }
     let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let raw = if format == ConfigFormat::Jsonc {
+        strip_jsonc_comments(&raw)
+    } else {
+        raw
+    };
     serde_json::from_str(&raw).with_context(|| format!("parse JSON in {}", path.display()))
+}
+
+/// Strip `//` line and `/* */` block comments from JSONC, leaving comment-like
+/// sequences inside string literals (e.g. `"http://x"`) untouched. UTF-8 safe.
+fn strip_jsonc_comments(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    let mut in_str = false;
+    while let Some(c) = chars.next() {
+        if in_str {
+            out.push(c);
+            if c == '\\' {
+                if let Some(n) = chars.next() {
+                    out.push(n);
+                }
+            } else if c == '"' {
+                in_str = false;
+            }
+        } else if c == '"' {
+            in_str = true;
+            out.push('"');
+        } else if c == '/' && chars.peek() == Some(&'/') {
+            for n in chars.by_ref() {
+                if n == '\n' {
+                    out.push('\n');
+                    break;
+                }
+            }
+        } else if c == '/' && chars.peek() == Some(&'*') {
+            chars.next(); // consume '*'
+            let mut prev = '\0';
+            for n in chars.by_ref() {
+                if prev == '*' && n == '/' {
+                    break;
+                }
+                prev = n;
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Write a JSON config file, creating parent directories as needed.
@@ -452,8 +515,8 @@ fn read_registered_entry(
     servers_key: &str,
 ) -> Option<(String, String)> {
     match format {
-        ConfigFormat::Json => {
-            let cfg = read_config(path).ok()?;
+        ConfigFormat::Json | ConfigFormat::Jsonc => {
+            let cfg = read_config(path, format).ok()?;
             let e = cfg.get(servers_key)?.get(SERVER_NAME)?;
             let cmd = e.get("command")?.as_str()?.to_string();
             let db = e.get("env")?.get("ASD_DB")?.as_str()?.to_string();
@@ -499,9 +562,9 @@ fn install(args: InstallArgs) -> Result<()> {
         };
 
         let already = match tool.format {
-            ConfigFormat::Json => {
+            ConfigFormat::Json | ConfigFormat::Jsonc => {
                 let entry = build_entry(tool.entry_style, &asd_mcp, &db_path);
-                let mut cfg = read_config(&cfg_path)?;
+                let mut cfg = read_config(&cfg_path, tool.format)?;
                 let already = upsert_server(&mut cfg, tool.servers_key, &entry)?;
                 write_config(&cfg_path, &cfg)?;
                 already
@@ -560,8 +623,8 @@ fn uninstall(args: UninstallArgs) -> Result<()> {
         }
 
         let was_present = match tool.format {
-            ConfigFormat::Json => {
-                let mut cfg = read_config(&cfg_path)?;
+            ConfigFormat::Json | ConfigFormat::Jsonc => {
+                let mut cfg = read_config(&cfg_path, tool.format)?;
                 let present = remove_server(&mut cfg, tool.servers_key);
                 if present {
                     write_config(&cfg_path, &cfg)?;
@@ -666,13 +729,44 @@ mod tests {
             "vscode",
             "cline",
             "codex-cli",
+            "kilo-code",
         ] {
             assert!(names.contains(&expected), "TOOLS missing {expected}");
         }
         // valid_tool_names() is derived from TOOLS, so it must list them too.
         let listed = valid_tool_names();
         assert!(listed.contains("zed") && listed.contains("vscode") && listed.contains("cline"));
-        assert!(listed.contains("codex-cli"));
+        assert!(listed.contains("codex-cli") && listed.contains("kilo-code"));
+    }
+
+    #[test]
+    fn jsonc_comments_stripped_but_strings_preserved() {
+        let src = "{\n  // line comment\n  \"url\": \"http://x/a\", /* block */\n  \"k\": \"a//b\"\n}";
+        let parsed: serde_json::Value = serde_json::from_str(&strip_jsonc_comments(src)).unwrap();
+        // The "//" inside string values must survive.
+        assert_eq!(parsed["url"], "http://x/a");
+        assert_eq!(parsed["k"], "a//b");
+    }
+
+    #[test]
+    fn jsonc_round_trip_preserves_sibling_servers() {
+        // A commented kilo.jsonc with an existing server: read (strip), upsert, write.
+        let dir = std::env::temp_dir().join(format!("asd_mcp_jsonc_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("kilo.jsonc");
+        std::fs::write(
+            &path,
+            "{\n  // my config\n  \"mcpServers\": { \"other\": { \"command\": \"x\" } }\n}",
+        )
+        .unwrap();
+        let mut cfg = read_config(&path, ConfigFormat::Jsonc).unwrap();
+        upsert_server(&mut cfg, "mcpServers", &std_entry()).unwrap();
+        write_config(&path, &cfg).unwrap();
+        // Re-read: both servers present (comments are gone, which is expected).
+        let back = read_config(&path, ConfigFormat::Jsonc).unwrap();
+        assert!(back["mcpServers"]["other"].is_object());
+        assert!(back["mcpServers"]["asd"].is_object());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn std_entry() -> serde_json::Value {
