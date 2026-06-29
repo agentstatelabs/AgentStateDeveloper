@@ -17,8 +17,8 @@ use serde_json::json;
 use uuid::Uuid;
 
 use agentstatedeveloper_core::{
-    AsgEffectStore, AsgIndexStore, EffectCategory, EffectStore, Engine, IndexStore, Mismatch,
-    RuntimeEvidence, Verification, VerificationSource, VerificationStatus, paths,
+    AsgEffectStore, AsgIndexStore, EdgeEvidence, EffectCategory, EffectStore, Engine, IndexStore,
+    Mismatch, RuntimeEvidence, Verification, VerificationSource, VerificationStatus, paths,
 };
 
 use crate::config::Config;
@@ -42,6 +42,17 @@ struct Report {
     started_at: DateTime<Utc>,
     finished_at: DateTime<Utc>,
     observations: Vec<Observation>,
+    /// t-013: caller→callee calls observed at runtime. Empty for old reports.
+    #[serde(default)]
+    observed_edges: Vec<ObservedEdge>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ObservedEdge {
+    caller: String,
+    callee: String,
+    #[allow(dead_code)]
+    count: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -205,10 +216,66 @@ pub fn run(cfg: &Config, args: TraceArgs) -> Result<()> {
         }));
     }
 
+    // t-013: fold observed call edges into per-edge runtime confidence. A
+    // static edge gets confirmed (confidence rises); an observed edge absent
+    // from the static graph is recorded as runtime-only (a missed edge —
+    // dynamic dispatch the static walker couldn't resolve).
+    let mut edges_confirmed = 0usize;
+    let mut runtime_only_edges = 0usize;
+    if !report.observed_edges.is_empty() {
+        let edge_trace_id = format!("trc_{}", Uuid::new_v4().simple());
+        let now = Utc::now();
+        for oe in &report.observed_edges {
+            let (Some(caller), Some(callee)) = (
+                index_store.get_symbol_by_qname(&engine.ref_name, &oe.caller)?,
+                index_store.get_symbol_by_qname(&engine.ref_name, &oe.callee)?,
+            ) else {
+                continue;
+            };
+            let static_known = index_store
+                .get_callees(&engine.ref_name, &caller.symbol_id)?
+                .iter()
+                .any(|c| c == &callee.symbol_id);
+
+            let path = paths::edge_evidence_path(&caller.symbol_id, &callee.symbol_id);
+            let mut ev = engine
+                .repo
+                .get_tree(&engine.ref_name, &path)
+                .ok()
+                .and_then(|v| serde_json::from_value::<EdgeEvidence>(v).ok())
+                .unwrap_or_else(|| {
+                    if static_known {
+                        EdgeEvidence::static_edge(&caller.symbol_id, &callee.symbol_id)
+                    } else {
+                        EdgeEvidence::runtime_only_edge(&caller.symbol_id, &callee.symbol_id)
+                    }
+                });
+            if static_known {
+                ev.mark_static_known();
+            }
+            ev.confirm(&edge_trace_id, now);
+            if ev.static_known {
+                edges_confirmed += 1;
+            } else {
+                runtime_only_edges += 1;
+            }
+            let opts = CommitOptions::new(
+                &cfg.agent_id,
+                IntentCategory::Explore,
+                format!("runtime edge {} -> {}", oe.caller, oe.callee),
+            );
+            engine
+                .repo
+                .set_json(&engine.ref_name, &path, &serde_json::to_value(&ev)?, opts)?;
+        }
+    }
+
     let summary = json!({
         "exit_code": status.code(),
         "report_path": args.out.display().to_string(),
         "traced_qnames": traced_qnames,
+        "edges_confirmed": edges_confirmed,
+        "runtime_only_edges": runtime_only_edges,
         "updates": updates,
     });
     println!("{}", serde_json::to_string_pretty(&summary)?);

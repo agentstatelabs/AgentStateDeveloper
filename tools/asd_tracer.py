@@ -132,6 +132,8 @@ class _Tracer:
         self.stack: list[tuple[str, int]] = []
         # qname -> { "observed_effects": [(effect, note), ...], "call_count": int }
         self.observations: dict[str, dict[str, Any]] = {}
+        # (caller_qname, callee_qname) -> observed call count (t-013).
+        self.edges: dict[tuple[str, str], int] = {}
 
     def current_qname(self) -> str | None:
         return self.stack[-1][0] if self.stack else None
@@ -141,6 +143,11 @@ class _Tracer:
             qname, {"observed_effects": [], "call_count": 0}
         )
         rec["call_count"] += 1
+
+    def record_edge(self, caller: str, callee: str) -> None:
+        # A self-recursive call is a real edge but rarely interesting; keep it.
+        key = (caller, callee)
+        self.edges[key] = self.edges.get(key, 0) + 1
 
     def record_effect(self, effect: str, note: str) -> None:
         qname = self.current_qname()
@@ -170,6 +177,14 @@ class _Tracer:
         out.sort(key=lambda o: o["qname"])
         return out
 
+    def edges_dump(self) -> list[dict[str, Any]]:
+        out = [
+            {"caller": caller, "callee": callee, "count": count}
+            for (caller, callee), count in self.edges.items()
+        ]
+        out.sort(key=lambda e: (e["caller"], e["callee"]))
+        return out
+
 
 TRACER = _Tracer()
 
@@ -186,8 +201,12 @@ def _trace_call(frame, event, arg):  # noqa: ARG001
             # Not user code — still return the tracer so we see 'return' of
             # child frames, but don't push.
             return _trace_call
+        # The current stack top (if any) is the caller of this new frame.
+        caller = TRACER.current_qname()
         TRACER.stack.append((qname, id(frame)))
         TRACER.record_call(qname)
+        if caller is not None:
+            TRACER.record_edge(caller, qname)
         return _trace_return
     return _trace_call
 
@@ -579,6 +598,7 @@ def _write_report(command: list[str], started: str, finished: str) -> str:
         "started_at": started,
         "finished_at": finished,
         "observations": TRACER.dump(),
+        "observed_edges": TRACER.edges_dump(),
     }
     with open(out_path, "w") as f:
         json.dump(report, f, indent=2)
