@@ -54,6 +54,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentstatedeveloper-conformance"
+version = "1.1.23"
+dependencies = [
+ "agentstatedeveloper-adapters",
+ "agentstatedeveloper-core",
+]
+
+[[package]]
 name = "agentstatedeveloper-core"
 version = "1.1.23"
 dependencies = [

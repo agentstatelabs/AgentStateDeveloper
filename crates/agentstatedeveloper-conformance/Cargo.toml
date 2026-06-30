@@ -1,0 +1,11 @@
+[package]
+name = "agentstatedeveloper-conformance"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Cross-language conformance matrix + contract tests for AgentStateDeveloper adapters"
+
+[dependencies]
+agentstatedeveloper-core = { workspace = true }
+agentstatedeveloper-adapters = { workspace = true }

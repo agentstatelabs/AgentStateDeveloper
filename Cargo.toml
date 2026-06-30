@@ -12,6 +12,7 @@ members = [
     "crates/agentstatedeveloper-kotlin",
     "crates/agentstatedeveloper-swift",
     "crates/agentstatedeveloper-adapters",
+    "crates/agentstatedeveloper-conformance",
     "crates/agentstatedeveloper-cli",
     "crates/agentstatedeveloper-mcp",
     "crates/agentstatedeveloper-audit-pro",
