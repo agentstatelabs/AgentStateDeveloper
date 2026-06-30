@@ -36,3 +36,6 @@ site/dist/
 site/.astro/
 site/package-lock.json
 .claude/worktrees/
+
+# Tier-2 realism corpus (cloned third-party repos, never committed)
+.realism-corpus/

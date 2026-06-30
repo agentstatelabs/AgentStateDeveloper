@@ -31,6 +31,7 @@
 //! can do today."
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use agentstatedeveloper_core::adapter::{LanguageAdapter, ParsedSymbol, WorkspaceSymbols};
 use agentstatedeveloper_core::cross_service::{
@@ -210,4 +211,190 @@ pub fn expected_matrix() -> Vec<(&'static str, [bool; 5])> {
         ("kotlin", [t, t, t, t, t]),
         ("swift", [t, t, t, t, false]),
     ]
+}
+
+// ---------------------------------------------------------------------------
+// Tier-2 realism: run the full pipeline over a REAL source tree.
+//
+// Tier-1 (the matrix above) proves each adapter handles code we wrote to
+// trigger it. Tier-2 proves the adapters survive code we DIDN'T write — the
+// incidental mess of real projects (deep nesting, odd Unicode, huge files,
+// route-like strings inside comments). It asserts only coarse invariants:
+// nothing panics, and aggregate counts clear a floor. Never exact values.
+// ---------------------------------------------------------------------------
+
+/// Coarse stats from running the adapter pipeline over a file tree.
+#[derive(Debug, Default, Clone)]
+pub struct TreeStats {
+    pub files_parsed: usize,
+    pub symbols: usize,
+    pub files_with_effects: usize,
+    pub call_edges: usize,
+    pub inbound_endpoints: usize,
+    pub outbound_endpoints: usize,
+    /// Files whose pipeline panicked — MUST be empty. Each entry names the
+    /// file and the stage, so a real-world panic is actionable, not a mystery.
+    pub panicked_files: Vec<String>,
+    /// `(language, files_parsed)` for the printed summary.
+    pub by_language: Vec<(String, usize)>,
+}
+
+/// Recursively collect files under `root`, skipping build/VCS/vendor and
+/// hidden directories.
+pub fn collect_source_files(root: &Path) -> Vec<PathBuf> {
+    const SKIP: &[&str] = &[
+        "target",
+        "node_modules",
+        "vendor",
+        "dist",
+        "build",
+        "__pycache__",
+        ".git",
+    ];
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if name.starts_with('.') || SKIP.contains(&name.as_str()) {
+                    continue;
+                }
+                stack.push(path);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+/// Run parse → effects → call-edges → endpoints over every recognized file in
+/// `root`, dispatching by file extension to the built-in adapters. Each
+/// per-file call is wrapped in `catch_unwind` so a panic is recorded against
+/// the offending file+stage rather than aborting the whole pass.
+pub fn run_pipeline_over_tree(root: &Path) -> TreeStats {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    let adapters = default_adapters();
+    let mut by_ext: HashMap<&'static str, usize> = HashMap::new();
+    for (i, a) in adapters.iter().enumerate() {
+        for ext in a.file_extensions() {
+            by_ext.insert(ext, i);
+        }
+    }
+
+    struct ParsedFile {
+        file: String,
+        source: String,
+        symbols: Vec<ParsedSymbol>,
+    }
+
+    let mut stats = TreeStats::default();
+    let mut per_adapter: HashMap<usize, Vec<ParsedFile>> = HashMap::new();
+
+    // Parse pass.
+    for path in collect_source_files(root) {
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+        let Some(&ai) = by_ext.get(ext) else {
+            continue;
+        };
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let file = path.to_string_lossy().into_owned();
+        let a = adapters[ai].as_ref();
+        match catch_unwind(AssertUnwindSafe(|| {
+            a.parse_symbols(&file, &source).unwrap_or_default()
+        })) {
+            Ok(symbols) => {
+                stats.files_parsed += 1;
+                stats.symbols += symbols.len();
+                per_adapter.entry(ai).or_default().push(ParsedFile {
+                    file,
+                    source,
+                    symbols,
+                });
+            }
+            Err(_) => stats.panicked_files.push(format!("{file} :: parse_symbols")),
+        }
+    }
+
+    // Per-adapter: build a workspace from all of that language's files (so
+    // cross-file call resolution behaves like the real index pipeline), then
+    // run effects + call-edges + endpoints per file.
+    for (ai, parsed) in &per_adapter {
+        let a = adapters[*ai].as_ref();
+        stats.by_language.push((a.language().to_string(), parsed.len()));
+
+        let mut ws = WorkspaceSymbols {
+            qnames: HashSet::new(),
+            kinds: HashMap::new(),
+            suffix_index: HashMap::new(),
+            properties: HashMap::new(),
+        };
+        for pf in parsed {
+            for s in &pf.symbols {
+                ws.qnames.insert(s.qname.clone());
+                ws.kinds.insert(s.qname.clone(), s.kind.clone());
+            }
+            for (k, v) in a.extract_property_types(&pf.symbols) {
+                ws.properties.insert(k, v);
+            }
+        }
+        ws.build_suffix_index();
+
+        for pf in parsed {
+            match catch_unwind(AssertUnwindSafe(|| {
+                pf.symbols.iter().any(|s| {
+                    a.infer_effects(&pf.source, s)
+                        .iter()
+                        .any(|e| e.effect != EffectCategory::Pure)
+                })
+            })) {
+                Ok(true) => stats.files_with_effects += 1,
+                Ok(false) => {}
+                Err(_) => stats
+                    .panicked_files
+                    .push(format!("{} :: infer_effects", pf.file)),
+            }
+
+            match catch_unwind(AssertUnwindSafe(|| {
+                a.extract_call_edges(&pf.file, &pf.source, &pf.symbols, &ws)
+                    .len()
+            })) {
+                Ok(n) => stats.call_edges += n,
+                Err(_) => stats
+                    .panicked_files
+                    .push(format!("{} :: extract_call_edges", pf.file)),
+            }
+
+            match catch_unwind(AssertUnwindSafe(|| {
+                a.infer_service_endpoints(&pf.file, &pf.source, &pf.symbols)
+            })) {
+                Ok(eps) => {
+                    stats.inbound_endpoints += eps
+                        .iter()
+                        .filter(|e| e.direction == Direction::Inbound)
+                        .count();
+                    stats.outbound_endpoints += eps
+                        .iter()
+                        .filter(|e| e.direction == Direction::Outbound)
+                        .count();
+                }
+                Err(_) => stats
+                    .panicked_files
+                    .push(format!("{} :: infer_service_endpoints", pf.file)),
+            }
+        }
+    }
+
+    stats.by_language.sort();
+    stats
 }
