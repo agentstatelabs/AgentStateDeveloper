@@ -2,6 +2,7 @@
 stages:
   - check
   - test
+  - realism
 
 default:
   image: rust:1-bookworm
@@ -44,3 +45,40 @@ test:
   stage: test
   script:
     - cargo test --workspace --locked
+
+# --- Tier-2 conformance realism -------------------------------------------
+# The `--ignored` conformance tests run the full adapter pipeline over real
+# source trees, asserting only coarse invariants (no panics, counts above a
+# floor). They are kept out of `cargo test --workspace` above so the regular
+# test stage stays fast; CI runs them here.
+
+# Always-on: ASD's own source tree (zero network). A panic on real code, or a
+# collapse-to-zero in symbols/edges, fails the pipeline.
+realism:self:
+  stage: realism
+  script:
+    - cargo test -p agentstatedeveloper-conformance --test realism realism_asd_self -- --ignored --nocapture
+
+# Polyglot corpus of real third-party repos. Heavy (clones repos), so it runs
+# only on scheduled pipelines and manual ("Run pipeline") triggers — wire a
+# nightly schedule in GitLab → CI/CD → Schedules. Resilient to no network: if
+# nothing clones, the corpus is empty and the test skips rather than fails.
+realism:corpus:
+  stage: realism
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+      when: manual
+  script:
+    - ./scripts/fetch-realism-corpus.sh "$CI_PROJECT_DIR/.realism-corpus" || true
+    - |
+      if find "$CI_PROJECT_DIR/.realism-corpus" -type f \
+        \( -name '*.py' -o -name '*.ts' -o -name '*.go' -o -name '*.java' \
+           -o -name '*.rb' -o -name '*.cs' -o -name '*.kt' -o -name '*.swift' \
+           -o -name '*.rs' \) -print -quit | grep -q .; then
+        export ASD_REALISM_CORPUS="$CI_PROJECT_DIR/.realism-corpus"
+        echo "corpus populated -> running external realism"
+      else
+        echo "corpus empty (no network?) -> external realism will skip"
+      fi
+    - cargo test -p agentstatedeveloper-conformance --test realism realism_external_corpus -- --ignored --nocapture
