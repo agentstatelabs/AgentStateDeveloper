@@ -326,9 +326,11 @@ mod plan_j_t016_decay_tests {
         let now = Utc::now();
         let twelve_hours_ago = now - Duration::hours(12);
         let f = decay_for_entry(twelve_hours_ago, now, 1.0);
+        // 12h of a 1-day half-life is exactly 0.5^0.5 = 1/sqrt(2). Use the
+        // constant, not a 0.7071 literal (clippy::approx_constant).
         assert!(
-            (f - 0.7071).abs() < 0.01,
-            "12h/1day should produce ~0.707; got {f}"
+            (f - std::f64::consts::FRAC_1_SQRT_2).abs() < 0.01,
+            "12h/1day should produce ~0.707 (1/sqrt2); got {f}"
         );
     }
 
