@@ -418,13 +418,19 @@ fn rs_out(file: &str, line: u32, contract: &str, owner: &ParsedSymbol) -> Detect
 }
 
 fn rs_owner_for_body(symbols: &[ParsedSymbol], line: u32) -> Option<&ParsedSymbol> {
-    symbols.iter().filter(|s| s.start_line <= line && line <= s.end_line).max_by_key(|s| s.start_line)
+    symbols
+        .iter()
+        .filter(|s| s.start_line <= line && line <= s.end_line)
+        .max_by_key(|s| s.start_line)
 }
 fn rs_owner_for_annotation(symbols: &[ParsedSymbol], line: u32) -> Option<&ParsedSymbol> {
     if let Some(s) = rs_owner_for_body(symbols, line) {
         return Some(s);
     }
-    symbols.iter().filter(|s| s.start_line > line && s.start_line <= line + 6).min_by_key(|s| s.start_line)
+    symbols
+        .iter()
+        .filter(|s| s.start_line > line && s.start_line <= line + 6)
+        .min_by_key(|s| s.start_line)
 }
 
 fn actix_route(line: &str) -> Option<(String, String)> {
@@ -1384,10 +1390,14 @@ mod service_endpoint_tests {
         a.infer_service_endpoints("svc.rs", src, &s)
     }
     fn inb(e: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
-        e.iter().filter(|e| e.direction == Direction::Inbound).collect()
+        e.iter()
+            .filter(|e| e.direction == Direction::Inbound)
+            .collect()
     }
     fn outb(e: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
-        e.iter().filter(|e| e.direction == Direction::Outbound).collect()
+        e.iter()
+            .filter(|e| e.direction == Direction::Outbound)
+            .collect()
     }
 
     #[test]
@@ -1403,7 +1413,14 @@ mod service_endpoint_tests {
         let eps = detect(src);
         let mut got: Vec<String> = inb(&eps).iter().map(|e| e.contract.clone()).collect();
         got.sort();
-        assert_eq!(got, vec!["http:GET /users/{}".to_string(), "http:POST /users/{}".to_string()], "{eps:?}");
+        assert_eq!(
+            got,
+            vec![
+                "http:GET /users/{}".to_string(),
+                "http:POST /users/{}".to_string()
+            ],
+            "{eps:?}"
+        );
     }
 
     #[test]
@@ -1412,7 +1429,13 @@ mod service_endpoint_tests {
         let eps = detect(src);
         let mut got: Vec<String> = outb(&eps).iter().map(|e| e.contract.clone()).collect();
         got.sort();
-        assert_eq!(got, vec!["http:GET /users/{}".to_string(), "http:POST /charge".to_string()]);
+        assert_eq!(
+            got,
+            vec![
+                "http:GET /users/{}".to_string(),
+                "http:POST /charge".to_string()
+            ]
+        );
     }
 
     #[test]

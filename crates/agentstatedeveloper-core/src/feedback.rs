@@ -75,11 +75,7 @@ pub fn decay_factor(age_days: f64, half_life_days: f64) -> f64 {
 /// internally) so tests can pass fixed timestamps and so multiple
 /// decay computations in the same scoring pass share a single
 /// consistent "now".
-pub fn decay_for_entry(
-    created_at: DateTime<Utc>,
-    now: DateTime<Utc>,
-    half_life_days: f64,
-) -> f64 {
+pub fn decay_for_entry(created_at: DateTime<Utc>, now: DateTime<Utc>, half_life_days: f64) -> f64 {
     let age_secs = (now - created_at).num_seconds() as f64;
     let age_days = age_secs / 86_400.0;
     decay_factor(age_days, half_life_days)
@@ -301,8 +297,14 @@ mod plan_j_t016_decay_tests {
         // is operationalized by this curve.
         let day_old = decay_factor(1.0, DEFAULT_FEEDBACK_HALF_LIFE_DAYS);
         let six_months = decay_factor(180.0, DEFAULT_FEEDBACK_HALF_LIFE_DAYS);
-        assert!(day_old > 0.98, "1-day-old must be near full weight; got {day_old}");
-        assert!(approx(six_months, 0.25), "6-month must be ~25%; got {six_months}");
+        assert!(
+            day_old > 0.98,
+            "1-day-old must be near full weight; got {day_old}"
+        );
+        assert!(
+            approx(six_months, 0.25),
+            "6-month must be ~25%; got {six_months}"
+        );
         assert!(
             day_old > six_months * 3.0,
             "yesterday's weight must dominate 6-month-old by >3×"
@@ -316,7 +318,10 @@ mod plan_j_t016_decay_tests {
         let now = Utc::now();
         let one_quarter_ago = now - Duration::days(90);
         let f = decay_for_entry(one_quarter_ago, now, 90.0);
-        assert!(approx(f, 0.5), "90-day-old at 90-day half-life → 0.5; got {f}");
+        assert!(
+            approx(f, 0.5),
+            "90-day-old at 90-day half-life → 0.5; got {f}"
+        );
     }
 
     #[test]

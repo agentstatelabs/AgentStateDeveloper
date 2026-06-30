@@ -12,9 +12,7 @@ use anyhow::Result;
 use clap::Args;
 use serde_json::{Value, json};
 
-use agentstatedeveloper_core::{
-    AsgEffectStore, AsgIndexStore, AsgLedgerStore, Engine, IndexStore,
-};
+use agentstatedeveloper_core::{AsgEffectStore, AsgIndexStore, AsgLedgerStore, Engine, IndexStore};
 
 use crate::commands::graph::AsdTimer;
 use crate::config::Config;
@@ -117,7 +115,6 @@ pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
     t.total("context-for");
     Ok(())
 }
-
 
 /// Reduce ledger entries to fit within `max_chars`. Trims `decisions_and_notes`
 /// first (least critical), then `proofs`, keeping invariants and hazards.

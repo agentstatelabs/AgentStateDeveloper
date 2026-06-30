@@ -14,9 +14,9 @@
 use std::path::PathBuf;
 
 use agentstatedeveloper_core::{
-    thinking::{gather_prior_thinking, DEFAULT_CONFIDENCE_FLOOR},
     AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, IndexStore, LedgerEntry, LedgerKind,
     LedgerStore, Position, Symbol, SymbolKind,
+    thinking::{DEFAULT_CONFIDENCE_FLOOR, gather_prior_thinking},
 };
 
 fn fresh_engine() -> (tempfile::TempDir, PathBuf, Engine) {
@@ -67,7 +67,10 @@ fn append_think(
         sym_id,
         kind,
         summary,
-        Author { kind: AuthorKind::Agent, id: "asd-think".into() },
+        Author {
+            kind: AuthorKind::Agent,
+            id: "asd-think".into(),
+        },
     );
     entry.entry_id = entry_id.to_string();
     entry.confidence = conf;
@@ -192,9 +195,7 @@ fn deterministic_entry_id_is_idempotent_on_replay() {
     );
 
     let ledger = AsgLedgerStore::from_engine(&engine);
-    let entries = ledger
-        .list_entries(&engine.ref_name, &sid)
-        .expect("list");
+    let entries = ledger.list_entries(&engine.ref_name, &sid).expect("list");
     let hyps: Vec<_> = entries
         .iter()
         .filter(|e| e.kind == LedgerKind::Hypothesis)

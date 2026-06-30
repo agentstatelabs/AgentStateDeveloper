@@ -432,8 +432,10 @@ pub fn propagate_caller_invariants(
             }
         }
     }
-    let caller_id_strs: Vec<&str> =
-        caller_visit_order.iter().map(|(_, cid)| cid.as_str()).collect();
+    let caller_id_strs: Vec<&str> = caller_visit_order
+        .iter()
+        .map(|(_, cid)| cid.as_str())
+        .collect();
     let caller_resolved = SearchFtsDb::open(db_path)
         .ok()
         .map(|fts| fts.resolve_symbol_ids_bulk(&caller_id_strs))

@@ -419,10 +419,7 @@ fn apply_exclude_languages_filter(
     if exclude_languages.is_empty() {
         return;
     }
-    let lower: Vec<String> = exclude_languages
-        .iter()
-        .map(|s| s.to_lowercase())
-        .collect();
+    let lower: Vec<String> = exclude_languages.iter().map(|s| s.to_lowercase()).collect();
     scored.retain(|(_, qname)| {
         let lang = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
             Ok(Some(sym)) => sym.language.to_lowercase(),
@@ -724,9 +721,7 @@ pub fn find_candidates(
                         // (boost is the same magnitude, scoring is
                         // monotone, the boost still only fires when
                         // `is_view_query` is true).
-                        let view_boost = if is_view_query
-                            && view_layer_matches(layer, &hit.file)
-                        {
+                        let view_boost = if is_view_query && view_layer_matches(layer, &hit.file) {
                             2.0
                         } else {
                             0.0
@@ -816,7 +811,15 @@ pub fn find_candidates(
     }
 
     // Plan M t-006 (1.0.101): in-memory fallback extracted to a named pipeline stage.
-    fallback_in_memory_search(engine, tokens, filters, ledger_store, index_store, fts, depth)
+    fallback_in_memory_search(
+        engine,
+        tokens,
+        filters,
+        ledger_store,
+        index_store,
+        fts,
+        depth,
+    )
 }
 
 /// Plan M t-006 (1.0.101): in-memory O(N) candidate scoring used when
@@ -3329,7 +3332,9 @@ mod plan_j_t012_explain_match_tests {
     //! can't silently shrink what's reported.
 
     use crate::candidates::explain_match;
-    use crate::schema::{Author, AuthorKind, LedgerEntry, LedgerKind, Position, Symbol, SymbolKind};
+    use crate::schema::{
+        Author, AuthorKind, LedgerEntry, LedgerKind, Position, Symbol, SymbolKind,
+    };
 
     fn mk_sym(qname: &str, file: &str, sig: Option<&str>, doc: Option<&str>) -> Symbol {
         Symbol {
@@ -3351,7 +3356,10 @@ mod plan_j_t012_explain_match_tests {
             "sym_x",
             kind,
             summary,
-            Author { kind: AuthorKind::Human, id: "alice".into() },
+            Author {
+                kind: AuthorKind::Human,
+                id: "alice".into(),
+            },
         )
     }
 
@@ -3377,7 +3385,12 @@ mod plan_j_t012_explain_match_tests {
 
     #[test]
     fn doc_match_yields_doc_reason_when_higher_priority_miss() {
-        let sym = mk_sym("pkg.x", "src/x.py", None, Some("Handles the audio mixer pipeline."));
+        let sym = mk_sym(
+            "pkg.x",
+            "src/x.py",
+            None,
+            Some("Handles the audio mixer pipeline."),
+        );
         let reasons = explain_match(&sym, &["mixer".into()], &[], false);
         assert!(
             reasons.iter().any(|r| r == "doc:mixer"),
@@ -3417,18 +3430,25 @@ mod plan_j_t012_explain_match_tests {
             mk_entry(LedgerKind::Hazard, "be careful 1"),
             mk_entry(LedgerKind::Hazard, "be careful 2"),
         ];
-        assert!(explain_match(&sym, &[], &one, false)
-            .iter()
-            .any(|r| r == "ledger:1 hazard"));
-        assert!(explain_match(&sym, &[], &two, false)
-            .iter()
-            .any(|r| r == "ledger:2 hazards"));
+        assert!(
+            explain_match(&sym, &[], &one, false)
+                .iter()
+                .any(|r| r == "ledger:1 hazard")
+        );
+        assert!(
+            explain_match(&sym, &[], &two, false)
+                .iter()
+                .any(|r| r == "ledger:2 hazards")
+        );
     }
 
     #[test]
     fn ownership_match_surfaces_when_summary_overlaps_query() {
         let sym = mk_sym("pkg.audio", "src/audio.py", None, None);
-        let entries = vec![mk_entry(LedgerKind::Ownership, "audio mixer pipeline source of truth")];
+        let entries = vec![mk_entry(
+            LedgerKind::Ownership,
+            "audio mixer pipeline source of truth",
+        )];
         let reasons = explain_match(&sym, &["audio".into()], &entries, false);
         assert!(
             reasons.iter().any(|r| r.starts_with("ownership:")),
@@ -3471,10 +3491,7 @@ mod plan_j_t011_exclude_sets_tests {
     #[test]
     fn returns_empty_when_no_exclude_sets_table() {
         let tmp = tempfile::tempdir().unwrap();
-        write_scopes_toml(
-            tmp.path(),
-            "drift-pad = [\"App/**/DriftPad*\"]\n",
-        );
+        write_scopes_toml(tmp.path(), "drift-pad = [\"App/**/DriftPad*\"]\n");
         let map = load_exclude_sets(&db_path_in(tmp.path()));
         assert!(
             map.is_empty(),
@@ -3499,10 +3516,7 @@ mod plan_j_t011_exclude_sets_tests {
             "tests must have 2 globs; got {:?}",
             map.get("tests")
         );
-        assert_eq!(
-            map.get("generated").map(|v| v.len()),
-            Some(1)
-        );
+        assert_eq!(map.get("generated").map(|v| v.len()), Some(1));
     }
 
     #[test]
@@ -3511,10 +3525,7 @@ mod plan_j_t011_exclude_sets_tests {
         // glob), --exclude-set on an unknown name returns [] so a typo
         // can't silently morph into a path filter.
         let tmp = tempfile::tempdir().unwrap();
-        write_scopes_toml(
-            tmp.path(),
-            "[exclude_sets]\ntests = [\"tests/**\"]\n",
-        );
+        write_scopes_toml(tmp.path(), "[exclude_sets]\ntests = [\"tests/**\"]\n");
         let globs = resolve_exclude_set("nonexistent", &db_path_in(tmp.path()));
         assert!(
             globs.is_empty(),
@@ -3588,7 +3599,10 @@ mod plan_j_t006_view_layer_matches_tests {
         // file) BUT classify_file_role picks it up via stem suffix.
         // This is the M22 field-eval case — `*View.swift` outside
         // a /views/ directory used to miss the boost.
-        assert!(view_layer_matches("other", "app/components/ExampleFlowView.swift"));
+        assert!(view_layer_matches(
+            "other",
+            "app/components/ExampleFlowView.swift"
+        ));
     }
 
     #[test]
@@ -3603,7 +3617,10 @@ mod plan_j_t006_view_layer_matches_tests {
     #[test]
     fn file_role_viewmodel_closes_layer_gap() {
         // *ViewModel.kt in a non-`/viewmodels/` directory.
-        assert!(view_layer_matches("other", "app/screens/login/LoginViewModel.kt"));
+        assert!(view_layer_matches(
+            "other",
+            "app/screens/login/LoginViewModel.kt"
+        ));
     }
 
     #[test]
@@ -3619,6 +3636,9 @@ mod plan_j_t006_view_layer_matches_tests {
         // From t-003 unit tests: stem_ends_with avoids `Preview*`
         // false-matching `view`. Lock the same regression here so
         // we don't reintroduce it via the boost gate.
-        assert!(!view_layer_matches("other", "src/preview/PreviewService.swift"));
+        assert!(!view_layer_matches(
+            "other",
+            "src/preview/PreviewService.swift"
+        ));
     }
 }

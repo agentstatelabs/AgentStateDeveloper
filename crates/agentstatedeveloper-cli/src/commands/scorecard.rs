@@ -295,7 +295,12 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
             "{} {} {}",
             sym.qname,
             sym.signature.as_deref().unwrap_or(""),
-            sym.doc.as_deref().unwrap_or("").lines().next().unwrap_or("")
+            sym.doc
+                .as_deref()
+                .unwrap_or("")
+                .lines()
+                .next()
+                .unwrap_or("")
         );
         structured_tokens += estimate_tokens(&record);
         let f = file_max_line.entry(sym.file.as_str()).or_insert(0);
@@ -468,8 +473,10 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
     // t-006: estimated token economy. Source-read baseline = file length
     // (max symbol end-line) × a rough source density. Internal estimate only.
     const TOKENS_PER_LINE: usize = 9;
-    let source_read_tokens: usize =
-        file_max_line.values().map(|&l| l as usize * TOKENS_PER_LINE).sum();
+    let source_read_tokens: usize = file_max_line
+        .values()
+        .map(|&l| l as usize * TOKENS_PER_LINE)
+        .sum();
     let reduction_pct = if source_read_tokens > 0 {
         (1.0 - structured_tokens as f64 / source_read_tokens as f64) * 100.0
     } else {

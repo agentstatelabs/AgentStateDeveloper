@@ -275,8 +275,6 @@ fn append_trust_history(
     dirty_file_count: usize,
     concept_gap_count: usize,
 ) {
-    
-
     let now = chrono::Utc::now().to_rfc3339();
     let record = json!({
         "timestamp": now,

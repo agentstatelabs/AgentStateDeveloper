@@ -1,10 +1,10 @@
 //! Cross-language conformance: capability matrix + contract interop.
 
-use agentstatedeveloper_conformance::{
-    cross_repo_edges, expected_matrix, fixture_for, inbound_endpoints, live_matrix,
-    outbound_endpoints, COLUMNS,
-};
 use agentstatedeveloper_adapters::default_adapters;
+use agentstatedeveloper_conformance::{
+    COLUMNS, cross_repo_edges, expected_matrix, fixture_for, inbound_endpoints, live_matrix,
+    outbound_endpoints,
+};
 
 fn render_matrix(rows: &[(String, [bool; 5])]) -> String {
     let mut out = String::new();
@@ -42,7 +42,10 @@ fn every_adapter_has_a_fixture() {
         .map(|a| a.language().to_string())
         .filter(|lang| fixture_for(lang).is_none())
         .collect();
-    assert!(missing.is_empty(), "adapters without a fixture: {missing:?}");
+    assert!(
+        missing.is_empty(),
+        "adapters without a fixture: {missing:?}"
+    );
 }
 
 /// The live matrix must match the spec. A regression flips a cell to `--`;
@@ -66,7 +69,8 @@ fn matrix_matches_spec() {
             .find(|(l, _)| l == lang)
             .unwrap_or_else(|| panic!("no live row for {lang}"));
         assert_eq!(
-            &got.1, want,
+            &got.1,
+            want,
             "\ncapability drift for `{lang}`\nexpected: {want:?}\n   found: {:?}\ncolumns: {COLUMNS:?}\n\nfull live matrix:\n{}",
             got.1,
             render_matrix(&live_rows)
@@ -137,5 +141,7 @@ fn contracts_match_across_languages() {
         }
     }
     assert!(checked > 0, "no cross-language pairs were exercised");
-    eprintln!("contracts_match_across_languages: {checked} cross-language pairs matched on {want_contract}");
+    eprintln!(
+        "contracts_match_across_languages: {checked} cross-language pairs matched on {want_contract}"
+    );
 }

@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use agentstatedeveloper_core::{
-    AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, IndexStore, LedgerEntry,
-    LedgerKind, LedgerStore, Position, Symbol, SymbolKind,
+    AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, IndexStore, LedgerEntry, LedgerKind,
+    LedgerStore, Position, Symbol, SymbolKind,
 };
 
 fn asd_bin() -> PathBuf {
@@ -39,21 +39,34 @@ fn seed_engine(db_path: &Path) {
             "sym_payment",
             kind,
             summary,
-            Author { kind: AuthorKind::Human, id: "alice".into() },
+            Author {
+                kind: AuthorKind::Human,
+                id: "alice".into(),
+            },
         );
         e.entry_id = id.into();
-        ledger
-            .append_entry(&engine.ref_name, &e, "alice")
-            .unwrap();
+        ledger.append_entry(&engine.ref_name, &e, "alice").unwrap();
     };
-    append(LedgerKind::Invariant, "led_inv_1", "amount must be positive");
-    append(LedgerKind::Hazard, "led_haz_1", "rounding errors on subcents");
+    append(
+        LedgerKind::Invariant,
+        "led_inv_1",
+        "amount must be positive",
+    );
+    append(
+        LedgerKind::Hazard,
+        "led_haz_1",
+        "rounding errors on subcents",
+    );
     append(
         LedgerKind::ValidationScenario,
         "led_vs_1",
         "charge() rejects negative amount with InvalidAmount",
     );
-    append(LedgerKind::KnownBug, "led_kb_1", "double-charge under retry race");
+    append(
+        LedgerKind::KnownBug,
+        "led_kb_1",
+        "double-charge under retry race",
+    );
 }
 
 fn run_impact(db_path: &Path, qname: &str) -> serde_json::Value {
@@ -69,8 +82,12 @@ fn run_impact(db_path: &Path, qname: &str) -> serde_json::Value {
         "asd impact failed:\nstderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    serde_json::from_slice(&out.stdout)
-        .unwrap_or_else(|e| panic!("non-JSON stdout: {e}\n{}", String::from_utf8_lossy(&out.stdout)))
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "non-JSON stdout: {e}\n{}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    })
 }
 
 #[test]
@@ -91,11 +108,7 @@ fn impact_surfaces_validation_scenarios_alongside_invariants() {
     let vs = v["validation_scenarios"]
         .as_array()
         .expect("validation_scenarios array present");
-    assert_eq!(
-        vs.len(),
-        1,
-        "expected 1 validation scenario; got: {vs:?}"
-    );
+    assert_eq!(vs.len(), 1, "expected 1 validation scenario; got: {vs:?}");
     assert!(
         vs[0]["summary"]
             .as_str()
@@ -103,7 +116,9 @@ fn impact_surfaces_validation_scenarios_alongside_invariants() {
             .unwrap_or(false),
         "scenario summary must be preserved; got: {vs:?}"
     );
-    let kbs = v["known_bugs"].as_array().expect("known_bugs array present");
+    let kbs = v["known_bugs"]
+        .as_array()
+        .expect("known_bugs array present");
     assert_eq!(kbs.len(), 1, "expected 1 known bug; got: {kbs:?}");
     assert!(
         kbs[0]["summary"]
@@ -149,6 +164,9 @@ fn impact_returns_empty_arrays_when_no_entries_present() {
         let arr = v[k]
             .as_array()
             .unwrap_or_else(|| panic!("`{k}` must be present as an array, even when empty"));
-        assert!(arr.is_empty(), "`{k}` must be empty array for bare symbol; got {arr:?}");
+        assert!(
+            arr.is_empty(),
+            "`{k}` must be empty array for bare symbol; got {arr:?}"
+        );
     }
 }

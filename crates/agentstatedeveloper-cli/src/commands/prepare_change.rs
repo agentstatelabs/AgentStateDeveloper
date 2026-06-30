@@ -21,11 +21,11 @@ use agentstatedeveloper_core::{
     SearchFtsDb, Symbol, aggregate_candidate_data, apply_feedback_adjustments, classify_file_role,
     classify_layer_sym, compute_trust_score, compute_uncertainty, confidence_scores,
     derive_cold_hints, detect_ambiguous_tokens, detect_possible_misses, estimate_tokens,
-    explain_match, extract_summary, fetch_all_test_file_paths, find_candidates,
-    finalize_file_scores, gather_recency, git_dirty_files, glob_match, intent_focus,
-    intent_layer_order, load_layer_overrides, parse_intent, parse_query,
-    propagate_caller_invariants, propose_test_path, propose_test_stub, resolve_scope,
-    result_bucket, stale_warning, symbol_tier, test_files_for_source, trim_for_agent,
+    explain_match, extract_summary, fetch_all_test_file_paths, finalize_file_scores,
+    find_candidates, gather_recency, git_dirty_files, glob_match, intent_focus, intent_layer_order,
+    load_layer_overrides, parse_intent, parse_query, propagate_caller_invariants,
+    propose_test_path, propose_test_stub, resolve_scope, result_bucket, stale_warning, symbol_tier,
+    test_files_for_source, trim_for_agent,
 };
 
 use crate::commands::impact::git_recent_touches_pub;
@@ -209,7 +209,8 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         exclude_terms: exclusions,
         paths_filter,
         exclude_paths: Vec::new(),
-        exclude_languages: Vec::new(),    };
+        exclude_languages: Vec::new(),
+    };
 
     let mut candidates = find_candidates(
         &engine,
@@ -239,7 +240,14 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     )> = all_fb
         .iter()
         .filter(|e| e.file_scope.is_none())
-        .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict, e.created_at))
+        .map(|e| {
+            (
+                e.symbol_id.clone(),
+                e.query.clone(),
+                e.verdict,
+                e.created_at,
+            )
+        })
         .collect();
     let feedback_metrics = apply_feedback_adjustments(
         &engine,
@@ -1202,7 +1210,10 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     let feedback_summary = {
         let mut m = serde_json::Map::new();
         if feedback_metrics.entries_applied > 0 {
-            m.insert("entries_applied".into(), json!(feedback_metrics.entries_applied));
+            m.insert(
+                "entries_applied".into(),
+                json!(feedback_metrics.entries_applied),
+            );
         }
         if feedback_metrics.suppressed > 0 {
             m.insert("suppressed".into(), json!(feedback_metrics.suppressed));
@@ -1223,7 +1234,10 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             );
         }
         if !feedback_metrics.rules_applied.is_empty() {
-            m.insert("rules_applied".into(), json!(feedback_metrics.rules_applied));
+            m.insert(
+                "rules_applied".into(),
+                json!(feedback_metrics.rules_applied),
+            );
         }
         Value::Object(m)
     };

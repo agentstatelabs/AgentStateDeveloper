@@ -325,10 +325,7 @@ fn export(cfg: &Config, args: ExportArgs) -> Result<()> {
                     ));
                 }
             }
-            let msg = format!(
-                "sidecar budget exceeded:\n  {}",
-                violations.join("\n  ")
-            );
+            let msg = format!("sidecar budget exceeded:\n  {}", violations.join("\n  "));
             if args.soft {
                 eprintln!("warning: {msg}");
             } else {

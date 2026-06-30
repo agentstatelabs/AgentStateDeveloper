@@ -13,20 +13,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use agentstatedeveloper_core::{
-    AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine,
-    IndexStore, LedgerEntry, LedgerKind, LedgerStore, Position, Symbol, SymbolKind,
+    AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, IndexStore, LedgerEntry, LedgerKind,
+    LedgerStore, Position, Symbol, SymbolKind,
 };
 
 fn asd_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_asd"))
 }
 
-fn put_sym(
-    engine: &Engine,
-    sym_id: &str,
-    qname: &str,
-    file: &str,
-) -> String {
+fn put_sym(engine: &Engine, sym_id: &str, qname: &str, file: &str) -> String {
     let sym = Symbol {
         symbol_id: sym_id.into(),
         symbol_fp: "fp".into(),
@@ -36,7 +31,10 @@ fn put_sym(
         file: file.into(),
         start: Position { line: 1, col: 0 },
         end: Position { line: 5, col: 0 },
-        signature: Some(format!("def {}()", qname.rsplit('.').next().unwrap_or(qname))),
+        signature: Some(format!(
+            "def {}()",
+            qname.rsplit('.').next().unwrap_or(qname)
+        )),
         doc: Some(format!("Function {qname}")),
     };
     AsgIndexStore::from_engine(engine)
@@ -101,7 +99,10 @@ fn seed_engine_with_caller_invariant(db_path: &Path) {
         &process_id,
         LedgerKind::Invariant,
         "wrapper guarantees idempotency across retries",
-        Author { kind: AuthorKind::Human, id: "alice".into() },
+        Author {
+            kind: AuthorKind::Human,
+            id: "alice".into(),
+        },
     );
     inv.entry_id = "led_inv_process".into();
     ledger
@@ -122,8 +123,12 @@ fn run_prepare_change(db: &Path, description: &str) -> serde_json::Value {
         "prepare-change failed:\nstderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    serde_json::from_slice(&out.stdout)
-        .unwrap_or_else(|e| panic!("non-JSON stdout: {e}\n{}", String::from_utf8_lossy(&out.stdout)))
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "non-JSON stdout: {e}\n{}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    })
 }
 
 #[test]

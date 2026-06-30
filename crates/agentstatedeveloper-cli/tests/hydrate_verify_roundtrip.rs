@@ -40,7 +40,10 @@ fn mk_sym(sym_id: &str, qname: &str, file: &str) -> Symbol {
         file: file.into(),
         start: Position { line: 1, col: 0 },
         end: Position { line: 10, col: 0 },
-        signature: Some(format!("def {}()", qname.rsplit('.').next().unwrap_or(qname))),
+        signature: Some(format!(
+            "def {}()",
+            qname.rsplit('.').next().unwrap_or(qname)
+        )),
         doc: Some(format!("Function {qname}")),
     }
 }
@@ -57,9 +60,21 @@ fn seed_source_engine(db: &Path) -> (usize, usize, usize, usize) {
     // shape is non-trivial.
     let syms = [
         mk_sym("sym_a", "billing.payment.charge", "src/billing/payment.py"),
-        mk_sym("sym_b", "billing.workflow.process", "src/billing/workflow.py"),
-        mk_sym("sym_c", "catalog.pricing.discount", "src/catalog/pricing.py"),
-        mk_sym("sym_d", "ui.session.ExampleFlowView", "app/components/ExampleFlowView.swift"),
+        mk_sym(
+            "sym_b",
+            "billing.workflow.process",
+            "src/billing/workflow.py",
+        ),
+        mk_sym(
+            "sym_c",
+            "catalog.pricing.discount",
+            "src/catalog/pricing.py",
+        ),
+        mk_sym(
+            "sym_d",
+            "ui.session.ExampleFlowView",
+            "app/components/ExampleFlowView.swift",
+        ),
     ];
     for s in &syms {
         idx.put_symbol(&engine.ref_name, s, "t").unwrap();
@@ -68,16 +83,35 @@ fn seed_source_engine(db: &Path) -> (usize, usize, usize, usize) {
     // 4 ledger entries across 3 symbols — 1 invariant, 1 hazard,
     // 1 ownership, 1 concept. Exercises the multi-kind path that
     // historically had a kind-whitelist drift bug.
-    let alice = Author { kind: AuthorKind::Human, id: "alice".into() };
+    let alice = Author {
+        kind: AuthorKind::Human,
+        id: "alice".into(),
+    };
     let entries = [
-        ("sym_a", LedgerKind::Invariant,
-         "charge() must be idempotent across retries", "led_inv_a"),
-        ("sym_b", LedgerKind::Hazard,
-         "process() may double-charge on partial retry", "led_haz_b"),
-        ("sym_c", LedgerKind::Ownership,
-         "owned by pricing team", "led_own_c"),
-        ("sym_a", LedgerKind::Concept,
-         "single point of money movement", "led_con_a"),
+        (
+            "sym_a",
+            LedgerKind::Invariant,
+            "charge() must be idempotent across retries",
+            "led_inv_a",
+        ),
+        (
+            "sym_b",
+            LedgerKind::Hazard,
+            "process() may double-charge on partial retry",
+            "led_haz_b",
+        ),
+        (
+            "sym_c",
+            LedgerKind::Ownership,
+            "owned by pricing team",
+            "led_own_c",
+        ),
+        (
+            "sym_a",
+            LedgerKind::Concept,
+            "single point of money movement",
+            "led_con_a",
+        ),
     ];
     for (sid, kind, summary, eid) in entries {
         let mut e = LedgerEntry::new(sid, kind, summary, alice.clone());
@@ -108,8 +142,12 @@ fn seed_source_engine(db: &Path) -> (usize, usize, usize, usize) {
         runtime: None,
         matched_policy: None,
     };
-    effects.put_effects(&engine.ref_name, "sym_a", &eff_a, "alice").unwrap();
-    effects.put_effects(&engine.ref_name, "sym_b", &eff_b, "alice").unwrap();
+    effects
+        .put_effects(&engine.ref_name, "sym_a", &eff_a, "alice")
+        .unwrap();
+    effects
+        .put_effects(&engine.ref_name, "sym_b", &eff_b, "alice")
+        .unwrap();
 
     (syms.len(), entries.len(), 1, 2) // 1 invariant of the 4 entries; 2 effect symbols
 }
@@ -130,8 +168,12 @@ fn run_hydrate_verify(db: &Path, project_root: &Path) -> serde_json::Value {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
-    serde_json::from_slice(&out.stdout)
-        .unwrap_or_else(|e| panic!("non-JSON hydrate stdout: {e}\n{}", String::from_utf8_lossy(&out.stdout)))
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "non-JSON hydrate stdout: {e}\n{}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    })
 }
 
 #[test]
@@ -145,9 +187,8 @@ fn hydrate_verify_roundtrip_zero_discrepancies() {
     // sync_to_dir writes to `<dir>/.asd/v1/`. Point it at the
     // tempdir root so the layout is what hydrate expects.
     let src_engine = Engine::open_sqlite(&src_db).unwrap();
-    let sync_summary =
-        sync_to_dir(&src_engine.repo, &src_engine.ref_name, src_tmp.path())
-            .expect("sync to sidecar");
+    let sync_summary = sync_to_dir(&src_engine.repo, &src_engine.ref_name, src_tmp.path())
+        .expect("sync to sidecar");
     assert!(
         sync_summary.symbols_written >= n_syms,
         "sync should write all {n_syms} symbols; got summary: {sync_summary:#?}",

@@ -301,11 +301,7 @@ fn git_origin_url(cwd: &std::path::Path) -> Option<String> {
         return None;
     }
     let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if url.is_empty() {
-        None
-    } else {
-        Some(url)
-    }
+    if url.is_empty() { None } else { Some(url) }
 }
 
 /// Flatten the on-disk endpoint registry tree
@@ -346,7 +342,10 @@ pub fn match_edges(endpoints: &[ServiceEndpoint]) -> Vec<CrossServiceEdge> {
     use std::collections::HashMap;
 
     let mut inbound_by_contract: HashMap<&str, Vec<&ServiceEndpoint>> = HashMap::new();
-    for e in endpoints.iter().filter(|e| e.direction == Direction::Inbound) {
+    for e in endpoints
+        .iter()
+        .filter(|e| e.direction == Direction::Inbound)
+    {
         inbound_by_contract
             .entry(e.contract.as_str())
             .or_default()
@@ -354,7 +353,10 @@ pub fn match_edges(endpoints: &[ServiceEndpoint]) -> Vec<CrossServiceEdge> {
     }
 
     let mut edges = Vec::new();
-    for out in endpoints.iter().filter(|e| e.direction == Direction::Outbound) {
+    for out in endpoints
+        .iter()
+        .filter(|e| e.direction == Direction::Outbound)
+    {
         let Some(ins) = inbound_by_contract.get(out.contract.as_str()) else {
             continue;
         };
@@ -414,7 +416,10 @@ mod tests {
 
     #[test]
     fn pubsub_contract_normalizes_case() {
-        assert_eq!(pubsub_contract("  Payments.Charged "), "topic:payments.charged");
+        assert_eq!(
+            pubsub_contract("  Payments.Charged "),
+            "topic:payments.charged"
+        );
     }
 
     #[test]
@@ -430,17 +435,32 @@ mod tests {
 
     #[test]
     fn repo_id_scp_and_https_collapse() {
-        assert_eq!(normalize_repo_id("git@github.com:Org/Repo.git"), "github.com/org/repo");
-        assert_eq!(normalize_repo_id("https://github.com/Org/Repo.git"), "github.com/org/repo");
-        assert_eq!(normalize_repo_id("https://github.com/Org/Repo"), "github.com/org/repo");
+        assert_eq!(
+            normalize_repo_id("git@github.com:Org/Repo.git"),
+            "github.com/org/repo"
+        );
+        assert_eq!(
+            normalize_repo_id("https://github.com/Org/Repo.git"),
+            "github.com/org/repo"
+        );
+        assert_eq!(
+            normalize_repo_id("https://github.com/Org/Repo"),
+            "github.com/org/repo"
+        );
     }
 
     #[test]
     fn repo_id_strips_userinfo_keeps_port() {
         // A `:port` is preserved (only an SCP `host:path` colon converts to `/`),
         // so the two URL forms for the same host stay distinct from a portless one.
-        assert_eq!(normalize_repo_id("ssh://git@host.example:22/team/svc.git"), "host.example:22/team/svc");
-        assert_eq!(normalize_repo_id("https://user@gitlab.com/team/svc.git"), "gitlab.com/team/svc");
+        assert_eq!(
+            normalize_repo_id("ssh://git@host.example:22/team/svc.git"),
+            "host.example:22/team/svc"
+        );
+        assert_eq!(
+            normalize_repo_id("https://user@gitlab.com/team/svc.git"),
+            "gitlab.com/team/svc"
+        );
     }
 
     #[test]
@@ -507,8 +527,18 @@ mod tests {
     #[test]
     fn different_contracts_do_not_match() {
         let eps = vec![
-            ep(Direction::Outbound, &http_contract("POST", "/charge"), "a", 1.0),
-            ep(Direction::Inbound, &http_contract("POST", "/refund"), "b", 1.0),
+            ep(
+                Direction::Outbound,
+                &http_contract("POST", "/charge"),
+                "a",
+                1.0,
+            ),
+            ep(
+                Direction::Inbound,
+                &http_contract("POST", "/refund"),
+                "b",
+                1.0,
+            ),
         ];
         assert!(match_edges(&eps).is_empty());
     }
@@ -528,7 +558,12 @@ mod tests {
     #[test]
     fn endpoints_from_tree_flattens_registry() {
         // Mirror the on-disk shape: contract_hash → repo_id → symbol_id → endpoint.
-        let e = ep(Direction::Inbound, &http_contract("POST", "/charge"), "pay", 0.9);
+        let e = ep(
+            Direction::Inbound,
+            &http_contract("POST", "/charge"),
+            "pay",
+            0.9,
+        );
         let tree = serde_json::json!({
             contract_hash(&e.contract): { "pay": { "sym_1": serde_json::to_value(&e).unwrap() } }
         });
@@ -544,7 +579,12 @@ mod tests {
     fn manifest_round_trips() {
         let m = ServiceManifest {
             repo_id: "payments".into(),
-            endpoints: vec![ep(Direction::Inbound, &http_contract("POST", "/charge"), "payments", 0.9)],
+            endpoints: vec![ep(
+                Direction::Inbound,
+                &http_contract("POST", "/charge"),
+                "payments",
+                0.9,
+            )],
         };
         let back: ServiceManifest =
             serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();

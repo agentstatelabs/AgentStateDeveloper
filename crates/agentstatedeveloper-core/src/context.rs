@@ -109,7 +109,10 @@ pub fn assemble_symbol_context(
         .iter()
         .filter(|(_, (_, static_known))| !static_known)
         .map(|(id, (conf, _))| {
-            let qname = id_map.get(id).map(|s| s.qname.clone()).unwrap_or_else(|| id.clone());
+            let qname = id_map
+                .get(id)
+                .map(|s| s.qname.clone())
+                .unwrap_or_else(|| id.clone());
             json!({ "qname": qname, "edge_confidence": round2(*conf) })
         })
         .collect();
@@ -268,8 +271,10 @@ pub fn assemble_symbol_context(
             .get_tree(&engine.ref_name, "/asd/v1/index/endpoints")
             .unwrap_or(Value::Null);
         let all = crate::cross_service::endpoints_from_tree(&tree);
-        let mine: Vec<&crate::cross_service::ServiceEndpoint> =
-            all.iter().filter(|e| e.symbol_id == symbol.symbol_id).collect();
+        let mine: Vec<&crate::cross_service::ServiceEndpoint> = all
+            .iter()
+            .filter(|e| e.symbol_id == symbol.symbol_id)
+            .collect();
         if mine.is_empty() {
             None
         } else {

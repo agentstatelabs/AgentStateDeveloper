@@ -28,7 +28,7 @@
 use std::collections::BTreeMap;
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::engine::Engine;
 use crate::index::{AsgIndexStore, IndexStore};
@@ -376,7 +376,10 @@ mod tests {
             sym_id,
             kind,
             summary,
-            Author { kind: AuthorKind::Agent, id: "t".into() },
+            Author {
+                kind: AuthorKind::Agent,
+                id: "t".into(),
+            },
         );
         entry.confidence = conf;
         entry.body = body.map(str::to_string);
@@ -402,7 +405,14 @@ mod tests {
     #[test]
     fn surfaces_high_confidence_hypothesis() {
         let (engine, qn) = seed();
-        append(&engine, "sym_x", LedgerKind::Hypothesis, "X causes Y", Some(0.7), None);
+        append(
+            &engine,
+            "sym_x",
+            LedgerKind::Hypothesis,
+            "X causes Y",
+            Some(0.7),
+            None,
+        );
         let pt = gather_prior_thinking(&engine, &[qn], DEFAULT_CONFIDENCE_FLOOR);
         let o = pt.entries.as_object().unwrap();
         let hyps = o["hypotheses"].as_array().unwrap();
@@ -418,7 +428,14 @@ mod tests {
     #[test]
     fn excludes_below_confidence_floor_and_records_dropped() {
         let (engine, qn) = seed();
-        append(&engine, "sym_x", LedgerKind::Hypothesis, "weak guess", Some(0.1), None);
+        append(
+            &engine,
+            "sym_x",
+            LedgerKind::Hypothesis,
+            "weak guess",
+            Some(0.1),
+            None,
+        );
         let pt = gather_prior_thinking(&engine, &[qn], DEFAULT_CONFIDENCE_FLOOR);
         assert_eq!(pt.entries, Value::Null);
         assert_eq!(pt.summary.surfaced, 0);
@@ -474,7 +491,14 @@ mod tests {
     #[test]
     fn surfaces_open_question() {
         let (engine, qn) = seed();
-        append(&engine, "sym_x", LedgerKind::OpenQuestion, "what does 4096 mean?", None, None);
+        append(
+            &engine,
+            "sym_x",
+            LedgerKind::OpenQuestion,
+            "what does 4096 mean?",
+            None,
+            None,
+        );
         let pt = gather_prior_thinking(&engine, &[qn], DEFAULT_CONFIDENCE_FLOOR);
         let oq = pt.entries["open_questions"].as_array().unwrap();
         assert_eq!(oq[0]["question"].as_str(), Some("what does 4096 mean?"));
@@ -484,9 +508,30 @@ mod tests {
     #[test]
     fn excludes_non_thinking_kinds() {
         let (engine, qn) = seed();
-        append(&engine, "sym_x", LedgerKind::Decision, "decided X", None, None);
-        append(&engine, "sym_x", LedgerKind::Constraint, "must Y", None, None);
-        append(&engine, "sym_x", LedgerKind::Mapping, "covers Z", None, None);
+        append(
+            &engine,
+            "sym_x",
+            LedgerKind::Decision,
+            "decided X",
+            None,
+            None,
+        );
+        append(
+            &engine,
+            "sym_x",
+            LedgerKind::Constraint,
+            "must Y",
+            None,
+            None,
+        );
+        append(
+            &engine,
+            "sym_x",
+            LedgerKind::Mapping,
+            "covers Z",
+            None,
+            None,
+        );
         let pt = gather_prior_thinking(&engine, &[qn], DEFAULT_CONFIDENCE_FLOOR);
         assert_eq!(pt.entries, Value::Null);
         // Non-thinking kinds don't even register as a match
@@ -499,9 +544,20 @@ mod tests {
         // matched_for_query stays 0, so entries_in_workspace must
         // be populated AND > 0.
         let (engine, _qn) = seed();
-        append(&engine, "sym_x", LedgerKind::Hypothesis, "ws hyp", Some(0.8), None);
+        append(
+            &engine,
+            "sym_x",
+            LedgerKind::Hypothesis,
+            "ws hyp",
+            Some(0.8),
+            None,
+        );
         // Query a non-existent qname.
-        let pt = gather_prior_thinking(&engine, &["nonexistent.qname".into()], DEFAULT_CONFIDENCE_FLOOR);
+        let pt = gather_prior_thinking(
+            &engine,
+            &["nonexistent.qname".into()],
+            DEFAULT_CONFIDENCE_FLOOR,
+        );
         assert_eq!(pt.summary.matched_for_query, 0);
         assert_eq!(
             pt.summary.entries_in_workspace,

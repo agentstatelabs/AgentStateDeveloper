@@ -15,9 +15,7 @@
 
 use std::path::Path;
 
-use agentstatedeveloper_core::{
-    AsgIndexStore, Engine, IndexStore, Position, Symbol, SymbolKind,
-};
+use agentstatedeveloper_core::{AsgIndexStore, Engine, IndexStore, Position, Symbol, SymbolKind};
 
 fn mk_sym(sym_id: &str, qname: &str, file: &str, language: &str) -> Symbol {
     Symbol {
@@ -29,7 +27,10 @@ fn mk_sym(sym_id: &str, qname: &str, file: &str, language: &str) -> Symbol {
         file: file.into(),
         start: Position { line: 1, col: 0 },
         end: Position { line: 5, col: 0 },
-        signature: Some(format!("class {}", qname.rsplit('.').next().unwrap_or(qname))),
+        signature: Some(format!(
+            "class {}",
+            qname.rsplit('.').next().unwrap_or(qname)
+        )),
         doc: Some(format!("Class {qname} (lang={language})")),
     }
 }
@@ -64,7 +65,10 @@ fn no_hint_returns_qname_index_winner() {
         .get_symbol_by_qname_lang(&engine.ref_name, "auth.User", None)
         .unwrap()
         .expect("primary qname index hit");
-    assert_eq!(sym.language, "swift", "last-write-wins: swift overwrote python");
+    assert_eq!(
+        sym.language, "swift",
+        "last-write-wins: swift overwrote python"
+    );
     assert_eq!(sym.symbol_id, "sym_sw_user");
 }
 

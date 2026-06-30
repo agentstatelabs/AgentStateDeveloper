@@ -25,18 +25,15 @@ fn mk_sym(sym_id: &str, qname: &str, file: &str, language: &str) -> Symbol {
         file: file.into(),
         start: Position { line: 1, col: 0 },
         end: Position { line: 5, col: 0 },
-        signature: Some(format!("def {}()", qname.rsplit('.').next().unwrap_or(qname))),
+        signature: Some(format!(
+            "def {}()",
+            qname.rsplit('.').next().unwrap_or(qname)
+        )),
         doc: Some(format!("Function {qname}")),
     }
 }
 
-fn put_sym(
-    engine: &Engine,
-    sym_id: &str,
-    qname: &str,
-    file: &str,
-    language: &str,
-) -> Symbol {
+fn put_sym(engine: &Engine, sym_id: &str, qname: &str, file: &str, language: &str) -> Symbol {
     let sym = mk_sym(sym_id, qname, file, language);
     AsgIndexStore::from_engine(engine)
         .put_symbol(&engine.ref_name, &sym, "t")
@@ -87,8 +84,12 @@ fn run_search(db: &Path, args: &[&str]) -> serde_json::Value {
         "search failed:\nstderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    serde_json::from_slice(&out.stdout)
-        .unwrap_or_else(|e| panic!("non-JSON stdout: {e}\n{}", String::from_utf8_lossy(&out.stdout)))
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "non-JSON stdout: {e}\n{}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    })
 }
 
 #[test]
@@ -124,17 +125,10 @@ fn broadened_search_fires_when_language_filter_narrows_below_threshold() {
     let db = tmp.path().join(".asd-state.db");
     seed_engine_two_langs(&db);
 
-    let v = run_search(
-        &db,
-        &["discount", "--language", "python", "--limit", "20"],
-    );
+    let v = run_search(&db, &["discount", "--language", "python", "--limit", "20"]);
     let primary: Vec<&str> = v["results"]
         .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|r| r["qname"].as_str())
-                .collect()
-        })
+        .map(|a| a.iter().filter_map(|r| r["qname"].as_str()).collect())
         .unwrap_or_default();
     let bs = &v["broadened_search"];
     assert!(

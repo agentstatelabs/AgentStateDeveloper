@@ -448,9 +448,9 @@ pub fn run_index(
         ));
         // Cross-service endpoint detection. The adapter names each endpoint's
         // owner by qname; resolve it to a symbol_id and stamp this repo's id.
-        for det in
-            ctx.adapter
-                .infer_service_endpoints(&ctx.file_str, &ctx.source, &ctx.parsed)
+        for det in ctx
+            .adapter
+            .infer_service_endpoints(&ctx.file_str, &ctx.source, &ctx.parsed)
         {
             if let Some(sym_id) = qname_to_sym_id.get(&det.owner_qname) {
                 all_endpoints.push(det.into_endpoint(&repo_id, sym_id));
@@ -458,9 +458,9 @@ pub fn run_index(
         }
         // Data-flow (arg→param). Resolve symbol identity + the callee's param
         // name from its signature; unresolved sites are dropped.
-        for det in
-            ctx.adapter
-                .extract_dataflow(&ctx.file_str, &ctx.source, &ctx.parsed, &workspace)
+        for det in ctx
+            .adapter
+            .extract_dataflow(&ctx.file_str, &ctx.source, &ctx.parsed, &workspace)
         {
             if let Some(edge) = crate::dataflow::resolve_edge(
                 &det,
@@ -550,8 +550,12 @@ pub fn run_index(
         );
     }
     if !endpoints_tree.is_empty() {
-        repo.spec_set_json(spec2, "/asd/v1/index/endpoints", &Value::Object(endpoints_tree))
-            .map_err(|e| AsdError::Other(e.to_string()))?;
+        repo.spec_set_json(
+            spec2,
+            "/asd/v1/index/endpoints",
+            &Value::Object(endpoints_tree),
+        )
+        .map_err(|e| AsdError::Other(e.to_string()))?;
     }
 
     // t-002 slice 4: data-flow registry, keyed by source symbol_id →
@@ -566,8 +570,12 @@ pub fn run_index(
             .push(serde_json::to_value(edge).unwrap_or(Value::Null));
     }
     if !dataflow_tree.is_empty() {
-        repo.spec_set_json(spec2, "/asd/v1/index/dataflow", &Value::Object(dataflow_tree))
-            .map_err(|e| AsdError::Other(e.to_string()))?;
+        repo.spec_set_json(
+            spec2,
+            "/asd/v1/index/dataflow",
+            &Value::Object(dataflow_tree),
+        )
+        .map_err(|e| AsdError::Other(e.to_string()))?;
     }
 
     let opts2 = CommitOptions::new(

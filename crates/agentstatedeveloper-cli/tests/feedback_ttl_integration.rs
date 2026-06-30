@@ -9,9 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use agentstatedeveloper_core::{
-    AsgIndexStore, Engine, IndexStore, Position, Symbol, SymbolKind,
-};
+use agentstatedeveloper_core::{AsgIndexStore, Engine, IndexStore, Position, Symbol, SymbolKind};
 
 fn asd_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_asd"))
@@ -95,13 +93,7 @@ fn feedback_mark_without_ttl_has_no_expiry() {
 
     let (ok, _, _) = run_asd(
         &db,
-        &[
-            "feedback",
-            "mark",
-            "test query",
-            "pkg.target",
-            "noisy",
-        ],
+        &["feedback", "mark", "test query", "pkg.target", "noisy"],
     );
     assert!(ok);
 
@@ -113,8 +105,7 @@ fn feedback_mark_without_ttl_has_no_expiry() {
         .or_else(|| v.as_array())
         .expect("entries array somewhere");
     assert!(
-        entries[0].get("expires_at").is_none()
-            || entries[0]["expires_at"].is_null(),
+        entries[0].get("expires_at").is_none() || entries[0]["expires_at"].is_null(),
         "without --ttl-days, expires_at must be absent or null; got: {entries:?}"
     );
 }
@@ -150,5 +141,9 @@ fn feedback_mark_with_negative_ttl_immediately_expired() {
         .or_else(|| v.as_array())
         .expect("entries array somewhere");
     // Storage preserved even when expired.
-    assert_eq!(entries.len(), 1, "feedback list shows ALL entries, including expired; got {entries:?}");
+    assert_eq!(
+        entries.len(),
+        1,
+        "feedback list shows ALL entries, including expired; got {entries:?}"
+    );
 }

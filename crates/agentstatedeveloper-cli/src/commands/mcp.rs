@@ -150,11 +150,7 @@ const TOOLS: &[Tool] = &[
 /// Comma-separated list of registered tool names, for help text and errors.
 /// Derived from [`TOOLS`] so it can never drift out of sync.
 fn valid_tool_names() -> String {
-    TOOLS
-        .iter()
-        .map(|t| t.name)
-        .collect::<Vec<_>>()
-        .join(", ")
+    TOOLS.iter().map(|t| t.name).collect::<Vec<_>>().join(", ")
 }
 
 fn home() -> Option<PathBuf> {
@@ -204,7 +200,11 @@ fn vscode_config_path() -> Option<PathBuf> {
 fn cline_config_path() -> Option<PathBuf> {
     let rel = "globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json";
     #[cfg(target_os = "macos")]
-    return Some(home()?.join("Library/Application Support/Code/User").join(rel));
+    return Some(
+        home()?
+            .join("Library/Application Support/Code/User")
+            .join(rel),
+    );
     #[cfg(target_os = "linux")]
     return Some(home()?.join(".config/Code/User").join(rel));
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -496,7 +496,7 @@ fn toml_upsert_server(
     asd_mcp: &Path,
     db_path: &Path,
 ) -> Result<bool> {
-    use toml_edit::{value, Array, DocumentMut, Item, Table};
+    use toml_edit::{Array, DocumentMut, Item, Table, value};
 
     let mut doc = if path.exists() {
         std::fs::read_to_string(path)
@@ -604,7 +604,11 @@ fn install(args: InstallArgs) -> Result<()> {
     let tools = tools_to_process(args.tool.as_deref());
 
     if tools.is_empty() {
-        anyhow::bail!("unknown tool {:?}; valid: {}", args.tool, valid_tool_names());
+        anyhow::bail!(
+            "unknown tool {:?}; valid: {}",
+            args.tool,
+            valid_tool_names()
+        );
     }
 
     let mut installed = 0usize;
@@ -678,7 +682,11 @@ fn uninstall(args: UninstallArgs) -> Result<()> {
     let tools = tools_to_process(args.tool.as_deref());
 
     if tools.is_empty() {
-        anyhow::bail!("unknown tool {:?}; valid: {}", args.tool, valid_tool_names());
+        anyhow::bail!(
+            "unknown tool {:?}; valid: {}",
+            args.tool,
+            valid_tool_names()
+        );
     }
 
     let mut removed = 0usize;
@@ -688,7 +696,11 @@ fn uninstall(args: UninstallArgs) -> Result<()> {
             continue;
         };
         if tool.format == ConfigFormat::Manual {
-            eprintln!("  {} — remove the asd MCP server manually from {}", tool.name, cfg_path.display());
+            eprintln!(
+                "  {} — remove the asd MCP server manually from {}",
+                tool.name,
+                cfg_path.display()
+            );
             continue;
         }
         if !cfg_path.exists() {
@@ -903,9 +915,7 @@ fn upsert_claude_hook(settings: &mut serde_json::Value, remove: bool) -> bool {
     let Some(obj) = settings.as_object_mut() else {
         return false;
     };
-    let hooks = obj
-        .entry("hooks")
-        .or_insert_with(|| serde_json::json!({}));
+    let hooks = obj.entry("hooks").or_insert_with(|| serde_json::json!({}));
     let Some(hooks) = hooks.as_object_mut() else {
         return false;
     };
@@ -994,7 +1004,10 @@ mod tests {
         upsert_claude_hook(&mut s, false);
         assert!(upsert_claude_hook(&mut s, true), "remove changes");
         assert!(s["hooks"]["PreToolUse"].as_array().unwrap().is_empty());
-        assert!(!upsert_claude_hook(&mut s, true), "second remove is a no-op");
+        assert!(
+            !upsert_claude_hook(&mut s, true),
+            "second remove is a no-op"
+        );
     }
 
     #[test]
@@ -1034,7 +1047,8 @@ mod tests {
 
     #[test]
     fn jsonc_comments_stripped_but_strings_preserved() {
-        let src = "{\n  // line comment\n  \"url\": \"http://x/a\", /* block */\n  \"k\": \"a//b\"\n}";
+        let src =
+            "{\n  // line comment\n  \"url\": \"http://x/a\", /* block */\n  \"k\": \"a//b\"\n}";
         let parsed: serde_json::Value = serde_json::from_str(&strip_jsonc_comments(src)).unwrap();
         // The "//" inside string values must survive.
         assert_eq!(parsed["url"], "http://x/a");
@@ -1086,11 +1100,19 @@ mod tests {
 
     #[test]
     fn divergent_entry_styles_add_their_marker() {
-        let zed = build_entry(EntryStyle::ZedCustom, Path::new("/bin/asd-mcp"), Path::new("/db"));
+        let zed = build_entry(
+            EntryStyle::ZedCustom,
+            Path::new("/bin/asd-mcp"),
+            Path::new("/db"),
+        );
         assert_eq!(zed["source"], "custom");
         assert_eq!(zed["command"], "/bin/asd-mcp"); // standard body still present
 
-        let vscode = build_entry(EntryStyle::VsCodeStdio, Path::new("/bin/asd-mcp"), Path::new("/db"));
+        let vscode = build_entry(
+            EntryStyle::VsCodeStdio,
+            Path::new("/bin/asd-mcp"),
+            Path::new("/db"),
+        );
         assert_eq!(vscode["type"], "stdio");
         assert_eq!(vscode["env"]["ASD_DB"], "/db");
     }
@@ -1099,7 +1121,11 @@ mod tests {
     fn upsert_uses_the_tools_servers_key() {
         // Zed nests under context_servers, not mcpServers.
         let mut cfg = serde_json::json!({});
-        let entry = build_entry(EntryStyle::ZedCustom, Path::new("/bin/asd-mcp"), Path::new("/db"));
+        let entry = build_entry(
+            EntryStyle::ZedCustom,
+            Path::new("/bin/asd-mcp"),
+            Path::new("/db"),
+        );
         let already = upsert_server(&mut cfg, "context_servers", &entry).unwrap();
         assert!(!already);
         assert_eq!(cfg["context_servers"]["asd"]["source"], "custom");
@@ -1140,8 +1166,14 @@ mod tests {
         let mut cfg = serde_json::json!({});
         assert!(!remove_server(&mut cfg, "mcpServers"), "nothing to remove");
         upsert_server(&mut cfg, "mcpServers", &std_entry()).unwrap();
-        assert!(remove_server(&mut cfg, "mcpServers"), "should remove the asd entry");
-        assert!(!remove_server(&mut cfg, "mcpServers"), "second remove is a no-op");
+        assert!(
+            remove_server(&mut cfg, "mcpServers"),
+            "should remove the asd entry"
+        );
+        assert!(
+            !remove_server(&mut cfg, "mcpServers"),
+            "second remove is a no-op"
+        );
     }
 
     fn temp_toml(tag: &str) -> PathBuf {
@@ -1159,9 +1191,13 @@ mod tests {
         )
         .unwrap();
 
-        let already =
-            toml_upsert_server(&path, "mcp_servers", Path::new("/bin/asd-mcp"), Path::new("/db"))
-                .unwrap();
+        let already = toml_upsert_server(
+            &path,
+            "mcp_servers",
+            Path::new("/bin/asd-mcp"),
+            Path::new("/db"),
+        )
+        .unwrap();
         assert!(!already, "fresh insert");
 
         let txt = std::fs::read_to_string(&path).unwrap();
@@ -1178,17 +1214,31 @@ mod tests {
 
         // Idempotent: second upsert reports already-present.
         assert!(
-            toml_upsert_server(&path, "mcp_servers", Path::new("/bin/asd-mcp"), Path::new("/db"))
-                .unwrap()
+            toml_upsert_server(
+                &path,
+                "mcp_servers",
+                Path::new("/bin/asd-mcp"),
+                Path::new("/db")
+            )
+            .unwrap()
         );
 
         // Remove leaves the rest of the document intact.
         assert!(toml_remove_server(&path, "mcp_servers").unwrap());
         let txt2 = std::fs::read_to_string(&path).unwrap();
         assert!(!txt2.contains("[mcp_servers.asd]"), "asd removed");
-        assert!(txt2.contains("# hand-written codex config"), "comment survives removal");
-        assert!(txt2.contains("[mcp_servers.other]"), "sibling survives removal");
-        assert!(!toml_remove_server(&path, "mcp_servers").unwrap(), "second remove no-op");
+        assert!(
+            txt2.contains("# hand-written codex config"),
+            "comment survives removal"
+        );
+        assert!(
+            txt2.contains("[mcp_servers.other]"),
+            "sibling survives removal"
+        );
+        assert!(
+            !toml_remove_server(&path, "mcp_servers").unwrap(),
+            "second remove no-op"
+        );
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -1197,8 +1247,13 @@ mod tests {
     fn toml_upsert_creates_file_when_absent() {
         let path = temp_toml("create");
         let _ = std::fs::remove_file(&path);
-        toml_upsert_server(&path, "mcp_servers", Path::new("/bin/asd-mcp"), Path::new("/db"))
-            .unwrap();
+        toml_upsert_server(
+            &path,
+            "mcp_servers",
+            Path::new("/bin/asd-mcp"),
+            Path::new("/db"),
+        )
+        .unwrap();
         let (cmd, _db) = read_registered_entry(&path, ConfigFormat::Toml, "mcp_servers").unwrap();
         assert_eq!(cmd, "/bin/asd-mcp");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

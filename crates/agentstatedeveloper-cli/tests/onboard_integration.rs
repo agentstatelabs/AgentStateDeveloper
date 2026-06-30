@@ -49,7 +49,10 @@ fn onboard_on_fresh_project_succeeds_end_to_end() {
     seed_minimal_python_project(tmp.path());
 
     let (ok, _stdout, stderr) = run_onboard(tmp.path());
-    assert!(ok, "asd onboard must exit 0 on fresh project; stderr:\n{stderr}");
+    assert!(
+        ok,
+        "asd onboard must exit 0 on fresh project; stderr:\n{stderr}"
+    );
     // Each of the three steps must have printed its banner.
     assert!(
         stderr.contains("[1/3]") && stderr.contains("[2/3]") && stderr.contains("[3/3]"),

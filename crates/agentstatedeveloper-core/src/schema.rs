@@ -145,9 +145,7 @@ impl LedgerKind {
             FollowUp => ConclusionClass::FollowUps,
             // Plan G t-002: thinking kinds bucket into a new
             // .asd/conclusions/thinking.jsonl file.
-            Hypothesis | MentalModel | FailedAttempt | OpenQuestion => {
-                ConclusionClass::Thinking
-            }
+            Hypothesis | MentalModel | FailedAttempt | OpenQuestion => ConclusionClass::Thinking,
         }
     }
 }
@@ -1126,7 +1124,10 @@ mod runtime_evidence_tests {
     fn zero_evidence_equals_prior() {
         // With no runtime observations the confidence is exactly the prior.
         for p in [0.0, 0.2, 0.5, 0.8, 1.0] {
-            assert!((derive(p, 0, 0) - p).abs() < 1e-9, "prior {p} not preserved");
+            assert!(
+                (derive(p, 0, 0) - p).abs() < 1e-9,
+                "prior {p} not preserved"
+            );
         }
     }
 
@@ -1153,7 +1154,10 @@ mod runtime_evidence_tests {
             for conf in [0u64, 1, 50, 10_000] {
                 for contra in [0u64, 1, 50, 10_000] {
                     let c = derive(p, conf, contra);
-                    assert!((0.0..=1.0).contains(&c), "out of range: {c} for {p},{conf},{contra}");
+                    assert!(
+                        (0.0..=1.0).contains(&c),
+                        "out of range: {c} for {p},{conf},{contra}"
+                    );
                 }
             }
         }
@@ -1163,17 +1167,26 @@ mod runtime_evidence_tests {
     fn evidence_overwhelms_prior_asymptotically() {
         // A confident-but-wrong prior is dragged down by sustained contradiction.
         let c = derive(0.9, 0, 1_000);
-        assert!(c < 0.05, "1000 contradictions should crush a 0.9 prior, got {c}");
+        assert!(
+            c < 0.05,
+            "1000 contradictions should crush a 0.9 prior, got {c}"
+        );
         // And confirmations push a low prior toward 1.0.
         let c2 = derive(0.1, 1_000, 0);
-        assert!(c2 > 0.95, "1000 confirmations should lift a 0.1 prior, got {c2}");
+        assert!(
+            c2 > 0.95,
+            "1000 confirmations should lift a 0.1 prior, got {c2}"
+        );
     }
 
     #[test]
     fn balanced_evidence_trends_to_half() {
         // Equal confirmations/contradictions wash out toward 0.5 regardless of prior.
         let c = derive(0.9, 500, 500);
-        assert!((c - 0.5).abs() < 0.02, "balanced evidence should near 0.5, got {c}");
+        assert!(
+            (c - 0.5).abs() < 0.02,
+            "balanced evidence should near 0.5, got {c}"
+        );
     }
 
     #[test]

@@ -28,7 +28,10 @@ fn mk_sym(sym_id: &str, qname: &str, file: &str) -> Symbol {
         file: file.into(),
         start: Position { line: 1, col: 0 },
         end: Position { line: 5, col: 0 },
-        signature: Some(format!("def {}()", qname.rsplit('.').next().unwrap_or(qname))),
+        signature: Some(format!(
+            "def {}()",
+            qname.rsplit('.').next().unwrap_or(qname)
+        )),
         doc: None,
     }
 }

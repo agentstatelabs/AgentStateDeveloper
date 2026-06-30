@@ -475,7 +475,10 @@ fn infer_service_endpoints_in_swift(
 }
 
 fn sw_owner_for_body(symbols: &[ParsedSymbol], line: u32) -> Option<&ParsedSymbol> {
-    symbols.iter().filter(|s| s.start_line <= line && line <= s.end_line).max_by_key(|s| s.start_line)
+    symbols
+        .iter()
+        .filter(|s| s.start_line <= line && line <= s.end_line)
+        .max_by_key(|s| s.start_line)
 }
 
 /// `app.get("users", ":id") { … }` → (GET, /users/:id). Requires a handler
@@ -1399,10 +1402,7 @@ enum Currency {
             "consecutive `ExampleFlow` segments should collapse to one"
         );
         // Double, not triple
-        assert_eq!(
-            file_qname_prefix("Foo/Bar/Bar/baz.swift"),
-            "Foo.Bar.baz"
-        );
+        assert_eq!(file_qname_prefix("Foo/Bar/Bar/baz.swift"), "Foo.Bar.baz");
         // Non-consecutive duplicates left alone (could be a real
         // semantic structure: `App.Auth.User.Auth.helper`)
         assert_eq!(
@@ -1954,7 +1954,9 @@ mod service_endpoint_tests {
         a.infer_service_endpoints("routes.swift", src, &s)
     }
     fn inb(e: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
-        e.iter().filter(|e| e.direction == Direction::Inbound).collect()
+        e.iter()
+            .filter(|e| e.direction == Direction::Inbound)
+            .collect()
     }
 
     #[test]
@@ -1980,8 +1982,13 @@ mod service_endpoint_tests {
 
     #[test]
     fn swift_server_matches_other_language_client() {
-        let server = detect("func r(_ app: Application) throws {\n    app.get(\"users\", \":id\") { req in return u }\n}\n");
-        assert_eq!(inb(&server)[0].contract, http_contract("get", "https://svc/users/:id"));
+        let server = detect(
+            "func r(_ app: Application) throws {\n    app.get(\"users\", \":id\") { req in return u }\n}\n",
+        );
+        assert_eq!(
+            inb(&server)[0].contract,
+            http_contract("get", "https://svc/users/:id")
+        );
         assert_eq!(inb(&server)[0].contract, "http:GET /users/{}");
     }
 }

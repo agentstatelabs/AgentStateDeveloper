@@ -81,7 +81,9 @@ pub fn run(cfg: &Config, args: OnboardArgs) -> Result<()> {
         };
         conclusions::run(cfg, ConclusionsCmd::Import(import_args))?;
     } else {
-        eprintln!("\n[3/3] asd conclusions import — skipped (.asd/conclusions/ doesn't exist; fresh project)");
+        eprintln!(
+            "\n[3/3] asd conclusions import — skipped (.asd/conclusions/ doesn't exist; fresh project)"
+        );
     }
 
     eprintln!("\n== onboard complete ==");

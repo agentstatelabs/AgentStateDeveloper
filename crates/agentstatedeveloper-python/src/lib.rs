@@ -7,8 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use agentstatedeveloper_core::adapter::{
-    CallEdge, DynamicDispatchHint, LanguageAdapter, ParsedSymbol, UnresolvedCall,
-    WorkspaceSymbols,
+    CallEdge, DynamicDispatchHint, LanguageAdapter, ParsedSymbol, UnresolvedCall, WorkspaceSymbols,
 };
 use agentstatedeveloper_core::cross_service::{
     DetectedEndpoint, Direction, Transport, http_contract, pubsub_contract,
@@ -126,14 +125,61 @@ pub fn report_unresolved_calls_in_python(
     // a workspace symbol. Keep this list tight; when in doubt, leave
     // the call OUT of the allowlist so it surfaces.
     let stdlib_allowlist: HashSet<&str> = [
-        "print", "len", "range", "type", "isinstance", "super", "hasattr",
-        "getattr", "setattr", "delattr", "callable", "iter", "next",
-        "list", "dict", "set", "tuple", "str", "int", "float", "bool",
-        "bytes", "bytearray", "frozenset", "min", "max", "sum", "abs",
-        "round", "sorted", "reversed", "enumerate", "zip", "map", "filter",
-        "any", "all", "open", "repr", "hash", "id", "vars", "dir",
-        "format", "input", "ord", "chr", "hex", "oct", "bin", "pow",
-        "divmod", "compile", "eval", "exec",
+        "print",
+        "len",
+        "range",
+        "type",
+        "isinstance",
+        "super",
+        "hasattr",
+        "getattr",
+        "setattr",
+        "delattr",
+        "callable",
+        "iter",
+        "next",
+        "list",
+        "dict",
+        "set",
+        "tuple",
+        "str",
+        "int",
+        "float",
+        "bool",
+        "bytes",
+        "bytearray",
+        "frozenset",
+        "min",
+        "max",
+        "sum",
+        "abs",
+        "round",
+        "sorted",
+        "reversed",
+        "enumerate",
+        "zip",
+        "map",
+        "filter",
+        "any",
+        "all",
+        "open",
+        "repr",
+        "hash",
+        "id",
+        "vars",
+        "dir",
+        "format",
+        "input",
+        "ord",
+        "chr",
+        "hex",
+        "oct",
+        "bin",
+        "pow",
+        "divmod",
+        "compile",
+        "eval",
+        "exec",
     ]
     .into_iter()
     .collect();
@@ -226,11 +272,7 @@ fn walk_unresolved_calls(
                 // segment for chained attribute access (`foo.bar` →
                 // check `foo` against the allowlist; this catches
                 // `str.format`-style chains incidentally).
-                let head = callee_text
-                    .split('.')
-                    .next()
-                    .unwrap_or(&callee_text)
-                    .trim();
+                let head = callee_text.split('.').next().unwrap_or(&callee_text).trim();
                 if !stdlib_allowlist.contains(head) {
                     out.push(UnresolvedCall {
                         file: file.to_string(),
@@ -723,9 +765,7 @@ fn first_string_arg(args: &str) -> Option<String> {
     // Skip a leading `name=` kwarg label (e.g. url=, path=).
     let s = match s.find('=') {
         Some(eq)
-            if s[..eq]
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_')
+            if s[..eq].chars().all(|c| c.is_alphanumeric() || c == '_')
                 && !s[..eq].is_empty()
                 && s.as_bytes().get(eq + 1) != Some(&b'=') =>
         {
@@ -932,7 +972,10 @@ fn simple_args(inner: &str) -> Option<Vec<String>> {
     let mut args = Vec::new();
     for part in inner.split(',') {
         let p = part.trim();
-        let is_ident = p.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        let is_ident = p
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
             && p.chars().all(|c| c.is_alphanumeric() || c == '_');
         if !is_ident || matches!(p, "True" | "False" | "None" | "self" | "cls") {
             return None;
@@ -1463,10 +1506,7 @@ fn first_matching_line(scan: &str, body: &str, needles: &[&str]) -> Option<Strin
     for (i, scan_line) in scan.lines().enumerate() {
         for n in needles {
             if scan_line.contains(n) {
-                return body
-                    .lines()
-                    .nth(i)
-                    .map(|l| l.trim().to_string());
+                return body.lines().nth(i).map(|l| l.trim().to_string());
             }
         }
     }
@@ -2481,11 +2521,7 @@ mod tests {
         // being the same byte length AND splitting into the same lines.
         let body = "x = 'open(\"a\")'  # open(\"b\")\ny = 1\n";
         let masked = mask_comments_and_literals(body);
-        assert_eq!(
-            masked.len(),
-            body.len(),
-            "mask must preserve byte length"
-        );
+        assert_eq!(masked.len(), body.len(), "mask must preserve byte length");
         assert_eq!(
             masked.lines().count(),
             body.lines().count(),
@@ -2808,7 +2844,8 @@ def foo():
         }];
         let mut ws = WorkspaceSymbols::default();
         ws.qnames.insert("app.show.show".into());
-        ws.kinds.insert("app.show.show".into(), SymbolKind::Function);
+        ws.kinds
+            .insert("app.show.show".into(), SymbolKind::Function);
         ws.build_suffix_index();
 
         let hits = report_unresolved_calls_in_python("app/show.py", src, &parsed, &ws);
@@ -2896,7 +2933,8 @@ def foo():
 
     #[test]
     fn detects_dunder_getattr_method_definition() {
-        let src = "class Proxy:\n    def __getattr__(self, name):\n        return self._lookup(name)\n";
+        let src =
+            "class Proxy:\n    def __getattr__(self, name):\n        return self._lookup(name)\n";
         let hints = scan_dynamic_dispatch_in_python("app/proxy.py", src);
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].pattern, "__getattr__");
@@ -2991,8 +3029,7 @@ def foo():
 
         let mut ws = WorkspaceSymbols::default();
         ws.qnames.insert("pkg.api.Client".into());
-        ws.kinds
-            .insert("pkg.api.Client".into(), SymbolKind::Class);
+        ws.kinds.insert("pkg.api.Client".into(), SymbolKind::Class);
         ws.qnames.insert("app.main.use".into());
         ws.kinds.insert("app.main.use".into(), SymbolKind::Function);
         ws.build_suffix_index();
@@ -3044,9 +3081,9 @@ def foo():
         let edges = adapter.extract_call_edges("app/main.py", src, &syms, &ws);
         // Either branch's resolution is acceptable — both are real
         // bindings in the same module. We just need at least one.
-        let resolved = edges.iter().any(|e| {
-            e.callee_qname == "pkg.fast.loader" || e.callee_qname == "pkg.slow.loader"
-        });
+        let resolved = edges
+            .iter()
+            .any(|e| e.callee_qname == "pkg.fast.loader" || e.callee_qname == "pkg.slow.loader");
         assert!(
             resolved,
             "try/except import must resolve to one of the branches; got {edges:?}"
@@ -3107,8 +3144,7 @@ def foo():
         let adapter = PythonAdapter::new();
         // crucible.agents.litellm_agent imports from crucible.util
         // (two dots up: agents → crucible, then .util).
-        let caller_src =
-            "from ..util import helper\n\ndef act():\n    return helper()\n";
+        let caller_src = "from ..util import helper\n\ndef act():\n    return helper()\n";
 
         let caller_syms = vec![ParsedSymbol {
             qname: "crucible.agents.litellm_agent.act".into(),
@@ -3221,10 +3257,14 @@ mod service_endpoint_tests {
     }
 
     fn inbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
-        eps.iter().filter(|e| e.direction == Direction::Inbound).collect()
+        eps.iter()
+            .filter(|e| e.direction == Direction::Inbound)
+            .collect()
     }
     fn outbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
-        eps.iter().filter(|e| e.direction == Direction::Outbound).collect()
+        eps.iter()
+            .filter(|e| e.direction == Direction::Outbound)
+            .collect()
     }
 
     #[test]
@@ -3234,7 +3274,11 @@ mod service_endpoint_tests {
         let inb = inbound(&eps);
         assert_eq!(inb.len(), 1, "{eps:?}");
         assert_eq!(inb[0].contract, "http:GET /charge");
-        assert!(inb[0].owner_qname.ends_with("charge"), "owner: {}", inb[0].owner_qname);
+        assert!(
+            inb[0].owner_qname.ends_with("charge"),
+            "owner: {}",
+            inb[0].owner_qname
+        );
         assert!(inb[0].confidence > 0.9);
     }
 
@@ -3244,7 +3288,13 @@ mod service_endpoint_tests {
         let eps = detect(src);
         let mut got: Vec<String> = inbound(&eps).iter().map(|e| e.contract.clone()).collect();
         got.sort();
-        assert_eq!(got, vec!["http:GET /items".to_string(), "http:POST /items".to_string()]);
+        assert_eq!(
+            got,
+            vec![
+                "http:GET /items".to_string(),
+                "http:POST /items".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -3263,7 +3313,11 @@ mod service_endpoint_tests {
         let out = outbound(&eps);
         assert_eq!(out.len(), 1, "{eps:?}");
         assert_eq!(out[0].contract, "http:POST /charge");
-        assert!(out[0].owner_qname.ends_with("pay"), "owner: {}", out[0].owner_qname);
+        assert!(
+            out[0].owner_qname.ends_with("pay"),
+            "owner: {}",
+            out[0].owner_qname
+        );
     }
 
     #[test]
@@ -3385,14 +3439,23 @@ mod pubsub_tests {
     fn listener_and_emit_share_one_contract() {
         let src = "@app.task(bind=True)\ndef send_email(addr):\n    pass\n\ndef trigger():\n    send_email.apply_async((a,))\n";
         let eps = detect(src);
-        assert_eq!(ps(&eps, Direction::Inbound)[0].contract, ps(&eps, Direction::Outbound)[0].contract);
+        assert_eq!(
+            ps(&eps, Direction::Inbound)[0].contract,
+            ps(&eps, Direction::Outbound)[0].contract
+        );
         assert_eq!(ps(&eps, Direction::Inbound)[0].contract, "topic:send_email");
     }
 
     #[test]
     fn non_celery_decorator_is_not_a_listener() {
         // @property / @app.get(...) must not register as a pub-sub listener.
-        assert!(ps(&detect("@property\ndef value(self):\n    return 1\n"), Direction::Inbound).is_empty());
+        assert!(
+            ps(
+                &detect("@property\ndef value(self):\n    return 1\n"),
+                Direction::Inbound
+            )
+            .is_empty()
+        );
         let http = detect("@app.get(\"/x\")\ndef h():\n    pass\n");
         assert!(ps(&http, Direction::Inbound).is_empty());
     }

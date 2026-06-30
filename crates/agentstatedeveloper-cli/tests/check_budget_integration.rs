@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use agentstatedeveloper_core::{
-    AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, IndexStore, LedgerEntry,
-    LedgerKind, LedgerStore, Position, Symbol, SymbolKind,
+    AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, IndexStore, LedgerEntry, LedgerKind,
+    LedgerStore, Position, Symbol, SymbolKind,
 };
 
 fn asd_bin() -> PathBuf {
@@ -38,12 +38,13 @@ fn seed_engine_with_decisions(db_path: &Path, n: usize) {
             "sym_budget_test",
             LedgerKind::Decision,
             &format!("decision #{i} with some prose to take bytes"),
-            Author { kind: AuthorKind::Agent, id: "t".into() },
+            Author {
+                kind: AuthorKind::Agent,
+                id: "t".into(),
+            },
         );
         entry.entry_id = format!("led_budget_{i:04}");
-        ledger
-            .append_entry(&engine.ref_name, &entry, "t")
-            .unwrap();
+        ledger.append_entry(&engine.ref_name, &entry, "t").unwrap();
     }
 }
 
@@ -52,9 +53,7 @@ fn write_budget_config(project_root: &Path, total: u64, per_shard: u64) {
     std::fs::create_dir_all(&asd).unwrap();
     std::fs::write(
         asd.join("config.toml"),
-        format!(
-            "[sidecar]\nbudget_total_bytes = {total}\nbudget_per_shard_bytes = {per_shard}\n"
-        ),
+        format!("[sidecar]\nbudget_total_bytes = {total}\nbudget_per_shard_bytes = {per_shard}\n"),
     )
     .unwrap();
 }

@@ -18,7 +18,7 @@
 
 use std::path::PathBuf;
 
-use agentstatedeveloper_conformance::{run_pipeline_over_tree, TreeStats};
+use agentstatedeveloper_conformance::{TreeStats, run_pipeline_over_tree};
 
 /// Workspace root, resolved from the compile-time crate dir — never CWD
 /// (CLAUDE.md: CWD-relative paths break from non-source checkouts).
@@ -63,9 +63,21 @@ fn realism_asd_self() {
         s.panicked_files.len(),
         s.panicked_files
     );
-    assert!(s.files_parsed >= 100, "expected ≥100 files, got {}", s.files_parsed);
-    assert!(s.symbols >= 1000, "expected ≥1000 symbols, got {}", s.symbols);
-    assert!(s.call_edges >= 100, "expected ≥100 call edges, got {}", s.call_edges);
+    assert!(
+        s.files_parsed >= 100,
+        "expected ≥100 files, got {}",
+        s.files_parsed
+    );
+    assert!(
+        s.symbols >= 1000,
+        "expected ≥1000 symbols, got {}",
+        s.symbols
+    );
+    assert!(
+        s.call_edges >= 100,
+        "expected ≥100 call edges, got {}",
+        s.call_edges
+    );
     assert!(
         s.files_with_effects >= 5,
         "expected ≥5 files with effects, got {}",
@@ -100,5 +112,9 @@ fn realism_external_corpus() {
         s.panicked_files
     );
     assert!(s.files_parsed > 0, "no recognized source files under {dir}");
-    assert!(s.symbols > 0, "parsed {} files but found no symbols under {dir}", s.files_parsed);
+    assert!(
+        s.symbols > 0,
+        "parsed {} files but found no symbols under {dir}",
+        s.files_parsed
+    );
 }

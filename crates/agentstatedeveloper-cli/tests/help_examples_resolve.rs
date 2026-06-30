@@ -75,7 +75,8 @@ fn extract_asd_subcommands(text: &str) -> HashSet<String> {
         }
         // Strip a trailing colon if present (markdown formatting:
         // "run `asd init`:").
-        let cleaned = token.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
+        let cleaned =
+            token.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
         if !cleaned.is_empty() {
             found.insert(cleaned.to_string());
         }
@@ -144,12 +145,7 @@ fn think_bootstrap_human_output_examples_resolve() {
     // the gather_thinking pass doesn't error on a missing repo.
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join(".asd-state.db");
-    let text = run_cmd_capture_stdout(&[
-        "--db",
-        db.to_str().unwrap(),
-        "think",
-        "bootstrap",
-    ]);
+    let text = run_cmd_capture_stdout(&["--db", db.to_str().unwrap(), "think", "bootstrap"]);
     let subs = extract_asd_subcommands(&text);
     // Some output (e.g. "Read the prompt") references commands;
     // empty set is acceptable for a fresh repo. The strict check
@@ -175,13 +171,8 @@ fn think_bootstrap_json_output_examples_resolve() {
     // own copy of the example text).
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join(".asd-state.db");
-    let text = run_cmd_capture_stdout(&[
-        "--db",
-        db.to_str().unwrap(),
-        "think",
-        "bootstrap",
-        "--json",
-    ]);
+    let text =
+        run_cmd_capture_stdout(&["--db", db.to_str().unwrap(), "think", "bootstrap", "--json"]);
     let subs = extract_asd_subcommands(&text);
     let mut broken: Vec<String> = Vec::new();
     for sub in &subs {
@@ -207,7 +198,10 @@ fn extractor_unit_skips_placeholders_and_flags() {
     assert!(subs.contains("index"), "must extract literal 'index'");
     assert!(!subs.contains("<subcommand>"), "must skip placeholder");
     assert!(!subs.iter().any(|s| s.starts_with('-')), "must skip flags");
-    assert!(!subs.iter().any(|s| s.starts_with('[')), "must skip clap templates");
+    assert!(
+        !subs.iter().any(|s| s.starts_with('[')),
+        "must skip clap templates"
+    );
 }
 
 #[test]

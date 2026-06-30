@@ -54,9 +54,9 @@ pub fn run(cfg: &Config, args: ArchitectureArgs) -> Result<()> {
         .iter()
         .take(args.top)
         .filter_map(|(id, deg)| {
-            id_map.get(*id).map(|s| {
-                json!({ "qname": s.qname, "file": s.file, "degree": deg })
-            })
+            id_map
+                .get(*id)
+                .map(|s| json!({ "qname": s.qname, "file": s.file, "degree": deg }))
         })
         .collect();
 
@@ -256,7 +256,11 @@ fn print_human(out: &Value) {
             let parts: Vec<String> = arr
                 .iter()
                 .map(|e| {
-                    let name = e.get("name").or_else(|| e.get("layer")).and_then(|v| v.as_str()).unwrap_or("?");
+                    let name = e
+                        .get("name")
+                        .or_else(|| e.get("layer"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
                     format!("{} ({})", name, e["symbols"].as_u64().unwrap_or(0))
                 })
                 .collect();
@@ -281,14 +285,21 @@ fn print_human(out: &Value) {
         }
     }
 
-    let inbound = out["routes"]["inbound"].as_array().cloned().unwrap_or_default();
+    let inbound = out["routes"]["inbound"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     println!(
         "  routes: {} inbound, {} outbound consumers",
         inbound.len(),
         out["routes"]["outbound_consumers"].as_u64().unwrap_or(0)
     );
     for r in inbound.iter().take(10) {
-        println!("    {}  ({})", r["contract"].as_str().unwrap_or("?"), r["qname"].as_str().unwrap_or("?"));
+        println!(
+            "    {}  ({})",
+            r["contract"].as_str().unwrap_or("?"),
+            r["qname"].as_str().unwrap_or("?")
+        );
     }
 
     if let Some(hs) = out["hotspots"].as_array() {

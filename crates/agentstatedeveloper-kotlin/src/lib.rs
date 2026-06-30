@@ -362,7 +362,12 @@ fn infer_service_endpoints_in_kotlin(
         // Spring annotation routes (owner = the function below the annotation).
         for (method, sub) in kt_method_mappings(line) {
             if let Some(owner) = kt_owner_for_annotation(symbols, line_no) {
-                out.push(mk_in(file, line_no, &http_contract(&method, &kt_join(&prefix, &sub)), owner));
+                out.push(mk_in(
+                    file,
+                    line_no,
+                    &http_contract(&method, &kt_join(&prefix, &sub)),
+                    owner,
+                ));
             }
         }
         // Ktor DSL route `get("/path") {` (owner = enclosing symbol).
@@ -407,13 +412,19 @@ fn mk_out(file: &str, line: u32, contract: &str, owner: &ParsedSymbol) -> Detect
 }
 
 fn kt_owner_for_body(symbols: &[ParsedSymbol], line: u32) -> Option<&ParsedSymbol> {
-    symbols.iter().filter(|s| s.start_line <= line && line <= s.end_line).max_by_key(|s| s.start_line)
+    symbols
+        .iter()
+        .filter(|s| s.start_line <= line && line <= s.end_line)
+        .max_by_key(|s| s.start_line)
 }
 fn kt_owner_for_annotation(symbols: &[ParsedSymbol], line: u32) -> Option<&ParsedSymbol> {
     if let Some(s) = kt_owner_for_body(symbols, line) {
         return Some(s);
     }
-    symbols.iter().filter(|s| s.start_line > line && s.start_line <= line + 6).min_by_key(|s| s.start_line)
+    symbols
+        .iter()
+        .filter(|s| s.start_line > line && s.start_line <= line + 6)
+        .min_by_key(|s| s.start_line)
 }
 
 fn kt_class_prefix(source: &str) -> String {
@@ -435,7 +446,10 @@ fn kt_method_mappings(line: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (anno, method) in KT_HTTP_ATTRS {
         if line.starts_with(&format!("@{anno}")) {
-            out.push((method.to_string(), kt_mapping_path(line).unwrap_or_default()));
+            out.push((
+                method.to_string(),
+                kt_mapping_path(line).unwrap_or_default(),
+            ));
         }
     }
     if line.starts_with("@RequestMapping") {
@@ -462,12 +476,18 @@ fn kt_mapping_path(line: &str) -> Option<String> {
 }
 fn kt_kv_string(args: &str, key: &str) -> Option<String> {
     let pos = args.find(key)?;
-    let rest = args[pos + key.len()..].trim_start().strip_prefix('=')?.trim_start();
+    let rest = args[pos + key.len()..]
+        .trim_start()
+        .strip_prefix('=')?
+        .trim_start();
     first_kt_string(rest)
 }
 fn kt_request_method(line: &str) -> Option<String> {
     let pos = line.find("RequestMethod.")?;
-    let v: String = line[pos + 14..].chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+    let v: String = line[pos + 14..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect();
     (!v.is_empty()).then(|| v.to_uppercase())
 }
 
@@ -488,8 +508,10 @@ fn kt_ktor_route(line: &str) -> Option<(String, String)> {
 fn kt_clients(line: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let simple = [
-        ("getForObject", "GET"), ("getForEntity", "GET"),
-        ("postForObject", "POST"), ("postForEntity", "POST"),
+        ("getForObject", "GET"),
+        ("getForEntity", "GET"),
+        ("postForObject", "POST"),
+        ("postForEntity", "POST"),
     ];
     for (m, method) in simple {
         let needle = format!(".{m}(");
@@ -1194,10 +1216,14 @@ mod service_endpoint_tests {
         a.infer_service_endpoints("C.kt", src, &s)
     }
     fn inb(e: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
-        e.iter().filter(|e| e.direction == Direction::Inbound).collect()
+        e.iter()
+            .filter(|e| e.direction == Direction::Inbound)
+            .collect()
     }
     fn outb(e: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
-        e.iter().filter(|e| e.direction == Direction::Outbound).collect()
+        e.iter()
+            .filter(|e| e.direction == Direction::Outbound)
+            .collect()
     }
 
     #[test]

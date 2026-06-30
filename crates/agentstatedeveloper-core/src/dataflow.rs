@@ -179,7 +179,10 @@ mod tests {
     #[test]
     fn parse_params_basic_and_annotated() {
         assert_eq!(parse_params("def f(a, b, c)"), vec!["a", "b", "c"]);
-        assert_eq!(parse_params("def get_user(id: int, name: str = \"x\")"), vec!["id", "name"]);
+        assert_eq!(
+            parse_params("def get_user(id: int, name: str = \"x\")"),
+            vec!["id", "name"]
+        );
     }
 
     #[test]
@@ -191,7 +194,10 @@ mod tests {
     #[test]
     fn parse_params_handles_nested_parens_in_defaults() {
         // The default value's parens must not truncate the list.
-        assert_eq!(parse_params("def f(a, b=foo(1, 2), c)"), vec!["a", "b", "c"]);
+        assert_eq!(
+            parse_params("def f(a, b=foo(1, 2), c)"),
+            vec!["a", "b", "c"]
+        );
     }
 
     #[test]
@@ -235,7 +241,12 @@ mod tests {
             confidence: 0.8,
         };
         assert!(
-            resolve_edge(&det, |q| Some(q.to_string()), |_| Some(vec!["only".to_string()])).is_none()
+            resolve_edge(
+                &det,
+                |q| Some(q.to_string()),
+                |_| Some(vec!["only".to_string()])
+            )
+            .is_none()
         );
     }
 

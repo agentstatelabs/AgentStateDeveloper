@@ -198,11 +198,22 @@ mod tests {
         let recipe = &out["safe_change_recipe"];
         assert!(recipe["inspect"].is_array());
         assert!(recipe.get("preserve").is_none(), "empty preserve dropped");
-        assert!(recipe.get("reference_only").is_none(), "empty ref_only dropped");
-        assert!(recipe.get("likely_omitted_files").is_none(), "empty likely_omitted dropped");
-        assert!(recipe["blast_radius"]["total_callers"].is_number(), "non-empty kept");
         assert!(
-            recipe["blast_radius"].get("callee_layer_distribution").is_none(),
+            recipe.get("reference_only").is_none(),
+            "empty ref_only dropped"
+        );
+        assert!(
+            recipe.get("likely_omitted_files").is_none(),
+            "empty likely_omitted dropped"
+        );
+        assert!(
+            recipe["blast_radius"]["total_callers"].is_number(),
+            "non-empty kept"
+        );
+        assert!(
+            recipe["blast_radius"]
+                .get("callee_layer_distribution")
+                .is_none(),
             "nested empty object dropped"
         );
     }

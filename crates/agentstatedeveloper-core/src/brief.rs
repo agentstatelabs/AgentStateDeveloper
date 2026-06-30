@@ -153,20 +153,24 @@ pub fn brief_investigate(full: &Value) -> Value {
     let mut out = serde_json::Map::new();
     // Token economy (1.0.80): no `query` echo — the agent has it.
     // `query_id` (trace marker, not input) preserved below.
-    let entry_points: Vec<Value> = if let Some(eps) = full.get("entry_points").and_then(Value::as_array) {
-        eps.clone()
-    } else if let Some(by_layer) = full.get("by_layer").and_then(Value::as_object) {
-        // Flatten { layer: [eps] } → single eps list.
-        by_layer
-            .values()
-            .filter_map(|v| v.as_array().cloned())
-            .flatten()
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let entry_points: Vec<Value> =
+        if let Some(eps) = full.get("entry_points").and_then(Value::as_array) {
+            eps.clone()
+        } else if let Some(by_layer) = full.get("by_layer").and_then(Value::as_object) {
+            // Flatten { layer: [eps] } → single eps list.
+            by_layer
+                .values()
+                .filter_map(|v| v.as_array().cloned())
+                .flatten()
+                .collect()
+        } else {
+            Vec::new()
+        };
     if !entry_points.is_empty() {
-        out.insert("entry_points".into(), json!(brief_search_results(&entry_points)));
+        out.insert(
+            "entry_points".into(),
+            json!(brief_search_results(&entry_points)),
+        );
     }
     for k in ["safe_change_recipe", "stale", "query_id"] {
         if let Some(v) = full.get(k) {
@@ -214,7 +218,12 @@ pub fn brief_prepare_change(full: &Value) -> Value {
             .collect();
         out.insert("likely_edit_files".into(), json!(compact));
     }
-    for k in ["safe_change_recipe", "design_invariants", "known_hazards", "prior_thinking"] {
+    for k in [
+        "safe_change_recipe",
+        "design_invariants",
+        "known_hazards",
+        "prior_thinking",
+    ] {
         if let Some(v) = full.get(k) {
             let nonempty = v.as_array().map(|a| !a.is_empty()).unwrap_or(false)
                 || v.as_object().map(|o| !o.is_empty()).unwrap_or(false);
@@ -452,7 +461,10 @@ mod tests {
         let o = v.as_object().unwrap();
         // Token economy (1.0.80): input echo `query` is no longer
         // emitted — the agent has it.
-        assert!(!o.contains_key("query"), "input echo `query` dropped by brief");
+        assert!(
+            !o.contains_key("query"),
+            "input echo `query` dropped by brief"
+        );
         assert!(o.contains_key("entry_points"));
         assert!(!o.contains_key("ambiguous_terms"));
         assert!(!o.contains_key("possible_misses"));
@@ -483,7 +495,10 @@ mod tests {
         assert!(o.contains_key("design_invariants"));
         assert!(!o.contains_key("by_layer"));
         assert!(!o.contains_key("recently_touched"));
-        assert!(!o.contains_key("known_hazards"), "empty array should be dropped");
+        assert!(
+            !o.contains_key("known_hazards"),
+            "empty array should be dropped"
+        );
         // likely_edit_files entries should keep file/why/top_symbol/layer.
         let lef = o["likely_edit_files"].as_array().unwrap();
         let f0 = lef[0].as_object().unwrap();
@@ -512,7 +527,10 @@ mod tests {
         let o = v.as_object().unwrap();
         let callers = o["callers"].as_array().unwrap();
         assert_eq!(callers.len(), 3, "callers should be capped to 3");
-        assert!(!o.contains_key("callees"), "empty callees should be dropped");
+        assert!(
+            !o.contains_key("callees"),
+            "empty callees should be dropped"
+        );
         assert_eq!(o["ledger_count"].as_u64(), Some(2));
         assert_eq!(o["effects"].as_array().unwrap().len(), 1);
     }
@@ -542,9 +560,15 @@ mod tests {
         assert!(!o.contains_key("symbol"), "null symbol should be dropped");
         let bucket = o["buckets"]["decisions"].as_array().unwrap();
         let entry = bucket[0].as_object().unwrap();
-        assert!(!entry.contains_key("symbol_id"), "internal symbol_id must be dropped");
+        assert!(
+            !entry.contains_key("symbol_id"),
+            "internal symbol_id must be dropped"
+        );
         assert!(!entry.contains_key("role"), "null role must be dropped");
-        assert!(!entry.contains_key("command"), "null command must be dropped");
+        assert!(
+            !entry.contains_key("command"),
+            "null command must be dropped"
+        );
         assert!(!entry.contains_key("tags"), "empty tags must be dropped");
         assert_eq!(entry["entry_id"].as_str(), Some("led_1"));
         assert_eq!(entry["kind"].as_str(), Some("decision"));

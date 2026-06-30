@@ -131,9 +131,7 @@ impl Registry {
     pub fn register(&mut self, name: &str, path: &Path) -> Result<()> {
         validate_name(name)?;
         if !path.is_absolute() {
-            return Err(RegistryError::NonAbsolutePath(
-                path.display().to_string(),
-            ));
+            return Err(RegistryError::NonAbsolutePath(path.display().to_string()));
         }
         let registered_at = self
             .repos
@@ -203,8 +201,7 @@ struct DiskRepo {
 }
 
 fn parse(raw: &str) -> Result<Registry> {
-    let root: DiskRoot =
-        toml::from_str(raw).map_err(|e| RegistryError::Parse(e.to_string()))?;
+    let root: DiskRoot = toml::from_str(raw).map_err(|e| RegistryError::Parse(e.to_string()))?;
     let version = root.version.unwrap_or(SCHEMA_VERSION);
     if version > SCHEMA_VERSION {
         return Err(RegistryError::UnknownVersion(version));
@@ -396,7 +393,14 @@ mod tests {
     #[test]
     fn rejects_bad_names() {
         let mut r = Registry::default();
-        for bad in ["", "default", "has space", "has/slash", "has.dot", &"x".repeat(65)] {
+        for bad in [
+            "",
+            "default",
+            "has space",
+            "has/slash",
+            "has.dot",
+            &"x".repeat(65),
+        ] {
             assert!(
                 matches!(
                     r.register(bad, &PathBuf::from("/tmp/x.db")),

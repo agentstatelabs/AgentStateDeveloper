@@ -496,8 +496,10 @@ pub fn scan_sidecar(conclusions_dir: &std::path::Path) -> Vec<RepairIssue> {
     if !conclusions_dir.is_dir() {
         return issues;
     }
-    let known_stems: std::collections::HashSet<&'static str> =
-        ConclusionClass::all().iter().map(|c| c.filename_stem()).collect();
+    let known_stems: std::collections::HashSet<&'static str> = ConclusionClass::all()
+        .iter()
+        .map(|c| c.filename_stem())
+        .collect();
 
     let entries = match std::fs::read_dir(conclusions_dir) {
         Ok(e) => e,

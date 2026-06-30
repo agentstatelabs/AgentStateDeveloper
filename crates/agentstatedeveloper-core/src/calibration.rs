@@ -159,11 +159,7 @@ where
 /// rate we'd expect if the bucket label accurately describes
 /// the underlying signal. Advice fires when observed deviates
 /// from that by >15pp and sample size is ≥5.
-fn bucket_advice_with_status(
-    label: &str,
-    count: usize,
-    rate: f64,
-) -> (String, AdviceStatus) {
+fn bucket_advice_with_status(label: &str, count: usize, rate: f64) -> (String, AdviceStatus) {
     if count < 5 {
         return (String::new(), AdviceStatus::SampleTooSmall);
     }
@@ -254,8 +250,11 @@ mod tests {
     #[test]
     fn multi_bucket_groups_correctly() {
         let obs = vec![
-            ("high", true), ("high", true), ("high", false),
-            ("low", false), ("low", false),
+            ("high", true),
+            ("high", true),
+            ("high", false),
+            ("low", false),
+            ("low", false),
             ("medium", true),
         ];
         let r = compute_calibration(obs);
@@ -433,8 +432,10 @@ mod tests {
     #[test]
     fn overall_rate_aggregates_across_buckets() {
         let obs = vec![
-            ("high", true), ("high", true),
-            ("low", false), ("low", false),
+            ("high", true),
+            ("high", true),
+            ("low", false),
+            ("low", false),
         ];
         let r = compute_calibration(obs);
         // 2 pass / 4 total = 0.5

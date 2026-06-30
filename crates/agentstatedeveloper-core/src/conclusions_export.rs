@@ -17,7 +17,7 @@ use crate::index::{AsgIndexStore, IndexStore};
 use crate::ledger::{AsgLedgerStore, LedgerStore};
 use crate::paths::ASD_ROOT;
 use crate::schema::{AuthorKind, ConclusionClass, LedgerKind};
-use crate::sidecar_config::{package_key_for_filename, ShardBy, SidecarConfig};
+use crate::sidecar_config::{ShardBy, SidecarConfig, package_key_for_filename};
 use crate::thinking::DEFAULT_CONFIDENCE_FLOOR;
 
 /// Compact JSONL record. `preserve_order` is on for serde_json in this
@@ -315,11 +315,7 @@ pub fn check_budget(
     })
 }
 
-fn collect_jsonl_sizes(
-    base: &Path,
-    dir: &Path,
-    out: &mut Vec<ShardSize>,
-) -> std::io::Result<()> {
+fn collect_jsonl_sizes(base: &Path, dir: &Path, out: &mut Vec<ShardSize>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -395,13 +391,10 @@ pub fn import_all(
         // Read every *.jsonl in the per-class subdirectory.
         let pkg_dir = in_dir.join(stem);
         if pkg_dir.is_dir() {
-            let mut shard_paths: Vec<std::path::PathBuf> =
-                std::fs::read_dir(&pkg_dir)?
-                    .filter_map(|e| e.ok().map(|e| e.path()))
-                    .filter(|p| {
-                        p.extension().and_then(|s| s.to_str()) == Some("jsonl")
-                    })
-                    .collect();
+            let mut shard_paths: Vec<std::path::PathBuf> = std::fs::read_dir(&pkg_dir)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl"))
+                .collect();
             // Sort for stable import order (helps test determinism).
             shard_paths.sort();
             for path in shard_paths {
@@ -757,12 +750,13 @@ mod tests {
                 &sym.symbol_id,
                 LedgerKind::Decision,
                 *summary,
-                Author { kind: AuthorKind::Agent, id: "t".into() },
+                Author {
+                    kind: AuthorKind::Agent,
+                    id: "t".into(),
+                },
             );
             entry.entry_id = (*id).to_string();
-            ledger
-                .append_entry(&engine.ref_name, &entry, "t")
-                .unwrap();
+            ledger.append_entry(&engine.ref_name, &entry, "t").unwrap();
             inserted.push(((*id).to_string(), (*summary).to_string()));
         }
         (engine, inserted)
@@ -885,7 +879,10 @@ mod tests {
                 sid,
                 LedgerKind::Decision,
                 summary,
-                Author { kind: AuthorKind::Agent, id: "t".into() },
+                Author {
+                    kind: AuthorKind::Agent,
+                    id: "t".into(),
+                },
             );
             entry.entry_id = eid.into();
             AsgLedgerStore::from_engine(&engine)
@@ -960,11 +957,7 @@ mod tests {
         use crate::sidecar_config::BudgetConfig;
         let tmp = tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("decisions")).unwrap();
-        std::fs::write(
-            tmp.path().join("decisions/crates--core.jsonl"),
-            b"row\n",
-        )
-        .unwrap();
+        std::fs::write(tmp.path().join("decisions/crates--core.jsonl"), b"row\n").unwrap();
         let r = check_budget(
             tmp.path(),
             &BudgetConfig {
@@ -987,11 +980,7 @@ mod tests {
         use crate::sidecar_config::BudgetConfig;
         let tmp = tempdir().unwrap();
         // tmp/conclusions doesn't exist.
-        let r = check_budget(
-            &tmp.path().join("conclusions"),
-            &BudgetConfig::default(),
-        )
-        .unwrap();
+        let r = check_budget(&tmp.path().join("conclusions"), &BudgetConfig::default()).unwrap();
         assert!(r.ok, "empty/missing dir is trivially under budget");
         assert_eq!(r.total_bytes, 0);
         assert!(r.shards.is_empty());
@@ -1053,7 +1042,10 @@ mod tests {
         );
         let body = std::fs::read_to_string(&flat).unwrap();
         for id in ["led_a1", "led_a2", "led_b1"] {
-            assert!(body.contains(id), "flat file must contain {id}; got:\n{body}");
+            assert!(
+                body.contains(id),
+                "flat file must contain {id}; got:\n{body}"
+            );
         }
         // The per-package subdir must NOT have been created.
         assert!(
@@ -1130,7 +1122,10 @@ mod tests {
             "sym_order_test",
             kind,
             summary,
-            Author { kind: AuthorKind::Agent, id: "t".into() },
+            Author {
+                kind: AuthorKind::Agent,
+                id: "t".into(),
+            },
         );
         entry.entry_id = id.to_string();
         entry.confidence = confidence;
@@ -1172,8 +1167,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         export_all(&engine, tmp.path()).unwrap();
-        let body =
-            std::fs::read_to_string(tmp.path().join("thinking.jsonl")).unwrap();
+        let body = std::fs::read_to_string(tmp.path().join("thinking.jsonl")).unwrap();
 
         assert!(
             body.contains("led_strong"),
@@ -1221,8 +1215,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         export_all(&engine, tmp.path()).unwrap();
-        let body =
-            std::fs::read_to_string(tmp.path().join("thinking.jsonl")).unwrap();
+        let body = std::fs::read_to_string(tmp.path().join("thinking.jsonl")).unwrap();
 
         for must_appear in ["led_mm_low", "led_oq_unset", "led_fa_low"] {
             assert!(
@@ -1248,8 +1241,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         export_all(&engine, tmp.path()).unwrap();
-        let body =
-            std::fs::read_to_string(tmp.path().join("decisions.jsonl")).unwrap();
+        let body = std::fs::read_to_string(tmp.path().join("decisions.jsonl")).unwrap();
         assert!(
             body.contains("led_dec_low"),
             "low-confidence Decision must still ship; got:\n{body}"
@@ -1268,8 +1260,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         export_all(&engine, tmp.path()).unwrap();
 
-        let body = std::fs::read_to_string(tmp.path().join("decisions.jsonl"))
-            .unwrap();
+        let body = std::fs::read_to_string(tmp.path().join("decisions.jsonl")).unwrap();
         // Grep-by-qname must hit. (The grep test mirrors what an
         // agent reading the file cold would do.)
         assert!(
@@ -1310,8 +1301,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         export_all(&engine, tmp.path()).unwrap();
 
-        let body = std::fs::read_to_string(tmp.path().join("decisions.jsonl"))
-            .unwrap();
+        let body = std::fs::read_to_string(tmp.path().join("decisions.jsonl")).unwrap();
         let lines: Vec<&str> = body.lines().collect();
         assert_eq!(lines.len(), 2);
         // led_aaa < led_zzz lexicographically; aaa must come first

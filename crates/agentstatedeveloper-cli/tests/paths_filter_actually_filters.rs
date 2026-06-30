@@ -30,7 +30,10 @@ fn mk_sym(sym_id: &str, qname: &str, file: &str, language: &str) -> Symbol {
         file: file.into(),
         start: Position { line: 1, col: 0 },
         end: Position { line: 5, col: 0 },
-        signature: Some(format!("def {}()", qname.rsplit('.').next().unwrap_or(qname))),
+        signature: Some(format!(
+            "def {}()",
+            qname.rsplit('.').next().unwrap_or(qname)
+        )),
         doc: Some(format!("Function {qname}")),
     }
 }
@@ -252,8 +255,7 @@ fn t004_broadener_extra_hits_now_recoverable_via_paths_drop() {
                 .collect()
         })
         .unwrap_or_default();
-    let extra_set: std::collections::HashSet<&str> =
-        extra.iter().map(|s| s.as_str()).collect();
+    let extra_set: std::collections::HashSet<&str> = extra.iter().map(|s| s.as_str()).collect();
     assert!(
         extra_set.contains("catalog.pricing.discount"),
         "broadener should recover the python catalog symbol; got: {extra:?}"

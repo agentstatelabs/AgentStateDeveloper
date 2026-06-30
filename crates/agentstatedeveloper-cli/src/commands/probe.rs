@@ -74,8 +74,7 @@ use rusqlite::{Connection, params};
 use serde_json::Value;
 
 use agentstatedeveloper_core::{
-    FtsFilters, SearchFtsDb, calibration::compute_calibration, compute_trust_score,
-    stale_warning,
+    FtsFilters, SearchFtsDb, calibration::compute_calibration, compute_trust_score, stale_warning,
 };
 
 use crate::config::Config;
@@ -928,10 +927,7 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
                 let names: Vec<&str> = group.iter().map(|r| r.name.as_str()).collect();
                 let mut v = result_to_json(group[0]);
                 if let Some(obj) = v.as_object_mut() {
-                    obj.insert(
-                        "probe_names".to_string(),
-                        serde_json::json!(names),
-                    );
+                    obj.insert("probe_names".to_string(), serde_json::json!(names));
                     obj.insert(
                         "cache_shared_count".to_string(),
                         serde_json::json!(group.len()),
@@ -1249,7 +1245,10 @@ fn run_assertion_against(probe: &ProbeEntry, cached: &CachedOutput) -> ProbeResu
             error: Some(exec_err.clone()),
             debug_payload: None,
             debug_payload_summary: None,
-            calibration_signal: cached.json.as_ref().and_then(|j| extract_calibration_signal(Some(j))),
+            calibration_signal: cached
+                .json
+                .as_ref()
+                .and_then(|j| extract_calibration_signal(Some(j))),
         };
     }
 
@@ -1264,7 +1263,10 @@ fn run_assertion_against(probe: &ProbeEntry, cached: &CachedOutput) -> ProbeResu
             error: Some(format!("command failed: {}", cached.stderr.trim())),
             debug_payload: None,
             debug_payload_summary: None,
-            calibration_signal: cached.json.as_ref().and_then(|j| extract_calibration_signal(Some(j))),
+            calibration_signal: cached
+                .json
+                .as_ref()
+                .and_then(|j| extract_calibration_signal(Some(j))),
         };
     }
 
@@ -1281,7 +1283,10 @@ fn run_assertion_against(probe: &ProbeEntry, cached: &CachedOutput) -> ProbeResu
                 error: Some("command output was not valid JSON".to_string()),
                 debug_payload: None,
                 debug_payload_summary: None,
-            calibration_signal: cached.json.as_ref().and_then(|j| extract_calibration_signal(Some(j))),
+                calibration_signal: cached
+                    .json
+                    .as_ref()
+                    .and_then(|j| extract_calibration_signal(Some(j))),
             };
         }
     };
@@ -1297,7 +1302,10 @@ fn run_assertion_against(probe: &ProbeEntry, cached: &CachedOutput) -> ProbeResu
             error: None,
             debug_payload: None,
             debug_payload_summary: None,
-            calibration_signal: cached.json.as_ref().and_then(|j| extract_calibration_signal(Some(j))),
+            calibration_signal: cached
+                .json
+                .as_ref()
+                .and_then(|j| extract_calibration_signal(Some(j))),
         },
         Err(msg) => {
             let summary = summarize_debug_payload(json);
@@ -2750,7 +2758,8 @@ fn bootstrap_probes(cfg: &Config, args: ProbeBootstrapArgs) -> Result<()> {
         exclude_terms: vec![],
         paths_filter: vec![],
         exclude_paths: vec![],
-        exclude_languages: vec![],    };
+        exclude_languages: vec![],
+    };
     // Try a few common structural terms to surface domain symbols.
     let try_terms = [
         "manager",
@@ -3114,7 +3123,9 @@ fn eval_cluster_winner_kind_not(
     let entry = dbg.iter().find(|e| {
         e.get("doc_file")
             .and_then(|v| v.as_str())
-            .map_or(false, |f| f.to_lowercase().contains(&doc_stem.to_lowercase()))
+            .map_or(false, |f| {
+                f.to_lowercase().contains(&doc_stem.to_lowercase())
+            })
     });
     match entry {
         None => Err(format!(
@@ -3150,7 +3161,9 @@ fn eval_cluster_winner_qname_contains(
     let entry = dbg.iter().find(|e| {
         e.get("doc_file")
             .and_then(|v| v.as_str())
-            .map_or(false, |f| f.to_lowercase().contains(&doc_stem.to_lowercase()))
+            .map_or(false, |f| {
+                f.to_lowercase().contains(&doc_stem.to_lowercase())
+            })
     });
     match entry {
         None => Err(format!(
@@ -3288,10 +3301,7 @@ mod plan_j_t019_qname_rank_eq_tests {
     #[test]
     fn passes_when_exact_rank_match() {
         let assert = assert_block("qname_rank_eq", "ProjectManager", 1);
-        let output = results_with(&[
-            "App.Foo.ProjectManager",
-            "App.Bar.OtherSym",
-        ]);
+        let output = results_with(&["App.Foo.ProjectManager", "App.Bar.OtherSym"]);
         assert!(eval_assert(&assert, &output).is_ok());
     }
 
@@ -3299,8 +3309,8 @@ mod plan_j_t019_qname_rank_eq_tests {
     fn fails_when_match_at_wrong_rank() {
         let assert = assert_block("qname_rank_eq", "ProjectManager", 1);
         let output = results_with(&[
-            "App.Bar.OtherSym",            // rank 1
-            "App.Foo.ProjectManager",       // rank 2 — wrong
+            "App.Bar.OtherSym",       // rank 1
+            "App.Foo.ProjectManager", // rank 2 — wrong
         ]);
         let err = eval_assert(&assert, &output).expect_err("must fail");
         assert!(err.contains("rank 2"), "got: {err}");
@@ -3323,9 +3333,9 @@ mod plan_j_t019_qname_rank_eq_tests {
         // the signal the calibration harvester needs to disambiguate
         // its "too strict" advisory.
         let output = results_with(&[
-            "App.Bar.OtherSym",            // rank 1
-            "App.Bar.OtherSym2",            // rank 2
-            "App.Foo.ProjectManager",       // rank 3 — within top-5 but not #1
+            "App.Bar.OtherSym",       // rank 1
+            "App.Bar.OtherSym2",      // rank 2
+            "App.Foo.ProjectManager", // rank 3 — within top-5 but not #1
         ]);
 
         let lenient: toml::Value = toml::from_str(
@@ -3355,10 +3365,7 @@ mod plan_j_t019_qname_rank_eq_tests {
         // that the pre-existing qname_rank_lte already has, so it's
         // not t-019-specific.
         let assert = assert_block("qname_rank_eq", "AlphaCanon", 2);
-        let output = results_with(&[
-            "App.Bar.BetaSibling",
-            "App.Foo.AlphaCanon",
-        ]);
+        let output = results_with(&["App.Bar.BetaSibling", "App.Foo.AlphaCanon"]);
         assert!(eval_assert(&assert, &output).is_ok());
     }
 }

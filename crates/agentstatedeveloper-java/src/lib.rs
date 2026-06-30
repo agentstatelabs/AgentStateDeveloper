@@ -442,7 +442,10 @@ fn java_method_mappings(line: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (anno, method) in MAPPING_VERB {
         if line.starts_with(&format!("@{anno}")) {
-            out.push((method.to_string(), java_mapping_path(line).unwrap_or_default()));
+            out.push((
+                method.to_string(),
+                java_mapping_path(line).unwrap_or_default(),
+            ));
         }
     }
     // @RequestMapping(method = RequestMethod.GET, value = "/x") at method level.
@@ -523,7 +526,10 @@ fn java_clients(line: &str) -> Vec<(String, String)> {
     }
     if let Some(pos) = line.find(".exchange(") {
         let after = &line[pos + ".exchange(".len()..];
-        if let (Some(url), Some(m)) = (first_java_string(after.trim_start()), java_http_method(after)) {
+        if let (Some(url), Some(m)) = (
+            first_java_string(after.trim_start()),
+            java_http_method(after),
+        ) {
             if looks_like_url(&url) {
                 out.push((m, url));
             }
@@ -1236,10 +1242,14 @@ mod service_endpoint_tests {
         a.infer_service_endpoints("C.java", src, &symbols)
     }
     fn inbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
-        eps.iter().filter(|e| e.direction == Direction::Inbound).collect()
+        eps.iter()
+            .filter(|e| e.direction == Direction::Inbound)
+            .collect()
     }
     fn outbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
-        eps.iter().filter(|e| e.direction == Direction::Outbound).collect()
+        eps.iter()
+            .filter(|e| e.direction == Direction::Outbound)
+            .collect()
     }
 
     #[test]
@@ -1260,7 +1270,10 @@ public class UserController {
         got.sort();
         assert_eq!(
             got,
-            vec!["http:GET /api/users/{}".to_string(), "http:POST /api/users".to_string()],
+            vec![
+                "http:GET /api/users/{}".to_string(),
+                "http:POST /api/users".to_string()
+            ],
             "{eps:?}"
         );
     }
@@ -1292,7 +1305,13 @@ public class S {
         let eps = detect(src);
         let mut got: Vec<String> = outbound(&eps).iter().map(|e| e.contract.clone()).collect();
         got.sort();
-        assert_eq!(got, vec!["http:GET /users/{}".to_string(), "http:PUT /items/{}".to_string()]);
+        assert_eq!(
+            got,
+            vec![
+                "http:GET /users/{}".to_string(),
+                "http:PUT /items/{}".to_string()
+            ]
+        );
     }
 
     #[test]

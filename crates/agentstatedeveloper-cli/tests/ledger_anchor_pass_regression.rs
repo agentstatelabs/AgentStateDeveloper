@@ -24,9 +24,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use agentstatedeveloper_core::{
-    AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, FtsFilters, IndexStore,
-    LedgerEntry, LedgerKind, LedgerStore, Position, SearchFtsDb, Symbol, SymbolKind,
-    find_candidates, query_tokens,
+    AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, FtsFilters, IndexStore, LedgerEntry,
+    LedgerKind, LedgerStore, Position, SearchFtsDb, Symbol, SymbolKind, find_candidates,
+    query_tokens,
 };
 
 fn mk_sym(sym_id: &str, qname: &str, file: &str) -> Symbol {
@@ -76,7 +76,10 @@ fn seed_anchor_fixture(db: &Path) -> Vec<Symbol> {
 
     // The Invariant ledger entry whose summary contains
     // "idempotent" — the anchor signal.
-    let alice = Author { kind: AuthorKind::Human, id: "alice".into() };
+    let alice = Author {
+        kind: AuthorKind::Human,
+        id: "alice".into(),
+    };
     let mut inv = LedgerEntry::new(
         "sym_charge",
         LedgerKind::Invariant,
@@ -84,7 +87,9 @@ fn seed_anchor_fixture(db: &Path) -> Vec<Symbol> {
         alice.clone(),
     );
     inv.entry_id = "led_inv_charge".into();
-    ledger.append_entry(&engine.ref_name, &inv, "alice").unwrap();
+    ledger
+        .append_entry(&engine.ref_name, &inv, "alice")
+        .unwrap();
 
     // Also add a Concept entry on the same symbol — its summary
     // also contains the token, but the anchor pass should IGNORE
@@ -99,7 +104,9 @@ fn seed_anchor_fixture(db: &Path) -> Vec<Symbol> {
         alice,
     );
     concept.entry_id = "led_con_charge".into();
-    ledger.append_entry(&engine.ref_name, &concept, "alice").unwrap();
+    ledger
+        .append_entry(&engine.ref_name, &concept, "alice")
+        .unwrap();
 
     vec![target, bystander]
 }
@@ -199,10 +206,15 @@ fn anchor_pass_only_fires_for_invariant_and_hazard_kinds() {
         "sym_unrelated",
         LedgerKind::Concept,
         "concept says idempotent but kind is wrong for anchor",
-        Author { kind: AuthorKind::Human, id: "alice".into() },
+        Author {
+            kind: AuthorKind::Human,
+            id: "alice".into(),
+        },
     );
     concept.entry_id = "led_con_only".into();
-    ledger.append_entry(&engine.ref_name, &concept, "alice").unwrap();
+    ledger
+        .append_entry(&engine.ref_name, &concept, "alice")
+        .unwrap();
 
     // Bystander: must NOT contain the query token anywhere — its
     // job is solely to make FTS has_data() true so find_candidates

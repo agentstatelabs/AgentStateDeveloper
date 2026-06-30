@@ -427,10 +427,15 @@ mod tests {
             sym_id,
             LedgerKind::Mapping,
             "mapping with body",
-            Author { kind: AuthorKind::Agent, id: "test".into() },
+            Author {
+                kind: AuthorKind::Agent,
+                id: "test".into(),
+            },
         );
         entry.body = Some(body.to_string());
-        ledger.append_entry(&engine.ref_name, &entry, "test").unwrap();
+        ledger
+            .append_entry(&engine.ref_name, &entry, "test")
+            .unwrap();
     }
 
     #[test]
@@ -450,8 +455,7 @@ mod tests {
 
     #[test]
     fn migrate_stale_tests_emits_move_when_mapping_has_move_to() {
-        let (engine, sid) =
-            engine_with_symbol("pkg.tests.legacy_test", "tests/legacy_test.py");
+        let (engine, sid) = engine_with_symbol("pkg.tests.legacy_test", "tests/legacy_test.py");
         append_mapping_with_body(
             &engine,
             &sid,
@@ -477,8 +481,7 @@ mod tests {
     fn migrate_stale_tests_falls_back_to_classify_decision_tree() {
         // A Mapping entry without move_to should fall back to
         // KeepAsCovered, matching classify_test_migration.
-        let (engine, sid) =
-            engine_with_symbol("pkg.tests.covered_test", "tests/covered_test.py");
+        let (engine, sid) = engine_with_symbol("pkg.tests.covered_test", "tests/covered_test.py");
         append_mapping_with_body(
             &engine,
             &sid,
@@ -497,9 +500,14 @@ mod tests {
     #[test]
     fn migrate_stale_tests_routes_stale_api_constraint_to_delete() {
         // Inherits the Delete branch from pick_action.
-        let (engine, sid) =
-            engine_with_symbol("pkg.tests.legacy", "tests/legacy_test.py");
-        append(&engine, &sid, LedgerKind::Constraint, Some("stale-api"), None);
+        let (engine, sid) = engine_with_symbol("pkg.tests.legacy", "tests/legacy_test.py");
+        append(
+            &engine,
+            &sid,
+            LedgerKind::Constraint,
+            Some("stale-api"),
+            None,
+        );
         let index = AsgIndexStore::from_engine(&engine);
         let recipe = super::migrate_stale_tests(
             &engine,
@@ -512,13 +520,8 @@ mod tests {
 
     #[test]
     fn migrate_stale_tests_skips_non_test_tier() {
-        let (engine, sid) =
-            engine_with_symbol("pkg.module.production_fn", "src/pkg/module.py");
-        append_mapping_with_body(
-            &engine,
-            &sid,
-            r#"{"move_to":"src/new.py"}"#,
-        );
+        let (engine, sid) = engine_with_symbol("pkg.module.production_fn", "src/pkg/module.py");
+        append_mapping_with_body(&engine, &sid, r#"{"move_to":"src/new.py"}"#);
         let index = AsgIndexStore::from_engine(&engine);
         let recipe = super::migrate_stale_tests(
             &engine,

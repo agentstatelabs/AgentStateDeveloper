@@ -33,12 +33,12 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use agentstatedeveloper_adapters::default_adapters;
 use agentstatedeveloper_core::adapter::{LanguageAdapter, ParsedSymbol, WorkspaceSymbols};
 use agentstatedeveloper_core::cross_service::{
-    match_edges, CrossServiceEdge, Direction, ServiceEndpoint, Transport,
+    CrossServiceEdge, Direction, ServiceEndpoint, Transport, match_edges,
 };
 use agentstatedeveloper_core::schema::EffectCategory;
-use agentstatedeveloper_adapters::default_adapters;
 
 pub mod fixtures;
 
@@ -77,7 +77,10 @@ pub const COLUMNS: [&str; 5] = ["symbols", "effects", "call_edges", "inbound", "
 /// `extract_call_edges` can resolve intra-file calls by suffix.
 fn workspace_for(symbols: &[ParsedSymbol]) -> WorkspaceSymbols {
     let mut ws = WorkspaceSymbols {
-        qnames: symbols.iter().map(|s| s.qname.clone()).collect::<HashSet<_>>(),
+        qnames: symbols
+            .iter()
+            .map(|s| s.qname.clone())
+            .collect::<HashSet<_>>(),
         kinds: symbols
             .iter()
             .map(|s| (s.qname.clone(), s.kind.clone()))
@@ -278,7 +281,7 @@ pub fn collect_source_files(root: &Path) -> Vec<PathBuf> {
 /// per-file call is wrapped in `catch_unwind` so a panic is recorded against
 /// the offending file+stage rather than aborting the whole pass.
 pub fn run_pipeline_over_tree(root: &Path) -> TreeStats {
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     let adapters = default_adapters();
     let mut by_ext: HashMap<&'static str, usize> = HashMap::new();
@@ -322,7 +325,9 @@ pub fn run_pipeline_over_tree(root: &Path) -> TreeStats {
                     symbols,
                 });
             }
-            Err(_) => stats.panicked_files.push(format!("{file} :: parse_symbols")),
+            Err(_) => stats
+                .panicked_files
+                .push(format!("{file} :: parse_symbols")),
         }
     }
 
@@ -331,7 +336,9 @@ pub fn run_pipeline_over_tree(root: &Path) -> TreeStats {
     // run effects + call-edges + endpoints per file.
     for (ai, parsed) in &per_adapter {
         let a = adapters[*ai].as_ref();
-        stats.by_language.push((a.language().to_string(), parsed.len()));
+        stats
+            .by_language
+            .push((a.language().to_string(), parsed.len()));
 
         let mut ws = WorkspaceSymbols {
             qnames: HashSet::new(),

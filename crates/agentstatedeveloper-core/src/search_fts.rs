@@ -1975,10 +1975,7 @@ pub const SOFT_STALE_THRESHOLD_SECS: u64 = 86_400;
 /// hot path in `status` / `health` adds zero ceremony on a healthy
 /// repo. When they diverge, includes an `advice` string the agent
 /// can act on directly.
-pub fn compute_index_consistency(
-    asg_symbols: usize,
-    fts_symbols: usize,
-) -> serde_json::Value {
+pub fn compute_index_consistency(asg_symbols: usize, fts_symbols: usize) -> serde_json::Value {
     let delta = asg_symbols as i64 - fts_symbols as i64;
     if delta == 0 {
         // Token economy (1.0.79): return Null when consistent.
@@ -2546,9 +2543,9 @@ pub fn propose_test_stub(source_file: &str, symbol_name: &str) -> String {
         "swift" => format!(
             "func test{pascal}() throws {{\n    // arrange\n    // act\n    // assert\n    XCTFail(\"test{pascal}: fill in\")\n}}\n"
         ),
-        _ => format!(
-            "// New test exercising {symbol_name} — fill in the arrange / act / assert.\n"
-        ),
+        _ => {
+            format!("// New test exercising {symbol_name} — fill in the arrange / act / assert.\n")
+        }
     }
 }
 
@@ -3400,9 +3397,7 @@ pub fn classify_file_role(file: &str) -> &'static str {
     // Plan J t-003: viewmodel + view patterns. Order matters —
     // ViewModel.swift must short-circuit before the bare "view"
     // suffix check below catches it.
-    if fl.contains("/viewmodels/")
-        || fl.contains("/viewmodel/")
-        || stem_ends_with(&fl, "viewmodel")
+    if fl.contains("/viewmodels/") || fl.contains("/viewmodel/") || stem_ends_with(&fl, "viewmodel")
     {
         return "viewmodel";
     }
@@ -4141,7 +4136,10 @@ mod tests {
     #[test]
     fn effect_detail_single_trace_is_singular() {
         let label = effect_detail_reason(Some(&decl_with_runtime(1, 0, 0.5)));
-        assert!(label.contains("over 1 trace)"), "expected singular, got: {label}");
+        assert!(
+            label.contains("over 1 trace)"),
+            "expected singular, got: {label}"
+        );
     }
 
     #[test]
@@ -4149,7 +4147,10 @@ mod tests {
         // Static verification is Ok, but the runtime badge (with confidence)
         // must win over the plain "ok — verified by ..." label.
         let label = effect_detail_reason(Some(&decl_with_runtime(3, 0, 0.6)));
-        assert!(!label.starts_with("ok — verified"), "static label leaked: {label}");
+        assert!(
+            !label.starts_with("ok — verified"),
+            "static label leaked: {label}"
+        );
     }
 
     #[test]
@@ -4171,7 +4172,10 @@ mod tests {
         };
         let label = effect_detail_reason(Some(&decl));
         // Existing renderer lowercases the Debug name ("StaticChecker" → "staticchecker").
-        assert!(label.starts_with("ok — verified by staticchecker"), "got: {label}");
+        assert!(
+            label.starts_with("ok — verified by staticchecker"),
+            "got: {label}"
+        );
     }
 
     #[test]
@@ -4912,10 +4916,7 @@ mod plan_j_t007_test_stub_tests {
 
     fn assert_contains_all(actual: &str, needles: &[&str]) {
         for n in needles {
-            assert!(
-                actual.contains(n),
-                "stub missing `{n}` — got:\n{actual}"
-            );
+            assert!(actual.contains(n), "stub missing `{n}` — got:\n{actual}");
         }
     }
 
@@ -4924,7 +4925,13 @@ mod plan_j_t007_test_stub_tests {
         let s = propose_test_stub("src/billing/calc.py", "discount");
         assert_contains_all(
             &s,
-            &["def test_discount", "arrange", "act", "assert", "NotImplementedError"],
+            &[
+                "def test_discount",
+                "arrange",
+                "act",
+                "assert",
+                "NotImplementedError",
+            ],
         );
     }
 
@@ -4943,10 +4950,7 @@ mod plan_j_t007_test_stub_tests {
     #[test]
     fn go_stub_uses_pascal_case_and_t_fatal() {
         let s = propose_test_stub("billing/calc.go", "discount");
-        assert_contains_all(
-            &s,
-            &["func TestDiscount", "*testing.T", "t.Fatal"],
-        );
+        assert_contains_all(&s, &["func TestDiscount", "*testing.T", "t.Fatal"]);
     }
 
     #[test]
@@ -4991,7 +4995,10 @@ mod plan_j_t007_test_stub_tests {
         // billing.payment.charge → just `charge` for the test body.
         let s = propose_test_stub("src/calc.py", "billing.payment.charge");
         assert!(s.contains("def test_charge"), "got:\n{s}");
-        assert!(!s.contains("billing_payment"), "qname module path must not leak into test name; got:\n{s}");
+        assert!(
+            !s.contains("billing_payment"),
+            "qname module path must not leak into test name; got:\n{s}"
+        );
     }
 
     #[test]
@@ -5020,7 +5027,10 @@ mod plan_j_t003_classify_file_role_tests {
     fn tests_short_circuit_before_view_check() {
         // `ViewTests.swift` must be `test`, not `view` — the
         // /test predicate runs first.
-        assert_eq!(classify_file_role("App/Tests/ExampleFlowViewTests.swift"), "test");
+        assert_eq!(
+            classify_file_role("App/Tests/ExampleFlowViewTests.swift"),
+            "test"
+        );
         assert_eq!(classify_file_role("src/lib_test.py"), "test");
         assert_eq!(classify_file_role("crates/x/tests/it.rs"), "test");
     }
@@ -5044,10 +5054,7 @@ mod plan_j_t003_classify_file_role_tests {
             classify_file_role("App/Sources/viewmodels/ExampleFlow.swift"),
             "viewmodel"
         );
-        assert_eq!(
-            classify_file_role("web/viewmodel/foo.ts"),
-            "viewmodel"
-        );
+        assert_eq!(classify_file_role("web/viewmodel/foo.ts"), "viewmodel");
     }
 
     #[test]
@@ -5103,7 +5110,10 @@ mod plan_j_t003_classify_file_role_tests {
     fn existing_roles_still_classify_correctly() {
         // Regression guard against the CLI-side helper that this
         // function lifted from.
-        assert_eq!(classify_file_role("examples/sample-py-repo/foo.py"), "example");
+        assert_eq!(
+            classify_file_role("examples/sample-py-repo/foo.py"),
+            "example"
+        );
         assert_eq!(classify_file_role("fixtures/seed.json"), "fixture");
         assert_eq!(classify_file_role("scripts/release.sh"), "script");
         assert_eq!(classify_file_role("generated/proto.pb.go"), "generated");

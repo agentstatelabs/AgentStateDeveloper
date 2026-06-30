@@ -10,7 +10,7 @@
 //! Entries use deterministic blake3-derived IDs so re-running the
 //! initial-read prompt overwrites instead of duplicating.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use clap::{Args, Subcommand};
 use serde_json::json;
 
@@ -26,8 +26,7 @@ use crate::config::Config;
 /// project that asd indexes — not just the AgentStateDeveloper
 /// source checkout). The path is resolved relative to think.rs:
 /// repo-root/docs/initial-read-prompt.md.
-pub const INITIAL_READ_PROMPT: &str =
-    include_str!("../../../../docs/initial-read-prompt.md");
+pub const INITIAL_READ_PROMPT: &str = include_str!("../../../../docs/initial-read-prompt.md");
 
 #[derive(Debug, Subcommand)]
 pub enum ThinkCmd {
@@ -310,18 +309,16 @@ fn run_bootstrap(cfg: &Config, args: BootstrapArgs) -> Result<()> {
     run_bootstrap_default(prompt_path, &summary, args.json)
 }
 
-fn run_bootstrap_check(
-    prompt_path: &str,
-    s: &InheritanceSummary,
-    json_out: bool,
-) -> Result<()> {
+fn run_bootstrap_check(prompt_path: &str, s: &InheritanceSummary, json_out: bool) -> Result<()> {
     let c = &s.counts;
     // Gaps are computed against the TEAM total (anything in the
     // ledger counts as "we have it"). The "you" subset is reported
     // alongside so a new dev can see what's inherited vs personal.
     let mut gaps: Vec<&str> = Vec::new();
     if c.mental_model == 0 {
-        gaps.push("no MentalModel yet — describe the top-level architecture with `asd think model`");
+        gaps.push(
+            "no MentalModel yet — describe the top-level architecture with `asd think model`",
+        );
     }
     if c.hypothesis == 0 {
         gaps.push("no Hypothesis yet — record at least one speculation with `asd think speculate`");
@@ -330,7 +327,9 @@ fn run_bootstrap_check(
         gaps.push("no OpenQuestion yet — record known unknowns with `asd think question`");
     }
     if c.failed_attempt == 0 {
-        gaps.push("no FailedAttempt yet — once a dead end appears, capture with `asd think failed`");
+        gaps.push(
+            "no FailedAttempt yet — once a dead end appears, capture with `asd think failed`",
+        );
     }
 
     if json_out {
@@ -393,11 +392,7 @@ fn run_bootstrap_check(
     Ok(())
 }
 
-fn run_bootstrap_default(
-    prompt_path: &str,
-    s: &InheritanceSummary,
-    json_out: bool,
-) -> Result<()> {
+fn run_bootstrap_default(prompt_path: &str, s: &InheritanceSummary, json_out: bool) -> Result<()> {
     if json_out {
         // JSON output: include inheritance summary if present so MCP
         // callers can detect it programmatically.
@@ -490,7 +485,10 @@ fn print_inheritance_block(s: &InheritanceSummary) {
                 .confidence
                 .map(|c| format!("{:.2}", c))
                 .unwrap_or_else(|| "—".into());
-            println!("    - [{conf}] {} ({}) — {}", h.qname, h.author_id, h.summary);
+            println!(
+                "    - [{conf}] {} ({}) — {}",
+                h.qname, h.author_id, h.summary
+            );
         }
         println!();
     }
@@ -534,7 +532,10 @@ fn open_with_symbol(cfg: &Config, qname: &str) -> Result<(Engine, String)> {
 }
 
 fn agent_author(cfg: &Config) -> Author {
-    Author { kind: AuthorKind::Agent, id: cfg.agent_id.clone() }
+    Author {
+        kind: AuthorKind::Agent,
+        id: cfg.agent_id.clone(),
+    }
 }
 
 /// Deterministic entry id so re-running the initial-read prompt
@@ -562,7 +563,10 @@ fn read_active_ctx_task_id_from(
     let raw = match env_raw {
         Some(s) if !s.is_empty() => s.to_string(),
         _ => {
-            let p = db_parent?.join(".asd").join("cache").join("active-task.json");
+            let p = db_parent?
+                .join(".asd")
+                .join("cache")
+                .join("active-task.json");
             std::fs::read_to_string(p).ok()?
         }
     };
@@ -573,8 +577,7 @@ fn read_active_ctx_task_id_from(
 fn active_ctx_task_tag(cfg: &Config) -> Option<String> {
     let env_raw = std::env::var("CTX_ACTIVE_TASK").ok();
     let db_parent = std::path::Path::new(&cfg.db_path).parent();
-    read_active_ctx_task_id_from(env_raw.as_deref(), db_parent)
-        .map(|id| format!("ctx:task:{id}"))
+    read_active_ctx_task_id_from(env_raw.as_deref(), db_parent).map(|id| format!("ctx:task:{id}"))
 }
 
 /// Append `source:asd-think` and (when set) `ctx:task:<id>` to an
@@ -779,10 +782,7 @@ mod tests {
 
     #[test]
     fn ctx_task_id_extracted_from_env_json() {
-        let id = read_active_ctx_task_id_from(
-            Some(r#"{"task_id":"plan-g-005"}"#),
-            None,
-        );
+        let id = read_active_ctx_task_id_from(Some(r#"{"task_id":"plan-g-005"}"#), None);
         assert_eq!(id.as_deref(), Some("plan-g-005"));
     }
 
@@ -790,7 +790,10 @@ mod tests {
     fn ctx_task_id_returns_none_when_env_empty_and_no_file() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(read_active_ctx_task_id_from(None, Some(tmp.path())), None);
-        assert_eq!(read_active_ctx_task_id_from(Some(""), Some(tmp.path())), None);
+        assert_eq!(
+            read_active_ctx_task_id_from(Some(""), Some(tmp.path())),
+            None
+        );
     }
 
     #[test]
@@ -798,11 +801,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cache = tmp.path().join(".asd").join("cache");
         std::fs::create_dir_all(&cache).unwrap();
-        std::fs::write(
-            cache.join("active-task.json"),
-            r#"{"task_id":"file-task"}"#,
-        )
-        .unwrap();
+        std::fs::write(cache.join("active-task.json"), r#"{"task_id":"file-task"}"#).unwrap();
         let id = read_active_ctx_task_id_from(None, Some(tmp.path()));
         assert_eq!(id.as_deref(), Some("file-task"));
     }
@@ -812,15 +811,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cache = tmp.path().join(".asd").join("cache");
         std::fs::create_dir_all(&cache).unwrap();
-        std::fs::write(
-            cache.join("active-task.json"),
-            r#"{"task_id":"file-task"}"#,
-        )
-        .unwrap();
-        let id = read_active_ctx_task_id_from(
-            Some(r#"{"task_id":"env-task"}"#),
-            Some(tmp.path()),
-        );
+        std::fs::write(cache.join("active-task.json"), r#"{"task_id":"file-task"}"#).unwrap();
+        let id = read_active_ctx_task_id_from(Some(r#"{"task_id":"env-task"}"#), Some(tmp.path()));
         assert_eq!(id.as_deref(), Some("env-task"));
     }
 

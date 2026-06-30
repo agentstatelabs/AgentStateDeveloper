@@ -26,8 +26,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    ASD_SCHEMA_VERSION, AsgIndexStore, AsgLedgerStore, Engine, LedgerStore,
-    SearchFtsDb, SidecarState,
+    ASD_SCHEMA_VERSION, AsgIndexStore, AsgLedgerStore, Engine, LedgerStore, SearchFtsDb,
+    SidecarState,
     schema::{LedgerKind, Symbol},
     sidecar_lifecycle_state,
 };
@@ -181,18 +181,16 @@ pub fn compute_trust_score(db_path: &Path) -> TrustScore {
     // rounds to 0.0006 density; old code mislabeled this as
     // "no annotations yet"). See ExampleFlow field-test feedback,
     // 2026-06-04.
-    let annotated_symbol_count = SearchFtsDb::open(db_path)
-        .ok()
-        .map(|fts| {
-            // ref_name lives on Engine; reopen here to avoid threading it
-            // through ledger_signals. compute_trust_score is called once
-            // per status/probe/etc. invocation, so the extra open is
-            // negligible.
-            let ref_name = Engine::open_sqlite(db_path)
-                .map(|e| e.ref_name)
-                .unwrap_or_else(|_| "refs/heads/main".to_string());
-            fts.annotated_symbol_count(&ref_name)
-        });
+    let annotated_symbol_count = SearchFtsDb::open(db_path).ok().map(|fts| {
+        // ref_name lives on Engine; reopen here to avoid threading it
+        // through ledger_signals. compute_trust_score is called once
+        // per status/probe/etc. invocation, so the extra open is
+        // negligible.
+        let ref_name = Engine::open_sqlite(db_path)
+            .map(|e| e.ref_name)
+            .unwrap_or_else(|_| "refs/heads/main".to_string());
+        fts.annotated_symbol_count(&ref_name)
+    });
 
     // -----------------------------------------------------------------------
     // 5. Schema version

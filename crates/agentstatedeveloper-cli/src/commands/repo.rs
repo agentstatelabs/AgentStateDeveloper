@@ -130,9 +130,18 @@ fn run_list(args: ListArgs) -> Result<()> {
         return Ok(());
     }
 
-    let name_width = entries.iter().map(|e| e.name.len()).max().unwrap_or(4).max(4);
+    let name_width = entries
+        .iter()
+        .map(|e| e.name.len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
     for e in entries {
-        let marker = if Some(&e.name) == active.as_ref() { "*" } else { " " };
+        let marker = if Some(&e.name) == active.as_ref() {
+            "*"
+        } else {
+            " "
+        };
         println!(
             "{marker} {:width$}  {}",
             e.name,

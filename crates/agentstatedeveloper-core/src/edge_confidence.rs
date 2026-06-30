@@ -103,7 +103,9 @@ mod tests {
     use super::*;
 
     fn ts() -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339("2026-06-29T00:00:00Z").unwrap().with_timezone(&Utc)
+        DateTime::parse_from_rfc3339("2026-06-29T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
     }
 
     #[test]

@@ -355,7 +355,12 @@ fn go_routes(line: &str) -> Vec<(String, String)> {
 /// `http.NewRequest[WithContext](… "METHOD", "url" …)`.
 fn go_clients(line: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    for (func, method) in [("Get", "GET"), ("Post", "POST"), ("Head", "HEAD"), ("PostForm", "POST")] {
+    for (func, method) in [
+        ("Get", "GET"),
+        ("Post", "POST"),
+        ("Head", "HEAD"),
+        ("PostForm", "POST"),
+    ] {
         let needle = format!("http.{func}(");
         if let Some(pos) = line.find(&needle) {
             if call_boundary_ok(line, pos) {
@@ -1183,10 +1188,14 @@ mod service_endpoint_tests {
         a.infer_service_endpoints("svc.go", src, &symbols)
     }
     fn inbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
-        eps.iter().filter(|e| e.direction == Direction::Inbound).collect()
+        eps.iter()
+            .filter(|e| e.direction == Direction::Inbound)
+            .collect()
     }
     fn outbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
-        eps.iter().filter(|e| e.direction == Direction::Outbound).collect()
+        eps.iter()
+            .filter(|e| e.direction == Direction::Outbound)
+            .collect()
     }
 
     #[test]
@@ -1215,7 +1224,13 @@ mod service_endpoint_tests {
         let eps = detect(src);
         let mut got: Vec<String> = outbound(&eps).iter().map(|e| e.contract.clone()).collect();
         got.sort();
-        assert_eq!(got, vec!["http:GET /users/{}".to_string(), "http:POST /charge".to_string()]);
+        assert_eq!(
+            got,
+            vec![
+                "http:GET /users/{}".to_string(),
+                "http:POST /charge".to_string()
+            ]
+        );
     }
 
     #[test]

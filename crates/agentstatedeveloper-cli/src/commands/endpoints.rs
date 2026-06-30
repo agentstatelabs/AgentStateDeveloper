@@ -77,7 +77,10 @@ pub fn run(cfg: &Config, args: EndpointsArgs) -> Result<()> {
     } else {
         println!("{} in-repo matched edge(s):", edges.len());
         for ed in &edges {
-            println!("  {}  ->  {}   [{}]", ed.from.qname, ed.to.qname, ed.contract);
+            println!(
+                "  {}  ->  {}   [{}]",
+                ed.from.qname, ed.to.qname, ed.contract
+            );
         }
     }
     Ok(())

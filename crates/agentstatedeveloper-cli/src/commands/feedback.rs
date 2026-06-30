@@ -150,9 +150,7 @@ fn run_mark(cfg: &Config, args: MarkArgs) -> Result<()> {
         (symbol.symbol_id, args.qname.clone())
     };
     let now = chrono::Utc::now();
-    let expires_at = args
-        .ttl_days
-        .map(|days| now + chrono::Duration::days(days));
+    let expires_at = args.ttl_days.map(|days| now + chrono::Duration::days(days));
     let entry = FeedbackEntry {
         entry_id: format!("fb_{}", Uuid::new_v4().simple()),
         symbol_id,

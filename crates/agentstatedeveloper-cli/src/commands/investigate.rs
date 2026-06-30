@@ -9,14 +9,14 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
-    AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, Engine,
-    FeedbackStore, FtsFilters, IndexStore, LedgerStore, OwnershipSignal,
-    apply_feedback_adjustments, build_feedback_state_from_entries, classify_layer_sym,
-    compute_trust_score, compute_uncertainty, confidence_scores, detect_ambiguous_tokens,
-    detect_possible_misses, discover_symbol_ownership, estimate_tokens, explain_match,
-    extract_summary, find_candidates, gather_recency, git_dirty_files, intent_focus,
-    intent_layer_order, load_layer_overrides, parse_intent, parse_query, resolve_scope,
-    result_bucket, stale_warning, symbol_tier, trim_for_agent,
+    AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, Engine, FeedbackStore,
+    FtsFilters, IndexStore, LedgerStore, OwnershipSignal, apply_feedback_adjustments,
+    build_feedback_state_from_entries, classify_layer_sym, compute_trust_score,
+    compute_uncertainty, confidence_scores, detect_ambiguous_tokens, detect_possible_misses,
+    discover_symbol_ownership, estimate_tokens, explain_match, extract_summary, find_candidates,
+    gather_recency, git_dirty_files, intent_focus, intent_layer_order, load_layer_overrides,
+    parse_intent, parse_query, resolve_scope, result_bucket, stale_warning, symbol_tier,
+    trim_for_agent,
 };
 
 use crate::commands::context_for::assemble_symbol_context;
@@ -161,7 +161,8 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
         exclude_terms: exclusions,
         paths_filter,
         exclude_paths: Vec::new(),
-        exclude_languages: Vec::new(),    };
+        exclude_languages: Vec::new(),
+    };
 
     // Each entry_point candidate: (combined_score, symbol_id, qname)
     // We resolve full Symbol via index_store for context assembly.
@@ -192,7 +193,14 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     )> = all_fb
         .iter()
         .filter(|e| e.file_scope.is_none())
-        .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict, e.created_at))
+        .map(|e| {
+            (
+                e.symbol_id.clone(),
+                e.query.clone(),
+                e.verdict,
+                e.created_at,
+            )
+        })
         .collect();
     let feedback_metrics = apply_feedback_adjustments(
         &engine,

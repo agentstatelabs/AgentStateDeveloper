@@ -9,15 +9,15 @@ use clap::Args;
 
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgFeedbackStore, AsgIndexStore, AsgLedgerStore, EffectStore, Engine,
-    FeedbackMetrics, FeedbackStore, FeedbackVerdict, FtsFilters, IndexStore,
-    LedgerStore, SearchDocsDb, SearchFtsDb, apply_feedback_adjustments, apply_file_scope_feedback,
-    build_feedback_state_from_entries, classify_layer_sym, compute_trust_score, matches_any_path_glob,
+    FeedbackMetrics, FeedbackStore, FeedbackVerdict, FtsFilters, IndexStore, LedgerStore,
+    SearchDocsDb, SearchFtsDb, apply_feedback_adjustments, apply_file_scope_feedback,
+    build_feedback_state_from_entries, classify_layer_sym, compute_trust_score,
     compute_uncertainty, confidence_reason, confidence_scores, detect_ambiguous_tokens,
     detect_confidence_warnings, detect_possible_misses, effect_detail_reason, estimate_tokens,
     explain_feedback_impacts, explain_match, extract_summary, gather_recency, hybrid_boost,
-    in_memory_score, intent_focus, kind_str, load_layer_overrides, parse_intent, parse_query,
-    resolve_scope, result_bucket, stale_warning, suggest_better_queries, suggest_scoped_queries,
-    symbol_tier, trim_for_agent,
+    in_memory_score, intent_focus, kind_str, load_layer_overrides, matches_any_path_glob,
+    parse_intent, parse_query, resolve_scope, result_bucket, stale_warning, suggest_better_queries,
+    suggest_scoped_queries, symbol_tier, trim_for_agent,
 };
 
 use crate::config::Config;
@@ -189,13 +189,16 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
     // --exclude-path globs, then both stack with --exclude-lang.
     let mut exclude_paths: Vec<String> = Vec::new();
     if let Some(ref s) = args.exclude_set {
-        exclude_paths.extend(
-            agentstatedeveloper_core::resolve_exclude_set(s, &cfg.db_path),
-        );
+        exclude_paths.extend(agentstatedeveloper_core::resolve_exclude_set(
+            s,
+            &cfg.db_path,
+        ));
     }
     if let Some(ref s) = args.exclude_path {
         exclude_paths.extend(
-            s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()),
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty()),
         );
     }
     let exclude_languages: Vec<String> = args
@@ -409,7 +412,14 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
                 let fb_tuples: Vec<_> = all_feedback
                     .iter()
                     .filter(|e| e.file_scope.is_none())
-                    .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict, e.created_at))
+                    .map(|e| {
+                        (
+                            e.symbol_id.clone(),
+                            e.query.clone(),
+                            e.verdict,
+                            e.created_at,
+                        )
+                    })
                     .collect();
                 let fs_tuples: Vec<_> = all_feedback
                     .iter()
@@ -958,7 +968,14 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
             let fb_tuples: Vec<_> = fb
                 .iter()
                 .filter(|e| e.file_scope.is_none())
-                .map(|e| (e.symbol_id.clone(), e.query.clone(), e.verdict, e.created_at))
+                .map(|e| {
+                    (
+                        e.symbol_id.clone(),
+                        e.query.clone(),
+                        e.verdict,
+                        e.created_at,
+                    )
+                })
                 .collect();
             let fs_tuples: Vec<_> = fb
                 .iter()
@@ -1078,14 +1095,22 @@ fn compute_broadened_search(
         dropped.push(format!(
             "paths ({} pattern{})",
             filters.paths_filter.len(),
-            if filters.paths_filter.len() == 1 { "" } else { "s" }
+            if filters.paths_filter.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
         ));
     }
     if !filters.exclude_paths.is_empty() {
         dropped.push(format!(
             "exclude-paths ({} pattern{})",
             filters.exclude_paths.len(),
-            if filters.exclude_paths.len() == 1 { "" } else { "s" }
+            if filters.exclude_paths.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
         ));
     }
     if !filters.exclude_languages.is_empty() {

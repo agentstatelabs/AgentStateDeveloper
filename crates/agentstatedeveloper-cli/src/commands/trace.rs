@@ -193,8 +193,13 @@ pub fn run(cfg: &Config, args: TraceArgs) -> Result<()> {
             .declared
             .iter()
             .any(|e| e.effect != EffectCategory::Pure);
-        let outcome =
-            fold_runtime_evidence(&mut decl, declared_real, observed_real, contradicted, &trace_id);
+        let outcome = fold_runtime_evidence(
+            &mut decl,
+            declared_real,
+            observed_real,
+            contradicted,
+            &trace_id,
+        );
 
         effect_store.put_effects(&engine.ref_name, &symbol.symbol_id, &decl, &cfg.agent_id)?;
 
@@ -392,20 +397,29 @@ mod tests {
     fn contradiction_always_wins() {
         let mut d = decl_with(None);
         // Even with positive observation, an undeclared effect ⇒ contradiction.
-        assert_eq!(fold_runtime_evidence(&mut d, true, true, true, "t"), "contradiction");
+        assert_eq!(
+            fold_runtime_evidence(&mut d, true, true, true, "t"),
+            "contradiction"
+        );
     }
 
     #[test]
     fn observed_real_effect_is_confirmation() {
         let mut d = decl_with(None);
-        assert_eq!(fold_runtime_evidence(&mut d, true, true, false, "t"), "confirmation");
+        assert_eq!(
+            fold_runtime_evidence(&mut d, true, true, false, "t"),
+            "confirmation"
+        );
     }
 
     #[test]
     fn pure_declared_pure_observed_is_confirmation() {
         let mut d = decl_with(None);
         // declared_real=false (pure), observed_real=false, not contradicted.
-        assert_eq!(fold_runtime_evidence(&mut d, false, false, false, "t"), "confirmation");
+        assert_eq!(
+            fold_runtime_evidence(&mut d, false, false, false, "t"),
+            "confirmation"
+        );
     }
 
     #[test]
@@ -435,7 +449,10 @@ mod tests {
         assert_eq!(d.runtime.as_ref().unwrap().contradictions, 1);
         // Prior stays frozen across ingests.
         assert_eq!(d.runtime.as_ref().unwrap().prior, 0.5);
-        assert_eq!(d.runtime.as_ref().unwrap().last_trace_id.as_deref(), Some("t2"));
+        assert_eq!(
+            d.runtime.as_ref().unwrap().last_trace_id.as_deref(),
+            Some("t2")
+        );
     }
 
     #[test]
@@ -443,14 +460,20 @@ mod tests {
         // No static confidence ⇒ neutral 0.5 prior is captured on first evidence.
         let mut d = decl_with(None);
         fold_runtime_evidence(&mut d, true, true, false, "t");
-        assert_eq!(d.runtime.as_ref().unwrap().prior, RuntimeEvidence::NEUTRAL_PRIOR);
+        assert_eq!(
+            d.runtime.as_ref().unwrap().prior,
+            RuntimeEvidence::NEUTRAL_PRIOR
+        );
     }
 
     #[test]
     fn neutral_then_confirmation_still_seeds_prior_from_static() {
         let mut d = decl_with(Some(0.8));
         // A neutral run leaves everything untouched...
-        assert_eq!(fold_runtime_evidence(&mut d, true, false, false, "t0"), "neutral");
+        assert_eq!(
+            fold_runtime_evidence(&mut d, true, false, false, "t0"),
+            "neutral"
+        );
         assert!(d.runtime.is_none());
         // ...so the first decisive run still captures the static prior.
         fold_runtime_evidence(&mut d, true, true, false, "t1");

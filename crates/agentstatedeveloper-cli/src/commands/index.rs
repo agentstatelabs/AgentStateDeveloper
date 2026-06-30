@@ -292,7 +292,11 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
         let ep_msg = format!(
             "{} cross-service endpoint{} detected (see `asd endpoints`).",
             summary.service_endpoints,
-            if summary.service_endpoints == 1 { "" } else { "s" }
+            if summary.service_endpoints == 1 {
+                ""
+            } else {
+                "s"
+            }
         );
         eprintln!("{}", ep_msg);
         if let Some(l) = &mut log {
@@ -319,7 +323,11 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
         let warn_header = format!(
             "Note: {} dynamic-dispatch site{} detected (calls the static walker can't resolve into edges).",
             summary.dynamic_dispatch_sites,
-            if summary.dynamic_dispatch_sites == 1 { "" } else { "s" }
+            if summary.dynamic_dispatch_sites == 1 {
+                ""
+            } else {
+                "s"
+            }
         );
         eprintln!("{}", warn_header);
         if let Some(l) = &mut log {
@@ -349,7 +357,11 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
         let warn_header = format!(
             "Note: {} call site{} couldn't be resolved to a workspace symbol (stdlib / third-party / dynamic).",
             summary.dropped_call_edges,
-            if summary.dropped_call_edges == 1 { "" } else { "s" }
+            if summary.dropped_call_edges == 1 {
+                ""
+            } else {
+                "s"
+            }
         );
         eprintln!("{}", warn_header);
         if let Some(l) = &mut log {
@@ -524,8 +536,6 @@ fn auto_register_in_registry(db_path: &Path) {
         return;
     }
     if reg.save().is_ok() {
-        eprintln!(
-            "Registered as '{name}' — use `asd repo use {name}` to make it active."
-        );
+        eprintln!("Registered as '{name}' — use `asd repo use {name}` to make it active.");
     }
 }

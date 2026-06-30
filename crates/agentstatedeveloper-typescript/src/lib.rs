@@ -1791,10 +1791,14 @@ mod service_endpoint_tests {
         a.infer_service_endpoints("app.ts", src, &symbols)
     }
     fn inbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
-        eps.iter().filter(|e| e.direction == Direction::Inbound).collect()
+        eps.iter()
+            .filter(|e| e.direction == Direction::Inbound)
+            .collect()
     }
     fn outbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
-        eps.iter().filter(|e| e.direction == Direction::Outbound).collect()
+        eps.iter()
+            .filter(|e| e.direction == Direction::Outbound)
+            .collect()
     }
 
     #[test]

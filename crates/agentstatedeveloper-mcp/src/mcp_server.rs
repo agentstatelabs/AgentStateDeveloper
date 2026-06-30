@@ -99,10 +99,7 @@ impl AsdMcpServer {
 
     /// Clone of the currently-open db path. Cheap (one std::RwLock read + clone).
     pub fn db_path(&self) -> PathBuf {
-        self.db_path
-            .read()
-            .expect("db_path lock poisoned")
-            .clone()
+        self.db_path.read().expect("db_path lock poisoned").clone()
     }
 
     // -- Read tools --
@@ -139,9 +136,7 @@ impl AsdMcpServer {
                         match engine.repo.get_tree(&ref_name, &indexed_prefix) {
                             Ok(serde_json::Value::Object(m)) => m
                                 .values()
-                                .filter_map(|v| {
-                                    v.get("symbol_id")?.as_str().map(|s| s.to_string())
-                                })
+                                .filter_map(|v| v.get("symbol_id")?.as_str().map(|s| s.to_string()))
                                 .collect(),
                             _ => std::collections::HashSet::new(),
                         };
@@ -312,7 +307,8 @@ impl AsdMcpServer {
             exclude_terms: exclusions.clone(),
             paths_filter,
             exclude_paths: Vec::new(),
-            exclude_languages: Vec::new(),        };
+            exclude_languages: Vec::new(),
+        };
 
         // --- FTS path ---
         let fts_result = SearchFtsDb::open(&db_path)
@@ -784,7 +780,8 @@ impl AsdMcpServer {
                 exclude_terms: vec![],
                 paths_filter: vec![],
                 exclude_paths: vec![],
-                exclude_languages: vec![],            };
+                exclude_languages: vec![],
+            };
             fts.search(&p.query, &filters, p.limit as usize)
                 .unwrap_or_default()
                 .into_iter()
@@ -806,7 +803,10 @@ impl AsdMcpServer {
     async fn think_speculate(&self, params: Parameters<ThinkSpeculateParams>) -> String {
         let p = params.0;
         if !(0.0..=1.0).contains(&p.confidence) {
-            return err_json(&format!("confidence must be in [0.0, 1.0]; got {}", p.confidence));
+            return err_json(&format!(
+                "confidence must be in [0.0, 1.0]; got {}",
+                p.confidence
+            ));
         }
         let engine = self.engine.lock().await;
         let ref_name = engine.ref_name.clone();
@@ -821,7 +821,10 @@ impl AsdMcpServer {
             &sym.symbol_id,
             LedgerKind::Hypothesis,
             &p.summary,
-            Author { kind: AuthorKind::Agent, id: "asd-mcp".into() },
+            Author {
+                kind: AuthorKind::Agent,
+                id: "asd-mcp".into(),
+            },
         );
         entry.entry_id = think_det_id("hypothesis", &p.qname, &p.summary);
         entry.confidence = Some(p.confidence);
@@ -831,7 +834,8 @@ impl AsdMcpServer {
             Ok(()) => serde_json::to_string(&serde_json::json!({
                 "ok": true, "kind": "hypothesis", "qname": p.qname,
                 "confidence": p.confidence, "entry_id": entry.entry_id,
-            })).unwrap_or_else(|_| "{}".to_string()),
+            }))
+            .unwrap_or_else(|_| "{}".to_string()),
             Err(e) => err_json(&e.to_string()),
         }
     }
@@ -864,7 +868,10 @@ impl AsdMcpServer {
             &sym.symbol_id,
             LedgerKind::MentalModel,
             format!("{}: {}", p.name, p.summary),
-            Author { kind: AuthorKind::Agent, id: "asd-mcp".into() },
+            Author {
+                kind: AuthorKind::Agent,
+                id: "asd-mcp".into(),
+            },
         );
         entry.entry_id = think_det_id("model", &p.name, &p.summary);
         entry.body = Some(body);
@@ -873,7 +880,8 @@ impl AsdMcpServer {
             Ok(()) => serde_json::to_string(&serde_json::json!({
                 "ok": true, "kind": "mental_model", "name": p.name,
                 "symbols": symbols, "entry_id": entry.entry_id,
-            })).unwrap_or_else(|_| "{}".to_string()),
+            }))
+            .unwrap_or_else(|_| "{}".to_string()),
             Err(e) => err_json(&e.to_string()),
         }
     }
@@ -897,7 +905,10 @@ impl AsdMcpServer {
             &sym.symbol_id,
             LedgerKind::FailedAttempt,
             format!("failed: {} — because {}", p.tried, p.because),
-            Author { kind: AuthorKind::Agent, id: "asd-mcp".into() },
+            Author {
+                kind: AuthorKind::Agent,
+                id: "asd-mcp".into(),
+            },
         );
         entry.entry_id = think_det_id("failed", &p.qname, &p.tried);
         entry.body = Some(body);
@@ -906,7 +917,8 @@ impl AsdMcpServer {
             Ok(()) => serde_json::to_string(&serde_json::json!({
                 "ok": true, "kind": "failed_attempt", "qname": p.qname,
                 "entry_id": entry.entry_id,
-            })).unwrap_or_else(|_| "{}".to_string()),
+            }))
+            .unwrap_or_else(|_| "{}".to_string()),
             Err(e) => err_json(&e.to_string()),
         }
     }
@@ -929,7 +941,10 @@ impl AsdMcpServer {
             &sym.symbol_id,
             LedgerKind::OpenQuestion,
             &p.question,
-            Author { kind: AuthorKind::Agent, id: "asd-mcp".into() },
+            Author {
+                kind: AuthorKind::Agent,
+                id: "asd-mcp".into(),
+            },
         );
         entry.entry_id = think_det_id("question", &p.qname, &p.question);
         think_push_provenance_tags(&self.db_path(), &mut entry.tags);
@@ -937,7 +952,8 @@ impl AsdMcpServer {
             Ok(()) => serde_json::to_string(&serde_json::json!({
                 "ok": true, "kind": "open_question", "qname": p.qname,
                 "entry_id": entry.entry_id,
-            })).unwrap_or_else(|_| "{}".to_string()),
+            }))
+            .unwrap_or_else(|_| "{}".to_string()),
             Err(e) => err_json(&e.to_string()),
         }
     }
@@ -1045,7 +1061,8 @@ impl AsdMcpServer {
                 exclude_terms: vec![],
                 paths_filter: vec![],
                 exclude_paths: vec![],
-                exclude_languages: vec![],            };
+                exclude_languages: vec![],
+            };
             fts.search(&p.query, &filters, p.limit as usize)
                 .unwrap_or_default()
                 .into_iter()
@@ -1200,7 +1217,8 @@ impl AsdMcpServer {
             exclude_terms: exclusions,
             paths_filter,
             exclude_paths: Vec::new(),
-            exclude_languages: Vec::new(),        };
+            exclude_languages: Vec::new(),
+        };
 
         let index = AsgIndexStore::from_engine(&engine);
         let ledger_store = AsgLedgerStore::from_engine(&engine);
@@ -2952,7 +2970,8 @@ impl AsdMcpServer {
             exclude_terms: exclusions,
             paths_filter,
             exclude_paths: Vec::new(),
-            exclude_languages: Vec::new(),        };
+            exclude_languages: Vec::new(),
+        };
 
         let index = AsgIndexStore::from_engine(&engine);
         let ledger_store = AsgLedgerStore::from_engine(&engine);
@@ -3037,11 +3056,8 @@ impl AsdMcpServer {
         }
 
         let dirty_files_pc = git_dirty_files();
-        let likely_edit_files = agentstatedeveloper_core::finalize_file_scores(
-            &mut file_scores,
-            &dirty_files_pc,
-            true,
-        );
+        let likely_edit_files =
+            agentstatedeveloper_core::finalize_file_scores(&mut file_scores, &dirty_files_pc, true);
 
         // Affected tests via BFS from top entry point.
         let mut affected_tests: Vec<serde_json::Value> = Vec::new();
@@ -3127,11 +3143,9 @@ impl AsdMcpServer {
         // used to derive the test name (snake_case for py/rs/rb/ts,
         // PascalCase for go/java/cs/kt/swift).
         let proposed_test_stub: Option<String> = if test_gap {
-            file_scores
-                .first()
-                .map(|(_, file, _, _, _, qname, _)| {
-                    agentstatedeveloper_core::propose_test_stub(file, qname)
-                })
+            file_scores.first().map(|(_, file, _, _, _, qname, _)| {
+                agentstatedeveloper_core::propose_test_stub(file, qname)
+            })
         } else {
             None
         };
@@ -3277,15 +3291,14 @@ impl AsdMcpServer {
         }
         // ExampleFlow refinement #1 (1.0.84): recursively drop
         // empty sub-fields. Matches CLI prepare_change handling.
-        let safe_change_recipe = agentstatedeveloper_core::drop_empty_recursive(
-            serde_json::json!({
+        let safe_change_recipe =
+            agentstatedeveloper_core::drop_empty_recursive(serde_json::json!({
                 "inspect": recipe_inspect,
                 "preserve": recipe_preserve,
                 "edit": recipe_edit,
                 "run": recipe_run,
                 "manually_validate": recipe_manually_validate,
-            }),
-        );
+            }));
 
         let focus = intent_focus(intent);
         let layers_present_pc: std::collections::HashSet<&str> = file_scores
@@ -3435,7 +3448,8 @@ impl AsdMcpServer {
             exclude_terms: exclusions,
             paths_filter,
             exclude_paths: Vec::new(),
-            exclude_languages: Vec::new(),        };
+            exclude_languages: Vec::new(),
+        };
 
         let index = AsgIndexStore::from_engine(&engine);
         let ledger_store = AsgLedgerStore::from_engine(&engine);
@@ -4830,8 +4844,7 @@ impl AsdMcpServer {
             .collect();
         // Token economy (1.0.80): MCP is always agent-consumed.
         // Drop input echo (p.query) and any empty top-level fields.
-        let raw =
-            serde_json::json!({"results": results, "document_hits": doc_hits});
+        let raw = serde_json::json!({"results": results, "document_hits": doc_hits});
         let raw = agentstatedeveloper_core::drop_empty_top_level(raw);
         serde_json::to_string(&raw).unwrap_or_else(|_| "{}".to_string())
     }
@@ -4890,9 +4903,9 @@ impl AsdMcpServer {
                 None,
             ) {
                 Ok(ctx) => symbols_out.push(ctx),
-                Err(e) => symbols_out.push(
-                    serde_json::json!({ "qname": qname, "error": e.to_string() }),
-                ),
+                Err(e) => {
+                    symbols_out.push(serde_json::json!({ "qname": qname, "error": e.to_string() }))
+                }
             }
         }
 
@@ -4936,9 +4949,8 @@ impl AsdMcpServer {
             "thinking_summary".into(),
             serde_json::to_value(&pt.summary).unwrap_or(serde_json::Value::Null),
         );
-        let out = agentstatedeveloper_core::drop_empty_top_level(
-            serde_json::Value::Object(out_map),
-        );
+        let out =
+            agentstatedeveloper_core::drop_empty_top_level(serde_json::Value::Object(out_map));
 
         let mut output = serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string());
         if let Some(max_chars) = budget_chars {
@@ -5419,9 +5431,7 @@ impl AsdMcpServer {
             .ok()
             .and_then(|v| v.as_object().map(|m| m.len()));
         let index_consistency = asg_symbol_count
-            .map(|asg| {
-                agentstatedeveloper_core::compute_index_consistency(asg, count as usize)
-            })
+            .map(|asg| agentstatedeveloper_core::compute_index_consistency(asg, count as usize))
             .unwrap_or(serde_json::Value::Null);
 
         let out = serde_json::json!({
@@ -6071,7 +6081,10 @@ fn think_active_ctx_task_tag(db_path: &std::path::Path) -> Option<String> {
     let raw = match env_raw {
         Some(s) if !s.is_empty() => s,
         _ => {
-            let p = db_parent?.join(".asd").join("cache").join("active-task.json");
+            let p = db_parent?
+                .join(".asd")
+                .join("cache")
+                .join("active-task.json");
             std::fs::read_to_string(p).ok()?
         }
     };
@@ -6088,8 +6101,6 @@ fn think_push_provenance_tags(db_path: &std::path::Path, tags: &mut Vec<String>)
         tags.push(t);
     }
 }
-
-
 
 fn parse_ledger_kind(s: &str) -> Result<LedgerKind, String> {
     match s.to_lowercase().as_str() {
@@ -6381,10 +6392,7 @@ const REGISTRY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_mi
 /// and, if the active repo's db path differs from what the engine currently
 /// holds, open the new db and swap it in place. Errors are logged at WARN —
 /// the watcher never poisons the running engine.
-fn spawn_registry_watcher(
-    engine: Arc<Mutex<Engine>>,
-    db_path: Arc<std::sync::RwLock<PathBuf>>,
-) {
+fn spawn_registry_watcher(engine: Arc<Mutex<Engine>>, db_path: Arc<std::sync::RwLock<PathBuf>>) {
     let registry_path = match agentstatedeveloper_core::registry::Registry::path() {
         Ok(p) => p,
         Err(e) => {
@@ -6407,9 +6415,8 @@ fn spawn_registry_watcher(
 
             // Mtime changed (or first observation). Re-read the registry and
             // decide whether the active path actually moved.
-            let reg = match agentstatedeveloper_core::registry::Registry::load_from(
-                &registry_path,
-            ) {
+            let reg = match agentstatedeveloper_core::registry::Registry::load_from(&registry_path)
+            {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(error = %e, "registry watcher: load failed");
@@ -6419,11 +6426,7 @@ fn spawn_registry_watcher(
             let Some(active) = reg.active() else {
                 continue;
             };
-            let current = db_path
-                .read()
-                .ok()
-                .map(|g| g.clone())
-                .unwrap_or_default();
+            let current = db_path.read().ok().map(|g| g.clone()).unwrap_or_default();
             if active.path == current {
                 continue;
             }

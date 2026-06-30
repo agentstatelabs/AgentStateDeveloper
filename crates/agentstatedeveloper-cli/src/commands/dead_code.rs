@@ -47,7 +47,10 @@ pub fn run(cfg: &Config, args: DeadCodeArgs) -> Result<()> {
     let mut has_callers: HashSet<String> = HashSet::new();
     if let Some(obj) = callers_tree.as_object() {
         for (sym_id, v) in obj {
-            let n = v.get("callers").and_then(|a| a.as_array()).map_or(0, |a| a.len());
+            let n = v
+                .get("callers")
+                .and_then(|a| a.as_array())
+                .map_or(0, |a| a.len());
             if n > 0 {
                 has_callers.insert(sym_id.clone());
             }
@@ -89,7 +92,11 @@ pub fn run(cfg: &Config, args: DeadCodeArgs) -> Result<()> {
         }
         dead.push(sym);
     }
-    dead.sort_by(|a, b| a.file.cmp(&b.file).then_with(|| a.start.line.cmp(&b.start.line)));
+    dead.sort_by(|a, b| {
+        a.file
+            .cmp(&b.file)
+            .then_with(|| a.start.line.cmp(&b.start.line))
+    });
 
     let total = dead.len();
     let candidates: Vec<Value> = dead
@@ -146,7 +153,9 @@ pub fn run(cfg: &Config, args: DeadCodeArgs) -> Result<()> {
     if total > candidates.len() {
         println!("  … {} more (use --limit)", total - candidates.len());
     }
-    println!("\nNote: candidates only — static call graph misses public API, dynamic dispatch, and framework callbacks.");
+    println!(
+        "\nNote: candidates only — static call graph misses public API, dynamic dispatch, and framework callbacks."
+    );
     Ok(())
 }
 
@@ -194,8 +203,14 @@ mod tests {
     #[test]
     fn test_symbols_detected_by_path_and_qname() {
         // Inline #[cfg(test)] mod tests inside a src file (path isn't tier-2).
-        assert!(is_test_symbol("crates/x/src/lib.rs", "x.lib.tests.it_works"));
-        assert!(is_test_symbol("crates/x/src/lib.rs", "x::lib::tests::it_works"));
+        assert!(is_test_symbol(
+            "crates/x/src/lib.rs",
+            "x.lib.tests.it_works"
+        ));
+        assert!(is_test_symbol(
+            "crates/x/src/lib.rs",
+            "x::lib::tests::it_works"
+        ));
         // Path-based test file.
         assert!(is_test_symbol("crates/x/tests/foo.rs", "x.foo.bar"));
         // Ordinary source symbol is not a test.

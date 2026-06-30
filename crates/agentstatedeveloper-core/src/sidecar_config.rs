@@ -174,11 +174,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let asd = tmp.path().join(".asd");
         std::fs::create_dir_all(&asd).unwrap();
-        std::fs::write(
-            asd.join("config.toml"),
-            "[sidecar]\nshard_by = \"class\"\n",
-        )
-        .unwrap();
+        std::fs::write(asd.join("config.toml"), "[sidecar]\nshard_by = \"class\"\n").unwrap();
         let cfg = SidecarConfig::load_from_project(tmp.path());
         assert_eq!(cfg.shard_by, ShardBy::Class);
     }
@@ -236,7 +232,10 @@ mod tests {
 
     #[test]
     fn package_key_sanitizes_slashes() {
-        assert_eq!(package_key_for_filename("crates/foo/src"), "crates--foo--src");
+        assert_eq!(
+            package_key_for_filename("crates/foo/src"),
+            "crates--foo--src"
+        );
         assert_eq!(package_key_for_filename("src"), "src");
         assert_eq!(package_key_for_filename(""), "_root");
     }

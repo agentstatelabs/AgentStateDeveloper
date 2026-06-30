@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use agentstatedeveloper_core::{
-    AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, IndexStore, LedgerEntry,
-    LedgerKind, LedgerStore, Position, Symbol, SymbolKind,
+    AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, IndexStore, LedgerEntry, LedgerKind,
+    LedgerStore, Position, Symbol, SymbolKind,
 };
 
 fn asd_bin() -> PathBuf {
@@ -50,7 +50,10 @@ fn append_thinking(
         sym_id,
         kind,
         summary,
-        Author { kind: AuthorKind::Agent, id: author_id.into() },
+        Author {
+            kind: AuthorKind::Agent,
+            id: author_id.into(),
+        },
     );
     entry.entry_id = format!("led_test_{}", suffix);
     entry.confidence = conf;

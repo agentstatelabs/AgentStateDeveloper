@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use agentstatedeveloper_core::{
-    AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, IndexStore, LedgerEntry,
-    LedgerKind, LedgerStore, Position, SearchFtsDb, Symbol, SymbolKind,
+    AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, IndexStore, LedgerEntry, LedgerKind,
+    LedgerStore, Position, SearchFtsDb, Symbol, SymbolKind,
 };
 
 fn asd_bin() -> PathBuf {
@@ -31,7 +31,10 @@ fn mk_sym(sym_id: &str, qname: &str, file: &str) -> Symbol {
         file: file.into(),
         start: Position { line: 1, col: 0 },
         end: Position { line: 5, col: 0 },
-        signature: Some(format!("def {}()", qname.rsplit('.').next().unwrap_or(qname))),
+        signature: Some(format!(
+            "def {}()",
+            qname.rsplit('.').next().unwrap_or(qname)
+        )),
         doc: Some(format!("Function {qname}")),
     }
 }
@@ -49,7 +52,10 @@ fn append_thinking(
         sym_id,
         kind,
         summary,
-        Author { kind: AuthorKind::Agent, id: "alice".into() },
+        Author {
+            kind: AuthorKind::Agent,
+            id: "alice".into(),
+        },
     );
     e.confidence = confidence;
     e.body = body.map(str::to_string);
@@ -105,7 +111,9 @@ fn seed_drift_pad_world(db: &Path) {
         LedgerKind::FailedAttempt,
         "tried: route DriftClips into Scheduler directly",
         None,
-        Some(r#"{"tried":"direct routing","because":"Scheduler only accepts precompiled ScheduledEvent arrays"}"#),
+        Some(
+            r#"{"tried":"direct routing","because":"Scheduler only accepts precompiled ScheduledEvent arrays"}"#,
+        ),
     );
     // One LOW-confidence hypothesis (should NOT surface; should
     // appear in by_kind_dropped)
@@ -148,11 +156,23 @@ fn cli_surfaces_all_four_thinking_kinds() {
     let v = run_prepare_change(&db, &["syncDriftScheduler"]);
 
     let pt = &v["prior_thinking"];
-    assert!(pt.is_object(), "prior_thinking must be present and an object; got: {pt:#?}");
+    assert!(
+        pt.is_object(),
+        "prior_thinking must be present and an object; got: {pt:#?}"
+    );
     assert!(pt.get("hypotheses").is_some(), "hypotheses arm: {pt:#?}");
-    assert!(pt.get("mental_models").is_some(), "mental_models arm: {pt:#?}");
-    assert!(pt.get("open_questions").is_some(), "open_questions arm: {pt:#?}");
-    assert!(pt.get("failed_attempts").is_some(), "failed_attempts arm: {pt:#?}");
+    assert!(
+        pt.get("mental_models").is_some(),
+        "mental_models arm: {pt:#?}"
+    );
+    assert!(
+        pt.get("open_questions").is_some(),
+        "open_questions arm: {pt:#?}"
+    );
+    assert!(
+        pt.get("failed_attempts").is_some(),
+        "failed_attempts arm: {pt:#?}"
+    );
 }
 
 #[test]
@@ -187,10 +207,7 @@ fn cli_thinking_floor_flag_lowers_threshold() {
     let db = tmp.path().join(".asd-state.db");
     seed_drift_pad_world(&db);
 
-    let v = run_prepare_change(
-        &db,
-        &["syncDriftScheduler", "--thinking-floor", "0.05"],
-    );
+    let v = run_prepare_change(&db, &["syncDriftScheduler", "--thinking-floor", "0.05"]);
     let hyps = v["prior_thinking"]["hypotheses"]
         .as_array()
         .expect("hypotheses array");
@@ -205,7 +222,10 @@ fn cli_thinking_floor_flag_lowers_threshold() {
     // semantics are valid; assert via the field shape that
     // matches the current serde skip predicates.
     let dropped = &v["thinking_summary"]["by_kind_dropped"];
-    let hyp_dropped = dropped.get("hypothesis").and_then(|v| v.as_u64()).unwrap_or(0);
+    let hyp_dropped = dropped
+        .get("hypothesis")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     assert_eq!(
         hyp_dropped, 0,
         "no hypotheses dropped at floor 0.05 (absent OR explicit 0 both fine; got: {dropped:#?})"

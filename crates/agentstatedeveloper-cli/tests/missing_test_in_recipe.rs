@@ -6,9 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use agentstatedeveloper_core::{
-    AsgIndexStore, Engine, IndexStore, Position, Symbol, SymbolKind,
-};
+use agentstatedeveloper_core::{AsgIndexStore, Engine, IndexStore, Position, Symbol, SymbolKind};
 
 fn asd_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_asd"))
@@ -48,8 +46,12 @@ fn run_prepare_change(db_path: &Path, description: &str) -> serde_json::Value {
         "prepare-change failed:\nstderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    serde_json::from_slice(&out.stdout)
-        .unwrap_or_else(|e| panic!("non-JSON stdout: {e}\n{}", String::from_utf8_lossy(&out.stdout)))
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "non-JSON stdout: {e}\n{}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    })
 }
 
 #[test]

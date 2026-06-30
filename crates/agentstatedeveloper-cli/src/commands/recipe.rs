@@ -41,16 +41,12 @@ pub struct ClassifyArgs {
 
 pub fn run(cfg: &Config, cmd: RecipeCmd) -> Result<()> {
     match cmd {
-        RecipeCmd::ClassifyTestMigration(args) => {
-            run_recipe(cfg, args, |e, i, q, query| {
-                classify_test_migration(e, i, q, query)
-            })
-        }
-        RecipeCmd::MigrateStaleTests(args) => {
-            run_recipe(cfg, args, |e, i, q, query| {
-                migrate_stale_tests(e, i, q, query)
-            })
-        }
+        RecipeCmd::ClassifyTestMigration(args) => run_recipe(cfg, args, |e, i, q, query| {
+            classify_test_migration(e, i, q, query)
+        }),
+        RecipeCmd::MigrateStaleTests(args) => run_recipe(cfg, args, |e, i, q, query| {
+            migrate_stale_tests(e, i, q, query)
+        }),
     }
 }
 
@@ -79,7 +75,8 @@ where
             exclude_terms: vec![],
             paths_filter: vec![],
             exclude_paths: vec![],
-            exclude_languages: vec![],        };
+            exclude_languages: vec![],
+        };
         fts.search(&query, &filters, args.limit)
             .unwrap_or_default()
             .into_iter()

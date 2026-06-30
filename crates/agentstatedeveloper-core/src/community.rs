@@ -26,7 +26,11 @@ use std::collections::HashMap;
 /// Returns a dense `node → community_id` map.
 pub fn detect_communities(nodes: &[String], edges: &[(String, String)]) -> HashMap<String, usize> {
     let n = nodes.len();
-    let idx: HashMap<&str, usize> = nodes.iter().enumerate().map(|(i, s)| (s.as_str(), i)).collect();
+    let idx: HashMap<&str, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.as_str(), i))
+        .collect();
 
     // Dedup'd undirected adjacency (simple graph).
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -51,7 +55,11 @@ pub fn detect_communities(nodes: &[String], edges: &[(String, String)]) -> HashM
     let two_m: f64 = deg.iter().sum();
     if two_m == 0.0 {
         // No edges — every node is its own community.
-        return nodes.iter().enumerate().map(|(i, s)| (s.clone(), i)).collect();
+        return nodes
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.clone(), i))
+            .collect();
     }
 
     let mut comm: Vec<usize> = (0..n).collect();
@@ -124,7 +132,9 @@ mod tests {
         ns.iter().map(|s| s.to_string()).collect()
     }
     fn edges(es: &[(&str, &str)]) -> Vec<(String, String)> {
-        es.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+        es.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
     }
     fn num_communities(m: &HashMap<String, usize>) -> usize {
         m.values().collect::<std::collections::HashSet<_>>().len()
@@ -136,9 +146,13 @@ mod tests {
         // single edge c—d must remain two communities.
         let ns = nodes(&["a", "b", "c", "d", "e", "f"]);
         let es = edges(&[
-            ("a", "b"), ("b", "c"), ("a", "c"), // triangle 1
-            ("d", "e"), ("e", "f"), ("d", "f"), // triangle 2
-            ("c", "d"),                         // bridge
+            ("a", "b"),
+            ("b", "c"),
+            ("a", "c"), // triangle 1
+            ("d", "e"),
+            ("e", "f"),
+            ("d", "f"), // triangle 2
+            ("c", "d"), // bridge
         ]);
         let comm = detect_communities(&ns, &es);
         assert_eq!(num_communities(&comm), 2, "{comm:?}");
@@ -153,8 +167,12 @@ mod tests {
     fn single_clique_is_one_community() {
         let ns = nodes(&["a", "b", "c", "d"]);
         let es = edges(&[
-            ("a", "b"), ("a", "c"), ("a", "d"),
-            ("b", "c"), ("b", "d"), ("c", "d"),
+            ("a", "b"),
+            ("a", "c"),
+            ("a", "d"),
+            ("b", "c"),
+            ("b", "d"),
+            ("c", "d"),
         ]);
         assert_eq!(num_communities(&detect_communities(&ns, &es)), 1);
     }
@@ -170,8 +188,12 @@ mod tests {
     fn deterministic_across_runs() {
         let ns = nodes(&["a", "b", "c", "d", "e", "f"]);
         let es = edges(&[
-            ("a", "b"), ("b", "c"), ("a", "c"),
-            ("d", "e"), ("e", "f"), ("d", "f"),
+            ("a", "b"),
+            ("b", "c"),
+            ("a", "c"),
+            ("d", "e"),
+            ("e", "f"),
+            ("d", "f"),
             ("c", "d"),
         ]);
         assert_eq!(detect_communities(&ns, &es), detect_communities(&ns, &es));

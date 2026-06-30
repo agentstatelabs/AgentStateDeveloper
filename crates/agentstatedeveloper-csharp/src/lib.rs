@@ -462,7 +462,13 @@ fn cs_method_attrs(line: &str) -> Vec<(String, String)> {
 /// Minimal-API routes `app.MapGet("/x", …)`.
 fn cs_minimal_api(line: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    for (m, method) in [("MapGet", "GET"), ("MapPost", "POST"), ("MapPut", "PUT"), ("MapDelete", "DELETE"), ("MapPatch", "PATCH")] {
+    for (m, method) in [
+        ("MapGet", "GET"),
+        ("MapPost", "POST"),
+        ("MapPut", "PUT"),
+        ("MapDelete", "DELETE"),
+        ("MapPatch", "PATCH"),
+    ] {
         if let Some(args) = cs_call_args(line, m) {
             if let Some(path) = first_cs_string(args) {
                 if path.starts_with('/') {
@@ -1211,10 +1217,14 @@ mod service_endpoint_tests {
         a.infer_service_endpoints("C.cs", src, &symbols)
     }
     fn inbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
-        eps.iter().filter(|e| e.direction == Direction::Inbound).collect()
+        eps.iter()
+            .filter(|e| e.direction == Direction::Inbound)
+            .collect()
     }
     fn outbound(eps: &[DetectedEndpoint]) -> Vec<&DetectedEndpoint> {
-        eps.iter().filter(|e| e.direction == Direction::Outbound).collect()
+        eps.iter()
+            .filter(|e| e.direction == Direction::Outbound)
+            .collect()
     }
 
     #[test]
@@ -1234,7 +1244,14 @@ public class UsersController : ControllerBase {
         let mut got: Vec<String> = inbound(&eps).iter().map(|e| e.contract.clone()).collect();
         got.sort();
         // [controller] → "Users" → normalized lowercase /api/users.
-        assert_eq!(got, vec!["http:GET /api/users/{}".to_string(), "http:POST /api/users".to_string()], "{eps:?}");
+        assert_eq!(
+            got,
+            vec![
+                "http:GET /api/users/{}".to_string(),
+                "http:POST /api/users".to_string()
+            ],
+            "{eps:?}"
+        );
     }
 
     #[test]
@@ -1250,13 +1267,24 @@ public class UsersController : ControllerBase {
         let eps = detect(src);
         let mut got: Vec<String> = outbound(&eps).iter().map(|e| e.contract.clone()).collect();
         got.sort();
-        assert_eq!(got, vec!["http:GET /users/{}".to_string(), "http:POST /charge".to_string()]);
+        assert_eq!(
+            got,
+            vec![
+                "http:GET /users/{}".to_string(),
+                "http:POST /charge".to_string()
+            ]
+        );
     }
 
     #[test]
     fn cs_server_matches_other_language_client() {
-        let server = detect("[Route(\"api/[controller]\")]\npublic class UsersController {\n  [HttpGet(\"{id}\")]\n  public IActionResult Get() { return Ok(); }\n}\n");
+        let server = detect(
+            "[Route(\"api/[controller]\")]\npublic class UsersController {\n  [HttpGet(\"{id}\")]\n  public IActionResult Get() { return Ok(); }\n}\n",
+        );
         assert_eq!(inbound(&server)[0].contract, "http:GET /api/users/{}");
-        assert_eq!(inbound(&server)[0].contract, http_contract("get", "https://svc/api/users/:id"));
+        assert_eq!(
+            inbound(&server)[0].contract,
+            http_contract("get", "https://svc/api/users/:id")
+        );
     }
 }

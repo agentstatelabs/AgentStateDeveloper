@@ -51,7 +51,8 @@ fn parse_cargo(text: &str) -> TestSummary {
     let mut failed = 0;
     let mut failed_names: Vec<String> = Vec::new();
     // `---- name stdout ----` … blocks give detail per failure.
-    let mut details: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut details: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
 
     let lines: Vec<&str> = text.lines().collect();
     let mut i = 0;
@@ -106,7 +107,12 @@ fn parse_cargo(text: &str) -> TestSummary {
         })
         .collect();
 
-    TestSummary { runner: "cargo".into(), passed, failed, failures }
+    TestSummary {
+        runner: "cargo".into(),
+        passed,
+        failed,
+        failures,
+    }
 }
 
 // --- pytest ----------------------------------------------------------------
@@ -122,7 +128,10 @@ fn parse_pytest(text: &str) -> TestSummary {
         if let Some(rest) = t.strip_prefix("FAILED ") {
             let mut parts = rest.splitn(2, " - ");
             let name = parts.next().unwrap_or("").trim().to_string();
-            let detail = parts.next().map(|d| vec![d.trim().to_string()]).unwrap_or_default();
+            let detail = parts
+                .next()
+                .map(|d| vec![d.trim().to_string()])
+                .unwrap_or_default();
             if !name.is_empty() && !failures.iter().any(|f| f.name == name) {
                 failures.push(Failure { name, detail });
             }
@@ -136,7 +145,12 @@ fn parse_pytest(text: &str) -> TestSummary {
     if failed == 0 {
         failed = failures.len();
     }
-    TestSummary { runner: "pytest".into(), passed, failed, failures }
+    TestSummary {
+        runner: "pytest".into(),
+        passed,
+        failed,
+        failures,
+    }
 }
 
 // --- Generic ---------------------------------------------------------------
@@ -151,11 +165,19 @@ fn parse_generic(text: &str, runner: &str) -> TestSummary {
             || t.contains("✗")
             || t.contains("✘");
         if looks_failed && !t.is_empty() && failures.len() < 200 {
-            failures.push(Failure { name: t.to_string(), detail: Vec::new() });
+            failures.push(Failure {
+                name: t.to_string(),
+                detail: Vec::new(),
+            });
         }
     }
     let failed = failures.len();
-    TestSummary { runner: runner.into(), passed: 0, failed, failures }
+    TestSummary {
+        runner: runner.into(),
+        passed: 0,
+        failed,
+        failures,
+    }
 }
 
 // --- helpers ---------------------------------------------------------------

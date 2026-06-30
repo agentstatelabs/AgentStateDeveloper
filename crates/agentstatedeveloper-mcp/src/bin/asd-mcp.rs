@@ -101,9 +101,10 @@ fn resolve_db_from_registry() -> Result<PathBuf> {
     use agentstatedeveloper_core::registry::Registry;
 
     let cwd_hint = cwd_db_hint();
-    let reg = Registry::load().context(
-        cwd_aware_error("ASD_DB not set and could not read repo registry.", &cwd_hint),
-    )?;
+    let reg = Registry::load().context(cwd_aware_error(
+        "ASD_DB not set and could not read repo registry.",
+        &cwd_hint,
+    ))?;
     if let Some(active) = reg.active() {
         tracing::info!(name = %active.name, "resolved db from registry active repo");
         return Ok(active.path.clone());

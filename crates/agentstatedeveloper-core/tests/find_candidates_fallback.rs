@@ -118,7 +118,9 @@ fn fallback_truncates_to_depth() {
     let filters = empty_filters();
     let tokens = vec!["resolve".to_string()];
     let depth = 5;
-    let results = find_candidates(&engine, "resolve", &tokens, &filters, &ledger, &index, depth);
+    let results = find_candidates(
+        &engine, "resolve", &tokens, &filters, &ledger, &index, depth,
+    );
 
     assert!(
         results.len() <= depth,
@@ -162,12 +164,7 @@ fn fallback_returns_empty_on_no_matches() {
     let engine = Engine::open_in_memory().expect("open in-memory engine");
     seed(
         &engine,
-        &[make_symbol(
-            "s1",
-            "mod.unrelated",
-            "mod.py",
-            "python",
-        )],
+        &[make_symbol("s1", "mod.unrelated", "mod.py", "python")],
     );
 
     let index = AsgIndexStore::from_engine(&engine);

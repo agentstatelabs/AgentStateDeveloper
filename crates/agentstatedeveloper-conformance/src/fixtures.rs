@@ -250,13 +250,49 @@ async fn get_user() -> HttpResponse {
 
 /// Every fixture, one per built-in adapter language.
 pub const ALL: &[Fixture] = &[
-    Fixture { language: "python", file: "sample.py", source: PYTHON },
-    Fixture { language: "typescript", file: "sample.ts", source: TYPESCRIPT },
-    Fixture { language: "go", file: "sample.go", source: GO },
-    Fixture { language: "java", file: "Sample.java", source: JAVA },
-    Fixture { language: "ruby", file: "sample.rb", source: RUBY },
-    Fixture { language: "csharp", file: "Sample.cs", source: CSHARP },
-    Fixture { language: "kotlin", file: "Sample.kt", source: KOTLIN },
-    Fixture { language: "swift", file: "Sample.swift", source: SWIFT },
-    Fixture { language: "rust", file: "sample.rs", source: RUST },
+    Fixture {
+        language: "python",
+        file: "sample.py",
+        source: PYTHON,
+    },
+    Fixture {
+        language: "typescript",
+        file: "sample.ts",
+        source: TYPESCRIPT,
+    },
+    Fixture {
+        language: "go",
+        file: "sample.go",
+        source: GO,
+    },
+    Fixture {
+        language: "java",
+        file: "Sample.java",
+        source: JAVA,
+    },
+    Fixture {
+        language: "ruby",
+        file: "sample.rb",
+        source: RUBY,
+    },
+    Fixture {
+        language: "csharp",
+        file: "Sample.cs",
+        source: CSHARP,
+    },
+    Fixture {
+        language: "kotlin",
+        file: "Sample.kt",
+        source: KOTLIN,
+    },
+    Fixture {
+        language: "swift",
+        file: "Sample.swift",
+        source: SWIFT,
+    },
+    Fixture {
+        language: "rust",
+        file: "sample.rs",
+        source: RUST,
+    },
 ];
