@@ -574,9 +574,15 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
             if net_note.is_none() {
                 net_note = first_matching_line(body, &[needle]);
             }
-            // Try to find URL literals near the call.
+            // Try to find URL literals near the call. Clamp the window to the
+            // body length and snap to a char boundary — a call within 200 bytes
+            // of the end (or near a multi-byte char) must not panic the slice.
             for call_site in find_calls(body, &format!("{needle}")) {
-                let snippet = &body[call_site..call_site.saturating_add(200)];
+                let mut end = call_site.saturating_add(200).min(body.len());
+                while end < body.len() && !body.is_char_boundary(end) {
+                    end += 1;
+                }
+                let snippet = &body[call_site..end];
                 if let Some(host) = extract_url_host(snippet) {
                     if !net_hosts.contains(&host) {
                         net_hosts.push(host);
@@ -1229,6 +1235,21 @@ fn resolve_callee(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn net_call_near_end_of_body_does_not_panic() {
+        // Regression: the URL-host window `&body[call_site..call_site+200]`
+        // was unclamped, so a reqwest call within 200 bytes of the body end
+        // panicked with an out-of-bounds slice. Found by the cross-language
+        // conformance matrix. The call sits right at the end here.
+        let body = "async fn f() {\n    let _ = reqwest::get(\"https://api.svc/x\").await;\n}";
+        let effs = infer_effects_from_body(body);
+        let cats: Vec<_> = effs.iter().map(|e| &e.effect).collect();
+        assert!(
+            cats.contains(&&EffectCategory::IoNetOut),
+            "expected IoNetOut, got {cats:?}"
+        );
+    }
 
     #[test]
     fn module_prefix_strips_rs_and_leading_dot_slash() {

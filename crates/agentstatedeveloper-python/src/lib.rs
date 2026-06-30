@@ -1109,7 +1109,7 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
     let mut net_hosts: Vec<String> = Vec::new();
     let mut net_note: Option<String> = None;
     for prefix in net_prefixes {
-        for call_site in find_calls(scan, prefix) {
+        for call_site in find_prefixed_calls(scan, prefix) {
             let args = &body[call_site.args_start..call_site.args_end];
             if let Some(host) = extract_url_host(args) {
                 if !net_hosts.contains(&host) {
@@ -1266,6 +1266,46 @@ fn find_calls(body: &str, needle: &str) -> Vec<CallSite> {
 #[allow(dead_code)]
 fn contains_call(body: &str, needle: &str) -> bool {
     !find_calls(body, needle).is_empty()
+}
+
+/// Like [`find_calls`], but for a dotted module/receiver prefix that ends in
+/// `.` (e.g. `"requests."`). Matches `prefix<identifier>(` — the dotted
+/// prefix, a bare method identifier, then the call's parens — and returns a
+/// [`CallSite`] whose `call_start` is the prefix start and whose
+/// `args_start..args_end` span the parenthesised arguments.
+///
+/// `find_calls` requires its needle to end in `(`, so passing a varying-method
+/// prefix like `"requests."` to it returns nothing (the guard rejects
+/// non-`(` needles). That is exactly how the network-effect detection used to
+/// silently no-op for `requests.get(...)` / `httpx.post(...)`; this helper
+/// closes that gap.
+fn find_prefixed_calls(body: &str, prefix: &str) -> Vec<CallSite> {
+    let mut out = Vec::new();
+    let bytes = body.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = body[from..].find(prefix) {
+        let abs = from + rel;
+        let after = abs + prefix.len();
+        from = after;
+        // The method name must be a bare identifier immediately followed by '('.
+        let rest = &body[after..];
+        let name_len = rest
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len());
+        if name_len == 0 || rest.as_bytes().get(name_len) != Some(&b'(') {
+            continue;
+        }
+        let args_start = after + name_len + 1;
+        if let Some(args_end) = find_matching_paren(bytes, args_start) {
+            out.push(CallSite {
+                call_start: abs,
+                args_start,
+                args_end,
+            });
+            from = args_end + 1;
+        }
+    }
+    out
 }
 
 /// Given the position just after `(`, find the matching `)`. Handles nested
@@ -2386,6 +2426,29 @@ mod tests {
             !cats.contains(&EffectCategory::IoNetOut),
             "requests.* in a docstring must not infer IoNetOut; got {cats:?}"
         );
+    }
+
+    #[test]
+    fn real_requests_call_infers_net_out() {
+        // The positive counterpart to the docstring test above. A live
+        // `requests.get(url)` MUST infer IoNetOut. Regression guard for the
+        // dead-code bug where `find_calls(scan, "requests.")` returned nothing
+        // because the prefix didn't end in `(` — found by the cross-language
+        // conformance matrix (effects column was blank for Python).
+        for body in [
+            "def f():\n    return requests.get('https://api.svc/x')\n",
+            "def f():\n    return httpx.post('https://api.svc/x', json={})\n",
+            "def f():\n    return requests.request('POST', 'https://api.svc/x')\n",
+        ] {
+            let cats: Vec<_> = infer_effects_from_body(body)
+                .iter()
+                .map(|e| e.effect.clone())
+                .collect();
+            assert!(
+                cats.contains(&EffectCategory::IoNetOut),
+                "expected IoNetOut for `{body}`; got {cats:?}"
+            );
+        }
     }
 
     #[test]

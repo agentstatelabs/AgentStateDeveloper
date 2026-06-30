@@ -591,6 +591,15 @@ fn infer_effects_from_body(body: &str) -> Vec<Effect> {
         "client.post(",
         "client.request(",
         "HttpClient(",
+        // Spring RestTemplate — already recognized by the cross-service
+        // outbound detector; the effect detector must agree (conformance
+        // matrix caught the inconsistency).
+        "RestTemplate(",
+        ".getForObject(",
+        ".getForEntity(",
+        ".postForObject(",
+        ".postForEntity(",
+        ".exchange(",
     ];
     let mut net_hosts: Vec<String> = Vec::new();
     let mut net_note: Option<String> = None;
@@ -1059,6 +1068,26 @@ class Fetcher {
         let effs = adapter().infer_effects("", fetch);
         let cats: Vec<_> = effs.iter().map(|e| &e.effect).collect();
         assert!(cats.contains(&&EffectCategory::IoFsRead), "{cats:?}");
+        assert!(cats.contains(&&EffectCategory::IoNetOut), "{cats:?}");
+    }
+
+    #[test]
+    fn infers_net_out_from_resttemplate() {
+        // RestTemplate is recognized by the cross-service outbound detector;
+        // the effect detector must agree. Regression guard for the gap the
+        // conformance matrix surfaced (Kotlin effects column was blank).
+        let src = r#"
+class UserClient {
+    fun getUser(): String {
+        val rt = RestTemplate()
+        return rt.getForObject("https://api.example.com/users/1", String::class.java)
+    }
+}
+"#;
+        let syms = adapter().parse_symbols("UserClient.kt", src).unwrap();
+        let f = syms.iter().find(|s| s.qname.ends_with(".getUser")).unwrap();
+        let effs = adapter().infer_effects("", f);
+        let cats: Vec<_> = effs.iter().map(|e| &e.effect).collect();
         assert!(cats.contains(&&EffectCategory::IoNetOut), "{cats:?}");
     }
 
