@@ -1903,7 +1903,7 @@ ship first.
 | t-002 | "Paste-this-into-your-agent" install prompt — one-shot install via the agent the user is already in | 1 | S | Low |
 | t-003 | Provable token-reduction benchmark + user-viewable savings ledger | 1 | M | Low |
 | t-004 | `asd init --install-prompts` — drop `CLAUDE.md` / `AGENTS.md` / `.cursor/rules/asd.mdc` into target repo | 2 | S | Low |
-| t-005 | Multi-assistant installers: `asd install <claude\|codex\|cursor\|gemini>` | 2 | S | Low |
+| t-005 | Multi-assistant installers — **SHIPPED** as `asd mcp install` (auto-detect) + `asd mcp instructions` | 2 | S | Done |
 | t-006 | Modular language adapters — Cargo features per language, no Swift bytes on a Python-only shop | 2 | S | Low |
 | t-007 | Automate the LLM-augmented extraction pass (currently agent-prompt-driven) | 3 | M | Medium |
 | t-008 | Brand the patterns — name "ledger anchor," "cliff cohort," "trust cliff," etc. consistently across docs + output | 3 | XS | None |
@@ -1972,18 +1972,19 @@ already cleared the friction bar graphify cleared with 60k stars.
   containing a clearly delimited `<!-- asd:begin --> … <!--
   asd:end -->` block so re-runs and upgrades are safe.
 
-- **t-005 Multi-assistant installers**: `asd install claude`,
-  `asd install codex`, `asd install cursor`, `asd install gemini`
-  each drop the assistant-specific MCP config + nudge file +
-  smoke verification. MCP standardizes the protocol but each
-  assistant has its own config file location and registration
-  format. Make it one command per tribe.
+- **t-005 Multi-assistant installers** — **SHIPPED** (1.1.x). The
+  original sketch was a per-tribe `asd <assistant>` installer that
+  drops the assistant-specific MCP config + nudge file + smoke
+  verification. It shipped as a *unified* pair instead: `asd mcp
+  install` auto-detects and registers MCP config across ~13
+  assistants in one command, and `asd mcp instructions` injects the
+  nudge/instruction files plus non-blocking hooks. One
+  auto-detecting command superseded the per-tribe subcommands.
 
-  *Acceptance*: each installer subcommand modifies the right
-  config file (Claude Code: `~/.claude/config.json`; Cursor:
-  `.cursor/mcp.json` or workspace settings; Codex: `codex.json`;
-  Gemini CLI: appropriate location), preserves existing entries,
-  and prints what it did + how to undo.
+  *Acceptance (met)*: `asd mcp install` modifies the right config
+  file per detected assistant (Claude Code, Cursor, Codex, Gemini
+  CLI, and more), preserves existing entries, and prints what it did
+  + how to undo; `asd mcp instructions` manages the nudge files.
 
 - **t-006 Modular language adapters**: a Swift-only shop
   shouldn't carry Kotlin + Ruby + Go + Java + C# bytes in their

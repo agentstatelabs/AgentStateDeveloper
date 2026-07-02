@@ -257,12 +257,20 @@ fn design_md_and_changelog_backtick_examples_resolve() {
         // spec for a future capability, not a hint that should
         // resolve today.
         "pull-meta",
-        // `install`, `plan`, `savings`, `enrich` — referenced in
-        // DESIGN.md/CHANGELOG.md but not implemented. Temporarily
-        // whitelisted to unblock CI; each must be validated
-        // (implement vs. correct the doc) and then removed from this
-        // list. Tracked as CTXone competitive-harvest t-019.
-        "install",
+        // Forward-looking commands sketched in DESIGN.md's competitive-
+        // response plan (Waves 1-3) but not built. Validated under CTXone
+        // competitive-harvest t-019 — these are intentional roadmap
+        // placeholders, not stale references:
+        //   `plan`    — `asd plan propose` / `asd plan order`: the
+        //               virtual-symbol / planned-tier feature, all backlog.
+        //   `savings` — `asd savings`: standalone token-savings command +
+        //               public benchmark, deferred by decision. The
+        //               measurement already lives in `asd scorecard`
+        //               (reduction_pct); the dedicated command does not.
+        //   `enrich`  — `asd enrich`: LLM ledger-extraction as a first-class
+        //               subcommand (today the pass is agent-prompt-driven).
+        // (`install` was here too; it shipped as `asd mcp install`, so the
+        //  DESIGN.md reference was corrected and the token removed.)
         "plan",
         "savings",
         "enrich",
