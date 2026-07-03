@@ -35,6 +35,7 @@ pub mod scratch;
 pub mod search;
 pub mod sidecar;
 pub mod since;
+pub mod skill;
 pub mod status;
 pub mod sync;
 pub mod task_close;

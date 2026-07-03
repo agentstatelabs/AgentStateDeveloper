@@ -69,6 +69,9 @@ agentstatedeveloper-ruby = { path = "crates/agentstatedeveloper-ruby" }
 agentstatedeveloper-kotlin = { path = "crates/agentstatedeveloper-kotlin" }
 agentstatedeveloper-swift = { path = "crates/agentstatedeveloper-swift" }
 agentstatedeveloper-adapters = { path = "crates/agentstatedeveloper-adapters" }
+# Shared agent-onboarding engine (suite-onboarding t-001). Sibling repo; path
+# dep for local dev — becomes a git/tag dep once published (like the ASG family).
+agent-skillgen = { path = "../agent-skillgen" }
 agentstatedeveloper-cli = { path = "crates/agentstatedeveloper-cli" }
 agentstatedeveloper-mcp = { path = "crates/agentstatedeveloper-mcp" }
 agentstatedeveloper-audit-pro = { path = "crates/agentstatedeveloper-audit-pro" }

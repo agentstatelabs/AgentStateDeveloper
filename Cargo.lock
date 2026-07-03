@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "agent-skillgen"
+version = "0.1.0"
+
+[[package]]
 name = "agentstatedeveloper-adapters"
 version = "1.1.23"
 dependencies = [
@@ -34,6 +38,7 @@ dependencies = [
 name = "agentstatedeveloper-cli"
 version = "1.1.23"
 dependencies = [
+ "agent-skillgen",
  "agentstatedeveloper-adapters",
  "agentstatedeveloper-core",
  "agentstategraph",

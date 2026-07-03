@@ -167,6 +167,9 @@ pub enum Command {
     #[command(subcommand)]
     Mcp(commands::mcp::McpCmd),
 
+    /// Install ASD's agent Skill (SKILL.md) into detected agent skill dirs.
+    Skill(commands::skill::SkillArgs),
+
     /// List indexed symbols, effects, or ledger entries.
     List(commands::list::ListArgs),
 
@@ -358,6 +361,7 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Hydrate(args) => hydrate::run(cfg, args),
         Command::Audit(sub) => audit::run(cfg, sub),
         Command::Mcp(sub) => mcp::run(cfg, sub),
+        Command::Skill(args) => skill::run(args),
         Command::List(args) => list::run(cfg, args),
         Command::Callers(args) => graph::run_callers(cfg, args),
         Command::Callees(args) => graph::run_callees(cfg, args),
