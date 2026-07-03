@@ -28,17 +28,19 @@ pub fn asd_skill_spec() -> SkillSpec {
     )
     .rule("Before a non-trivial edit, run `asd prepare-change <area>` for the scoped files, blast radius, and invariants.")
     .rule("Before assuming a symbol's behavior, get `asd context-for <symbol>` instead of guessing from grep.")
-    .rule("To see what a change breaks, run `asd impact <symbol>`.")
+    .rule("To see what a change breaks, run `asd impact <symbol>` before editing.")
+    .rule("To orient in an unfamiliar area, run `asd architecture` for languages, packages, layers, routes, and hotspots.")
     .rule("Prefer `asd search` over raw grep for symbol-level lookups.")
     .rule("After editing code, run `asd reindex` so the index stays current.")
     .command("asd prepare-change", "scope a change: files, impact, invariants")
     .command("asd context-for", "focused context for one symbol")
     .command("asd impact", "downstream blast radius of a change")
+    .command("asd architecture", "orient: languages, packages, layers, hotspots")
     .command("asd search", "structural symbol search")
     .sibling(
         "CTXone",
         "ctx",
-        "the team layer — shares decisions, plans, and memory across the team; install the `ctx` CLI to enable it.",
+        "use it to share decisions, plans, and memory across your team (the `ctx` CLI).",
     )
 }
 

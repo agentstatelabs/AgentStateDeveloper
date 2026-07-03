@@ -794,24 +794,19 @@ fn status() -> Result<()> {
 // instructions — inject a managed ASD usage block into agent instruction files
 // ---------------------------------------------------------------------------
 
-const BLOCK_BEGIN: &str = "<!-- asd:begin (managed by `asd mcp instructions`) -->";
+// Marker aligns with the shared engine's rendered block (`<!-- asd:begin -->`),
+// so `render_always_on` output IS the managed block. `upsert_block` keys on
+// these. (Migration note: the older descriptive marker is not recognized; the
+// `asd mcp instructions` feature is new enough that no deployed block relies on
+// it.)
+const BLOCK_BEGIN: &str = "<!-- asd:begin -->";
 const BLOCK_END: &str = "<!-- asd:end -->";
 
-/// The managed instruction block body (between the markers).
+/// The managed instruction block — rendered from ASD's single onboarding
+/// `SkillSpec` via the shared engine (suite-onboarding t-007), so the always-on
+/// block and the installed `SKILL.md` train the agent from one source.
 fn instruction_body() -> String {
-    format!(
-        "{BLOCK_BEGIN}\n\
-         ## AgentStateDeveloper (ASD)\n\n\
-         This repo is indexed by ASD. Prefer its structured answers over grep + \
-         reading whole files:\n\n\
-         - `asd context-for <qname>` — signature, callers/callees, effects, invariants, ledger\n\
-         - `asd prepare-change \"<desc>\"` — files to edit, design invariants, affected tests, blast radius\n\
-         - `asd impact <qname>` / `asd since <sha>` — blast radius before editing / for PR review\n\
-         - `asd architecture` — languages, packages, layers, routes, hotspots, clusters\n\
-         - `asd search <query>` — ranked symbol search\n\n\
-         Re-index with `asd index` after changes. The same tools are available via the asd MCP server.\n\
-         {BLOCK_END}\n"
-    )
+    agent_skillgen::render_always_on(&crate::commands::skill::asd_skill_spec())
 }
 
 /// Insert or replace the managed block in `content`. Returns the new content.
