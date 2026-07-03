@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use agent_skillgen::{PLATFORMS, SkillSpec, render_skill};
+use agent_skillgen::{PLATFORMS, SkillSpec, SkillState, render_skill, skill_state, write_stamp};
 use anyhow::{Context, Result};
 use clap::Args;
 
@@ -61,6 +61,10 @@ pub struct SkillArgs {
     #[arg(long)]
     pub remove: bool,
 
+    /// Report the install state of each host's skill without changing anything.
+    #[arg(long)]
+    pub status: bool,
+
     /// Print what would happen without touching the filesystem.
     #[arg(long)]
     pub dry_run: bool,
@@ -74,6 +78,8 @@ pub enum Action {
     WouldWrite,
     WouldRemove,
     Skipped,
+    /// The on-disk skill is newer than this package — refused to overwrite.
+    SkippedNewer,
 }
 
 /// Placement outcome for one host.
@@ -94,9 +100,21 @@ pub fn run(args: SkillArgs) -> Result<()> {
     } else {
         SkillScope::Home
     };
+    let spec = asd_skill_spec();
+
+    if args.status {
+        let states = skill_status(&spec, &home, &root, scope, args.tool.as_deref());
+        if states.is_empty() {
+            println!("No skill-capable hosts matched.");
+        }
+        for (tool, state) in &states {
+            println!("  {:<12}  {}", tool, describe_state(state));
+        }
+        return Ok(());
+    }
 
     let placed = place_skills(
-        &asd_skill_spec(),
+        &spec,
         &home,
         &root,
         scope,
@@ -116,10 +134,55 @@ pub fn run(args: SkillArgs) -> Result<()> {
             Action::WouldWrite => "would install",
             Action::WouldRemove => "would remove",
             Action::Skipped => "skipped",
+            Action::SkippedNewer => "skipped (newer on disk)",
         };
-        println!("  {verb:>14}  {:<12}  {}", p.tool, p.path.display());
+        println!("  {verb:>22}  {:<12}  {}", p.tool, p.path.display());
     }
     Ok(())
+}
+
+fn describe_state(state: &SkillState) -> String {
+    match state {
+        SkillState::NotInstalled => "not installed".to_string(),
+        SkillState::Missing => "SKILL.md missing — run `asd skill` to repair".to_string(),
+        SkillState::Unstamped => "installed, no version stamp".to_string(),
+        SkillState::Current { version } => format!("current ({version})"),
+        SkillState::Stale { installed, package } => {
+            format!("stale ({installed} < {package}) — run `asd skill` to update")
+        }
+        SkillState::Newer { installed, package } => {
+            format!("newer on disk ({installed} > {package}) — not overwriting")
+        }
+    }
+}
+
+/// Report the install state of ASD's skill per skill-capable host, without
+/// touching the filesystem.
+pub fn skill_status(
+    spec: &SkillSpec,
+    home: &Path,
+    root: &Path,
+    scope: SkillScope,
+    tool_filter: Option<&str>,
+) -> Vec<(&'static str, SkillState)> {
+    let mut out = Vec::new();
+    for p in PLATFORMS {
+        if let Some(f) = tool_filter {
+            if p.key != f {
+                continue;
+            }
+        }
+        let Some(skill) = p.skill else { continue };
+        let dir = match scope {
+            SkillScope::Home => skill.home_dir_under(&spec.slug, home),
+            SkillScope::Project => match skill.project_dir(&spec.slug, root) {
+                Some(d) => d,
+                None => continue,
+            },
+        };
+        out.push((p.key, skill_state(&dir, &spec.version)));
+    }
+    out
 }
 
 /// Render + place ASD's `SKILL.md` into each skill-capable host. Resolves paths
@@ -172,11 +235,22 @@ pub fn place_skills(
         let Some(content) = render_skill(spec, p) else {
             continue;
         };
+        // Version safety: never overwrite a strictly-newer installed skill
+        // (a downgrade). Honors dry-run — we report the refusal either way.
+        if skill_state(&dir, &spec.version).is_downgrade() {
+            out.push(Placed {
+                tool: p.key,
+                path,
+                action: Action::SkippedNewer,
+            });
+            continue;
+        }
         let action = if dry_run {
             Action::WouldWrite
         } else {
             std::fs::create_dir_all(&dir).with_context(|| format!("mkdir {dir:?}"))?;
             std::fs::write(&path, &content).with_context(|| format!("write {path:?}"))?;
+            write_stamp(&dir, &spec.version).with_context(|| format!("stamp {dir:?}"))?;
             Action::Wrote
         };
         out.push(Placed {
@@ -191,7 +265,7 @@ pub fn place_skills(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_skillgen::{platform, render_skill};
+    use agent_skillgen::{STAMP_FILE, SkillState, platform, render_skill, write_stamp};
 
     #[test]
     fn asd_spec_renders_real_content() {
@@ -278,5 +352,90 @@ mod tests {
         .unwrap();
         assert_eq!(placed[0].action, Action::Removed);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn install_writes_version_stamp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = asd_skill_spec();
+        place_skills(
+            &spec,
+            tmp.path(),
+            tmp.path(),
+            SkillScope::Home,
+            Some("claude-code"),
+            false,
+            false,
+        )
+        .unwrap();
+        let stamp = tmp.path().join(".claude/skills/asd").join(STAMP_FILE);
+        assert!(stamp.exists(), "version stamp not written");
+        assert_eq!(
+            std::fs::read_to_string(&stamp).unwrap().trim(),
+            spec.version
+        );
+    }
+
+    #[test]
+    fn refuses_to_downgrade_a_newer_skill() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = asd_skill_spec();
+        let dir = tmp.path().join(".claude/skills/asd");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "NEWER CONTENT").unwrap();
+        write_stamp(&dir, "999.0.0").unwrap(); // pretend a much newer install exists
+
+        let placed = place_skills(
+            &spec,
+            tmp.path(),
+            tmp.path(),
+            SkillScope::Home,
+            Some("claude-code"),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(placed[0].action, Action::SkippedNewer);
+        // content must NOT be overwritten
+        assert_eq!(
+            std::fs::read_to_string(dir.join("SKILL.md")).unwrap(),
+            "NEWER CONTENT"
+        );
+    }
+
+    #[test]
+    fn status_transitions_not_installed_to_current() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = asd_skill_spec();
+        let before = skill_status(
+            &spec,
+            tmp.path(),
+            tmp.path(),
+            SkillScope::Home,
+            Some("claude-code"),
+        );
+        assert_eq!(before[0].1, SkillState::NotInstalled);
+        place_skills(
+            &spec,
+            tmp.path(),
+            tmp.path(),
+            SkillScope::Home,
+            Some("claude-code"),
+            false,
+            false,
+        )
+        .unwrap();
+        let after = skill_status(
+            &spec,
+            tmp.path(),
+            tmp.path(),
+            SkillScope::Home,
+            Some("claude-code"),
+        );
+        assert!(
+            matches!(after[0].1, SkillState::Current { .. }),
+            "got {:?}",
+            after[0].1
+        );
     }
 }
