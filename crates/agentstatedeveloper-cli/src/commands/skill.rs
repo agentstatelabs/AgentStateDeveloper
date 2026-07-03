@@ -10,7 +10,10 @@
 
 use std::path::{Path, PathBuf};
 
-use agent_skillgen::{PLATFORMS, SkillSpec, SkillState, render_skill, skill_state, write_stamp};
+use agent_skillgen::{
+    PLATFORMS, SkillSpec, SkillState, already_nudged, binary_on_path, record_nudge, render_skill,
+    should_nudge, skill_state, write_stamp,
+};
 use anyhow::{Context, Result};
 use clap::Args;
 
@@ -34,6 +37,7 @@ pub fn asd_skill_spec() -> SkillSpec {
     .command("asd search", "structural symbol search")
     .sibling(
         "CTXone",
+        "ctx",
         "the team layer — shares decisions, plans, and memory across the team; install the `ctx` CLI to enable it.",
     )
 }
@@ -64,6 +68,11 @@ pub struct SkillArgs {
     /// Report the install state of each host's skill without changing anything.
     #[arg(long)]
     pub status: bool,
+
+    /// Suppress the one-time suggestion to add the sibling product (CTXone).
+    /// Also suppressed by the ASD_NO_SUGGEST env var.
+    #[arg(long)]
+    pub no_nudge: bool,
 
     /// Print what would happen without touching the filesystem.
     #[arg(long)]
@@ -138,7 +147,38 @@ pub fn run(args: SkillArgs) -> Result<()> {
         };
         println!("  {verb:>22}  {:<12}  {}", p.tool, p.path.display());
     }
+
+    // One-time cross-product suggestion — only after a real install.
+    if !args.dry_run && !args.remove {
+        let suppress = args.no_nudge || std::env::var_os("ASD_NO_SUGGEST").is_some();
+        if let Some(msg) = maybe_nudge_sibling(&spec, &asd_state_dir(&home), suppress) {
+            println!("{msg}");
+        }
+    }
     Ok(())
+}
+
+/// ASD's cross-run state directory (also home to `repos.toml`).
+fn asd_state_dir(home: &Path) -> PathBuf {
+    home.join(".config").join("asd")
+}
+
+/// The one-time sibling suggestion, or `None` when it shouldn't show (sibling
+/// already installed, already shown, or suppressed). Records the nudge when it
+/// returns `Some`, so it never repeats. Never blocks — it only gates a printed
+/// line.
+pub fn maybe_nudge_sibling(spec: &SkillSpec, state_dir: &Path, suppressed: bool) -> Option<String> {
+    let sib = spec.sibling.as_ref()?;
+    let present = binary_on_path(&sib.bin);
+    if !should_nudge(present, already_nudged(state_dir, &sib.bin), suppressed) {
+        return None;
+    }
+    // Best-effort — a failed marker write shouldn't error the install.
+    let _ = record_nudge(state_dir, &sib.bin);
+    Some(format!(
+        "\nTip: pair ASD with {} — {}\n(Shown once; suppress with --no-nudge or ASD_NO_SUGGEST=1.)",
+        sib.product, sib.pitch
+    ))
 }
 
 fn describe_state(state: &SkillState) -> String {
@@ -265,7 +305,7 @@ pub fn place_skills(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_skillgen::{STAMP_FILE, SkillState, platform, render_skill, write_stamp};
+    use agent_skillgen::{STAMP_FILE, SkillSpec, SkillState, platform, render_skill, write_stamp};
 
     #[test]
     fn asd_spec_renders_real_content() {
@@ -437,5 +477,33 @@ mod tests {
             "got {:?}",
             after[0].1
         );
+    }
+
+    #[test]
+    fn nudge_shows_once_then_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = SkillSpec::new("X", "x", "t", "1.0.0").sibling(
+            "Sibling",
+            "nonexistent-binary-xyz-404",
+            "get the sibling",
+        );
+        // sibling absent → shows once and records the marker
+        assert!(maybe_nudge_sibling(&spec, tmp.path(), false).is_some());
+        // second call → already nudged → silent
+        assert!(maybe_nudge_sibling(&spec, tmp.path(), false).is_none());
+    }
+
+    #[test]
+    fn nudge_suppressed_records_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = SkillSpec::new("X", "x", "t", "1.0.0").sibling(
+            "Sibling",
+            "nonexistent-binary-xyz-404",
+            "get the sibling",
+        );
+        // suppressed → no message, and no marker written…
+        assert!(maybe_nudge_sibling(&spec, tmp.path(), true).is_none());
+        // …so a later un-suppressed call still shows.
+        assert!(maybe_nudge_sibling(&spec, tmp.path(), false).is_some());
     }
 }
