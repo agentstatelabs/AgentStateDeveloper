@@ -11,8 +11,8 @@
 use std::path::{Path, PathBuf};
 
 use agent_skillgen::{
-    PLATFORMS, SkillSpec, SkillState, already_nudged, binary_on_path, record_nudge, render_skill,
-    should_nudge, skill_state, write_stamp,
+    Action, SkillScope, SkillSpec, SkillState, already_nudged, binary_on_path, place_skills,
+    record_nudge, should_nudge, skill_status,
 };
 use anyhow::{Context, Result};
 use clap::Args;
@@ -54,13 +54,6 @@ pub fn asd_skill_spec() -> SkillSpec {
     .bootstrap_step("asd status", "verify the index is built")
 }
 
-/// Where to install: user-wide (home) or repo-local (project).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SkillScope {
-    Home,
-    Project,
-}
-
 #[derive(Debug, Args)]
 pub struct SkillArgs {
     /// Install project-scoped (into the repo) instead of the default
@@ -89,26 +82,6 @@ pub struct SkillArgs {
     /// Print what would happen without touching the filesystem.
     #[arg(long)]
     pub dry_run: bool,
-}
-
-/// What happened for one host.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Action {
-    Wrote,
-    Removed,
-    WouldWrite,
-    WouldRemove,
-    Skipped,
-    /// The on-disk skill is newer than this package — refused to overwrite.
-    SkippedNewer,
-}
-
-/// Placement outcome for one host.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Placed {
-    pub tool: &'static str,
-    pub path: PathBuf,
-    pub action: Action,
 }
 
 pub fn run(args: SkillArgs) -> Result<()> {
@@ -240,116 +213,13 @@ fn describe_state(state: &SkillState) -> String {
     }
 }
 
-/// Report the install state of ASD's skill per skill-capable host, without
-/// touching the filesystem.
-pub fn skill_status(
-    spec: &SkillSpec,
-    home: &Path,
-    root: &Path,
-    scope: SkillScope,
-    tool_filter: Option<&str>,
-) -> Vec<(&'static str, SkillState)> {
-    let mut out = Vec::new();
-    for p in PLATFORMS {
-        if let Some(f) = tool_filter {
-            if p.key != f {
-                continue;
-            }
-        }
-        let Some(skill) = p.skill else { continue };
-        let dir = match scope {
-            SkillScope::Home => skill.home_dir_under(&spec.slug, home),
-            SkillScope::Project => match skill.project_dir(&spec.slug, root) {
-                Some(d) => d,
-                None => continue,
-            },
-        };
-        out.push((p.key, skill_state(&dir, &spec.version)));
-    }
-    out
-}
-
-/// Render + place ASD's `SKILL.md` into each skill-capable host. Resolves paths
-/// against the passed `home`/`root` (not the process env) so callers and tests
-/// can target any directory.
-pub fn place_skills(
-    spec: &SkillSpec,
-    home: &Path,
-    root: &Path,
-    scope: SkillScope,
-    tool_filter: Option<&str>,
-    remove: bool,
-    dry_run: bool,
-) -> Result<Vec<Placed>> {
-    let mut out = Vec::new();
-    for p in PLATFORMS {
-        if let Some(f) = tool_filter {
-            if p.key != f {
-                continue;
-            }
-        }
-        let Some(skill) = p.skill else { continue };
-        let dir = match scope {
-            SkillScope::Home => skill.home_dir_under(&spec.slug, home),
-            SkillScope::Project => match skill.project_dir(&spec.slug, root) {
-                Some(d) => d,
-                None => continue, // host has no project-scoped skill location
-            },
-        };
-        let path = dir.join("SKILL.md");
-
-        if remove {
-            let action = if dry_run {
-                Action::WouldRemove
-            } else if path.exists() {
-                std::fs::remove_file(&path).with_context(|| format!("remove {path:?}"))?;
-                let _ = std::fs::remove_dir(&dir); // best-effort if now empty
-                Action::Removed
-            } else {
-                Action::Skipped
-            };
-            out.push(Placed {
-                tool: p.key,
-                path,
-                action,
-            });
-            continue;
-        }
-
-        let Some(content) = render_skill(spec, p) else {
-            continue;
-        };
-        // Version safety: never overwrite a strictly-newer installed skill
-        // (a downgrade). Honors dry-run — we report the refusal either way.
-        if skill_state(&dir, &spec.version).is_downgrade() {
-            out.push(Placed {
-                tool: p.key,
-                path,
-                action: Action::SkippedNewer,
-            });
-            continue;
-        }
-        let action = if dry_run {
-            Action::WouldWrite
-        } else {
-            std::fs::create_dir_all(&dir).with_context(|| format!("mkdir {dir:?}"))?;
-            std::fs::write(&path, &content).with_context(|| format!("write {path:?}"))?;
-            write_stamp(&dir, &spec.version).with_context(|| format!("stamp {dir:?}"))?;
-            Action::Wrote
-        };
-        out.push(Placed {
-            tool: p.key,
-            path,
-            action,
-        });
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_skillgen::{STAMP_FILE, SkillSpec, SkillState, platform, render_skill, write_stamp};
+    use agent_skillgen::{
+        Action, STAMP_FILE, SkillScope, SkillSpec, SkillState, place_skills, platform,
+        render_skill, skill_status, write_stamp,
+    };
 
     #[test]
     fn asd_spec_renders_real_content() {
