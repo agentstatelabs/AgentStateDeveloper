@@ -42,6 +42,16 @@ pub fn asd_skill_spec() -> SkillSpec {
         "ctx",
         "use it to share decisions, plans, and memory across your team (the `ctx` CLI).",
     )
+    .bootstrap_step(
+        "brew install asd",
+        "install ASD (macOS/Linux; or run the install.sh script)",
+    )
+    .bootstrap_step("asd index .", "index this repository")
+    .bootstrap_step(
+        "asd mcp install && asd skill",
+        "register the MCP server + agent skill",
+    )
+    .bootstrap_step("asd status", "verify the index is built")
 }
 
 /// Where to install: user-wide (home) or repo-local (project).

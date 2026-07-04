@@ -170,6 +170,9 @@ pub enum Command {
     /// Install ASD's agent Skill (SKILL.md) into detected agent skill dirs.
     Skill(commands::skill::SkillArgs),
 
+    /// Print a paste-into-your-agent block that installs + connects ASD (+ CTX).
+    Bootstrap(commands::bootstrap::BootstrapArgs),
+
     /// List indexed symbols, effects, or ledger entries.
     List(commands::list::ListArgs),
 
@@ -362,6 +365,7 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Audit(sub) => audit::run(cfg, sub),
         Command::Mcp(sub) => mcp::run(cfg, sub),
         Command::Skill(args) => skill::run(args),
+        Command::Bootstrap(args) => bootstrap::run(args),
         Command::List(args) => list::run(cfg, args),
         Command::Callers(args) => graph::run_callers(cfg, args),
         Command::Callees(args) => graph::run_callees(cfg, args),
