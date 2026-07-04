@@ -5,8 +5,8 @@
 //! directory. Complements `asd mcp install` (MCP config) and `asd mcp
 //! instructions` (always-on block) — this adds the actual Agent Skill file.
 //!
-//! The always-on block today still comes from `mcp.rs::instruction_body`;
-//! unifying it onto this same spec is suite-onboarding t-007.
+//! `mcp.rs::instruction_body` renders the always-on block from this same
+//! `asd_skill_spec()` via the engine (t-007) — one source for both surfaces.
 
 use std::path::{Path, PathBuf};
 
@@ -150,14 +150,46 @@ pub fn run(args: SkillArgs) -> Result<()> {
         println!("  {verb:>22}  {:<12}  {}", p.tool, p.path.display());
     }
 
-    // One-time cross-product suggestion — only after a real install.
+    // Self-verify + one-time nudge — only after a real install.
     if !args.dry_run && !args.remove {
+        print_verify_summary(&spec, &home, &root, scope, args.tool.as_deref());
         let suppress = args.no_nudge || std::env::var_os("ASD_NO_SUGGEST").is_some();
         if let Some(msg) = maybe_nudge_sibling(&spec, &asd_state_dir(&home), suppress) {
             println!("{msg}");
         }
     }
     Ok(())
+}
+
+/// Re-read each host's skill state after an install and print a green/red
+/// verdict, so the user knows the install actually took (t-008). For the full
+/// index health check, `asd health` remains the deeper probe.
+fn print_verify_summary(
+    spec: &SkillSpec,
+    home: &Path,
+    root: &Path,
+    scope: SkillScope,
+    filter: Option<&str>,
+) {
+    let states = skill_status(spec, home, root, scope, filter);
+    if states.is_empty() {
+        return;
+    }
+    let total = states.len();
+    let current = states
+        .iter()
+        .filter(|(_, s)| matches!(s, SkillState::Current { .. }))
+        .count();
+    if current == total {
+        println!("\n✓ verified {current}/{total} skills installed and current");
+    } else {
+        println!("\n⚠ verified {current}/{total} current — issues:");
+        for (t, s) in &states {
+            if !matches!(s, SkillState::Current { .. }) {
+                println!("    {t:<12}  {}", describe_state(s));
+            }
+        }
+    }
 }
 
 /// ASD's cross-run state directory (also home to `repos.toml`).
@@ -507,5 +539,29 @@ mod tests {
         assert!(maybe_nudge_sibling(&spec, tmp.path(), true).is_none());
         // …so a later un-suppressed call still shows.
         assert!(maybe_nudge_sibling(&spec, tmp.path(), false).is_some());
+    }
+
+    #[test]
+    fn verify_all_current_after_full_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = asd_skill_spec();
+        place_skills(
+            &spec,
+            tmp.path(),
+            tmp.path(),
+            SkillScope::Home,
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+        let states = skill_status(&spec, tmp.path(), tmp.path(), SkillScope::Home, None);
+        assert!(!states.is_empty());
+        assert!(
+            states
+                .iter()
+                .all(|(_, s)| matches!(s, SkillState::Current { .. })),
+            "post-install verify should show all current: {states:?}"
+        );
     }
 }
