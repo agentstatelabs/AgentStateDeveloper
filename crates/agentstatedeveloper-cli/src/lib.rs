@@ -173,6 +173,9 @@ pub enum Command {
     /// Print a paste-into-your-agent block that installs + connects ASD (+ CTX).
     Bootstrap(commands::bootstrap::BootstrapArgs),
 
+    /// Watch the repo and re-index automatically on source changes.
+    Watch(commands::watch::WatchArgs),
+
     /// List indexed symbols, effects, or ledger entries.
     List(commands::list::ListArgs),
 
@@ -366,6 +369,7 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Mcp(sub) => mcp::run(cfg, sub),
         Command::Skill(args) => skill::run(args),
         Command::Bootstrap(args) => bootstrap::run(args),
+        Command::Watch(args) => watch::run(cfg, args),
         Command::List(args) => list::run(cfg, args),
         Command::Callers(args) => graph::run_callers(cfg, args),
         Command::Callees(args) => graph::run_callees(cfg, args),

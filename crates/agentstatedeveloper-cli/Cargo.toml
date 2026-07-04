@@ -32,6 +32,8 @@ rusqlite = { workspace = true }
 uuid = { workspace = true }
 blake3 = { workspace = true }
 tempfile = "3"
+# Filesystem watcher for `asd watch` (suite-onboarding t-009).
+notify = "6"
 
 [dev-dependencies]
 agentstatedeveloper-core = { workspace = true }

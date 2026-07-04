@@ -45,4 +45,5 @@ pub mod think;
 pub mod trace;
 pub mod trust;
 pub mod verify_effects;
+pub mod watch;
 pub mod workflow;
