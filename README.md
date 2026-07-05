@@ -6,6 +6,10 @@ ASD gives every function a decision ledger, an effect declaration, and a
 call graph — all queryable by the coding agents that write the code, and
 all checked into git so they travel with every clone.
 
+**Part of a suite:** ASD (per-developer code context) pairs with
+**[CTXone](https://github.com/ctxone/ctxone)** (shared team memory). Installing
+either offers the other — see [Pairs with CTXone](#pairs-with-ctxone).
+
 ## Install
 
 ### macOS / Linux — Homebrew (recommended)
@@ -77,6 +81,25 @@ brew uninstall asd
 | **Audit event stream** | Hash-chained JSONL log of every ledger mutation and policy evaluation. |
 | **Git-native sidecar** | The committed, compact subset of ledger entries (decisions, hazards, recipes, mappings, classifications, follow-ups, agent thinking) lives in `.asd/conclusions/*.jsonl` — checked into git, travels with every clone. Kilobytes, not megabytes. |
 
+## Pairs with CTXone
+
+ASD and **[CTXone](https://github.com/ctxone/ctxone)** are built as a suite:
+
+- **ASD** — per-developer **code context**: the decision ledger, effect
+  declarations, call graph, and impact analysis for the code in front of you.
+- **CTXone** — the **team layer**: shared decisions, plans, and memory that
+  travel across the whole team.
+
+Each works standalone, but they're better together:
+
+- Installing either one **offers to set up the other** — a one-time, dismissable
+  nudge (suppress with `--no-nudge` or `ASD_NO_SUGGEST=1`).
+- When both are installed, `asd skill` also installs a **combined suite skill**
+  that teaches the agent the joint workflow: use ASD for the code specifics
+  (impact, invariants), and record what you decide into CTXone so the team
+  inherits it.
+- `asd bootstrap` offers to install **both**.
+
 ## Quick start
 
 ```bash
@@ -143,23 +166,38 @@ Applies to CLI and MCP. The spawned `asd-mcp` server inherits
 three highest-volume read tools (`code_read`, `code_search`,
 `references`) through the same compact shape.
 
-## MCP server setup
+## Agent setup
 
-`asd-mcp` is the stdio MCP server that coding agents use to query ASD.
-Register it in all detected tools with one command:
+ASD plugs into your coding agent in a few layers. The fastest path is to let the
+agent set itself up.
+
+### Paste-to-your-agent (recommended)
 
 ```bash
-asd mcp install
+asd bootstrap
 ```
 
-This writes the `asd-mcp` entry into `mcpServers` in every config file it
-finds (Claude Code, Claude Desktop, Cursor). Restart the tool to activate.
+Prints a short block you paste into whatever agent you're already in (Claude
+Code, Cursor, Codex, Gemini CLI, …). The agent then installs, indexes, and
+connects ASD itself — and offers to set up **CTXone** (the team layer) too.
+
+### Individual commands
+
+| Command | Sets up |
+|---|---|
+| `asd mcp install` | Registers the `asd-mcp` stdio server in every detected agent's MCP config — Claude Code, Claude Desktop, Cursor, Codex, Gemini CLI, Windsurf, Zed, VS Code, Cline, Kilo Code, Antigravity, and more. Restart the tool to activate. |
+| `asd skill` | Installs ASD's **Agent Skill** (`SKILL.md`) into each host's skills directory — teaches the agent *when* to reach for ASD. Version-stamped, and won't overwrite a newer on-disk skill. When the `ctx` CLI is present, it also installs the combined **ASD + CTXone** suite skill. |
+| `asd mcp instructions` | Injects a managed always-on usage block into `AGENTS.md` / `CLAUDE.md` (idempotent — safe to re-run). |
+| `asd watch` | Watches the repo and re-indexes on source changes, so the index never silently drifts. |
 
 ```bash
-asd mcp status    # show registration status across all tools
-asd mcp install --tool cursor          # install into one specific tool
-asd mcp install --db /abs/path/to/db  # use a non-default db path
-asd mcp uninstall                      # remove from all tools
+asd mcp status                 # registration status across all tools
+asd mcp install --tool cursor  # one specific tool
+asd mcp install --db /abs/db   # non-default db path
+asd mcp uninstall              # remove from all tools
+
+asd skill --status             # what's installed, per host
+asd skill --dry-run            # preview without writing
 ```
 
 The MCP server reads `ASD_DB` (set by `install` in the env block) so agents
@@ -242,7 +280,7 @@ count is always included in the JSON summary.
 
 ## Surfaces
 
-- **`asd`** — CLI: `init`, `index`, `read`, `ledger`, `policy`, `verify-effects`, `trace`, `sync`, `hydrate`, `audit`, `hooks`, `mcp`
+- **`asd`** — CLI: `init`, `index`, `read`, `ledger`, `policy`, `verify-effects`, `trace`, `sync`, `hydrate`, `audit`, `hooks`, `mcp`, `skill`, `bootstrap`, `watch`
 - **`asd-mcp`** — stdio MCP server exposing 14+ tools to coding agents
 - **`asd-serve`** — HTTP server + Lens review UI
 
