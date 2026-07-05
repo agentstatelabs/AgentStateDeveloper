@@ -11,8 +11,6 @@ use std::sync::Arc;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
-use schemars::JsonSchema;
-use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use agentstatedeveloper_adapters::default_adapters;
@@ -28,9 +26,9 @@ use agentstatedeveloper_core::{
     build_feedback_state_from_entries, classify_layer_sym, compute_trust_score,
     compute_uncertainty, conclusions_export, confidence_reason, confidence_scores,
     derive_cold_hints, detect_ambiguous_tokens, detect_confidence_warnings, detect_possible_misses,
-    detect_workflow, discover_symbol_ownership, effect_detail_reason, emit_audit, estimate_tokens,
+    detect_workflow, effect_detail_reason, emit_audit, estimate_tokens,
     event_types, explain_feedback_impacts, explain_match, extract_summary, find_candidates,
-    find_covering_tests, gather_recency, git_dirty_files, glob_match, hybrid_boost, intent_focus,
+    gather_recency, git_dirty_files, glob_match, hybrid_boost, intent_focus,
     intent_layer_order, kind_str, load_layer_overrides, load_scope_aliases, parse_intent,
     parse_query, paths, propose_test_path, recipes, resolve_scope, result_bucket,
     score_evidence_quality, sidecar_lifecycle_state, stale_warning, suggest_better_queries,
