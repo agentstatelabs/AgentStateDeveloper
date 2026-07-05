@@ -2209,3 +2209,121 @@ Wave 1 + Wave 2 ship and the acceptance scenario above passes against
 a real multi-session implementation (dogfood: plan a new ASD feature
 in ASD before writing the code).
 
+---
+
+## Plan Q — Federated cross-repo context (multi-repo)
+
+### Motivation
+
+ASD is single-repo: one `.asd-state.db`, one `Engine`, resolved from
+`--db > ASD_DB > ./.asd-state.db`. Real developers have many projects
+and often work several at once. Two distinct problems:
+
+1. **Switch** (OSS): which repo is "active" right now. Mostly a
+   plumbing/UX problem — and it's ~80% built already (see t-002/t-003).
+2. **Simultaneous multi-repo** (Team/Enterprise): answer a question
+   *across* repos — "if I change this contract, what breaks in the
+   other services, and what invariants do they hold?" **Nobody ships
+   this for agents.** That is the wedge.
+
+The differentiator is **federated, decision-aware, git-native** context:
+each repo stays authoritative for itself (its committed `.asd/conclusions`
+sidecar), and cross-repo answers are *joined on demand* from per-repo
+service manifests keyed by contract hash — NOT merged into one central
+graph (the approach Graphify/others take and that we deliberately
+rejected: it goes stale, doesn't scale, loses per-repo authority).
+
+### De-risk spike (2026-07 — run before writing this plan)
+
+Measured on two real local repos (`Financial`, `ThreadWeaver`) with the
+existing detector. Findings:
+
+- **Robustness bug found + fixed:** the indexer panicked on any repo
+  containing a multi-byte char (em-dash `—`, arrow `←`) — a byte-slice
+  on a non-char boundary in `core::doc_adapters::strip_html_tags`. Fixed
+  this session (byte-safe ASCII compare + advance by `len_utf8`). Without
+  it, multi-repo indexing crashes on ordinary repos. Regression-worthy.
+- **Detection is strong:** Financial = 4171 symbols, **523 endpoints**
+  (518 http + 5 pub/sub), 455 inbound / 68 outbound. ThreadWeaver = 67
+  endpoints, **3 in-repo matched edges**. `normalize_http_path` already
+  strips scheme+host, so a client's `http://svc/api/x` keys the same as
+  a server's `/api/x` — **cross-repo join is fundamentally sound.**
+- **The coverage bottleneck is precise and singular:** Financial matched
+  **0** edges *despite obviously calling itself*, because it registers
+  routes via `APIRouter(prefix="/calculations")` + an `/api` mount, so a
+  decorator `@router.get("/budget")` has runtime path
+  `/api/calculations/budget` but ASD statically records only `/budget`.
+  The client calls the full assembled path; the keys never meet. Naive
+  `/api` stripping recovered only 2/68. **Coverage is gated on statically
+  resolving the nested router-prefix chain**, not on the matching model.
+
+Conclusion: the vision is sound; the whole game is **t-004 (router-prefix
+resolution)** for coverage, and the decision-aware join (t-007) for the
+moat. Each transport/framework we cover is defensible surface.
+
+### Core concept
+
+- **Registry of repos** (`~/.config/asd/repos.toml`, already exists) is
+  the federation membership list. Each repo exports a `ServiceManifest`
+  (`asd endpoints --export`, already exists).
+- **Contract hash is the join key** (`http_contract`/`pubsub_contract`,
+  already exist). Cross-repo edge = an outbound contract in repo A equal
+  to an inbound contract in repo B.
+- **Sidecars carry judgment.** A downstream match pulls the *other* repo's
+  invariants/hazards from its committed `.asd/conclusions`, so impact is
+  decision-aware, not just structural.
+
+### Task table
+
+| Task | Description | Tier | Wave |
+|------|-------------|------|------|
+| t-001 | Char-boundary indexer robustness (`strip_html_tags`) + regression test | OSS | 1 ✅ (this session) |
+| t-002 | Coherent active-repo resolution: CLI consults `Registry::active()` + CWD walk-up for `.asd-state.db` | OSS | 1 |
+| t-003 | Engage the built MCP registry watcher: stop pinning `ASD_DB` in `asd mcp install` (or `--follow-active`); show active repo in `status`/`trust` | OSS | 1 |
+| t-004 | **Router-prefix resolution**: propagate `APIRouter(prefix=)`/`include_router(prefix=)`/Flask blueprint `url_prefix`/Express router mounts onto decorator paths so the recorded contract is the full runtime path | OSS+ | 1 |
+| t-005 | Cross-repo matcher: `federated_edges(registry)` = `match_edges` over the union of registered manifests | Team | 1 |
+| t-006 | Federated impact: `impact`/`prepare-change`/`since` walk cross-repo edges → downstream callers in *other* repos | Team | 2 |
+| t-007 | **Decision-aware federation**: for each cross-repo downstream, surface that repo's invariants/hazards from its committed sidecar | Team | 2 |
+| t-008 | CTXone surface: expose federated impact via the hub's code tools (the pool), per-session `repo` scope | Team | 2 |
+| t-009 | Session-scoped active repo (concurrency): parallel agents on different repos don't collide (vs global `asd repo use`) | Team | 2 |
+| t-010 | Org registry + freshness: per-repo `trust` aggregation, staleness SLA, add/remove without reindex-the-world | Ent | 3 |
+| t-011 | Transport coverage: gRPC, GraphQL, event schemas, shared library/type contracts | Ent | 3 |
+| t-012 | Scale: engine LRU pool in the hub; N-repo perf + memory bounds | Ent | 3 |
+
+### Wave ordering
+
+- **Wave 1 (OSS foundation + coverage unlock):** t-001✅, t-002, t-003,
+  t-004, t-005. Ships a coherent single-active switch *and* the
+  prefix-resolution that makes cross-repo matching actually find edges.
+- **Wave 2 (Team wedge):** t-006–t-009. The decision-aware federated
+  impact, surfaced through CTXone, safe under concurrent sessions.
+- **Wave 3 (Enterprise scale):** t-010–t-012.
+
+### Acceptance
+
+The literal killer query, on two real repos A (defines an endpoint) and
+B (calls it), both in the registry:
+
+> *"I'm about to change endpoint `X` in repo A. Show me the calling
+> symbols in repo B **and** the invariants/hazards those symbols carry."*
+
+returns the downstream callers **and** their sidecar-recorded judgment,
+computed by joining per-repo manifests on contract hash — **no merged
+database**. Coverage gate: after t-004, a repo that calls itself matches
+a majority of its real self-calls (baseline today: Financial 0/68).
+
+### What's NOT in this plan
+
+- **Merge-into-one-graph.** Federation is join-on-demand; each repo stays
+  authoritative. Explicitly the opposite of the blob approach.
+- **Dynamic/runtime URL resolution** (fully computed URLs, service
+  discovery). Static contract identity only; runtime tracing is later.
+- **Non-HTTP/pubsub transports** in Waves 1–2 (t-011 is Wave 3).
+
+### Done when
+
+The acceptance query passes on two real repos through CTXone, with
+decision-aware downstream and per-session repo scoping — and the OSS
+switch (t-002/t-003) makes `cd` or `asd repo use` coherently move both
+the CLI and the MCP server.
+

@@ -324,16 +324,17 @@ fn strip_html_tags(s: &str) -> String {
     let mut in_tag = false;
     let mut in_script = false;
     let mut prev_space = true;
-    let sl = s.to_lowercase();
     let mut i = 0;
     let bytes = s.as_bytes();
     while i < bytes.len() {
-        // Detect <script> blocks.
-        if !in_tag && i + 8 <= bytes.len() && &sl[i..i + 7] == "<script" {
+        // Detect <script> blocks. Byte-wise ASCII comparison so a multi-byte
+        // char (em-dash, arrow, …) elsewhere in the string can never panic a
+        // string slice on a non-char boundary.
+        if !in_tag && i + 7 <= bytes.len() && bytes[i..i + 7].eq_ignore_ascii_case(b"<script") {
             in_script = true;
         }
         if in_script {
-            if i + 9 <= bytes.len() && &sl[i..i + 9] == "</script>" {
+            if i + 9 <= bytes.len() && bytes[i..i + 9].eq_ignore_ascii_case(b"</script>") {
                 in_script = false;
                 i += 9;
                 continue;
@@ -344,6 +345,7 @@ fn strip_html_tags(s: &str) -> String {
         match bytes[i] {
             b'<' => {
                 in_tag = true;
+                i += 1;
             }
             b'>' => {
                 in_tag = false;
@@ -351,8 +353,12 @@ fn strip_html_tags(s: &str) -> String {
                     out.push(' ');
                     prev_space = true;
                 }
+                i += 1;
             }
             _ if !in_tag => {
+                // `i` is always on a char boundary here (text advances by the
+                // char's UTF-8 width; tags/markup are skipped byte-by-byte
+                // through ASCII delimiters), so this slice is safe.
                 let c = s[i..].chars().next().unwrap_or(' ');
                 if c.is_whitespace() {
                     if !prev_space {
@@ -363,10 +369,12 @@ fn strip_html_tags(s: &str) -> String {
                     out.push(c);
                     prev_space = false;
                 }
+                i += c.len_utf8();
             }
-            _ => {}
+            _ => {
+                i += 1;
+            }
         }
-        i += 1;
     }
     out
 }
@@ -473,4 +481,31 @@ fn adapt_manifest(path: &Path, content: &str, kind: DocKind) -> Vec<SearchDoc> {
         return vec![];
     }
     vec![SearchDoc::new(kind, path_str.as_ref(), None, name, body)]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression (Plan Q t-001): the indexer panicked on any doc containing a
+    // multi-byte char (em-dash, arrow, …) because `strip_html_tags` iterated
+    // bytes but sliced the string and advanced one byte past a wide char. These
+    // must not panic and must preserve the char.
+    #[test]
+    fn strip_html_tags_survives_multibyte_chars() {
+        assert_eq!(strip_html_tags("a — b"), "a — b");
+        assert_eq!(strip_html_tags("x ← y → z"), "x ← y → z");
+        assert_eq!(strip_html_tags("<b>café</b> — déjà"), "café — déjà");
+        // A wide char adjacent to a <script> block (the original crash shape).
+        assert_eq!(strip_html_tags("— <script>evil()</script> ok"), "— ok");
+        // Emoji (4-byte) must not desync the index either.
+        assert_eq!(strip_html_tags("ship 🚀 it"), "ship 🚀 it");
+    }
+
+    #[test]
+    fn adapt_document_does_not_panic_on_unicode_html() {
+        let html = "<html><body><h1>Title —</h1><p>arrow ← here</p></body></html>";
+        // Must return Some(..) without panicking.
+        let _ = adapt_document(Path::new("doc.html"), html);
+    }
 }
