@@ -18,32 +18,10 @@ use crate::config::Config;
 
 /// Build a `symbol_id → Symbol` lookup map.
 ///
-/// Fast path: reads from `asd_symbols_cache` via the engine's shared FTS connection.
-/// Fallback: walks the `/asd/v1/index/by-qname` git tree.
-pub fn build_id_map(engine: &Engine) -> HashMap<String, Symbol> {
-    // Fast path: SQLite symbol cache — reuse engine's already-open connection.
-    if let Some(fts) = engine.fts.as_ref() {
-        if fts.symbols_cached_for(&engine.ref_name) {
-            let map = fts.build_id_map_cached(&engine.ref_name);
-            if !map.is_empty() {
-                return map;
-            }
-        }
-    }
-    // Authoritative git fallback.
-    let tree = engine
-        .repo
-        .get_tree(&engine.ref_name, "/asd/v1/index/by-qname")
-        .unwrap_or(Value::Object(Default::default()));
-    tree.as_object()
-        .map(|m| {
-            m.values()
-                .filter_map(|v| serde_json::from_value::<Symbol>(v.clone()).ok())
-                .map(|s| (s.symbol_id.clone(), s))
-                .collect()
-        })
-        .unwrap_or_default()
-}
+/// Canonical implementation now lives in [`agentstatedeveloper_core::overview`]
+/// so the CLI and the `asd-mcp` server share one copy. Re-exported here because
+/// many commands reference `crate::commands::graph::build_id_map`.
+pub use agentstatedeveloper_core::build_id_map;
 
 // ── callers command ───────────────────────────────────────────────────────────
 

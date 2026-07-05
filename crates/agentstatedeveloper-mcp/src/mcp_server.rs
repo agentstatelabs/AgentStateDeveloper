@@ -199,6 +199,44 @@ impl AsdMcpServer {
     }
 
     #[tool(
+        description = "State Trust Score for the current workspace: can I rely on ASD for this task right now? Returns score (0.0-1.0), level, reasons, a `blocking` flag, and signals (index freshness, ledger density, sidecar status, dirty files, concept gaps). Use as a pre-flight check before leaning on other ASD analysis. (CLI: `asd trust`.)"
+    )]
+    async fn trust(&self) -> String {
+        let db_path = self.db_path();
+        let trust = agentstatedeveloper_core::compute_trust_score(&db_path);
+        serde_json::to_string(&trust.to_json()).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[tool(
+        description = "One-call \"orient me\" overview for a cold start: languages, top packages, architectural layers, call-graph communities (functional clusters), inbound/outbound routes, and call-graph hotspots. Read-only — run this first in an unfamiliar repo. (CLI: `asd architecture`.)"
+    )]
+    async fn architecture(&self, params: Parameters<ArchitectureParams>) -> String {
+        let top = params.0.top;
+        let engine = self.engine.lock().await;
+        let out = agentstatedeveloper_core::architecture_overview(&engine, top);
+        serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[tool(
+        description = "Candidate dead code: functions/methods with no inbound call edges. Excludes HTTP route handlers, test functions (unless include_tests), and main/dunder methods. NOT definitive — the static call graph misses public API used by other repos, dynamic dispatch, and framework callbacks. (CLI: `asd dead-code`.)"
+    )]
+    async fn dead_code(&self, params: Parameters<DeadCodeParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let out = agentstatedeveloper_core::dead_code_report(&engine, p.limit, p.include_tests);
+        serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[tool(
+        description = "Cross-service endpoints (HTTP routes/clients, pub-sub) detected in this repo, plus the in-repo matched edges (a client call and a server route in THIS repo sharing a contract). Cross-repo matching is a Team-tier feature. (CLI: `asd endpoints`.)"
+    )]
+    async fn endpoints(&self) -> String {
+        let engine = self.engine.lock().await;
+        let out = agentstatedeveloper_core::endpoints_report(&engine);
+        serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[tool(
         description = "Query indexed symbols. Filters (all optional, AND-combined): name_contains, kind, language. Returns up to `limit` symbol summaries. (CLI: `asd search` covers the search variant.)"
     )]
     async fn code_query(&self, params: Parameters<CodeQueryParams>) -> String {

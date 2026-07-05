@@ -281,17 +281,51 @@ count is always included in the JSON summary.
 ## Surfaces
 
 - **`asd`** — CLI: `init`, `index`, `read`, `ledger`, `policy`, `verify-effects`, `trace`, `sync`, `hydrate`, `audit`, `hooks`, `mcp`, `skill`, `bootstrap`, `watch`
-- **`asd-mcp`** — stdio MCP server exposing 14+ tools to coding agents
+- **`asd-mcp`** — stdio MCP server exposing 60 tools to coding agents
 - **`asd-serve`** — HTTP server + Lens review UI
 
 ## MCP tools
 
-Agents access ASD through 14+ MCP tools: `health`, `code_query`, `code_read`,
-`effects_of`, `callers_of`, `callees_of`, `ledger_get`, `ledger_find`,
-`ledger_append`, `ledger_approve`, `ledger_reject`, `ledger_withdraw`,
-`ledger_supersede`, `effect_declare`, `traces_of`, `reindex`,
-`ledger_rebind`, `audit_tail`, `audit_verify`.
+Agents access ASD through **60 MCP tools** spanning code search/read, the call
+graph, orientation (`architecture`, `trust`, `endpoints`, `dead_code`), impact
+and change analysis, the decision ledger, invariants, effects, conclusions,
+scratch notes, agent thinking, feedback, and audit — e.g. `code_search`,
+`code_read`, `callers`, `callees`, `context_for`, `impact`, `prepare_change`,
+`since`, `architecture`, `trust`, `ledger_append`, `invariant_add`,
+`effect_declare`, `conclusions_export`, `scratch_write`, `think_speculate`,
+`feedback_promote`, `audit_verify`, `reindex`. The full list is in
+[docs/FEATURES.md](docs/FEATURES.md#mcp-tools).
 
-## License
+## Documentation
 
-BSL-1.1; converts to Apache-2.0 four years after each release.
+**Get started:**
+- [Walkthrough](docs/WALKTHROUGH.md) — install → daily loop → what happens under the covers → using ASD + CTXone together
+- [Features & Command Reference](docs/FEATURES.md) — every command, primitive, and MCP tool, explained
+
+**Reference:**
+- [MCP ↔ CLI mapping](docs/mcp-cli-mapping.md) — the two naming conventions, side by side
+- [Repo registry](docs/repo-registry.md) — the shared multi-repo registry (`asd repo`)
+- [Initial-read prompt](docs/initial-read-prompt.md) — the cold-start orientation prompt behind `asd think` / `asd map`
+- [Pairing with RTK](docs/PAIRING_WITH_RTK.md)
+
+**Licensing:**
+- [Licensing & editions](LICENSING.md) — BSL-1.1 plain-English + OSS / Team / Enterprise
+
+## License & editions
+
+ASD is **open source, commercially supported**, and ships in three editions:
+
+- **OSS** (this repo) — the full per-developer engine: index, ledger, effects,
+  call graph, impact, invariants, in-repo cross-service edges, and agent
+  onboarding. Self-hosted, no account.
+- **Team** — the cross-repo layer (portfolio architecture, cross-repo impact
+  and dead-endpoints, team-shared runtime confidence), paired with
+  **[CTXone](https://github.com/ctxone/ctxone)** as the shared team memory.
+- **Enterprise** — org-scale governance: endpoint registry, change-governance
+  gates, audit/SIEM export, org dashboards, and RBAC-scoped agent rollout.
+
+The code is licensed under **BSL-1.1** and converts to **Apache-2.0** four
+years after each release — internal use is free; redistribution or hosted
+resale needs a commercial license. Full plain-English summary and the edition
+breakdown: **[LICENSING.md](LICENSING.md)**. Team/Enterprise or commercial
+questions: [licensing@agentstatelabs.com](mailto:licensing@agentstatelabs.com).

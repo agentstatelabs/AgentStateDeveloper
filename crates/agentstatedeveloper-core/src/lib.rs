@@ -23,6 +23,7 @@ pub mod feedback;
 pub mod index;
 pub mod index_pipeline;
 pub mod ledger;
+pub mod overview;
 pub mod paths;
 pub mod policy;
 pub mod prepare_change;
@@ -60,6 +61,7 @@ pub use candidates::{
 };
 pub use community::detect_communities;
 pub use context::assemble_symbol_context;
+pub use overview::{architecture_overview, build_id_map, dead_code_report, endpoints_report};
 pub use cross_service::{
     CrossServiceEdge, DetectedEndpoint, Direction, EndpointRef, ServiceEndpoint, ServiceManifest,
     Transport, contract_hash, endpoints_from_tree, http_contract, match_edges, normalize_repo_id,

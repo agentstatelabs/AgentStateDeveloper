@@ -282,6 +282,31 @@ pub struct ImpactParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct ArchitectureParams {
+    /// How many packages, hotspots, and clusters to list (default: 12).
+    #[serde(default = "default_arch_top")]
+    pub top: usize,
+}
+
+fn default_arch_top() -> usize {
+    12
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DeadCodeParams {
+    /// Max candidates to list; the total count is always reported (default: 50).
+    #[serde(default = "default_dead_limit")]
+    pub limit: usize,
+    /// Include test functions (excluded by default).
+    #[serde(default)]
+    pub include_tests: bool,
+}
+
+fn default_dead_limit() -> usize {
+    50
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct SinceParams {
     /// Base commit SHA (or branch/tag) to diff against HEAD.
     pub sha: String,
