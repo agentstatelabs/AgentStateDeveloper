@@ -301,6 +301,7 @@ scratch notes, agent thinking, feedback, and audit — e.g. `code_search`,
 **Get started:**
 - [Walkthrough](docs/WALKTHROUGH.md) — install → daily loop → what happens under the covers → using ASD + CTXone together
 - [Features & Command Reference](docs/FEATURES.md) — every command, primitive, and MCP tool, explained
+- [Federation](docs/FEDERATION.md) — point ASD at multiple repos for cross-repo edges and decision-aware impact (`asd repo edges/impact`)
 
 **Reference:**
 - [MCP ↔ CLI mapping](docs/mcp-cli-mapping.md) — the two naming conventions, side by side
