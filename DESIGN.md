@@ -2278,8 +2278,8 @@ moat. Each transport/framework we cover is defensible surface.
 | Task | Description | Tier | Wave |
 |------|-------------|------|------|
 | t-001 | Char-boundary indexer robustness (`strip_html_tags`) + regression test | OSS | 1 ✅ (this session) |
-| t-002 | Coherent active-repo resolution: CLI consults `Registry::active()` + CWD walk-up for `.asd-state.db` | OSS | 1 |
-| t-003 | Engage the built MCP registry watcher: stop pinning `ASD_DB` in `asd mcp install` (or `--follow-active`); show active repo in `status`/`trust` | OSS | 1 |
+| t-002 | **Coherent active-repo resolution** ✅: default db = `--db > ASD_DB > local ./.asd-state.db > CWD walk-up (git-style) > registry active`. Scoped: `init`/`onboard`/`index` stay local-only (never walk up or jump to the active repo). Backward-compatible (a local db always wins) | OSS | 1 ✅ |
+| t-003 | **Engage the MCP registry watcher** ✅: `asd mcp install --follow-active` omits the pinned `ASD_DB` (both JSON + TOML writers) so the built watcher tracks `asd repo use`. +2 tests | OSS | 1 ✅ |
 | t-004a | **Router-prefix resolution (intra-file)** ✅: same-file `APIRouter(prefix=)`/`Blueprint(url_prefix=)` + same-file `include_router`/`register_blueprint` mounts propagated onto decorator paths. Measured: ThreadWeaver 3→5 edges (5/6 outbound = 83%), Financial 0→3. Solves the flat-prefix style outright | OSS+ | 1 ✅ |
 | t-004b | **Router-prefix resolution (project mount tree)** ✅: added a project-level `LanguageAdapter::resolve_endpoint_prefixes` hook (index-pipeline runs it per language over all files) + a name-based mount-tree resolver (`full(child)=full(parent)+mount+self`, cycle-guarded; ambiguous names fall back to file-local). Resolves name-matched nested mounts. +2 tests. **Empirical: no change on Financial/ThreadWeaver** — TW is flat (t-004a already covers it), Financial's mount edges reference *import aliases* (`include_router(calculators_router)` where `calculators_router = from .calc import router as ...`) that name-matching can't bridge | Team | 1 ✅ |
 | t-004c | **Import-alias resolution** ✅: routers keyed by **qname** (`module.var`, globally unique); `include_router(alias)` resolves the alias to the imported router's qname via a line-based `from … import … as …` parser reusing `resolve_relative_import`. Connects the decorator's generic `router` to the mount edge across files. **Measured: Financial 3→11 matched edges (3.7×)**, routes now carry full nested paths (`/api/v1/blog/posts/{}`). +2 tests | Team | 1 ✅ |
@@ -2300,7 +2300,7 @@ prefix work.
 | t-006 | **Federated impact** ✅: `asd repo impact <qname-or-contract>` resolves the changed endpoint's contract(s), finds downstream consumers across all registered repos (cross-repo flagged) | Team | 2 ✅ |
 | t-007 | **Decision-aware federation** ✅: for each cross-repo consumer, `asd repo impact` opens that consumer's repo db and reads its invariants/hazards (`LedgerStore::list_entries`) — judgment from the consumer's OWN ledger. **Acceptance query PASSES** (see below) | Team | 2 ✅ |
 | t-008 | **CTXone hub surface** ✅: two hub MCP tools `code_cross_repo_edges` + `code_impact` (server/src/memory_tools.rs) shell `asd repo edges/impact --agent` over the shared registry the hub already discovers. CTXone 50→52 tools; docs updated. Compiles offline. Requires the `asd` CLI on the hub's PATH | Team | 2 ✅ |
-| t-009 | Session-scoped active repo (concurrency): parallel agents on different repos don't collide (vs global `asd repo use`) | Team | 2 |
+| t-009 | Session-scoped active repo ✅ (addressed by design): the CTXone hub's `set_active_repo`/`get_active_repo` are already per-session; concurrent multi-repo agents use per-project pinned `asd mcp install` or the hub. The only global-active path is `asd mcp install --follow-active`, which is explicitly the single-focus mode. No new session-state machinery needed | Team | 2 ✅ |
 | t-010 | Org registry + freshness: per-repo `trust` aggregation, staleness SLA, add/remove without reindex-the-world | Ent | 3 |
 | t-011 | Transport coverage: gRPC, GraphQL, event schemas, shared library/type contracts | Ent | 3 |
 | t-012 | Scale: engine LRU pool in the hub; N-repo perf + memory bounds | Ent | 3 |
@@ -2349,4 +2349,20 @@ The acceptance query passes on two real repos through CTXone, with
 decision-aware downstream and per-session repo scoping — and the OSS
 switch (t-002/t-003) makes `cd` or `asd repo use` coherently move both
 the CLI and the MCP server.
+
+**✅ Waves 1 & 2 COMPLETE (2026-07).** t-001…t-009 all done or addressed:
+contract resolution (t-004a–d, Financial 0→33), cross-repo join (t-005, 33
+edges), decision-aware federated impact (t-006/7, **acceptance query passes**),
+CTXone hub surface (t-008), and the OSS coherent-switch (t-002/3). The
+"nobody's solved this" capability is built, demonstrated end-to-end on a real
+repo, and reachable via both `asd repo edges/impact` (CLI) and the hub's
+`code_cross_repo_edges`/`code_impact` (MCP).
+
+**Wave 3 (Enterprise) — remaining roadmap, NOT yet built:** t-010 org
+Postgres registry + freshness SLAs, t-011 more transports (gRPC, GraphQL,
+event schemas, shared types), t-012 hub-scale engine pooling. Each is a
+substantial standalone effort; they extend the proven spine to org scale
+rather than change it. Cross-*language* client detection already works (TS→
+Python edges matched); widening it (axios/fetch variants, more frameworks) is
+incremental coverage, not a new capability.
 

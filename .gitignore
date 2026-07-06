@@ -39,3 +39,4 @@ site/package-lock.json
 
 # Tier-2 realism corpus (cloned third-party repos, never committed)
 .realism-corpus/
+.asd/cache/

@@ -262,6 +262,13 @@ pub struct InstallArgs {
     /// list of known tools). Installs into all detected tools when omitted.
     #[arg(long)]
     pub tool: Option<String>,
+
+    /// Plan Q t-003: omit the pinned `ASD_DB` from the MCP config so the server
+    /// follows the active repo (`asd repo use`) and hot-swaps when it changes —
+    /// one MCP registration that tracks whichever project you're working on,
+    /// instead of pinning one database.
+    #[arg(long)]
+    pub follow_active: bool,
 }
 
 #[derive(Debug, Args)]
@@ -427,14 +434,17 @@ fn write_config(path: &Path, value: &serde_json::Value) -> Result<()> {
 }
 
 /// Build the server entry for a tool, applying any style-specific extra fields
-/// on top of the standard `{ command, args, env }` body.
-fn build_entry(style: EntryStyle, asd_mcp_bin: &Path, db_path: &Path) -> serde_json::Value {
+/// on top of the standard `{ command, args, env }` body. `db_path = None`
+/// (t-003 `--follow-active`) omits `ASD_DB` so the server follows the registry.
+fn build_entry(style: EntryStyle, asd_mcp_bin: &Path, db_path: Option<&Path>) -> serde_json::Value {
+    let env = match db_path {
+        Some(p) => serde_json::json!({ "ASD_DB": p.to_string_lossy() }),
+        None => serde_json::json!({}),
+    };
     let mut entry = serde_json::json!({
         "command": asd_mcp_bin.to_string_lossy(),
         "args": [],
-        "env": {
-            "ASD_DB": db_path.to_string_lossy()
-        }
+        "env": env
     });
     let obj = entry.as_object_mut().expect("entry is an object");
     match style {
@@ -494,7 +504,7 @@ fn toml_upsert_server(
     path: &Path,
     servers_key: &str,
     asd_mcp: &Path,
-    db_path: &Path,
+    db_path: Option<&Path>,
 ) -> Result<bool> {
     use toml_edit::{Array, DocumentMut, Item, Table, value};
 
@@ -523,7 +533,9 @@ fn toml_upsert_server(
     entry["command"] = value(asd_mcp.to_string_lossy().into_owned());
     entry["args"] = value(Array::new());
     let mut env = Table::new();
-    env["ASD_DB"] = value(db_path.to_string_lossy().into_owned());
+    if let Some(p) = db_path {
+        env["ASD_DB"] = value(p.to_string_lossy().into_owned());
+    }
     entry["env"] = Item::Table(env);
     servers[SERVER_NAME] = Item::Table(entry);
 
@@ -600,7 +612,17 @@ fn install(args: InstallArgs) -> Result<()> {
         )
     })?;
 
-    let db_path = resolve_db(args.db)?;
+    // t-003: `--follow-active` omits the pinned ASD_DB so the server tracks the
+    // registry's active repo; otherwise pin the resolved db as before.
+    let db_opt: Option<PathBuf> = if args.follow_active {
+        None
+    } else {
+        Some(resolve_db(args.db)?)
+    };
+    let db_display = db_opt
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "(unset — follows the active repo, `asd repo use`)".to_string());
     let tools = tools_to_process(args.tool.as_deref());
 
     if tools.is_empty() {
@@ -625,7 +647,7 @@ fn install(args: InstallArgs) -> Result<()> {
             eprintln!("  {} — manual setup (not auto-edited):", tool.name);
             eprintln!("      add an MCP server to {} with", cfg_path.display());
             eprintln!("        command: {}", asd_mcp.display());
-            eprintln!("        env ASD_DB: {}", db_path.display());
+            eprintln!("        env ASD_DB: {}", db_display);
             eprintln!(
                 "      (key `{}`; see the tool's MCP docs for the exact schema)",
                 tool.servers_key
@@ -635,14 +657,14 @@ fn install(args: InstallArgs) -> Result<()> {
 
         let already = match tool.format {
             ConfigFormat::Json | ConfigFormat::Jsonc => {
-                let entry = build_entry(tool.entry_style, &asd_mcp, &db_path);
+                let entry = build_entry(tool.entry_style, &asd_mcp, db_opt.as_deref());
                 let mut cfg = read_config(&cfg_path, tool.format)?;
                 let already = upsert_server(&mut cfg, tool.servers_key, &entry)?;
                 write_config(&cfg_path, &cfg)?;
                 already
             }
             ConfigFormat::Toml => {
-                toml_upsert_server(&cfg_path, tool.servers_key, &asd_mcp, &db_path)?
+                toml_upsert_server(&cfg_path, tool.servers_key, &asd_mcp, db_opt.as_deref())?
             }
             ConfigFormat::Manual => unreachable!("handled above"),
         };
@@ -666,7 +688,7 @@ fn install(args: InstallArgs) -> Result<()> {
     } else {
         eprintln!();
         eprintln!("  asd-mcp binary:  {}", asd_mcp.display());
-        eprintln!("  ASD_DB:          {}", db_path.display());
+        eprintln!("  ASD_DB:          {}", db_display);
         eprintln!();
         eprintln!("Restart your agent tool(s) to activate the MCP server.");
     }
@@ -1075,7 +1097,7 @@ mod tests {
         build_entry(
             EntryStyle::Standard,
             Path::new("/bin/asd-mcp"),
-            Path::new("/db"),
+            Some(Path::new("/db")),
         )
     }
 
@@ -1084,7 +1106,7 @@ mod tests {
         let entry = build_entry(
             EntryStyle::Standard,
             Path::new("/usr/local/bin/asd-mcp"),
-            Path::new("/repo/.asd-state.db"),
+            Some(Path::new("/repo/.asd-state.db")),
         );
         assert_eq!(entry["command"], "/usr/local/bin/asd-mcp");
         assert!(entry["args"].as_array().unwrap().is_empty());
@@ -1094,11 +1116,23 @@ mod tests {
     }
 
     #[test]
+    fn follow_active_entry_omits_asd_db() {
+        // t-003: `--follow-active` (db_path = None) writes an empty env so the
+        // server resolves the active repo from the registry instead.
+        let entry = build_entry(EntryStyle::Standard, Path::new("/bin/asd-mcp"), None);
+        assert!(
+            entry["env"].as_object().unwrap().is_empty(),
+            "no ASD_DB pinned when following the active repo"
+        );
+        assert_eq!(entry["command"], "/bin/asd-mcp");
+    }
+
+    #[test]
     fn divergent_entry_styles_add_their_marker() {
         let zed = build_entry(
             EntryStyle::ZedCustom,
             Path::new("/bin/asd-mcp"),
-            Path::new("/db"),
+            Some(Path::new("/db")),
         );
         assert_eq!(zed["source"], "custom");
         assert_eq!(zed["command"], "/bin/asd-mcp"); // standard body still present
@@ -1106,7 +1140,7 @@ mod tests {
         let vscode = build_entry(
             EntryStyle::VsCodeStdio,
             Path::new("/bin/asd-mcp"),
-            Path::new("/db"),
+            Some(Path::new("/db")),
         );
         assert_eq!(vscode["type"], "stdio");
         assert_eq!(vscode["env"]["ASD_DB"], "/db");
@@ -1119,7 +1153,7 @@ mod tests {
         let entry = build_entry(
             EntryStyle::ZedCustom,
             Path::new("/bin/asd-mcp"),
-            Path::new("/db"),
+            Some(Path::new("/db")),
         );
         let already = upsert_server(&mut cfg, "context_servers", &entry).unwrap();
         assert!(!already);
@@ -1190,7 +1224,7 @@ mod tests {
             &path,
             "mcp_servers",
             Path::new("/bin/asd-mcp"),
-            Path::new("/db"),
+            Some(Path::new("/db")),
         )
         .unwrap();
         assert!(!already, "fresh insert");
@@ -1213,7 +1247,7 @@ mod tests {
                 &path,
                 "mcp_servers",
                 Path::new("/bin/asd-mcp"),
-                Path::new("/db")
+                Some(Path::new("/db"))
             )
             .unwrap()
         );
@@ -1246,7 +1280,7 @@ mod tests {
             &path,
             "mcp_servers",
             Path::new("/bin/asd-mcp"),
-            Path::new("/db"),
+            Some(Path::new("/db")),
         )
         .unwrap();
         let (cmd, _db) = read_registered_entry(&path, ConfigFormat::Toml, "mcp_servers").unwrap();

@@ -1,5 +1,8 @@
 //! Minimal solo-developer config. Resolves the ASD database path from
-//! (in priority order): CLI flag, `ASD_DB` env var, or `./.asd-state.db`.
+//! (in priority order): CLI flag, `ASD_DB` env var, then a default:
+//! `./.asd-state.db` if present, else (Plan Q t-002) a git-style walk-up for
+//! the nearest `.asd-state.db`, else the registry's active repo (`asd repo
+//! use`), else `./.asd-state.db`.
 //! Policy file from `--policy <path>` or `ASD_POLICY` env var (optional).
 
 use std::path::PathBuf;
@@ -26,18 +29,31 @@ impl Config {
         explicit_policy: Option<PathBuf>,
         explicit_audit_log: Option<PathBuf>,
     ) -> Self {
-        Self::resolve_with_brief(explicit_db, explicit_policy, explicit_audit_log, false)
+        // Generic helper — conservative (local-only) default.
+        Self::resolve_with_brief(explicit_db, explicit_policy, explicit_audit_log, false, true)
     }
 
+    /// `local_only = true` restricts the default to `./.asd-state.db` (for
+    /// commands that CREATE or populate a db in place — `init`/`onboard`/`index`
+    /// — which must never target a parent project or the registry's active
+    /// repo). `false` enables the Plan Q t-002 walk-up + registry-active
+    /// fallback used by read/query commands.
     pub fn resolve_with_brief(
         explicit_db: Option<PathBuf>,
         explicit_policy: Option<PathBuf>,
         explicit_audit_log: Option<PathBuf>,
         brief_flag: bool,
+        local_only: bool,
     ) -> Self {
         let db_path = explicit_db
             .or_else(|| std::env::var_os("ASD_DB").map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("./.asd-state.db"));
+            .unwrap_or_else(|| {
+                if local_only {
+                    PathBuf::from("./.asd-state.db")
+                } else {
+                    resolve_default_db()
+                }
+            });
         let policy_path =
             explicit_policy.or_else(|| std::env::var_os("ASD_POLICY").map(PathBuf::from));
         let audit_log_path =
@@ -54,4 +70,44 @@ impl Config {
             brief,
         }
     }
+}
+
+/// Default db path when neither `--db` nor `ASD_DB` is given (Plan Q t-002).
+/// Backward-compatible: a `.asd-state.db` in the current directory always wins,
+/// so existing single-repo usage is unchanged. Only when there is none do we
+/// walk up for the nearest one (so `asd` works from any subdirectory), then
+/// fall back to the registry's active repo, then the plain cwd path.
+fn resolve_default_db() -> PathBuf {
+    let cwd_db = PathBuf::from("./.asd-state.db");
+    if cwd_db.exists() {
+        return cwd_db;
+    }
+    if let Some(found) = walk_up_for_db() {
+        return found;
+    }
+    if let Some(active) = registry_active_db() {
+        return active;
+    }
+    cwd_db
+}
+
+/// Walk up from the current directory to the filesystem root, returning the
+/// first `.asd-state.db` found (git-style project discovery).
+fn walk_up_for_db() -> Option<PathBuf> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        let candidate = dir.join(".asd-state.db");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+/// The registry's active repo db path (`asd repo use <name>`), if any.
+fn registry_active_db() -> Option<PathBuf> {
+    let reg = agentstatedeveloper_core::registry::Registry::load().ok()?;
+    reg.active().map(|e| e.path.clone())
 }

@@ -334,11 +334,19 @@ pub enum Command {
 
 /// Resolve [`Config`] from the parsed CLI flags.
 pub fn config_from_cli(cli: &Cli) -> Config {
+    // init/onboard/index create or (re)populate a db in the current location, so
+    // they must resolve to `./.asd-state.db` (or --db/ASD_DB) only — never the
+    // walk-up parent or the registry's active repo (Plan Q t-002 scoping).
+    let local_only = matches!(
+        cli.cmd,
+        Command::Init(_) | Command::Onboard(_) | Command::Index(_)
+    );
     Config::resolve_with_brief(
         cli.db.clone(),
         cli.policy.clone(),
         cli.audit_log.clone(),
         cli.brief,
+        local_only,
     )
 }
 
