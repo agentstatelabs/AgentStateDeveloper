@@ -2280,7 +2280,8 @@ moat. Each transport/framework we cover is defensible surface.
 | t-001 | Char-boundary indexer robustness (`strip_html_tags`) + regression test | OSS | 1 ✅ (this session) |
 | t-002 | Coherent active-repo resolution: CLI consults `Registry::active()` + CWD walk-up for `.asd-state.db` | OSS | 1 |
 | t-003 | Engage the built MCP registry watcher: stop pinning `ASD_DB` in `asd mcp install` (or `--follow-active`); show active repo in `status`/`trust` | OSS | 1 |
-| t-004 | **Router-prefix resolution**: propagate `APIRouter(prefix=)`/`include_router(prefix=)`/Flask blueprint `url_prefix`/Express router mounts onto decorator paths so the recorded contract is the full runtime path | OSS+ | 1 |
+| t-004a | **Router-prefix resolution (intra-file)** ✅: same-file `APIRouter(prefix=)`/`Blueprint(url_prefix=)` + same-file `include_router`/`register_blueprint` mounts propagated onto decorator paths. Measured: ThreadWeaver 3→5 edges (5/6 outbound = 83%), Financial 0→3. Solves the flat-prefix style outright | OSS+ | 1 ✅ |
+| t-004b | **Router-prefix resolution (project mount tree)**: resolve the cross-file, multi-level `include_router` chain (`app.include_router(api_router, prefix="/api")` → `api_router.include_router(calc_router, prefix="/calc")` → `@calc_router.get("/x")` = `/api/calc/x`). Needs a project-level pass + router-var identity (globally-unique names; file-scope fallback for generic `router`). This is what closes the nested style (Financial's remaining 65/68) | Team | 1 |
 | t-005 | Cross-repo matcher: `federated_edges(registry)` = `match_edges` over the union of registered manifests | Team | 1 |
 | t-006 | Federated impact: `impact`/`prepare-change`/`since` walk cross-repo edges → downstream callers in *other* repos | Team | 2 |
 | t-007 | **Decision-aware federation**: for each cross-repo downstream, surface that repo's invariants/hazards from its committed sidecar | Team | 2 |
