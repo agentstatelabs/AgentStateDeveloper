@@ -68,7 +68,11 @@ impl LanguageAdapter for PythonAdapter {
         infer_service_endpoints_in_python(file, source, symbols)
     }
 
-    fn resolve_endpoint_prefixes(&self, files: &[(String, String)], endpoints: &mut [ServiceEndpoint]) {
+    fn resolve_endpoint_prefixes(
+        &self,
+        files: &[(String, String)],
+        endpoints: &mut Vec<ServiceEndpoint>,
+    ) {
         resolve_python_endpoint_prefixes(files, endpoints);
     }
 
@@ -911,7 +915,7 @@ fn join_route(prefix: &str, path: &str) -> String {
 /// their **qname** (`module.var`), so an `include_router(alias)` mount connects
 /// to the aliased router's routes even across files and generic `router` names
 /// (t-004c: aliases resolved via `from … import … as …`).
-fn resolve_python_endpoint_prefixes(files: &[(String, String)], endpoints: &mut [ServiceEndpoint]) {
+fn resolve_python_endpoint_prefixes(files: &[(String, String)], endpoints: &mut Vec<ServiceEndpoint>) {
     // Per-file module qname + import alias map (local name -> imported qname).
     let module_by_path: HashMap<&str, String> = files
         .iter()
@@ -924,7 +928,7 @@ fn resolve_python_endpoint_prefixes(files: &[(String, String)], endpoints: &mut 
 
     // Global router tables keyed by qname (globally unique — no ambiguity).
     let mut self_by_q: HashMap<String, String> = HashMap::new();
-    let mut parent_of: HashMap<String, (String, String)> = HashMap::new();
+    let mut parent_of: HashMap<String, Vec<(String, String)>> = HashMap::new(); // child -> mounts
     let mut app_qs: HashSet<String> = HashSet::new();
     let mut known: HashSet<String> = HashSet::new();
 
@@ -973,17 +977,24 @@ fn resolve_python_endpoint_prefixes(files: &[(String, String)], endpoints: &mut 
                         let parent_q = resolve_name(&parent, module, imports);
                         known.insert(child_q.clone());
                         known.insert(parent_q.clone());
-                        parent_of.entry(child_q).or_insert((parent_q, m));
+                        let mounts = parent_of.entry(child_q).or_default();
+                        let edge = (parent_q, m);
+                        if !mounts.contains(&edge) {
+                            mounts.push(edge);
+                        }
                     }
                 }
             }
         }
     }
 
-    let mut cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut cache: HashMap<String, Option<Vec<String>>> = HashMap::new();
     let mut local: HashMap<String, HashMap<String, String>> = HashMap::new();
     let src_by_path: HashMap<&str, &str> =
         files.iter().map(|(p, s)| (p.as_str(), s.as_str())).collect();
+    // Routes served under >1 mount prefix produce extra endpoints (t-004d),
+    // appended after the in-place rewrite pass.
+    let mut additions: Vec<ServiceEndpoint> = Vec::new();
 
     for ep in endpoints.iter_mut() {
         if ep.transport != Transport::Http || ep.direction != Direction::Inbound {
@@ -1016,19 +1027,33 @@ fn resolve_python_endpoint_prefixes(files: &[(String, String)], endpoints: &mut 
 
         let recv_q = resolve_name(&recv, module, imports);
         // Global mount-tree resolution for known routers; else file-local (t-004a).
-        let full = if known.contains(&recv_q) {
-            resolve_full_q(&recv_q, &self_by_q, &parent_of, &app_qs, &mut cache).unwrap_or_default()
+        // A router mounted at N prefixes yields N full paths (t-004d).
+        let prefixes: Vec<String> = if known.contains(&recv_q) {
+            resolve_full_q(&recv_q, &self_by_q, &parent_of, &app_qs, &mut cache)
         } else {
-            local
-                .entry(ep.file.clone())
-                .or_insert_with(|| collect_router_prefixes(src))
-                .get(&recv)
-                .cloned()
-                .unwrap_or_default()
+            vec![
+                local
+                    .entry(ep.file.clone())
+                    .or_insert_with(|| collect_router_prefixes(src))
+                    .get(&recv)
+                    .cloned()
+                    .unwrap_or_default(),
+            ]
         };
-        let new_path = join_route(&full, raw_path);
-        ep.contract = http_contract(&method, &new_path);
+        let mut paths: Vec<String> = prefixes.iter().map(|p| join_route(p, raw_path)).collect();
+        paths.sort();
+        paths.dedup();
+        if paths.is_empty() {
+            paths.push(raw_path.clone());
+        }
+        ep.contract = http_contract(&method, &paths[0]);
+        for extra in paths.iter().skip(1) {
+            let mut dup = ep.clone();
+            dup.contract = http_contract(&method, extra);
+            additions.push(dup);
+        }
     }
+    endpoints.extend(additions);
 }
 
 /// `module.name`, or just `name` when module is empty.
@@ -1094,31 +1119,42 @@ fn file_import_qnames(source: &str, module: &str) -> HashMap<String, String> {
     out
 }
 
-/// Full mount-resolved prefix for a router qname: `full(parent) + mount + self`,
-/// memoized and cycle-guarded.
+/// Full mount-resolved prefixes for a router qname. A router included at several
+/// mounts (or via a parent that is) yields several full paths — one per mount
+/// path through the tree (`full(parent) + mount + self`). Memoized, cycle-guarded
+/// (a cycle contributes no path), and deduped.
 fn resolve_full_q(
     q: &str,
     self_by_q: &HashMap<String, String>,
-    parent_of: &HashMap<String, (String, String)>,
+    parent_of: &HashMap<String, Vec<(String, String)>>,
     app_qs: &HashSet<String>,
-    cache: &mut HashMap<String, Option<String>>,
-) -> Option<String> {
+    cache: &mut HashMap<String, Option<Vec<String>>>,
+) -> Vec<String> {
     if let Some(c) = cache.get(q) {
-        return c.clone();
+        return c.clone().unwrap_or_default(); // in-progress (None) → empty = cycle break
     }
-    cache.insert(q.to_string(), None); // cycle guard
+    cache.insert(q.to_string(), None); // mark visiting
     let self_p = self_by_q.get(q).cloned().unwrap_or_default();
-    let full = if app_qs.contains(q) {
-        self_p
-    } else if let Some((parent, mount)) = parent_of.get(q) {
-        let pfull =
-            resolve_full_q(parent, self_by_q, parent_of, app_qs, cache).unwrap_or_default();
-        normalize_prefix(&format!("{pfull}{mount}{self_p}"))
+    let mut out: Vec<String> = if app_qs.contains(q) {
+        vec![self_p.clone()]
+    } else if let Some(parents) = parent_of.get(q) {
+        let mut acc = Vec::new();
+        for (parent, mount) in parents {
+            let mut pfulls = resolve_full_q(parent, self_by_q, parent_of, app_qs, cache);
+            if pfulls.is_empty() {
+                pfulls.push(String::new());
+            }
+            for pf in pfulls {
+                acc.push(normalize_prefix(&format!("{pf}{mount}{self_p}")));
+            }
+        }
+        if acc.is_empty() { vec![self_p.clone()] } else { acc }
     } else {
-        self_p
+        vec![self_p.clone()]
     };
-    let out = Some(full);
-    cache.insert(q.to_string(), out.clone());
+    out.sort();
+    out.dedup();
+    cache.insert(q.to_string(), Some(out.clone()));
     out
 }
 
@@ -2894,6 +2930,28 @@ app.include_router(sub, prefix="/api")
         resolve_python_endpoint_prefixes(&files, &mut eps);
         assert_eq!(eps[0].contract, "http:GET /api/notif/x");
         assert_eq!(eps[1].contract, "http:GET /api/inst/y");
+    }
+
+    #[test]
+    fn multi_mount_emits_route_under_each_prefix() {
+        // api_router mounted at BOTH /api/v1 and /api → route served at both.
+        let files = vec![
+            (
+                "main.py".to_string(),
+                "from api import api_router\napp = FastAPI()\napp.include_router(api_router, prefix=\"/api/v1\")\napp.include_router(api_router, prefix=\"/api\")\n".to_string(),
+            ),
+            (
+                "api.py".to_string(),
+                "api_router = APIRouter()\n\n@api_router.get(\"/health\")\ndef health(): ...\n".to_string(),
+            ),
+        ];
+        let mut eps = vec![ep(&http_contract("GET", "/health"), "api.py", 3)];
+        resolve_python_endpoint_prefixes(&files, &mut eps);
+        let contracts: std::collections::HashSet<String> =
+            eps.iter().map(|e| e.contract.clone()).collect();
+        assert_eq!(eps.len(), 2, "{contracts:?}");
+        assert!(contracts.contains("http:GET /api/v1/health"), "{contracts:?}");
+        assert!(contracts.contains("http:GET /api/health"), "{contracts:?}");
     }
 
     #[test]

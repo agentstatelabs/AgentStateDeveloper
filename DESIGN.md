@@ -2283,7 +2283,19 @@ moat. Each transport/framework we cover is defensible surface.
 | t-004a | **Router-prefix resolution (intra-file)** ✅: same-file `APIRouter(prefix=)`/`Blueprint(url_prefix=)` + same-file `include_router`/`register_blueprint` mounts propagated onto decorator paths. Measured: ThreadWeaver 3→5 edges (5/6 outbound = 83%), Financial 0→3. Solves the flat-prefix style outright | OSS+ | 1 ✅ |
 | t-004b | **Router-prefix resolution (project mount tree)** ✅: added a project-level `LanguageAdapter::resolve_endpoint_prefixes` hook (index-pipeline runs it per language over all files) + a name-based mount-tree resolver (`full(child)=full(parent)+mount+self`, cycle-guarded; ambiguous names fall back to file-local). Resolves name-matched nested mounts. +2 tests. **Empirical: no change on Financial/ThreadWeaver** — TW is flat (t-004a already covers it), Financial's mount edges reference *import aliases* (`include_router(calculators_router)` where `calculators_router = from .calc import router as ...`) that name-matching can't bridge | Team | 1 ✅ |
 | t-004c | **Import-alias resolution** ✅: routers keyed by **qname** (`module.var`, globally unique); `include_router(alias)` resolves the alias to the imported router's qname via a line-based `from … import … as …` parser reusing `resolve_relative_import`. Connects the decorator's generic `router` to the mount edge across files. **Measured: Financial 3→11 matched edges (3.7×)**, routes now carry full nested paths (`/api/v1/blog/posts/{}`). +2 tests | Team | 1 ✅ |
-| t-004d | **Multi-mount**: a router mounted at multiple prefixes (Financial mounts `api_router` at *both* `/api/v1` and `/api`) should emit its routes under EACH. Needs child→`Vec<(parent,mount)>` edges, `resolve_full` returning N prefixes, and endpoint duplication (trait sig `&mut [..]` → `&mut Vec<..>`). **Quantified: +22 matches on Financial (11→~33, ~48%)** | Team | 2 |
+| t-004d | **Multi-mount** ✅: child→`Vec<(parent,mount)>` edges, `resolve_full_q` returns N prefixes, endpoint duplication (trait sig → `&mut Vec<..>`). A router mounted at both `/api/v1` and `/api` now emits routes under both. **Measured: Financial 11→33 (48%)**, exactly the predicted +22. +1 test | Team | 2 ✅ |
+
+**Router-prefix resolution (t-004) — server side COMPLETE.** Trajectory on
+Financial (real repo): raw **0** → t-004a intra-file **3** → t-004c aliased
+cross-file nested **11** → t-004d multi-mount **33/68 (48%)**. ThreadWeaver
+stable **5/6 (83%)**. The remaining 35 unmatched are all **`.tsx` frontend
+calls** (TS→Python cross-language): the backend correctly serves
+`/api/calculators/types` (both mounts) but the frontend calls
+`/api/calculators/budget`, which the backend serves elsewhere — i.e. **genuine
+frontend↔backend contract drift the tool now surfaces**, not a resolution gap.
+So the Python route resolution is done; further coverage is a cross-*language*
+matching concern (frontend TS client detection), tracked separately, not more
+prefix work.
 | t-005 | Cross-repo matcher: `federated_edges(registry)` = `match_edges` over the union of registered manifests | Team | 1 |
 | t-006 | Federated impact: `impact`/`prepare-change`/`since` walk cross-repo edges → downstream callers in *other* repos | Team | 2 |
 | t-007 | **Decision-aware federation**: for each cross-repo downstream, surface that repo's invariants/hazards from its committed sidecar | Team | 2 |

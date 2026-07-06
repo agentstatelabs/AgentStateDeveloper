@@ -232,7 +232,7 @@ pub trait LanguageAdapter: Send + Sync {
     fn resolve_endpoint_prefixes(
         &self,
         _files: &[(String, String)],
-        _endpoints: &mut [crate::cross_service::ServiceEndpoint],
+        _endpoints: &mut Vec<crate::cross_service::ServiceEndpoint>,
     ) {
     }
 
