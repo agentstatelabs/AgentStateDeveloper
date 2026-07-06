@@ -3,9 +3,11 @@
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 
 use agentstatedeveloper_core::registry::Registry;
+use agentstatedeveloper_core::{Engine, ServiceManifest, endpoints_from_tree, federated_edges};
 
 use crate::config::Config;
 
@@ -22,6 +24,10 @@ pub enum RepoCmd {
     Rm(RmArgs),
     /// Print the active repo's name and path.
     Show(ShowArgs),
+    /// Cross-repo service edges across all registered repos: a client call in
+    /// one repo matched to a route served by another, keyed by contract hash
+    /// (Plan Q t-005). Index each repo first so its contracts are current.
+    Edges(EdgesArgs),
 }
 
 #[derive(Debug, Args)]
@@ -60,6 +66,16 @@ pub struct ShowArgs {
     pub json: bool,
 }
 
+#[derive(Debug, Args)]
+pub struct EdgesArgs {
+    /// Machine-readable JSON.
+    #[arg(long)]
+    pub agent: bool,
+    /// Also include in-repo edges (default: cross-repo edges only).
+    #[arg(long)]
+    pub include_in_repo: bool,
+}
+
 pub fn run(_cfg: &Config, cmd: RepoCmd) -> Result<()> {
     match cmd {
         RepoCmd::Add(args) => run_add(args),
@@ -67,6 +83,7 @@ pub fn run(_cfg: &Config, cmd: RepoCmd) -> Result<()> {
         RepoCmd::Use(args) => run_use(args),
         RepoCmd::Rm(args) => run_rm(args),
         RepoCmd::Show(args) => run_show(args),
+        RepoCmd::Edges(args) => run_edges(args),
     }
 }
 
@@ -198,6 +215,83 @@ fn run_show(args: ShowArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn run_edges(args: EdgesArgs) -> Result<()> {
+    let reg = Registry::load().context("loading registry")?;
+    let entries = reg.list();
+    if entries.is_empty() {
+        println!("No repos registered. Add a couple with `asd repo add`, then re-index each.");
+        return Ok(());
+    }
+
+    // Load each registered repo's detected endpoints from its index.
+    let mut manifests = Vec::new();
+    let mut loaded: Vec<(String, usize)> = Vec::new();
+    for e in &entries {
+        match Engine::open_sqlite(&e.path) {
+            Ok(engine) => {
+                let tree = engine
+                    .repo
+                    .get_tree(&engine.ref_name, "/asd/v1/index/endpoints")
+                    .unwrap_or(Value::Null);
+                let endpoints = endpoints_from_tree(&tree);
+                let repo_id = endpoints
+                    .first()
+                    .map(|ep| ep.repo_id.clone())
+                    .unwrap_or_else(|| e.name.clone());
+                loaded.push((e.name.clone(), endpoints.len()));
+                manifests.push(ServiceManifest { repo_id, endpoints });
+            }
+            Err(err) => eprintln!("skip {}: {err}", e.name),
+        }
+    }
+
+    let edges = federated_edges(&manifests, !args.include_in_repo);
+
+    if args.agent {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "repos": loaded.iter().map(|(n, c)| json!({ "name": n, "endpoints": c })).collect::<Vec<_>>(),
+                "edges": edges,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{} repos loaded ({} endpoints total).",
+        loaded.len(),
+        loaded.iter().map(|(_, c)| c).sum::<usize>()
+    );
+    let label = if args.include_in_repo {
+        "edge(s)"
+    } else {
+        "cross-repo edge(s)"
+    };
+    if edges.is_empty() {
+        println!("No {label}. (Index each repo first so its contracts are current.)");
+        return Ok(());
+    }
+    println!("{} {label}:", edges.len());
+    for ed in &edges {
+        let scope = if ed.cross_repo { "  [cross-repo]" } else { "" };
+        println!(
+            "  {} → {}   {}{}",
+            ed.from.repo_id, ed.to.repo_id, ed.contract, scope
+        );
+        println!(
+            "      {}  →  {}",
+            short_qname(&ed.from.qname),
+            short_qname(&ed.to.qname)
+        );
+    }
+    Ok(())
+}
+
+fn short_qname(q: &str) -> &str {
+    q.rsplit(['.', ':']).next().unwrap_or(q)
 }
 
 fn default_name_for(path: &std::path::Path) -> Option<String> {

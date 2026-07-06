@@ -2296,7 +2296,7 @@ frontend↔backend contract drift the tool now surfaces**, not a resolution gap.
 So the Python route resolution is done; further coverage is a cross-*language*
 matching concern (frontend TS client detection), tracked separately, not more
 prefix work.
-| t-005 | Cross-repo matcher: `federated_edges(registry)` = `match_edges` over the union of registered manifests | Team | 1 |
+| t-005 | **Cross-repo matcher** ✅: `core::federated_edges(manifests, cross_repo_only)` = `match_edges` over the union of every registered repo's endpoints, filtered to edges whose consumer/producer differ (`cross_repo`). CLI `asd repo edges` loads each registered repo's index and reports them. **Demo: split Financial into fin-backend + fin-frontend → 33 cross-repo edges** (TS frontend → Python backend, with symbol provenance `CalculatorDirectoryPage → get_calculator_types`), cross-language and multi-mount. +1 test | Team | 1 ✅ |
 | t-006 | Federated impact: `impact`/`prepare-change`/`since` walk cross-repo edges → downstream callers in *other* repos | Team | 2 |
 | t-007 | **Decision-aware federation**: for each cross-repo downstream, surface that repo's invariants/hazards from its committed sidecar | Team | 2 |
 | t-008 | CTXone surface: expose federated impact via the hub's code tools (the pool), per-session `repo` scope | Team | 2 |

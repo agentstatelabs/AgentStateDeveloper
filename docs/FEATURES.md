@@ -74,8 +74,16 @@ commands:
 | `asd prepare-change` | The one-call agent context package for a planned change: design invariants, layer-grouped entry points, likely edit files, affected tests, effects, and recent git touches — composed into a single JSON response. |
 | `asd since <sha>` | Symbols in files changed since a commit + combined blast radius. The PR-review path: pass a base SHA, get impact without knowing symbol names. |
 | `asd investigate <query>` | Broad feature archaeology: search → expand call chains, invariants, hazards, and effects for the top entry points in one pass. |
-| `asd endpoints` | List cross-service endpoints (HTTP routes/clients, pub-sub) detected in the repo, show matched in-repo edges, and `--export` a service manifest. |
+| `asd endpoints` | List cross-service endpoints (HTTP routes/clients, pub-sub) detected in the repo, show matched in-repo edges, and `--export` a service manifest. Resolves nested/aliased/multi-mount router prefixes so a client call and a server route are keyed by the same full runtime contract. |
 | `asd dead-code` | Functions/methods with no inbound call edges (candidate dead code), excluding route handlers, tests, and main/dunder methods. |
+
+> **Contract-drift detection.** Because `asd endpoints` keys both client
+> calls and server routes by the same normalized contract (method + full
+> resolved path), a client call with **no matching route** is a candidate
+> drift signal — a caller reaching an endpoint the server no longer serves
+> at that path (e.g. a frontend calling `/api/calculators/budget` after the
+> backend moved budgets under `/api/budget/…`). In one repo this surfaces as
+> unmatched consumers; across repos it becomes cross-service impact (Team).
 
 ### Ledger & judgment
 

@@ -64,8 +64,8 @@ pub use context::assemble_symbol_context;
 pub use overview::{architecture_overview, build_id_map, dead_code_report, endpoints_report};
 pub use cross_service::{
     CrossServiceEdge, DetectedEndpoint, Direction, EndpointRef, ServiceEndpoint, ServiceManifest,
-    Transport, contract_hash, endpoints_from_tree, http_contract, match_edges, normalize_repo_id,
-    pubsub_contract, resolve_repo_id,
+    Transport, contract_hash, endpoints_from_tree, federated_edges, http_contract, match_edges,
+    normalize_repo_id, pubsub_contract, resolve_repo_id,
 };
 pub use dataflow::{
     DataFlowEdge, DataFlowKind, DetectedDataFlow, edges_from_tree, parse_params, resolve_edge,

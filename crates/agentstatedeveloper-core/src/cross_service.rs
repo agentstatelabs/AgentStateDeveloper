@@ -378,9 +378,76 @@ pub fn match_edges(endpoints: &[ServiceEndpoint]) -> Vec<CrossServiceEdge> {
     edges
 }
 
+/// Federated edges over a set of per-repo manifests: [`match_edges`] on the
+/// union of every manifest's endpoints. Each edge carries `cross_repo` (consumer
+/// and producer in different repos). With `cross_repo_only`, in-repo edges are
+/// dropped — the federated view a Team-tier tool wants: "a client in repo A
+/// calls a route served by repo B" (Plan Q t-005).
+pub fn federated_edges(manifests: &[ServiceManifest], cross_repo_only: bool) -> Vec<CrossServiceEdge> {
+    let all: Vec<ServiceEndpoint> = manifests
+        .iter()
+        .flat_map(|m| m.endpoints.iter().cloned())
+        .collect();
+    let mut edges = match_edges(&all);
+    if cross_repo_only {
+        edges.retain(|e| e.cross_repo);
+    }
+    edges
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn endpoint(repo: &str, dir: Direction, contract: &str) -> ServiceEndpoint {
+        ServiceEndpoint {
+            transport: Transport::Http,
+            direction: dir,
+            contract: contract.to_string(),
+            repo_id: repo.to_string(),
+            symbol_id: format!("{repo}:sym"),
+            qname: format!("{repo}.fn"),
+            file: format!("{repo}/f.py"),
+            line: 1,
+            confidence: 0.9,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn federated_edges_match_client_in_a_to_route_in_b() {
+        let manifests = vec![
+            ServiceManifest {
+                repo_id: "frontend".into(),
+                endpoints: vec![
+                    endpoint("frontend", Direction::Outbound, "http:GET /api/orders/{}"),
+                    // a call to something nobody serves — must NOT produce an edge
+                    endpoint("frontend", Direction::Outbound, "http:GET /api/ghost"),
+                ],
+            },
+            ServiceManifest {
+                repo_id: "backend".into(),
+                endpoints: vec![endpoint("backend", Direction::Inbound, "http:GET /api/orders/{}")],
+            },
+        ];
+        let edges = federated_edges(&manifests, true);
+        assert_eq!(edges.len(), 1, "{edges:?}");
+        assert_eq!(edges[0].from.repo_id, "frontend");
+        assert_eq!(edges[0].to.repo_id, "backend");
+        assert_eq!(edges[0].contract, "http:GET /api/orders/{}");
+        assert!(edges[0].cross_repo);
+
+        // An in-repo-only match is excluded when cross_repo_only is set.
+        let same = vec![ServiceManifest {
+            repo_id: "solo".into(),
+            endpoints: vec![
+                endpoint("solo", Direction::Outbound, "http:GET /api/x"),
+                endpoint("solo", Direction::Inbound, "http:GET /api/x"),
+            ],
+        }];
+        assert_eq!(federated_edges(&same, true).len(), 0);
+        assert_eq!(federated_edges(&same, false).len(), 1);
+    }
 
     // --- HTTP contract normalization ------------------------------------
 
