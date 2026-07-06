@@ -536,17 +536,28 @@ fn infer_service_endpoints_in_python(
     symbols: &[ParsedSymbol],
 ) -> Vec<DetectedEndpoint> {
     let mut out = Vec::new();
+    // Plan Q t-004: resolve each router's prefix once per file so route contracts
+    // are the full runtime path, not just the decorator arg. Covers same-file
+    // `APIRouter(prefix=)` / `Blueprint(url_prefix=)` and same-file
+    // `include_router`/`register_blueprint` mounts. (Cross-file/nested mount
+    // trees are increment 2.)
+    let router_prefixes = collect_router_prefixes(source);
     for (idx, raw) in source.lines().enumerate() {
         let line_no = (idx + 1) as u32;
         let line = raw.trim();
 
-        // Inbound: route decorators (@app.get("/x"), @app.route("/x", methods=[...])).
+        // Inbound: route decorators (@app.get("/x"), @router.get("/x"), @bp.route(...)).
+        let receiver_prefix = route_receiver(line).and_then(|r| router_prefixes.get(&r).cloned());
         for (method, path, conf) in parse_route_decorator(line) {
             if let Some(owner) = owner_for_decorator(symbols, line_no) {
+                let full = match &receiver_prefix {
+                    Some(pfx) => join_route(pfx, &path),
+                    None => path.clone(),
+                };
                 out.push(DetectedEndpoint {
                     transport: Transport::Http,
                     direction: Direction::Inbound,
-                    contract: http_contract(&method, &path),
+                    contract: http_contract(&method, &full),
                     owner_qname: owner.qname.clone(),
                     file: file.to_string(),
                     line: line_no,
@@ -713,6 +724,178 @@ fn parse_route_decorator(line: &str) -> Vec<(String, String, f64)> {
             .collect();
     }
     Vec::new()
+}
+
+// ── router-prefix resolution (Plan Q t-004) ────────────────────────────────
+
+/// The receiver variable of a route decorator: `@router.get("/x")` → `router`,
+/// `@app.route(...)` → `app`. `None` for bare `@decorator(` shapes.
+fn route_receiver(line: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix('@')?;
+    let paren = rest.find('(')?;
+    let callee = rest[..paren].trim();
+    let dot = callee.rfind('.')?;
+    let recv = callee[..dot].trim();
+    if recv.is_empty() {
+        None
+    } else {
+        Some(recv.to_string())
+    }
+}
+
+/// Map every router/blueprint variable in a file to its resolved prefix, from
+/// same-file `APIRouter(prefix=)` / `Blueprint(url_prefix=)` definitions and
+/// same-file `include_router(child, prefix=)` / `register_blueprint(child,
+/// url_prefix=)` mounts. The mount prefix precedes the router's own prefix
+/// (FastAPI/Flask ordering).
+fn collect_router_prefixes(source: &str) -> HashMap<String, String> {
+    let mut self_p: HashMap<String, String> = HashMap::new();
+    let mut mount_p: HashMap<String, String> = HashMap::new();
+    for raw in source.lines() {
+        let line = raw.trim();
+        // `<var> = APIRouter(... prefix="P" ...)` / `Blueprint(... url_prefix="P" ...)`.
+        if let Some(eq) = line.find('=') {
+            let var = line[..eq].trim();
+            if is_ident(var) {
+                let rhs = &line[eq + 1..];
+                if let Some(a) = ctor_args(rhs, "APIRouter") {
+                    if let Some(p) = string_kwarg(a, "prefix") {
+                        self_p.insert(var.to_string(), p);
+                    }
+                } else if let Some(a) = ctor_args(rhs, "Blueprint") {
+                    if let Some(p) = string_kwarg(a, "url_prefix") {
+                        self_p.insert(var.to_string(), p);
+                    }
+                }
+            }
+        }
+        // `<recv>.include_router(<child>, prefix="Q")` / `register_blueprint(<child>, url_prefix="Q")`.
+        if let Some(a) = ctor_args(line, "include_router") {
+            if let (Some(child), Some(q)) = (first_ident_arg(a), string_kwarg(a, "prefix")) {
+                mount_p.entry(child).or_insert(q);
+            }
+        }
+        if let Some(a) = ctor_args(line, "register_blueprint") {
+            if let (Some(child), Some(q)) = (first_ident_arg(a), string_kwarg(a, "url_prefix")) {
+                mount_p.entry(child).or_insert(q);
+            }
+        }
+    }
+    let keys: HashSet<String> = self_p.keys().chain(mount_p.keys()).cloned().collect();
+    let mut out = HashMap::new();
+    for k in keys {
+        let full = normalize_prefix(&format!(
+            "{}{}",
+            mount_p.get(&k).map(String::as_str).unwrap_or(""),
+            self_p.get(&k).map(String::as_str).unwrap_or("")
+        ));
+        if !full.is_empty() {
+            out.insert(k, full);
+        }
+    }
+    out
+}
+
+/// Args slice after `Name(` in `s`, respecting an identifier boundary before
+/// `Name` (so `APIRouter` is not matched inside `MyAPIRouter`).
+fn ctor_args<'a>(s: &'a str, name: &str) -> Option<&'a str> {
+    let mut from = 0;
+    while let Some(rel) = s[from..].find(name) {
+        let pos = from + rel;
+        from = pos + name.len();
+        let before_ok = pos == 0
+            || !s[..pos]
+                .chars()
+                .next_back()
+                .map(|c| c.is_alphanumeric() || c == '_')
+                .unwrap_or(false);
+        let after = s[pos + name.len()..].trim_start();
+        if before_ok {
+            if let Some(args) = after.strip_prefix('(') {
+                return Some(args);
+            }
+        }
+    }
+    None
+}
+
+/// A `key="value"` string kwarg, respecting an identifier boundary before `key`
+/// (so `prefix` is not matched inside `url_prefix`).
+fn string_kwarg(args: &str, key: &str) -> Option<String> {
+    let mut from = 0;
+    while let Some(rel) = args[from..].find(key) {
+        let pos = from + rel;
+        from = pos + key.len();
+        let before_ok = pos == 0
+            || !args[..pos]
+                .chars()
+                .next_back()
+                .map(|c| c.is_alphanumeric() || c == '_')
+                .unwrap_or(false);
+        if !before_ok {
+            continue;
+        }
+        let after = args[pos + key.len()..].trim_start();
+        if let Some(after) = after.strip_prefix('=') {
+            if let Some(s) = read_string_literal(after.trim_start()) {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
+/// First positional argument if it's a (possibly dotted) identifier.
+fn first_ident_arg(args: &str) -> Option<String> {
+    let s = args.trim_start();
+    let end = s
+        .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+        .unwrap_or(s.len());
+    let id = &s[..end];
+    if id.is_empty() || id.starts_with('.') {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
+fn is_ident(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// Normalize a prefix: leading slash, no trailing slash, collapse `//`.
+fn normalize_prefix(p: &str) -> String {
+    let p = p.trim();
+    if p.is_empty() {
+        return String::new();
+    }
+    let mut s = p.to_string();
+    while s.contains("//") {
+        s = s.replace("//", "/");
+    }
+    if !s.starts_with('/') {
+        s.insert(0, '/');
+    }
+    while s.len() > 1 && s.ends_with('/') {
+        s.pop();
+    }
+    s
+}
+
+/// Join a resolved router prefix with a decorator path into the full route path.
+fn join_route(prefix: &str, path: &str) -> String {
+    if prefix.is_empty() {
+        return path.to_string();
+    }
+    let p = prefix.trim_end_matches('/');
+    if path.is_empty() || path == "/" {
+        return p.to_string();
+    }
+    if path.starts_with('/') {
+        format!("{p}{path}")
+    } else {
+        format!("{p}/{path}")
+    }
 }
 
 /// Parse requests/httpx client calls on a line into `(METHOD, url, confidence)`.
@@ -2363,6 +2546,48 @@ fn flatten_attribute(node: Node<'_>, src: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn router_prefix_resolution_fastapi_and_flask() {
+        // FastAPI: APIRouter(prefix=) on the router the decorator hangs on.
+        let src = r#"
+router = APIRouter(prefix="/api/notifications", tags=["x"])
+
+@router.get("/unread")
+def unread(): ...
+"#;
+        let p = collect_router_prefixes(src);
+        assert_eq!(p.get("router").map(String::as_str), Some("/api/notifications"));
+        assert_eq!(route_receiver("@router.get(\"/unread\")").as_deref(), Some("router"));
+        assert_eq!(join_route("/api/notifications", "/unread"), "/api/notifications/unread");
+
+        // Flask blueprint url_prefix.
+        let flask = r#"bp = Blueprint("acct", __name__, url_prefix="/accounts")"#;
+        assert_eq!(collect_router_prefixes(flask).get("bp").map(String::as_str), Some("/accounts"));
+
+        // Same-file mount: include_router prefix precedes the router's own prefix.
+        let mounted = r#"
+sub = APIRouter(prefix="/items")
+app.include_router(sub, prefix="/api")
+"#;
+        assert_eq!(collect_router_prefixes(mounted).get("sub").map(String::as_str), Some("/api/items"));
+    }
+
+    #[test]
+    fn router_prefix_edge_cases() {
+        // `prefix` must not be matched inside `url_prefix`, and a plain FastAPI()
+        // app with no prefix yields nothing.
+        assert_eq!(string_kwarg(r#"url_prefix="/z""#, "prefix"), None);
+        assert_eq!(string_kwarg(r#"url_prefix="/z""#, "url_prefix").as_deref(), Some("/z"));
+        assert!(collect_router_prefixes("app = FastAPI()").is_empty());
+        // join handles missing/extra slashes and root paths.
+        assert_eq!(join_route("/api", "items"), "/api/items");
+        assert_eq!(join_route("/api/", "/items"), "/api/items");
+        assert_eq!(join_route("/api", "/"), "/api");
+        assert_eq!(join_route("", "/items"), "/items");
+        // ctor boundary: APIRouter not matched inside a longer identifier.
+        assert!(ctor_args("x = MyAPIRouter(prefix=\"/a\")", "APIRouter").is_none());
+    }
 
     #[test]
     fn module_prefix_strips_py_and_leading_dot_slash() {
