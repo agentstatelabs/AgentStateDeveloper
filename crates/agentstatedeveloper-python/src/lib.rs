@@ -902,51 +902,62 @@ fn join_route(prefix: &str, path: &str) -> String {
     }
 }
 
-// ── project-level mount-tree resolution (Plan Q t-004b) ─────────────────────
+// ── project-level mount-tree resolution (Plan Q t-004b/c) ───────────────────
 
 /// Rewrite each inbound HTTP endpoint's contract to the full runtime path by
 /// resolving the cross-file, nested router-mount chain
 /// (`app.include_router(api, prefix="/api")` → `api.include_router(calc,
-/// prefix="/calc")` → `@calc.get("/x")` = `/api/calc/x`). Router variables are
-/// resolved globally by name when unambiguous; a name defined in multiple files
-/// with differing prefixes falls back to file-local resolution (t-004a).
+/// prefix="/calc")` → `@calc.get("/x")` = `/api/calc/x`). Routers are keyed by
+/// their **qname** (`module.var`), so an `include_router(alias)` mount connects
+/// to the aliased router's routes even across files and generic `router` names
+/// (t-004c: aliases resolved via `from … import … as …`).
 fn resolve_python_endpoint_prefixes(files: &[(String, String)], endpoints: &mut [ServiceEndpoint]) {
-    // Global router table across all files.
-    let mut self_by_var: HashMap<String, Option<String>> = HashMap::new(); // None = ambiguous
-    let mut parent_of: HashMap<String, (String, String)> = HashMap::new(); // child -> (parent, mount)
-    let mut app_vars: HashSet<String> = HashSet::new();
+    // Per-file module qname + import alias map (local name -> imported qname).
+    let module_by_path: HashMap<&str, String> = files
+        .iter()
+        .map(|(p, _)| (p.as_str(), module_qname_prefix(p)))
+        .collect();
+    let imports_by_path: HashMap<&str, HashMap<String, String>> = files
+        .iter()
+        .map(|(p, s)| (p.as_str(), file_import_qnames(s, &module_by_path[p.as_str()])))
+        .collect();
 
-    for (_path, source) in files {
+    // Global router tables keyed by qname (globally unique — no ambiguity).
+    let mut self_by_q: HashMap<String, String> = HashMap::new();
+    let mut parent_of: HashMap<String, (String, String)> = HashMap::new();
+    let mut app_qs: HashSet<String> = HashSet::new();
+    let mut known: HashSet<String> = HashSet::new();
+
+    for (path, source) in files {
+        let module = &module_by_path[path.as_str()];
+        let imports = &imports_by_path[path.as_str()];
         for raw in source.lines() {
             let line = raw.trim();
+            // `<var> = APIRouter(...)` / `Blueprint(...)` / `FastAPI()` / `Flask()`.
             if let Some(eq) = line.find('=') {
                 let var = line[..eq].trim();
                 if is_ident(var) {
                     let rhs = &line[eq + 1..];
-                    let sp = if let Some(a) = ctor_args(rhs, "APIRouter") {
-                        string_kwarg(a, "prefix")
-                    } else if let Some(a) = ctor_args(rhs, "Blueprint") {
-                        string_kwarg(a, "url_prefix")
-                    } else {
-                        None
-                    };
-                    if let Some(p) = sp {
-                        let p = normalize_prefix(&p);
-                        match self_by_var.get(var) {
-                            None => {
-                                self_by_var.insert(var.to_string(), Some(p));
-                            }
-                            Some(Some(existing)) if *existing != p => {
-                                self_by_var.insert(var.to_string(), None);
-                            }
-                            _ => {}
+                    let q = qualify(module, var); // a definition binds locally
+                    if let Some(a) = ctor_args(rhs, "APIRouter") {
+                        if let Some(p) = string_kwarg(a, "prefix") {
+                            self_by_q.insert(q.clone(), normalize_prefix(&p));
                         }
-                    }
-                    if ctor_args(rhs, "FastAPI").is_some() || ctor_args(rhs, "Flask").is_some() {
-                        app_vars.insert(var.to_string());
+                        known.insert(q);
+                    } else if let Some(a) = ctor_args(rhs, "Blueprint") {
+                        if let Some(p) = string_kwarg(a, "url_prefix") {
+                            self_by_q.insert(q.clone(), normalize_prefix(&p));
+                        }
+                        known.insert(q);
+                    } else if ctor_args(rhs, "FastAPI").is_some()
+                        || ctor_args(rhs, "Flask").is_some()
+                    {
+                        app_qs.insert(q.clone());
+                        known.insert(q);
                     }
                 }
             }
+            // `<parent>.include_router(<child>, prefix="Q")` / register_blueprint.
             for (fname, pkey) in [
                 ("include_router", "prefix"),
                 ("register_blueprint", "url_prefix"),
@@ -958,7 +969,11 @@ fn resolve_python_endpoint_prefixes(files: &[(String, String)], endpoints: &mut 
                         let m = string_kwarg(a, pkey)
                             .map(|s| normalize_prefix(&s))
                             .unwrap_or_default();
-                        parent_of.entry(child).or_insert((parent, m));
+                        let child_q = resolve_name(&child, module, imports);
+                        let parent_q = resolve_name(&parent, module, imports);
+                        known.insert(child_q.clone());
+                        known.insert(parent_q.clone());
+                        parent_of.entry(child_q).or_insert((parent_q, m));
                     }
                 }
             }
@@ -977,6 +992,10 @@ fn resolve_python_endpoint_prefixes(files: &[(String, String)], endpoints: &mut 
         let Some(src) = src_by_path.get(ep.file.as_str()).copied() else {
             continue;
         };
+        let Some(module) = module_by_path.get(ep.file.as_str()) else {
+            continue;
+        };
+        let imports = &imports_by_path[ep.file.as_str()];
         let Some(line) = src.lines().nth(ep.line.saturating_sub(1) as usize) else {
             continue;
         };
@@ -995,59 +1014,111 @@ fn resolve_python_endpoint_prefixes(files: &[(String, String)], endpoints: &mut 
             .unwrap_or("GET")
             .to_string();
 
-        // Prefer global resolution when the receiver has an unambiguous
-        // definition or a mount edge; otherwise fall back to file-local.
-        let global = if matches!(self_by_var.get(&recv), Some(Some(_)))
-            || parent_of.contains_key(&recv)
-        {
-            resolve_full(&recv, &self_by_var, &parent_of, &app_vars, &mut cache)
+        let recv_q = resolve_name(&recv, module, imports);
+        // Global mount-tree resolution for known routers; else file-local (t-004a).
+        let full = if known.contains(&recv_q) {
+            resolve_full_q(&recv_q, &self_by_q, &parent_of, &app_qs, &mut cache).unwrap_or_default()
         } else {
-            None
-        };
-        let full = match global {
-            Some(p) => p,
-            None => local
+            local
                 .entry(ep.file.clone())
                 .or_insert_with(|| collect_router_prefixes(src))
                 .get(&recv)
                 .cloned()
-                .unwrap_or_default(),
+                .unwrap_or_default()
         };
         let new_path = join_route(&full, raw_path);
         ep.contract = http_contract(&method, &new_path);
     }
 }
 
-/// Full mount-resolved prefix for a router var: `full(parent) + mount + self`,
-/// memoized and cycle-guarded. Ambiguous vars resolve to `None` (→ file-local).
-fn resolve_full(
-    var: &str,
-    self_by_var: &HashMap<String, Option<String>>,
+/// `module.name`, or just `name` when module is empty.
+fn qualify(module: &str, name: &str) -> String {
+    if module.is_empty() {
+        name.to_string()
+    } else {
+        format!("{module}.{name}")
+    }
+}
+
+/// Resolve a local name to a qname: an imported alias resolves to the imported
+/// symbol's qname; otherwise it's `module.name` (a local binding).
+fn resolve_name(name: &str, module: &str, imports: &HashMap<String, String>) -> String {
+    imports
+        .get(name)
+        .cloned()
+        .unwrap_or_else(|| qualify(module, name))
+}
+
+/// Per-file import map: local name -> imported symbol qname, for
+/// `from <mod> import a, b as c` (relative or absolute). Best-effort single-line
+/// — enough to connect router aliases. Reuses [`resolve_relative_import`].
+fn file_import_qnames(source: &str, module: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for raw in source.lines() {
+        let line = raw.trim();
+        let Some(rest) = line.strip_prefix("from ") else {
+            continue;
+        };
+        let Some(imp) = rest.find(" import ") else {
+            continue;
+        };
+        let module_raw = rest[..imp].trim();
+        let resolved = if module_raw.starts_with('.') {
+            match resolve_relative_import(module, module_raw) {
+                Some(m) => m,
+                None => continue,
+            }
+        } else {
+            module_raw.to_string()
+        };
+        let names = rest[imp + " import ".len()..]
+            .trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .trim_end_matches('\\')
+            .trim();
+        for part in names.split(',') {
+            let part = part.trim();
+            if part.is_empty() || part == "*" {
+                continue;
+            }
+            let (orig, local) = match part.split_once(" as ") {
+                Some((o, l)) => (o.trim(), l.trim()),
+                None => (part, part),
+            };
+            if is_ident(orig) && is_ident(local) {
+                out.insert(local.to_string(), qualify(&resolved, orig));
+            }
+        }
+    }
+    out
+}
+
+/// Full mount-resolved prefix for a router qname: `full(parent) + mount + self`,
+/// memoized and cycle-guarded.
+fn resolve_full_q(
+    q: &str,
+    self_by_q: &HashMap<String, String>,
     parent_of: &HashMap<String, (String, String)>,
-    app_vars: &HashSet<String>,
+    app_qs: &HashSet<String>,
     cache: &mut HashMap<String, Option<String>>,
 ) -> Option<String> {
-    if let Some(c) = cache.get(var) {
+    if let Some(c) = cache.get(q) {
         return c.clone();
     }
-    // Mark in-progress as None so a cycle terminates instead of recursing.
-    cache.insert(var.to_string(), None);
-    let self_p = match self_by_var.get(var) {
-        Some(Some(p)) => p.clone(),
-        Some(None) => return None, // ambiguous name
-        None => String::new(),     // no APIRouter def (the app, or an edge-only var)
-    };
-    let full = if app_vars.contains(var) {
+    cache.insert(q.to_string(), None); // cycle guard
+    let self_p = self_by_q.get(q).cloned().unwrap_or_default();
+    let full = if app_qs.contains(q) {
         self_p
-    } else if let Some((parent, mount)) = parent_of.get(var) {
+    } else if let Some((parent, mount)) = parent_of.get(q) {
         let pfull =
-            resolve_full(parent, self_by_var, parent_of, app_vars, cache).unwrap_or_default();
+            resolve_full_q(parent, self_by_q, parent_of, app_qs, cache).unwrap_or_default();
         normalize_prefix(&format!("{pfull}{mount}{self_p}"))
     } else {
         self_p
     };
     let out = Some(full);
-    cache.insert(var.to_string(), out.clone());
+    cache.insert(q.to_string(), out.clone());
     out
 }
 
@@ -2775,20 +2846,26 @@ app.include_router(sub, prefix="/api")
     }
 
     #[test]
-    fn cross_file_mount_tree_resolves_nested_prefix() {
-        // app → api_router (/api) → calculators_router (/calculators) → @get(/budget)
+    fn cross_file_aliased_mount_tree_resolves_nested_prefix() {
+        // The real-world shape: nested include_router across files, where the
+        // mounted router is an ALIASED import and the decorator uses a generic
+        // `router`. Qname identity (module.var) bridges the alias.
+        //   main:  app=FastAPI(); app.include_router(api_router, "/api")
+        //   api:   api_router=APIRouter(); include_router(calculators_router, "/calculators")
+        //          (calculators_router is `from calc import router as calculators_router`)
+        //   calc:  router=APIRouter(); @router.get("/budget")  → /api/calculators/budget
         let files = vec![
             (
                 "main.py".to_string(),
-                "app = FastAPI()\napp.include_router(api_router, prefix=\"/api\")\n".to_string(),
+                "from api import api_router\napp = FastAPI()\napp.include_router(api_router, prefix=\"/api\")\n".to_string(),
             ),
             (
                 "api.py".to_string(),
-                "api_router = APIRouter()\napi_router.include_router(calculators_router, prefix=\"/calculators\")\n".to_string(),
+                "from calc import router as calculators_router\napi_router = APIRouter()\napi_router.include_router(calculators_router, prefix=\"/calculators\")\n".to_string(),
             ),
             (
                 "calc.py".to_string(),
-                "calculators_router = APIRouter()\n\n@calculators_router.get(\"/budget\")\ndef budget(): ...\n".to_string(),
+                "router = APIRouter()\n\n@router.get(\"/budget\")\ndef budget(): ...\n".to_string(),
             ),
         ];
         let mut eps = vec![ep(&http_contract("GET", "/budget"), "calc.py", 3)];
@@ -2797,8 +2874,9 @@ app.include_router(sub, prefix="/api")
     }
 
     #[test]
-    fn ambiguous_router_name_falls_back_to_file_local() {
-        // `router` means different things in two files → use each file's own prefix.
+    fn same_router_name_distinct_modules_resolve_independently() {
+        // `router` in two files → distinct qnames (a.router, b.router), each
+        // resolving to its own prefix (no cross-contamination).
         let files = vec![
             (
                 "a.py".to_string(),
