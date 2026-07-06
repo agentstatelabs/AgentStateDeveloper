@@ -2213,6 +2213,12 @@ in ASD before writing the code).
 
 ## Plan Q — Federated cross-repo context (multi-repo)
 
+> **STATUS: CLOSED (2026-07).** Waves 1 & 2 shipped — the federated,
+> decision-aware cross-repo contract-impact spine is built, verified, and
+> demonstrated end-to-end (acceptance query passes), reachable via `asd repo
+> edges/impact` (CLI) and the CTXone hub's `code_cross_repo_edges`/`code_impact`
+> (MCP). Wave 3 (Enterprise scale-out) graduated to **Plan R**.
+
 ### Motivation
 
 ASD is single-repo: one `.asd-state.db`, one `Engine`, resolved from
@@ -2365,4 +2371,97 @@ substantial standalone effort; they extend the proven spine to org scale
 rather than change it. Cross-*language* client detection already works (TS→
 Python edges matched); widening it (axios/fetch variants, more frameworks) is
 incremental coverage, not a new capability.
+
+---
+
+## Plan R — Federated cross-repo at org scale (Team / Enterprise)
+
+### Motivation
+
+Plan Q proved the hard part: cross-repo, cross-language, **decision-aware**
+contract impact is feasible and works end-to-end (Financial 0→33 resolved
+routes; 33 cross-repo edges; the acceptance query surfaces a downstream
+caller's invariants/hazards from its own ledger). But that spine runs on:
+
+- a **per-developer** registry (`~/.config/asd/repos.toml`) — not a shared,
+  org-wide federation set;
+- **HTTP + pub-sub** contracts only;
+- a **single-process, reopen-every-call** matcher;
+- **no governance** — nothing gates a contract change against its blast radius.
+
+Plan R takes the proven spine to org scale. It does NOT re-derive the model —
+every task extends what Plan Q shipped. This is the commercial surface: Team
+gets shared federation + broader coverage; Enterprise gets governance, audit,
+and scale.
+
+### Core concept
+
+Same federation model — **join per-repo manifests on contract hash, read
+judgment from each repo's own sidecar, never merge into one graph** — but:
+
+- the **registry becomes a shared service** (a team points at one org
+  registry instead of each dev's file);
+- **contract identity widens** beyond HTTP/pub-sub to gRPC, GraphQL, event
+  schemas, and shared library types — each a new join key, each defensible
+  moat surface;
+- the hub **holds many repos' endpoint indexes** with incremental refresh
+  and freshness signals;
+- a **change-governance gate** turns cross-repo impact from advisory into
+  enforceable (a contract change with N downstream consumers can require
+  approval), with an audit trail.
+
+### Task table
+
+| Task | Description | Tier | Wave |
+|------|-------------|------|------|
+| t-001 | **Org repo registry**: a shared, server-hosted registry (Postgres-backed on the CTXone hub) that the hub and `asd repo *` read, so a team shares one federation set instead of each dev's `repos.toml`. Sync/enroll flow; keep the local file as the OSS fallback | Team | 1 |
+| t-002 | **Freshness / staleness**: per-repo index age + contract snapshot; `asd repo edges/impact` flag repos whose contracts are stale; a freshness report + SLA so a federated answer states its own confidence ("2 of 7 repos stale") | Team | 1 |
+| t-003 | **Hub-scale pooling**: the hub holds N repos' endpoint indexes with LRU/incremental refresh instead of reopening every db per `code_impact` call; bounded memory, warm cache | Team | 1 |
+| t-004 | **Cross-language client widening**: axios/fetch/ky and more frameworks (Vue/Svelte/Angular, Go/Java/C# HTTP clients) so more real cross-language edges match — turns legitimate frontend/service calls that currently read as "drift" into matched edges | Team | 1 |
+| t-005 | **gRPC transport**: `.proto` service/method → contract key; generated client stubs → outbound, server impls → inbound | Team/Ent | 2 |
+| t-006 | **GraphQL transport**: schema operations (query/mutation/subscription) as contracts; client operations as consumers | Team/Ent | 2 |
+| t-007 | **Event-schema transport**: beyond Celery — Kafka/SNS/SQS/NATS topic + message-schema contracts across producers/consumers | Team/Ent | 2 |
+| t-008 | **Shared-type contracts**: a repo importing a shared package's type/interface is a consumer; a change to that type impacts them (contract = the shared symbol's fingerprint) | Ent | 2 |
+| t-009 | **Change-governance gate**: a contract change with ≥N cross-repo consumers requires approval before merge (ties to the ratify/policy layer); the gate reads federated impact | Ent | 3 |
+| t-010 | **Audit / SIEM export**: cross-repo impact + governance decisions emitted to the hash-chained audit stream and exportable (SIEM) — the compliance trail | Ent | 3 |
+| t-011 | **Org dashboards**: federated edge/impact overview, drift report, contract-coverage and adoption metrics across the portfolio (Lens/hub UI) | Ent | 3 |
+
+### Wave ordering
+
+- **Wave 1 (Team scale):** t-001–t-004. Shared federation set, freshness,
+  scale, and wider client coverage — makes the Plan Q spine usable by a real
+  team on real portfolios.
+- **Wave 2 (Coverage / moat):** t-005–t-008. Each transport is a new contract
+  key competitors would have to re-derive; the depth that makes the analysis
+  cover real polyglot systems.
+- **Wave 3 (Enterprise governance):** t-009–t-011. Turns advisory impact into
+  enforceable governance with an audit trail and org-wide visibility.
+
+### Acceptance
+
+On an org registry of ≥5 real repos spanning ≥2 transports (e.g. HTTP + gRPC):
+
+> *"A contract change in repo A with 4 downstream consumers across 3 repos is
+> flagged by the change-governance gate before merge; the federated impact is
+> complete (org registry) and states its freshness; the decision is recorded
+> in the audit stream."*
+
+with each transport's edges matched by contract hash, judgment read from each
+consumer's sidecar, and no merged database.
+
+### What's NOT in this plan
+
+- **Re-deriving the federation model.** Plan R only extends Plan Q's proven
+  spine (join-on-demand, contract-hash, sidecar judgment, no merged graph).
+- **A hosted multi-tenant SaaS.** Org registry can be self-hosted on the
+  team's own CTXone hub; managed hosting is a separate commercial concern.
+- **Dynamic/runtime contract discovery.** Still static contract identity;
+  runtime tracing remains out of scope.
+
+### Done when
+
+An org registry drives federated impact across a polyglot portfolio (≥2
+transports), each answer reports its freshness, the change-governance gate
+enforces approval on high-blast-radius contract changes, and those decisions
+land in the audit stream — all reachable from the CTXone hub over MCP.
 
