@@ -10,7 +10,7 @@ use agentstatedeveloper_core::adapter::{
     CallEdge, DynamicDispatchHint, LanguageAdapter, ParsedSymbol, UnresolvedCall, WorkspaceSymbols,
 };
 use agentstatedeveloper_core::cross_service::{
-    DetectedEndpoint, Direction, Transport, http_contract, pubsub_contract,
+    DetectedEndpoint, Direction, ServiceEndpoint, Transport, http_contract, pubsub_contract,
 };
 use agentstatedeveloper_core::dataflow::DetectedDataFlow;
 use agentstatedeveloper_core::error::{AsdError, Result};
@@ -66,6 +66,10 @@ impl LanguageAdapter for PythonAdapter {
         symbols: &[ParsedSymbol],
     ) -> Vec<DetectedEndpoint> {
         infer_service_endpoints_in_python(file, source, symbols)
+    }
+
+    fn resolve_endpoint_prefixes(&self, files: &[(String, String)], endpoints: &mut [ServiceEndpoint]) {
+        resolve_python_endpoint_prefixes(files, endpoints);
     }
 
     fn extract_dataflow(
@@ -895,6 +899,172 @@ fn join_route(prefix: &str, path: &str) -> String {
         format!("{p}{path}")
     } else {
         format!("{p}/{path}")
+    }
+}
+
+// ── project-level mount-tree resolution (Plan Q t-004b) ─────────────────────
+
+/// Rewrite each inbound HTTP endpoint's contract to the full runtime path by
+/// resolving the cross-file, nested router-mount chain
+/// (`app.include_router(api, prefix="/api")` → `api.include_router(calc,
+/// prefix="/calc")` → `@calc.get("/x")` = `/api/calc/x`). Router variables are
+/// resolved globally by name when unambiguous; a name defined in multiple files
+/// with differing prefixes falls back to file-local resolution (t-004a).
+fn resolve_python_endpoint_prefixes(files: &[(String, String)], endpoints: &mut [ServiceEndpoint]) {
+    // Global router table across all files.
+    let mut self_by_var: HashMap<String, Option<String>> = HashMap::new(); // None = ambiguous
+    let mut parent_of: HashMap<String, (String, String)> = HashMap::new(); // child -> (parent, mount)
+    let mut app_vars: HashSet<String> = HashSet::new();
+
+    for (_path, source) in files {
+        for raw in source.lines() {
+            let line = raw.trim();
+            if let Some(eq) = line.find('=') {
+                let var = line[..eq].trim();
+                if is_ident(var) {
+                    let rhs = &line[eq + 1..];
+                    let sp = if let Some(a) = ctor_args(rhs, "APIRouter") {
+                        string_kwarg(a, "prefix")
+                    } else if let Some(a) = ctor_args(rhs, "Blueprint") {
+                        string_kwarg(a, "url_prefix")
+                    } else {
+                        None
+                    };
+                    if let Some(p) = sp {
+                        let p = normalize_prefix(&p);
+                        match self_by_var.get(var) {
+                            None => {
+                                self_by_var.insert(var.to_string(), Some(p));
+                            }
+                            Some(Some(existing)) if *existing != p => {
+                                self_by_var.insert(var.to_string(), None);
+                            }
+                            _ => {}
+                        }
+                    }
+                    if ctor_args(rhs, "FastAPI").is_some() || ctor_args(rhs, "Flask").is_some() {
+                        app_vars.insert(var.to_string());
+                    }
+                }
+            }
+            for (fname, pkey) in [
+                ("include_router", "prefix"),
+                ("register_blueprint", "url_prefix"),
+            ] {
+                if let Some(a) = ctor_args(line, fname) {
+                    if let (Some(child), Some(parent)) =
+                        (first_ident_arg(a), mount_receiver(line, fname))
+                    {
+                        let m = string_kwarg(a, pkey)
+                            .map(|s| normalize_prefix(&s))
+                            .unwrap_or_default();
+                        parent_of.entry(child).or_insert((parent, m));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut local: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let src_by_path: HashMap<&str, &str> =
+        files.iter().map(|(p, s)| (p.as_str(), s.as_str())).collect();
+
+    for ep in endpoints.iter_mut() {
+        if ep.transport != Transport::Http || ep.direction != Direction::Inbound {
+            continue;
+        }
+        let Some(src) = src_by_path.get(ep.file.as_str()).copied() else {
+            continue;
+        };
+        let Some(line) = src.lines().nth(ep.line.saturating_sub(1) as usize) else {
+            continue;
+        };
+        let line = line.trim();
+        let Some(recv) = route_receiver(line) else {
+            continue;
+        };
+        let decos = parse_route_decorator(line);
+        let Some((_, raw_path, _)) = decos.first() else {
+            continue;
+        };
+        let method = ep
+            .contract
+            .strip_prefix("http:")
+            .and_then(|s| s.split(' ').next())
+            .unwrap_or("GET")
+            .to_string();
+
+        // Prefer global resolution when the receiver has an unambiguous
+        // definition or a mount edge; otherwise fall back to file-local.
+        let global = if matches!(self_by_var.get(&recv), Some(Some(_)))
+            || parent_of.contains_key(&recv)
+        {
+            resolve_full(&recv, &self_by_var, &parent_of, &app_vars, &mut cache)
+        } else {
+            None
+        };
+        let full = match global {
+            Some(p) => p,
+            None => local
+                .entry(ep.file.clone())
+                .or_insert_with(|| collect_router_prefixes(src))
+                .get(&recv)
+                .cloned()
+                .unwrap_or_default(),
+        };
+        let new_path = join_route(&full, raw_path);
+        ep.contract = http_contract(&method, &new_path);
+    }
+}
+
+/// Full mount-resolved prefix for a router var: `full(parent) + mount + self`,
+/// memoized and cycle-guarded. Ambiguous vars resolve to `None` (→ file-local).
+fn resolve_full(
+    var: &str,
+    self_by_var: &HashMap<String, Option<String>>,
+    parent_of: &HashMap<String, (String, String)>,
+    app_vars: &HashSet<String>,
+    cache: &mut HashMap<String, Option<String>>,
+) -> Option<String> {
+    if let Some(c) = cache.get(var) {
+        return c.clone();
+    }
+    // Mark in-progress as None so a cycle terminates instead of recursing.
+    cache.insert(var.to_string(), None);
+    let self_p = match self_by_var.get(var) {
+        Some(Some(p)) => p.clone(),
+        Some(None) => return None, // ambiguous name
+        None => String::new(),     // no APIRouter def (the app, or an edge-only var)
+    };
+    let full = if app_vars.contains(var) {
+        self_p
+    } else if let Some((parent, mount)) = parent_of.get(var) {
+        let pfull =
+            resolve_full(parent, self_by_var, parent_of, app_vars, cache).unwrap_or_default();
+        normalize_prefix(&format!("{pfull}{mount}{self_p}"))
+    } else {
+        self_p
+    };
+    let out = Some(full);
+    cache.insert(var.to_string(), out.clone());
+    out
+}
+
+/// The receiver before `.<fname>(` — `api_router.include_router(...)` →
+/// `api_router`, `app.register_blueprint(...)` → `app`.
+fn mount_receiver(line: &str, fname: &str) -> Option<String> {
+    let pos = line.find(fname)?;
+    let before = line[..pos].trim_end().strip_suffix('.')?;
+    let start = before
+        .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let recv = &before[start..];
+    if recv.is_empty() {
+        None
+    } else {
+        Some(recv.to_string())
     }
 }
 
@@ -2587,6 +2757,65 @@ app.include_router(sub, prefix="/api")
         assert_eq!(join_route("", "/items"), "/items");
         // ctor boundary: APIRouter not matched inside a longer identifier.
         assert!(ctor_args("x = MyAPIRouter(prefix=\"/a\")", "APIRouter").is_none());
+    }
+
+    fn ep(contract: &str, file: &str, line: u32) -> ServiceEndpoint {
+        ServiceEndpoint {
+            transport: Transport::Http,
+            direction: Direction::Inbound,
+            contract: contract.to_string(),
+            repo_id: "r".into(),
+            symbol_id: "s".into(),
+            qname: "q".into(),
+            file: file.into(),
+            line,
+            confidence: 0.95,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn cross_file_mount_tree_resolves_nested_prefix() {
+        // app → api_router (/api) → calculators_router (/calculators) → @get(/budget)
+        let files = vec![
+            (
+                "main.py".to_string(),
+                "app = FastAPI()\napp.include_router(api_router, prefix=\"/api\")\n".to_string(),
+            ),
+            (
+                "api.py".to_string(),
+                "api_router = APIRouter()\napi_router.include_router(calculators_router, prefix=\"/calculators\")\n".to_string(),
+            ),
+            (
+                "calc.py".to_string(),
+                "calculators_router = APIRouter()\n\n@calculators_router.get(\"/budget\")\ndef budget(): ...\n".to_string(),
+            ),
+        ];
+        let mut eps = vec![ep(&http_contract("GET", "/budget"), "calc.py", 3)];
+        resolve_python_endpoint_prefixes(&files, &mut eps);
+        assert_eq!(eps[0].contract, "http:GET /api/calculators/budget");
+    }
+
+    #[test]
+    fn ambiguous_router_name_falls_back_to_file_local() {
+        // `router` means different things in two files → use each file's own prefix.
+        let files = vec![
+            (
+                "a.py".to_string(),
+                "router = APIRouter(prefix=\"/api/notif\")\n\n@router.get(\"/x\")\ndef x(): ...\n".to_string(),
+            ),
+            (
+                "b.py".to_string(),
+                "router = APIRouter(prefix=\"/api/inst\")\n\n@router.get(\"/y\")\ndef y(): ...\n".to_string(),
+            ),
+        ];
+        let mut eps = vec![
+            ep(&http_contract("GET", "/x"), "a.py", 3),
+            ep(&http_contract("GET", "/y"), "b.py", 3),
+        ];
+        resolve_python_endpoint_prefixes(&files, &mut eps);
+        assert_eq!(eps[0].contract, "http:GET /api/notif/x");
+        assert_eq!(eps[1].contract, "http:GET /api/inst/y");
     }
 
     #[test]

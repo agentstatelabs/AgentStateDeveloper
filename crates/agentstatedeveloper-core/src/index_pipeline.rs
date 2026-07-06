@@ -472,6 +472,23 @@ pub fn run_index(
         }
     }
 
+    // Plan Q t-004b: project-level endpoint prefix resolution. Give each
+    // language one pass over all its files + the full endpoint set, so
+    // cross-file router-mount prefix chains resolve to the full runtime path.
+    {
+        let mut by_lang: HashMap<&str, (Arc<dyn LanguageAdapter>, Vec<(String, String)>)> =
+            HashMap::new();
+        for ctx in &file_ctxs {
+            let entry = by_lang
+                .entry(ctx.adapter.language())
+                .or_insert_with(|| (Arc::clone(&ctx.adapter), Vec::new()));
+            entry.1.push((ctx.file_str.clone(), ctx.source.clone()));
+        }
+        for (_lang, (adapter, lang_files)) in by_lang {
+            adapter.resolve_endpoint_prefixes(&lang_files, &mut all_endpoints);
+        }
+    }
+
     let mut callees_of: HashMap<String, Vec<String>> = HashMap::new();
     let mut callers_of: HashMap<String, Vec<String>> = HashMap::new();
     let mut resolved_edge_count = 0usize;

@@ -222,6 +222,20 @@ pub trait LanguageAdapter: Send + Sync {
         Vec::new()
     }
 
+    /// Project-level pass (Plan Q t-004b): rewrite endpoint contracts using
+    /// cross-file context — e.g. resolving nested router-mount prefix chains
+    /// (`app.include_router(api, prefix="/api")` → `api.include_router(calc,
+    /// prefix="/calc")` → `@calc.get("/x")` = `/api/calc/x`) that span files.
+    /// `files` is `(path, source)` for THIS adapter's language; `endpoints` is
+    /// the full project set — the adapter must only touch its own. Runs once
+    /// after per-file detection. Default: no-op.
+    fn resolve_endpoint_prefixes(
+        &self,
+        _files: &[(String, String)],
+        _endpoints: &mut [crate::cross_service::ServiceEndpoint],
+    ) {
+    }
+
     /// Detect intra-process data-flow sites (`arg → param` at call sites) in a
     /// file. Returns [`DetectedDataFlow`] naming caller/callee by qname plus the
     /// argument and its position; the index pipeline resolves the callee's
