@@ -2465,3 +2465,64 @@ transports), each answer reports its freshness, the change-governance gate
 enforces approval on high-blast-radius contract changes, and those decisions
 land in the audit stream — all reachable from the CTXone hub over MCP.
 
+---
+
+## Plan S — Federation usability & tiered-repo (OSS/Team/Enterprise) management
+
+### Motivation
+
+Three loose ends surfaced after Plan Q shipped the federation spine:
+
+1. **It's undiscoverable.** The multi-repo setup (index each repo → shared
+   registry → `asd repo edges/impact` / hub tools) works but is documented
+   nowhere.
+2. **Concurrent *independent* sessions aren't isolated on the agent side.**
+   Working on 2–3 unrelated codebases in separate sessions is a different
+   need than cross-repo federation. The CLI handles it (t-002 walk-up), but
+   `asd-mcp` resolves either a pinned `ASD_DB` (one db for all sessions) or the
+   **global** registry-active (sessions collide). No clean per-session db.
+3. **The public/commercial boundary isn't enforced by structure.** The ASD
+   repo carries the pro crates (`audit-pro`, `ratify`, `pro`) in-tree while
+   the READMEs point at a public GitHub that isn't published yet (404). Before
+   any public push, the OSS repo must contain only core; pro must be private.
+
+### Task table
+
+| Task | Description | Wave |
+|------|-------------|------|
+| t-001 | **Federation setup doc** (`docs/FEDERATION.md`): index each repo → registry (`asd repo add/list`) → `asd repo edges/impact`; the CTXone hub's `code_cross_repo_edges`/`code_impact`; distinct-`repo_id` notes | 1 |
+| t-002 | **Public/private crate boundary**: declare which crates are OSS-public (core + language + cli + mcp + conformance) vs private (`audit-pro`, `ratify`, `pro`); reconcile with the existing `AgentStateDeveloper-Enterprise` / `CTXone-Pro` repos | 1 |
+| t-003 | **Restructure for a clean public repo**: move the pro crates out of the public tree into the private Enterprise repo; wire them as git/tag deps (as `agent-skillgen` already is); verify the public workspace builds standalone with only core crates | 1 |
+| t-004 | **`asd-mcp` CWD walk-up resolution**: resolve db from the server's own startup directory (`ASD_DB` > CWD walk-up > registry-active) so each agent session, spawned in its project dir, auto-isolates — solving concurrent independent sessions | 2 |
+| t-005 | **`asd mcp install --project`**: write a per-project MCP config (e.g. Claude Code `.mcp.json`) pinned to that project's db — the explicit per-session isolation path alongside t-004's automatic one | 2 |
+| t-006 | **Publish + contribution flow**: how the private GitLab repo publishes core to public GitHub (split/mirror), a CLA/DCO for outside contributors (BSL relicensing needs contributor rights), and a documented upstream-sync (accepted public PRs → private) | 3 |
+
+### Wave ordering
+
+- **Wave 1 (gates the public launch):** t-001 (docs), t-002 + t-003 (get the
+  public/private split right *before* the first public push — no leak).
+- **Wave 2 (agent multi-session isolation):** t-004 + t-005.
+- **Wave 3 (open-source operations):** t-006.
+
+### Acceptance
+
+- A new user follows `docs/FEDERATION.md` and gets `asd repo impact` working
+  across two repos without prior knowledge.
+- Two agent sessions on two different repos each see only their own db, with
+  no pinning and no collision.
+- The public repo builds and passes CI with **only** core crates present; the
+  pro crates build privately against it as git-deps; an outside PR flows
+  through CLA → merge → upstream-sync.
+
+### What's NOT in this plan
+
+- The Enterprise federation features themselves (that's Plan R).
+- A hosted service or managed public infrastructure.
+
+### Done when
+
+The federation setup is documented, concurrent independent sessions are
+isolated on both CLI and agent surfaces, and the OSS repo can be pushed
+public with the commercial crates cleanly private and a contribution process
+in place.
+
