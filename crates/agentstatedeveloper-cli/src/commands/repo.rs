@@ -4,10 +4,14 @@
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use agentstatedeveloper_core::registry::Registry;
-use agentstatedeveloper_core::{Engine, ServiceManifest, endpoints_from_tree, federated_edges};
+use agentstatedeveloper_core::{
+    AsgIndexStore, AsgLedgerStore, Direction, Engine, IndexStore, LedgerKind, LedgerStore,
+    ServiceEndpoint, ServiceManifest, endpoints_from_tree, federated_edges,
+};
 
 use crate::config::Config;
 
@@ -28,6 +32,13 @@ pub enum RepoCmd {
     /// one repo matched to a route served by another, keyed by contract hash
     /// (Plan Q t-005). Index each repo first so its contracts are current.
     Edges(EdgesArgs),
+    /// Decision-aware federated impact (Plan Q t-006/7): given an endpoint you're
+    /// about to change (a route-handler qname, or a contract like
+    /// `http:GET /api/x`), show the downstream consumers in OTHER repos AND the
+    /// invariants/hazards those consuming symbols carry — pulled from each
+    /// consumer repo's own ledger. Answers "what breaks if I change this, and
+    /// what did those callers promise?"
+    Impact(ImpactArgs),
 }
 
 #[derive(Debug, Args)]
@@ -76,6 +87,17 @@ pub struct EdgesArgs {
     pub include_in_repo: bool,
 }
 
+#[derive(Debug, Args)]
+pub struct ImpactArgs {
+    /// The endpoint being changed: a route-handler qname (e.g.
+    /// `app.routes.get_orders`, or just `get_orders`) or a contract
+    /// (`http:GET /api/orders/{}`).
+    pub target: String,
+    /// Machine-readable JSON.
+    #[arg(long)]
+    pub agent: bool,
+}
+
 pub fn run(_cfg: &Config, cmd: RepoCmd) -> Result<()> {
     match cmd {
         RepoCmd::Add(args) => run_add(args),
@@ -84,6 +106,7 @@ pub fn run(_cfg: &Config, cmd: RepoCmd) -> Result<()> {
         RepoCmd::Rm(args) => run_rm(args),
         RepoCmd::Show(args) => run_show(args),
         RepoCmd::Edges(args) => run_edges(args),
+        RepoCmd::Impact(args) => run_impact(args),
     }
 }
 
@@ -292,6 +315,159 @@ fn run_edges(args: EdgesArgs) -> Result<()> {
 
 fn short_qname(q: &str) -> &str {
     q.rsplit(['.', ':']).next().unwrap_or(q)
+}
+
+fn run_impact(args: ImpactArgs) -> Result<()> {
+    let reg = Registry::load().context("loading registry")?;
+    let entries = reg.list();
+    if entries.is_empty() {
+        println!("No repos registered. Add repos with `asd repo add`, then re-index each.");
+        return Ok(());
+    }
+
+    // Load every registered repo's endpoints + map each repo_id -> its db path.
+    let mut all: Vec<ServiceEndpoint> = Vec::new();
+    let mut repo_db: HashMap<String, PathBuf> = HashMap::new();
+    for e in &entries {
+        if let Ok(engine) = Engine::open_sqlite(&e.path) {
+            let tree = engine
+                .repo
+                .get_tree(&engine.ref_name, "/asd/v1/index/endpoints")
+                .unwrap_or(Value::Null);
+            let eps = endpoints_from_tree(&tree);
+            if let Some(rid) = eps.first().map(|x| x.repo_id.clone()) {
+                repo_db.entry(rid).or_insert_with(|| e.path.clone());
+            }
+            all.extend(eps);
+        }
+    }
+
+    // Resolve the target to the contract(s) of the endpoint being changed.
+    let target = args.target.trim();
+    let target_contracts: HashSet<String> =
+        if target.starts_with("http:") || target.starts_with("topic:") {
+            std::iter::once(target.to_string()).collect()
+        } else {
+            all.iter()
+                .filter(|e| {
+                    e.direction == Direction::Inbound
+                        && (e.qname == target || e.qname.ends_with(&format!(".{target}")))
+                })
+                .map(|e| e.contract.clone())
+                .collect()
+        };
+    if target_contracts.is_empty() {
+        println!(
+            "No inbound endpoint matches '{target}'. Pass a route-handler qname \
+             or a contract like 'http:GET /api/x'."
+        );
+        return Ok(());
+    }
+
+    // Producers (repos serving it) + downstream consumers.
+    let producer_repos: HashSet<String> = all
+        .iter()
+        .filter(|e| e.direction == Direction::Inbound && target_contracts.contains(&e.contract))
+        .map(|e| e.repo_id.clone())
+        .collect();
+    let mut consumers: Vec<&ServiceEndpoint> = all
+        .iter()
+        .filter(|e| e.direction == Direction::Outbound && target_contracts.contains(&e.contract))
+        .collect();
+    consumers.sort_by(|a, b| (&a.repo_id, &a.qname).cmp(&(&b.repo_id, &b.qname)));
+    consumers.dedup_by(|a, b| a.repo_id == b.repo_id && a.qname == b.qname);
+
+    // Decision-aware rows: each consumer + its own repo's invariants/hazards.
+    let rows: Vec<Value> = consumers
+        .iter()
+        .map(|c| {
+            let (inv, haz) = repo_db
+                .get(&c.repo_id)
+                .map(|db| judgment_for(db, &c.qname))
+                .unwrap_or_default();
+            json!({
+                "repo": c.repo_id,
+                "cross_repo": !producer_repos.contains(&c.repo_id),
+                "symbol": c.qname,
+                "file": c.file,
+                "line": c.line,
+                "contract": c.contract,
+                "invariants": inv,
+                "hazards": haz,
+            })
+        })
+        .collect();
+
+    if args.agent {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "target": target,
+                "contracts": target_contracts.iter().collect::<Vec<_>>(),
+                "served_by": producer_repos.iter().collect::<Vec<_>>(),
+                "consumers": rows,
+            }))?
+        );
+        return Ok(());
+    }
+
+    let ctr = target_contracts.iter().cloned().collect::<Vec<_>>().join(", ");
+    let served = producer_repos.iter().cloned().collect::<Vec<_>>().join(", ");
+    println!("Changing {target}  (contract: {ctr}; served by: {served})");
+    if rows.is_empty() {
+        println!("  No downstream consumers found across registered repos.");
+        return Ok(());
+    }
+    let cross = rows
+        .iter()
+        .filter(|r| r["cross_repo"].as_bool().unwrap_or(false))
+        .count();
+    println!("  {} downstream consumer(s), {cross} cross-repo:", rows.len());
+    for r in &rows {
+        let scope = if r["cross_repo"].as_bool().unwrap_or(false) {
+            "[cross-repo] "
+        } else {
+            ""
+        };
+        println!(
+            "  {}{} — {}  ({}:{})",
+            scope,
+            r["repo"].as_str().unwrap_or("?"),
+            r["symbol"].as_str().unwrap_or("?"),
+            r["file"].as_str().unwrap_or("?"),
+            r["line"].as_u64().unwrap_or(0),
+        );
+        for inv in r["invariants"].as_array().into_iter().flatten() {
+            println!("      invariant: {}", inv.as_str().unwrap_or(""));
+        }
+        for haz in r["hazards"].as_array().into_iter().flatten() {
+            println!("      hazard:    {}", haz.as_str().unwrap_or(""));
+        }
+    }
+    Ok(())
+}
+
+/// Invariant + hazard summaries recorded on `qname` in the repo at `db_path`.
+fn judgment_for(db_path: &Path, qname: &str) -> (Vec<String>, Vec<String>) {
+    let mut invariants = Vec::new();
+    let mut hazards = Vec::new();
+    let Ok(engine) = Engine::open_sqlite(db_path) else {
+        return (invariants, hazards);
+    };
+    let index = AsgIndexStore::from_engine(&engine);
+    let ledger = AsgLedgerStore::from_engine(&engine);
+    if let Ok(Some(sym)) = index.get_symbol_by_qname(&engine.ref_name, qname) {
+        if let Ok(entries) = ledger.list_entries(&engine.ref_name, &sym.symbol_id) {
+            for e in entries {
+                match e.kind {
+                    LedgerKind::Invariant => invariants.push(e.summary),
+                    LedgerKind::Hazard => hazards.push(e.summary),
+                    _ => {}
+                }
+            }
+        }
+    }
+    (invariants, hazards)
 }
 
 fn default_name_for(path: &std::path::Path) -> Option<String> {

@@ -2297,8 +2297,8 @@ So the Python route resolution is done; further coverage is a cross-*language*
 matching concern (frontend TS client detection), tracked separately, not more
 prefix work.
 | t-005 | **Cross-repo matcher** ✅: `core::federated_edges(manifests, cross_repo_only)` = `match_edges` over the union of every registered repo's endpoints, filtered to edges whose consumer/producer differ (`cross_repo`). CLI `asd repo edges` loads each registered repo's index and reports them. **Demo: split Financial into fin-backend + fin-frontend → 33 cross-repo edges** (TS frontend → Python backend, with symbol provenance `CalculatorDirectoryPage → get_calculator_types`), cross-language and multi-mount. +1 test | Team | 1 ✅ |
-| t-006 | Federated impact: `impact`/`prepare-change`/`since` walk cross-repo edges → downstream callers in *other* repos | Team | 2 |
-| t-007 | **Decision-aware federation**: for each cross-repo downstream, surface that repo's invariants/hazards from its committed sidecar | Team | 2 |
+| t-006 | **Federated impact** ✅: `asd repo impact <qname-or-contract>` resolves the changed endpoint's contract(s), finds downstream consumers across all registered repos (cross-repo flagged) | Team | 2 ✅ |
+| t-007 | **Decision-aware federation** ✅: for each cross-repo consumer, `asd repo impact` opens that consumer's repo db and reads its invariants/hazards (`LedgerStore::list_entries`) — judgment from the consumer's OWN ledger. **Acceptance query PASSES** (see below) | Team | 2 ✅ |
 | t-008 | CTXone surface: expose federated impact via the hub's code tools (the pool), per-session `repo` scope | Team | 2 |
 | t-009 | Session-scoped active repo (concurrency): parallel agents on different repos don't collide (vs global `asd repo use`) | Team | 2 |
 | t-010 | Org registry + freshness: per-repo `trust` aggregation, staleness SLA, add/remove without reindex-the-world | Ent | 3 |
@@ -2326,6 +2326,14 @@ returns the downstream callers **and** their sidecar-recorded judgment,
 computed by joining per-repo manifests on contract hash — **no merged
 database**. Coverage gate: after t-004, a repo that calls itself matches
 a majority of its real self-calls (baseline today: Financial 0/68).
+
+**✅ PASSES (2026-07).** `asd repo impact get_calculator_types` on the
+Financial backend/frontend split returns the cross-repo consumer
+(`fin-frontend app.calculators.page.CalculatorDirectoryPage`) plus the
+invariant + hazard recorded on it in the frontend's own ledger — TS→Python,
+multi-mount-resolved contract, judgment read from the consumer repo's db.
+The Plan Q spine (contract resolution t-004 → cross-repo join t-005 →
+decision-aware federated impact t-006/7) is proven end-to-end.
 
 ### What's NOT in this plan
 
