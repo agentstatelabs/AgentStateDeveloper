@@ -39,6 +39,31 @@ impl<'a> AsgEffectStore<'a> {
     }
 }
 
+/// List every stored `EffectDecl` in the workspace as `(symbol_id, decl)`
+/// pairs by walking the `/asd/v1/effects` subtree. Read-only. Used by
+/// overview-style consumers (e.g. `asd-serve`'s `/api/v1/effects/overview`)
+/// that need the whole distribution rather than one symbol's decl — the
+/// per-symbol path stays `EffectStore::get_effects`.
+pub fn list_all_effect_decls(
+    repo: &Repository,
+    ref_name: &str,
+) -> Result<Vec<(String, EffectDecl)>> {
+    let prefix = format!("{}/effects", paths::ASD_ROOT);
+    let tree = match repo.get_tree(ref_name, &prefix) {
+        Ok(t) => t,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut out: Vec<(String, EffectDecl)> = Vec::new();
+    if let serde_json::Value::Object(map) = tree {
+        for (symbol_id, value) in map {
+            if let Ok(decl) = serde_json::from_value::<EffectDecl>(value) {
+                out.push((symbol_id, decl));
+            }
+        }
+    }
+    Ok(out)
+}
+
 impl<'a> EffectStore for AsgEffectStore<'a> {
     fn get_effects(&self, ref_name: &str, symbol_id: &str) -> Result<Option<EffectDecl>> {
         // Fast path: SQLite cache.

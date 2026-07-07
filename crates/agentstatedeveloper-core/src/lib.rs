@@ -72,7 +72,7 @@ pub use dataflow::{
 };
 pub use doc_adapters::{adapt_document, is_doc_file};
 pub use edge_confidence::EdgeEvidence;
-pub use effects::{AsgEffectStore, EffectStore};
+pub use effects::{AsgEffectStore, EffectStore, list_all_effect_decls};
 pub use engine::Engine;
 pub use error::{AsdError, Result};
 pub use feedback::{
@@ -123,7 +123,7 @@ pub use sidecar::{
     sidecar_lifecycle_state, sync_to_dir,
 };
 pub use symbol::{canonical_symbol_id, symbol_fingerprint};
-pub use transitive::propagate_transitive;
+pub use transitive::{declared_effect_blast_radius, propagate_transitive};
 pub use trust::{DataQuality, TrustScore, TrustSignals, compute_trust_score};
 pub use workflow::{
     EvidenceQuality, WorkflowSummary, append_workflow_session, detect_workflow,

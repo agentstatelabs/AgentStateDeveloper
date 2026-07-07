@@ -13,10 +13,12 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use std::collections::VecDeque;
+
 use crate::effects::EffectStore;
 use crate::error::Result;
 use crate::index::IndexStore;
-use crate::schema::{EffectCategory, TransitiveEffect};
+use crate::schema::{EffectCategory, EffectDecl, TransitiveEffect};
 
 /// Compute transitive effects for each symbol in `symbol_ids` and write
 /// them back via `effects.put_effects(...)`. Returns the count of
@@ -79,6 +81,81 @@ pub fn propagate_transitive<I: IndexStore, E: EffectStore>(
     }
 
     Ok(updated)
+}
+
+/// Per-declarer transitive blast radius, derived entirely from the *stored*
+/// transitive data written by [`propagate_transitive`] — no call-graph
+/// reachability is recomputed here.
+///
+/// For each effect category `E` declared by at least one symbol, and each
+/// declarer `S` of `E`, the blast radius of `S` is the number of distinct
+/// *other* symbols whose stored `EffectDecl.transitive` carries `E` through
+/// a `via` chain that reaches `S`. The `via` field on a transitive entry
+/// names the immediate callee(s) that surfaced the effect, so walking
+/// "who lists X in their via for E" upward from the declarer reconstructs
+/// exactly the propagation paths `propagate_transitive` recorded.
+///
+/// Returns, per category, the declarers as `(symbol_id, blast_radius)`
+/// sorted by blast radius descending (ties broken by symbol_id ascending)
+/// so callers can take the top-N directly.
+pub fn declared_effect_blast_radius(
+    decls: &[(String, EffectDecl)],
+) -> HashMap<EffectCategory, Vec<(String, usize)>> {
+    // Declarers per category.
+    let mut declarers: HashMap<EffectCategory, Vec<&str>> = HashMap::new();
+    for (symbol_id, decl) in decls {
+        for e in &decl.declared {
+            declarers
+                .entry(e.effect.clone())
+                .or_default()
+                .push(symbol_id.as_str());
+        }
+    }
+
+    // Reverse propagation edges per category: child (via entry) → parents
+    // that inherited the effect through that child.
+    let mut inherits_via: HashMap<&EffectCategory, HashMap<&str, Vec<&str>>> = HashMap::new();
+    for (symbol_id, decl) in decls {
+        for t in &decl.transitive {
+            let edges = inherits_via.entry(&t.effect).or_default();
+            for child in &t.via {
+                edges
+                    .entry(child.as_str())
+                    .or_default()
+                    .push(symbol_id.as_str());
+            }
+        }
+    }
+
+    let mut out: HashMap<EffectCategory, Vec<(String, usize)>> = HashMap::new();
+    for (cat, cat_declarers) in declarers {
+        let edges = inherits_via.get(&cat);
+        let mut ranked: Vec<(String, usize)> = cat_declarers
+            .into_iter()
+            .map(|declarer| {
+                // BFS upward over the stored via-graph for this category.
+                let mut visited: HashSet<&str> = HashSet::new();
+                let mut queue: VecDeque<&str> = VecDeque::new();
+                visited.insert(declarer);
+                queue.push_back(declarer);
+                while let Some(cur) = queue.pop_front() {
+                    let Some(parents) = edges.and_then(|e| e.get(cur)) else {
+                        continue;
+                    };
+                    for parent in parents {
+                        if visited.insert(parent) {
+                            queue.push_back(parent);
+                        }
+                    }
+                }
+                // Exclude the declarer itself from its own radius.
+                (declarer.to_string(), visited.len() - 1)
+            })
+            .collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        out.insert(cat, ranked);
+    }
+    out
 }
 
 /// Recursive worker. Returns `transitive[sym]` as a category->via map.

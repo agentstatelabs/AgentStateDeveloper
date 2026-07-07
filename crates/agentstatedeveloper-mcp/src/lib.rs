@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use agentstatedeveloper_core::{
     AsdError, AsgEffectStore, AsgIndexStore, AsgLedgerStore, AuditEvent, EffectStore, Engine,
-    IndexStore, LedgerStore, emit_audit, event_types,
+    FtsFilters, IndexStore, LedgerStore, declared_effect_blast_radius, emit_audit, event_types,
+    explain_match, find_candidates, kind_str, list_all_effect_decls, parse_query,
 };
 use axum::http::HeaderValue;
 use axum::{
@@ -73,8 +74,12 @@ pub fn build_router(
 
     let api = Router::new()
         .route("/health", get(health))
+        .route("/search", get(search_symbols))
+        .route("/effects/overview", get(effects_overview))
+        .route("/timeline", get(list_timeline))
         .route("/symbols", get(list_symbols))
         .route("/symbols/{qname}", get(get_symbol))
+        .route("/symbols/{qname}/graph", get(get_symbol_graph))
         .route("/symbols/{qname}/ledger", get(get_symbol_ledger))
         .route("/symbols/{qname}/effects", get(get_symbol_effects))
         .route("/symbols/{qname}/callers", get(get_symbol_callers))
@@ -132,6 +137,7 @@ pub fn build_router(
 // -----------------------------------------------------------------------------
 
 pub enum ApiError {
+    BadRequest(String),
     NotFound(String),
     Internal(String),
 }
@@ -139,6 +145,7 @@ pub enum ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, msg) = match self {
+            ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             ApiError::NotFound(m) => (StatusCode::NOT_FOUND, m),
             ApiError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
         };
@@ -384,12 +391,30 @@ async fn list_ledger(
     Query(q): Query<LedgerQuery>,
 ) -> Result<Json<Vec<agentstatedeveloper_core::LedgerEntry>>, ApiError> {
     let engine = state.engine.lock().await;
-    let ref_name = engine.ref_name.clone();
-    let prefix = format!("{}/ledger", agentstatedeveloper_core::ASD_PATH_PREFIX);
+    let mut entries = all_ledger_entries(&engine);
 
-    let tree = match engine.repo.get_tree(&ref_name, &prefix) {
+    if let Some(tag) = q.tag.as_deref() {
+        entries.retain(|e| e.tags.iter().any(|t| t == tag));
+    }
+
+    apply_kind_filter(&mut entries, q.kind.as_deref());
+
+    entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    let offset = q.offset.unwrap_or(0);
+    let limit = q.limit.unwrap_or(100).min(1000);
+    let page: Vec<_> = entries.into_iter().skip(offset).take(limit).collect();
+    Ok(Json(page))
+}
+
+/// Walk the `/asd/v1/ledger` subtree and return every entry across all
+/// symbols. Shared by `list_ledger` and `list_timeline` so both stay in
+/// lockstep on how the flat cross-symbol listing is produced.
+fn all_ledger_entries(engine: &Engine) -> Vec<agentstatedeveloper_core::LedgerEntry> {
+    let prefix = format!("{}/ledger", agentstatedeveloper_core::ASD_PATH_PREFIX);
+    let tree = match engine.repo.get_tree(&engine.ref_name, &prefix) {
         Ok(t) => t,
-        Err(_) => return Ok(Json(Vec::new())),
+        Err(_) => return Vec::new(),
     };
 
     let mut entries: Vec<agentstatedeveloper_core::LedgerEntry> = Vec::new();
@@ -406,38 +431,32 @@ async fn list_ledger(
             }
         }
     }
+    entries
+}
 
-    if let Some(tag) = q.tag.as_deref() {
-        entries.retain(|e| e.tags.iter().any(|t| t == tag));
+/// Apply a comma-separated `LedgerKind` filter (snake_case names, e.g.
+/// `hypothesis,mental_model`) to an entry list. Unknown tokens are ignored —
+/// they can't match any entry anyway, and we don't want a typo to 400 the
+/// whole listing. If ONLY unknown tokens were passed, the list is cleared
+/// rather than returned unfiltered, otherwise the filter is silent.
+fn apply_kind_filter(entries: &mut Vec<agentstatedeveloper_core::LedgerEntry>, raw: Option<&str>) {
+    let Some(raw) = raw else { return };
+    let allowed: Vec<agentstatedeveloper_core::LedgerKind> = raw
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| {
+            // LedgerKind serializes snake_case, so round-trip via JSON
+            // to parse the user's token without writing a hand-rolled
+            // match against every variant.
+            serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
+        })
+        .collect();
+    if !allowed.is_empty() {
+        entries.retain(|e| allowed.contains(&e.kind));
+    } else {
+        entries.clear();
     }
-
-    if let Some(raw) = q.kind.as_deref() {
-        let allowed: Vec<agentstatedeveloper_core::LedgerKind> = raw
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .filter_map(|s| {
-                // LedgerKind serializes snake_case, so round-trip via JSON
-                // to parse the user's token without writing a hand-rolled
-                // match against every variant.
-                serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
-            })
-            .collect();
-        if !allowed.is_empty() {
-            entries.retain(|e| allowed.contains(&e.kind));
-        } else {
-            // Caller passed `kind=` with only unknown tokens — return empty
-            // rather than the whole ledger, otherwise the filter is silent.
-            entries.clear();
-        }
-    }
-
-    entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-
-    let offset = q.offset.unwrap_or(0);
-    let limit = q.limit.unwrap_or(100).min(1000);
-    let page: Vec<_> = entries.into_iter().skip(offset).take(limit).collect();
-    Ok(Json(page))
 }
 
 // -----------------------------------------------------------------------------
@@ -852,4 +871,346 @@ async fn get_symbol_effects(
         .get_effects(&ref_name, &symbol.symbol_id)
         .map_err(ApiError::from)?;
     Ok(Json(effects))
+}
+
+// -----------------------------------------------------------------------------
+// Plan T t-003 — Lens web-UI endpoints (search / graph / effects / timeline)
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct SearchApiQuery {
+    /// Concept or keyword(s) to search for. Same query syntax as
+    /// `asd search` (inline `-term` exclusions supported).
+    q: String,
+    /// Filter by symbol kind: module, function, method, class, variable.
+    kind: Option<String>,
+    /// Filter by language (e.g. "swift", "python", "rust").
+    lang: Option<String>,
+    /// Maximum results (default 20, max 100).
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `GET /api/v1/search?q=…&kind=…&lang=…&limit=…` — ranked symbol search
+/// backed by the same `find_candidates` pipeline the CLI (`asd search`
+/// via prepare_change/investigate) and MCP tools use, so Lens results and
+/// scores match agent-side results. `why` carries the core
+/// `explain_match` reasons (`name:token`, `file:token`,
+/// `invariant-attached:N`, …) — no ranking is invented here.
+async fn search_symbols(
+    State(state): State<AppState>,
+    Query(q): Query<SearchApiQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    let query = q.q.trim().to_string();
+    if query.is_empty() {
+        return Err(ApiError::BadRequest(
+            "query parameter `q` must not be empty".into(),
+        ));
+    }
+    let limit = q.limit.unwrap_or(20).clamp(1, 100);
+
+    let engine = state.engine.lock().await;
+    let ref_name = engine.ref_name.clone();
+    let (tokens, exclusions) = parse_query(&query);
+    let filters = FtsFilters {
+        kind: q.kind.as_deref().map(|k| k.to_lowercase()),
+        language: q.lang.as_deref().map(|l| l.to_lowercase()),
+        include_tests: false,
+        tests_only: false,
+        exclude_terms: exclusions,
+        paths_filter: Vec::new(),
+        exclude_paths: Vec::new(),
+        exclude_languages: Vec::new(),
+    };
+
+    let index = AsgIndexStore::from_engine(&engine);
+    let ledger_store = AsgLedgerStore::from_engine(&engine);
+    let candidates = find_candidates(
+        &engine,
+        &query,
+        &tokens,
+        &filters,
+        &ledger_store,
+        &index,
+        limit,
+    );
+
+    let mut results: Vec<serde_json::Value> = Vec::with_capacity(candidates.len());
+    for (score, qname) in candidates {
+        let sym = match index.get_symbol_by_qname(&ref_name, &qname) {
+            Ok(Some(s)) => s,
+            _ => continue,
+        };
+        let entries = ledger_store
+            .list_entries(&ref_name, &sym.symbol_id)
+            .unwrap_or_default();
+        // is_hot=false: recency needs `git log` relative to the indexed
+        // checkout's CWD, which the server can't assume. The match reasons
+        // and scores are unaffected.
+        let why = explain_match(&sym, &tokens, &entries, false);
+        let name = sym
+            .qname
+            .rsplit(|c| c == '.' || c == ':')
+            .next()
+            .unwrap_or(sym.qname.as_str())
+            .to_string();
+        results.push(json!({
+            "qname": sym.qname,
+            "name": name,
+            "kind": kind_str(&sym.kind),
+            "language": sym.language,
+            "file": sym.file,
+            "line": sym.start.line,
+            "score": score,
+            "why": why,
+        }));
+    }
+    Ok(Json(results))
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQuery {
+    /// BFS depth from the root symbol (1..=3, default 1).
+    #[serde(default)]
+    hops: Option<usize>,
+    /// Which edges to walk: `callers`, `callees`, or `both` (default).
+    direction: Option<String>,
+}
+
+/// Hard cap on nodes returned by `/symbols/{qname}/graph`. When hit, the
+/// response carries `"truncated": true` — never a silent cut.
+const GRAPH_NODE_CAP: usize = 500;
+
+/// `GET /api/v1/symbols/{qname}/graph?hops=…&direction=…` — BFS over the
+/// call graph from the symbol, in a render-ready nodes/links shape. Node
+/// `id`s are the stable `symbol_id`s; links always point caller → callee
+/// (`source` calls `target`) regardless of traversal direction, and are
+/// deduped.
+async fn get_symbol_graph(
+    State(state): State<AppState>,
+    Path(qname): Path<String>,
+    Query(q): Query<GraphQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let hops = q.hops.unwrap_or(1);
+    if !(1..=3).contains(&hops) {
+        return Err(ApiError::BadRequest(format!(
+            "hops must be between 1 and 3, got {}",
+            hops
+        )));
+    }
+    let direction = q.direction.as_deref().unwrap_or("both");
+    let (want_callers, want_callees) = match direction {
+        "callers" => (true, false),
+        "callees" => (false, true),
+        "both" => (true, true),
+        other => {
+            return Err(ApiError::BadRequest(format!(
+                "direction must be one of callers|callees|both, got {}",
+                other
+            )));
+        }
+    };
+
+    let engine = state.engine.lock().await;
+    let ref_name = engine.ref_name.clone();
+    let index = AsgIndexStore::from_engine(&engine);
+    let root = index
+        .get_symbol_by_qname(&ref_name, &qname)
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::NotFound(format!("symbol not found: {}", qname)))?;
+    let id_map = index.build_id_map(&engine);
+
+    let node_json = |sym: &agentstatedeveloper_core::Symbol| {
+        json!({
+            "id": sym.symbol_id,
+            "qname": sym.qname,
+            "kind": kind_str(&sym.kind),
+            "file": sym.file,
+            "module": qname_module(&sym.qname),
+        })
+    };
+
+    let mut nodes: Vec<serde_json::Value> = vec![node_json(&root)];
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    visited.insert(root.symbol_id.clone());
+    let mut links: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
+    let mut queue: std::collections::VecDeque<(String, usize)> = std::collections::VecDeque::new();
+    queue.push_back((root.symbol_id.clone(), 0));
+    let mut truncated = false;
+
+    while let Some((sym_id, depth)) = queue.pop_front() {
+        if depth >= hops {
+            continue;
+        }
+        // (neighbor_id, link caller→callee)
+        let mut neighbors: Vec<(String, (String, String))> = Vec::new();
+        if want_callers {
+            for caller in index.get_callers(&ref_name, &sym_id).unwrap_or_default() {
+                let link = (caller.clone(), sym_id.clone());
+                neighbors.push((caller, link));
+            }
+        }
+        if want_callees {
+            for callee in index.get_callees(&ref_name, &sym_id).unwrap_or_default() {
+                let link = (sym_id.clone(), callee.clone());
+                neighbors.push((callee, link));
+            }
+        }
+        for (nbr_id, link) in neighbors {
+            // Skip edges whose peer no longer resolves to an indexed symbol
+            // (stale edge after a partial reindex) — a dangling link would
+            // break the renderer.
+            let Some(nbr_sym) = id_map.get(&nbr_id) else {
+                continue;
+            };
+            if !visited.contains(&nbr_id) {
+                if visited.len() >= GRAPH_NODE_CAP {
+                    truncated = true;
+                    continue;
+                }
+                visited.insert(nbr_id.clone());
+                nodes.push(node_json(nbr_sym));
+                queue.push_back((nbr_id, depth + 1));
+            }
+            links.insert(link);
+        }
+    }
+
+    let links: Vec<serde_json::Value> = links
+        .into_iter()
+        .map(|(source, target)| json!({ "source": source, "target": target }))
+        .collect();
+
+    Ok(Json(json!({
+        "root": root.qname,
+        "hops": hops,
+        "direction": direction,
+        "nodes": nodes,
+        "links": links,
+        "truncated": truncated,
+    })))
+}
+
+/// Parent path of a qname (`payments.charge_card` → `payments`,
+/// `crate::mod::f` → `crate::mod`). `None` for top-level names.
+fn qname_module(qname: &str) -> Option<String> {
+    if let Some((module, _)) = qname.rsplit_once("::") {
+        return Some(module.to_string());
+    }
+    qname.rsplit_once('.').map(|(m, _)| m.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+struct EffectsOverviewQuery {
+    /// Maximum effect rows to return (default 50, max 500).
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// Top declaring symbols listed per effect row in `/effects/overview`.
+const EFFECT_TOP_SYMBOLS: usize = 5;
+
+/// `GET /api/v1/effects/overview?limit=…` — per effect category, the count
+/// of symbols declaring it plus the top declarers ranked by transitive
+/// blast radius. Radius comes from the stored transitive data written by
+/// `propagate_transitive` at index time (walked via
+/// `core::declared_effect_blast_radius`) — reachability is not recomputed
+/// here. Backs DESIGN.md Plan I t-031.
+async fn effects_overview(
+    State(state): State<AppState>,
+    Query(q): Query<EffectsOverviewQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    let limit = q.limit.unwrap_or(50).min(500);
+    let engine = state.engine.lock().await;
+    let ref_name = engine.ref_name.clone();
+
+    let decls = list_all_effect_decls(&engine.repo, &ref_name).map_err(ApiError::from)?;
+    let radius_by_effect = declared_effect_blast_radius(&decls);
+    let index = AsgIndexStore::from_engine(&engine);
+    let id_map = index.build_id_map(&engine);
+
+    let mut rows: Vec<(String, usize, Vec<serde_json::Value>)> = radius_by_effect
+        .into_iter()
+        .map(|(cat, declarers)| {
+            let symbol_count = declarers.len();
+            let top_symbols: Vec<serde_json::Value> = declarers
+                .iter()
+                .take(EFFECT_TOP_SYMBOLS)
+                .map(|(symbol_id, blast_radius)| {
+                    json!({
+                        // Fall back to the raw symbol_id if the declarer is
+                        // no longer in the index (stale decl).
+                        "qname": id_map
+                            .get(symbol_id)
+                            .map(|s| s.qname.clone())
+                            .unwrap_or_else(|| symbol_id.clone()),
+                        "blast_radius": blast_radius,
+                    })
+                })
+                .collect();
+            (cat.as_str().to_string(), symbol_count, top_symbols)
+        })
+        .collect();
+    // Busiest effects first; alphabetical tie-break keeps output stable.
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    rows.truncate(limit);
+
+    Ok(Json(
+        rows.into_iter()
+            .map(|(effect, symbol_count, top_symbols)| {
+                json!({
+                    "effect": effect,
+                    "symbol_count": symbol_count,
+                    "top_symbols": top_symbols,
+                })
+            })
+            .collect(),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct TimelineQuery {
+    /// Maximum entries to return (default 100, max 1000).
+    #[serde(default)]
+    limit: Option<usize>,
+    /// Comma-separated `LedgerKind` names in snake_case (e.g.
+    /// `hypothesis,decision`). Same semantics as `/ledger`'s `kind` filter.
+    kinds: Option<String>,
+}
+
+/// `GET /api/v1/timeline?limit=…&kinds=…` — chronological (newest first)
+/// merged feed of ledger entries across all symbols. Plan G thinking
+/// entries (hypothesis / mental_model / open_question / failed_attempt)
+/// ARE ledger kinds, so one walk covers both; use `kinds=` to slice
+/// either family.
+async fn list_timeline(
+    State(state): State<AppState>,
+    Query(q): Query<TimelineQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    let engine = state.engine.lock().await;
+
+    let mut entries = all_ledger_entries(&engine);
+    apply_kind_filter(&mut entries, q.kinds.as_deref());
+    entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    let limit = q.limit.unwrap_or(100).min(1000);
+    entries.truncate(limit);
+
+    let index = AsgIndexStore::from_engine(&engine);
+    let id_map = index.build_id_map(&engine);
+    let feed: Vec<serde_json::Value> = entries
+        .into_iter()
+        .map(|e| {
+            json!({
+                "at": e.created_at,
+                // LedgerKind serializes snake_case — reuse that for the wire.
+                "kind": serde_json::to_value(e.kind).unwrap_or(serde_json::Value::Null),
+                "symbol_id": e.symbol_id,
+                "qname": id_map.get(&e.symbol_id).map(|s| s.qname.clone()),
+                "summary": e.summary,
+                "entry_id": e.entry_id,
+            })
+        })
+        .collect();
+    Ok(Json(feed))
 }
