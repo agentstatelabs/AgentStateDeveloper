@@ -7,6 +7,7 @@
 //! Also hosts the MCP stdio server module [`mcp_server`] — wired up by the
 //! `asd-mcp` binary.
 
+pub mod events;
 pub mod mcp_params;
 pub mod mcp_server;
 
@@ -25,7 +26,10 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse, Response,
+        sse::{Event as SseEvent, KeepAlive, Sse},
+    },
     routing::get,
 };
 use serde::{Deserialize, Serialize};
@@ -48,6 +52,9 @@ pub struct AppState {
     /// from this JSONL file; otherwise the endpoint returns an empty
     /// list with a `configured: false` flag.
     pub audit_log_path: Option<PathBuf>,
+    /// Live-events hub backing `/api/v1/events` (SSE). Spawns its poller
+    /// lazily on the first subscriber — see [`events::EventHub`].
+    pub events: Arc<events::EventHub>,
 }
 
 /// Build the axum router wired to the given engine + db path.
@@ -66,14 +73,17 @@ pub fn build_router(
     audit_log_path: Option<PathBuf>,
     cors_permissive: bool,
 ) -> Router {
+    let events = events::EventHub::new(&engine, audit_log_path.clone());
     let state = AppState {
         engine,
         db_path,
         audit_log_path,
+        events,
     };
 
     let api = Router::new()
         .route("/health", get(health))
+        .route("/events", get(events_stream))
         .route("/search", get(search_symbols))
         .route("/effects/overview", get(effects_overview))
         .route("/timeline", get(list_timeline))
@@ -1213,4 +1223,35 @@ async fn list_timeline(
         })
         .collect();
     Ok(Json(feed))
+}
+
+// -----------------------------------------------------------------------------
+// Live activity stream (SSE) — see the `events` module for the poller.
+// -----------------------------------------------------------------------------
+
+/// `GET /api/v1/events` — Server-Sent Events stream of live repo activity:
+/// ledger entries (all kinds, incl. Plan G thinking), effect declarations /
+/// verifications, index runs, and audit events. Each `data:` payload is a
+/// JSON object whose field names match `/api/v1/timeline`
+/// (`{at, kind, qname, symbol_id, entry_id, summary}`) so the Lens "now"
+/// feed can merge both sources. Events are detected by polling — worst-case
+/// latency is one [`events::POLL_INTERVAL`].
+async fn events_stream(
+    State(state): State<AppState>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, std::convert::Infallible>>> {
+    use tokio_stream::StreamExt;
+    let rx = state.events.subscribe().await;
+    let stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|item| match item {
+        Ok(data) => Some(Ok(SseEvent::default().data(data))),
+        // Slow consumer fell > CHANNEL_CAPACITY events behind: skip the
+        // gap and keep streaming rather than killing the connection.
+        Err(_lagged) => None,
+    });
+    Sse::new(stream).keep_alive(
+        // Comment frames so idle streams survive proxies/load-balancers
+        // that reap quiet connections.
+        KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("keep-alive"),
+    )
 }
