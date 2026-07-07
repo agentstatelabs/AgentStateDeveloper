@@ -1,4 +1,5 @@
 <script lang="ts">
+	import '@agentstate/lens-core/tokens.css';
 	import { getHealth, getSymbols, getAwaitingApproval } from '$lib/api';
 	import type { Health } from '$lib/types';
 	import { symbols, approvals } from '$lib/stores';
@@ -126,6 +127,28 @@
 		--kind-class: #d08770;
 		--kind-module: #b48ead;
 		--kind-variable: #ebcb8b;
+	}
+	/* @agentstate/lens-core bridge — map the app palette onto the --lens-*
+	   tokens the shared components consume. Declared on body (not :root) so
+	   it wins over tokens.css defaults regardless of import order. */
+	:global(body) {
+		--lens-bg: var(--bg);
+		--lens-surface: var(--bg-alt);
+		--lens-surface-raised: var(--bg-hover);
+		--lens-border: var(--border);
+		--lens-text-strong: var(--fg);
+		--lens-text: var(--fg);
+		--lens-text-secondary: var(--fg-dim);
+		--lens-muted: var(--fg-dim);
+		--lens-accent: var(--accent);
+		--lens-danger: var(--bad);
+		--lens-ok: var(--ok);
+		--lens-warn: #ebcb8b;
+		--lens-kind-function: var(--kind-function);
+		--lens-kind-method: var(--kind-method);
+		--lens-kind-class: var(--kind-class);
+		--lens-kind-module: var(--kind-module);
+		--lens-kind-variable: var(--kind-variable);
 	}
 	:global(html, body) {
 		margin: 0;

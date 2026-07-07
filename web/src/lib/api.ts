@@ -1,9 +1,8 @@
+import { createAsdClient, createHttpTransport, type AsdClient } from '@agentstate/lens-core';
 import type {
 	Health,
 	SymbolSummary,
-	SymbolDetail,
 	LedgerEntry,
-	EffectDecl,
 	AuditResponse,
 	AuditFilters,
 	AuditVerifyReport
@@ -12,6 +11,9 @@ import type {
 // In dev we proxy /api/* via vite.config.ts → same-origin works.
 // In prod the Rust HTTP server serves both the API and the built Lens.
 export const API_BASE = '';
+
+/** Typed ASD client for the shared lens-core components (same-origin /api/v1). */
+export const asdClient: AsdClient = createAsdClient(createHttpTransport(`${API_BASE}/api/v1`));
 
 async function getJson<T>(path: string): Promise<T> {
 	const res = await fetch(`${API_BASE}${path}`);
@@ -29,25 +31,8 @@ export function getSymbols(): Promise<SymbolSummary[]> {
 	return getJson<SymbolSummary[]>('/api/v1/symbols');
 }
 
-export function getSymbolDetail(qname: string): Promise<SymbolDetail> {
-	return getJson<SymbolDetail>(`/api/v1/symbols/${encodeURIComponent(qname)}`);
-}
-
-export function getLedger(qname: string): Promise<LedgerEntry[]> {
-	return getJson<LedgerEntry[]>(`/api/v1/symbols/${encodeURIComponent(qname)}/ledger`);
-}
-
-export function getEffects(qname: string): Promise<EffectDecl | null> {
-	return getJson<EffectDecl | null>(`/api/v1/symbols/${encodeURIComponent(qname)}/effects`);
-}
-
-export function getCallers(qname: string): Promise<SymbolSummary[]> {
-	return getJson<SymbolSummary[]>(`/api/v1/symbols/${encodeURIComponent(qname)}/callers`);
-}
-
-export function getCallees(qname: string): Promise<SymbolSummary[]> {
-	return getJson<SymbolSummary[]>(`/api/v1/symbols/${encodeURIComponent(qname)}/callees`);
-}
+// Symbol detail / callers / callees / ledger / effects moved to the shared
+// AsdClient (`asdClient` above) consumed by the lens-core SymbolDetail view.
 
 /// Flat cross-symbol ledger listing. Optional tag filter (e.g. "awaiting-approval").
 export function getLedgerByTag(tag?: string): Promise<LedgerEntry[]> {
