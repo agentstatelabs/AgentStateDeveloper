@@ -2526,3 +2526,81 @@ isolated on both CLI and agent surfaces, and the OSS repo can be pushed
 public with the commercial crates cleanly private and a contribution process
 in place.
 
+## Plan T — Lens: full ASD web UI (shared lens-core, accountability, territory view)
+
+### Motivation
+
+ASD's differentiator over graph-visualizers (graphify et al., see Plan N) is
+*judgment data*: decisions, reasoning, effects, and tamper-evident audit.
+None of it is visible to a human without CLI/MCP fluency. Plan T turns the
+existing skeleton (`asd-serve` + `web/`) into a full Lens:
+
+1. **Transparency as the product.** Devs should see what the agent did, why
+   it did it, and be able to *prove* it — human-style accountability, more
+   structured. The ledger/thinking/audit chain is the spine of the UI, not
+   an appendix.
+2. **Shared UI layer.** CTXone Lens already has strong `/code/*` views; ASD
+   `web/` has audit/approvals scaffolding. Both are SvelteKit 5. A shared
+   `lens-core` package (own repo, npm git-dep — the `agent-skillgen`
+   pattern) carries components, API clients, types, and the design system,
+   so both Lenses evolve together.
+3. **A novel view with meat behind it.** A stable "territory" rendering of
+   the codebase with selectable data layers — thinking/decision density as
+   the headline layer — as the marketing-friendly face, backed by real data
+   rather than a pretty force-directed graph.
+
+Sequencing: CTXone plan `namespaces-ctx` (Milestone 1) lands first; Plan T
+is Milestone 2; the CTXone Lens facelift (Milestone 3, future ctx plan)
+adopts lens-core + the identity defined here.
+
+### Task table
+
+| Task | Description | Wave |
+|------|-------------|------|
+| t-001 | **lens-core bootstrap**: new repo on GitLab (`lens-core`), npm package with TS API clients (asd-serve `/api/v1/*`, Hub proxy shape), shared types, Svelte 5 component library skeleton, tagged releases; ASD `web/` and CTXone `web/` consume as git dep | 1 |
+| t-002 | **Extract shared views into lens-core**: symbol search/detail (effects + ledger panels), file browser with inline symbols, call-graph view (hops/pin controls), thinking views w/ confidence floor — sourced from the better of CTXone `/code/*` and ASD `web/` | 1 |
+| t-003 | **asd-serve API additions**: FTS search, graph endpoint (node/link JSON for callers/callees N-hop), effects-distribution overview (top-N by transitive blast radius), thinking/ledger timeline (chronological, cross-symbol) | 1 |
+| t-004 | **Live activity stream**: SSE on asd-serve emitting index/ledger/thinking/audit events as they land; Hub passthrough so CTXone Lens gets it per-repo; Lens "now" feed | 2 |
+| t-005 | **Accountability view** (the centerpiece): per-session/per-commit timeline where every event links its ledger entry (why), thinking entries (reasoning), effect verification (what it touches), and hash-chained audit record (proof); includes verify-badge (absorbs Plan I t-046) | 2 |
+| t-006 | **Deferred-UI absorption**: approvals wiring incl. reject/withdraw (t-029), cross-module graph render (t-030), effect-distribution route (t-031), "who approved what, when" timeline (t-034) — all against existing backends | 2 |
+| t-007 | **Territory-view prototypes**: 2–3 renderings against the ExampleProj golden DB — true 3D globe (WebGL) vs deterministic 2.5D archipelago (SVG/canvas; stable layout run-to-run so devs build spatial memory) vs one wildcard. Islands/regions from module/dir structure, named/shaped by ledger Concept/Ownership entries where present. Selectable layers: thinking/decision density (headline), effects/risk, activity/recency, structure base. Pick winner, kill the rest | 3 |
+| t-008 | **Visual identity**: dark-first design tokens + theme in lens-core (no existing brand — this defines it); applied across ASD Lens; CTXone inherits in Milestone 3 | 3 |
+| t-009 | **Docs + field test**: `docs/LENS.md` (serve, build, ASD_LENS_DIR, CORS); smoke-test Lens served from a non-source checkout against a foreign repo db per the CLAUDE.md field-test rule | 3 |
+
+### Wave ordering
+
+- **Wave 1 (foundation):** t-001 → t-002/t-003 — shared package exists, both
+  apps consume it, the API can feed every planned view.
+- **Wave 2 (the meat):** t-004 + t-005 + t-006 — live transparency and the
+  accountability spine.
+- **Wave 3 (the face):** t-007 + t-008, then t-009.
+
+### Acceptance
+
+- A dev runs `asd serve` in any indexed repo and gets: search, symbol/file
+  browsing, call graph, thinking, effects overview, approvals, audit —
+  without the CLI.
+- For any agent change, the accountability view answers "what, why,
+  reasoning, proof" in ≤2 clicks from the activity feed, ending at a
+  verifiable audit-chain badge.
+- CTXone Lens `/code/*` renders from lens-core components with no fork
+  drift; a component fix lands once and ships to both.
+- The chosen territory view renders ExampleProj deterministically (same map
+  twice in a row) with at least the thinking-density and effects layers
+  toggleable.
+
+### What's NOT in this plan
+
+- CTXone-side namespace work (ctx plan `namespaces-ctx`) and the CTXone
+  Lens facelift (Milestone 3).
+- Team/Enterprise gating of Lens features — everything here ships OSS in
+  `asd-serve`; tier splits come later with the Plan R/S structure.
+- Auth/multi-user; Lens stays local-first.
+
+### Done when
+
+ASD has a Lens a solo dev actually leaves open: live agent activity with
+provable why-chains, conventional browse/search that beats the CLI for
+inspection, and one distinctive territory view worth a demo video — all on
+a shared lens-core that CTXone consumes.
+
