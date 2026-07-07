@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { Badge } from '@agentstate/lens-core';
 	import { getHealth } from '$lib/api';
 	import type { Health } from '$lib/types';
 
@@ -25,6 +26,8 @@
 			</p>
 		{:else if health}
 			<dl>
+				<dt>Status</dt>
+				<dd><Badge tone="ok">{health.status}</Badge></dd>
 				<dt>Database</dt>
 				<dd><code>{health.db_path}</code></dd>
 				<dt>Indexed symbols</dt>
