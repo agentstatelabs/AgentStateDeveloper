@@ -28,18 +28,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentstatedeveloper-audit-pro"
-version = "1.2.0"
-dependencies = [
- "agentstatedeveloper-core",
- "blake3",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "agentstatedeveloper-cli"
 version = "1.2.0"
 dependencies = [
@@ -163,24 +151,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentstatedeveloper-pro"
-version = "1.2.0"
-dependencies = [
- "agentstatedeveloper-audit-pro",
- "agentstatedeveloper-cli",
- "agentstatedeveloper-core",
- "agentstatedeveloper-mcp",
- "agentstatedeveloper-ratify",
- "anyhow",
- "axum",
- "clap",
- "rmcp",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "agentstatedeveloper-python"
 version = "1.2.0"
 dependencies = [
@@ -189,18 +159,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tree-sitter",
  "tree-sitter-python",
-]
-
-[[package]]
-name = "agentstatedeveloper-ratify"
-version = "1.2.0"
-dependencies = [
- "agentstatedeveloper-core",
- "agentstategraph",
- "agentstategraph-core",
- "chrono",
- "serde_json",
- "thiserror 2.0.18",
 ]
 
 [[package]]

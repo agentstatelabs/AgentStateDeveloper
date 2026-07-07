@@ -15,9 +15,6 @@ members = [
     "crates/agentstatedeveloper-conformance",
     "crates/agentstatedeveloper-cli",
     "crates/agentstatedeveloper-mcp",
-    "crates/agentstatedeveloper-audit-pro",
-    "crates/agentstatedeveloper-ratify",
-    "crates/agentstatedeveloper-pro",
 ]
 
 [workspace.package]
@@ -75,6 +72,3 @@ agentstatedeveloper-adapters = { path = "crates/agentstatedeveloper-adapters" }
 agent-skillgen = { git = "https://github.com/agentstatelabs/agent-skillgen.git", tag = "v0.1.0" }
 agentstatedeveloper-cli = { path = "crates/agentstatedeveloper-cli" }
 agentstatedeveloper-mcp = { path = "crates/agentstatedeveloper-mcp" }
-agentstatedeveloper-audit-pro = { path = "crates/agentstatedeveloper-audit-pro" }
-agentstatedeveloper-ratify = { path = "crates/agentstatedeveloper-ratify" }
-agentstatedeveloper-pro = { path = "crates/agentstatedeveloper-pro" }
