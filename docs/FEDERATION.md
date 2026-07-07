@@ -93,7 +93,20 @@ one shared hub, the whole team's agents get cross-repo context.
 
 If instead you're working on several **unrelated** repos at once (separate
 sessions, no cross-repo question), you don't want a shared active repo — you
-want each session pinned to its own. On the CLI this is automatic: `asd` walks
-up from the current directory to that project's `.asd-state.db`. For agents,
-install the MCP server per-project so each session targets its own db. (See the
-switch/isolation notes in the README's Agent setup section.)
+want each session on its own. This is automatic on **both** surfaces:
+
+- **CLI:** `asd` walks up from the current directory to that project's
+  `.asd-state.db`.
+- **Agents (MCP):** `asd-mcp` does the same walk-up from the directory it was
+  started in. Your editor spawns one `asd-mcp` per session in that session's
+  project directory, so each session isolates to its own db — no pinning, no
+  collision, even with 2–3 sessions open at once.
+
+Precedence in both cases: an explicit `ASD_DB` wins; then a project db found by
+walking up; and only if the process isn't inside any ASD project does it fall
+back to the registry's active repo (`asd repo use`).
+
+For an explicit per-project setup — e.g. an editor that uses one global MCP
+config across projects — run `asd mcp install --project`. It writes a
+`.mcp.json` in the current directory with the asd server pinned to this
+project's db, so that project's agent is isolated regardless of other sessions.

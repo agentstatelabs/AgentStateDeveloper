@@ -82,28 +82,14 @@ fn resolve_default_db() -> PathBuf {
     if cwd_db.exists() {
         return cwd_db;
     }
-    if let Some(found) = walk_up_for_db() {
+    // Shared with `asd-mcp` so both surfaces resolve identically (Plan S t-004).
+    if let Some(found) = agentstatedeveloper_core::registry::find_db_upwards() {
         return found;
     }
     if let Some(active) = registry_active_db() {
         return active;
     }
     cwd_db
-}
-
-/// Walk up from the current directory to the filesystem root, returning the
-/// first `.asd-state.db` found (git-style project discovery).
-fn walk_up_for_db() -> Option<PathBuf> {
-    let mut dir = std::env::current_dir().ok()?;
-    loop {
-        let candidate = dir.join(".asd-state.db");
-        if candidate.exists() {
-            return Some(candidate);
-        }
-        if !dir.pop() {
-            return None;
-        }
-    }
 }
 
 /// The registry's active repo db path (`asd repo use <name>`), if any.

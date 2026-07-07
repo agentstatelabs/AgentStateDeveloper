@@ -172,6 +172,24 @@ impl Registry {
     }
 }
 
+/// Walk up from the current directory to the filesystem root, returning the
+/// first `.asd-state.db` found — git-style project discovery. Shared by the CLI
+/// default-db resolution and the `asd-mcp` server so both isolate to the project
+/// the process was started in, independent of the registry's active repo
+/// (Plan Q t-002 / Plan S t-004).
+pub fn find_db_upwards() -> Option<PathBuf> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        let candidate = dir.join(".asd-state.db");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------

@@ -36,7 +36,18 @@ async fn main() -> Result<()> {
     let (db_path, track_registry) = match std::env::var("ASD_DB") {
         // Explicit ASD_DB pins this process to one db; do not follow the registry.
         Ok(p) if !p.is_empty() => (PathBuf::from(p), false),
-        _ => (resolve_db_from_registry()?, true),
+        // Plan S t-004: no pinned db — resolve from the server's own startup
+        // directory first (git-style walk-up). Each agent session is spawned in
+        // its project's dir, so this isolates concurrent sessions on different
+        // repos without pinning. Only when the server isn't inside any ASD
+        // project do we fall back to the registry's active repo (and track it).
+        _ => match agentstatedeveloper_core::registry::find_db_upwards() {
+            Some(db) => {
+                tracing::info!(?db, "resolved db via cwd walk-up (per-session isolation)");
+                (db, false)
+            }
+            None => (resolve_db_from_registry()?, true),
+        },
     };
 
     tracing::info!(?db_path, track_registry, "starting asd-mcp stdio server");

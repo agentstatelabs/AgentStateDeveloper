@@ -269,6 +269,13 @@ pub struct InstallArgs {
     /// instead of pinning one database.
     #[arg(long)]
     pub follow_active: bool,
+
+    /// Plan S t-005: write a project-local `.mcp.json` in the current directory
+    /// (pinned to this project's db) instead of editing each tool's global MCP
+    /// config. The explicit way to give one project its own isolated MCP server
+    /// — useful when several projects share a global agent config.
+    #[arg(long)]
+    pub project: bool,
 }
 
 #[derive(Debug, Args)]
@@ -611,6 +618,42 @@ fn install(args: InstallArgs) -> Result<()> {
              cargo install --path crates/agentstatedeveloper-mcp"
         )
     })?;
+
+    // Plan S t-005: `--project` writes a single project-local `.mcp.json` (pinned
+    // to this project's db) instead of touching each tool's global config.
+    if args.project {
+        let cfg_path = std::env::current_dir()
+            .context("cannot determine current directory")?
+            .join(".mcp.json");
+        let db_opt: Option<PathBuf> = if args.follow_active {
+            None
+        } else {
+            Some(resolve_db(args.db)?)
+        };
+        let entry = build_entry(EntryStyle::Standard, &asd_mcp, db_opt.as_deref());
+        let mut cfg = read_config(&cfg_path, ConfigFormat::Json)?;
+        let already = upsert_server(&mut cfg, "mcpServers", &entry)?;
+        write_config(&cfg_path, &cfg)?;
+
+        eprintln!(
+            "  asd {} {}",
+            if already { "updated in" } else { "installed to" },
+            cfg_path.display()
+        );
+        eprintln!(
+            "  ASD_DB:  {}",
+            db_opt
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(unset — server resolves this project by directory)".to_string())
+        );
+        eprintln!();
+        eprintln!(
+            "Project-scoped MCP config written. Restart your agent in this project; \
+             it targets this repo's db regardless of any other open sessions."
+        );
+        return Ok(());
+    }
 
     // t-003: `--follow-active` omits the pinned ASD_DB so the server tracks the
     // registry's active repo; otherwise pin the resolved db as before.
