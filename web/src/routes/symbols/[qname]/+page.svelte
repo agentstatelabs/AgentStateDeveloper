@@ -2,7 +2,7 @@
 	import { goto } from '$app/navigation';
 	import { SymbolDetail } from '@agentstate/lens-core';
 	import { asdClient } from '$lib/api';
-	import { symbols } from '$lib/stores';
+	import { symbols } from '$lib/stores.svelte';
 	import { page } from '$app/state';
 
 	let qname = $derived(decodeURIComponent(page.params.qname ?? ''));

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { getAudit, getAuditVerify } from '$lib/api';
 	import type { AuditEvent, AuditResponse, AuditVerifyReport } from '$lib/types';
+	import { VerifyBadge } from '@agentstate/lens-core';
 	import { onDestroy } from 'svelte';
 
 	let response = $state<AuditResponse | null>(null);
@@ -140,22 +141,16 @@
 			</span>
 		</div>
 	{:else if verify}
-		{#if verify.verified}
-			<div class="verify ok">
-				<span class="dot"></span>
-				<strong>Chain verified</strong>
-				<span class="v-detail">
-					{verify.signed_events} signed{#if verify.unsigned_events > 0}, {verify.unsigned_events} unsigned{/if}
-				</span>
-			</div>
-		{:else if verify.chain_breaks.length > 0}
-			<div class="verify bad">
-				<span class="dot"></span>
-				<strong>{verify.chain_breaks.length} chain break{verify.chain_breaks.length === 1 ? '' : 's'}</strong>
+		<!-- Shared VerifyBadge (lens-core) — same chain-status pill the
+		     /activity AccountabilityCards use. `report` keeps it in sync
+		     with this page's live polling instead of self-fetching. -->
+		<div class="verify-row">
+			<VerifyBadge report={verify} />
+			{#if (verify.chain_breaks?.length ?? 0) > 1}
 				<details class="breaks">
-					<summary>inspect</summary>
+					<summary>all {verify.chain_breaks?.length} breaks</summary>
 					<ul>
-						{#each verify.chain_breaks as b (b.event_id)}
+						{#each verify.chain_breaks ?? [] as b (b.event_id)}
 							<li>
 								<code>#{b.index}</code>
 								<code>{b.event_id}</code>
@@ -164,16 +159,8 @@
 						{/each}
 					</ul>
 				</details>
-			</div>
-		{:else if verify.signed_events === 0 && verify.total_events > 0}
-			<div class="verify warn">
-				<span class="dot"></span>
-				<strong>Unsigned log</strong>
-				<span class="v-detail">
-					{verify.unsigned_events} legacy event{verify.unsigned_events === 1 ? '' : 's'} — hash chain starts with the next emit
-				</span>
-			</div>
-		{/if}
+			{/if}
+		</div>
 	{/if}
 </header>
 
@@ -419,56 +406,29 @@
 	.empty {
 		padding: 24px 0;
 	}
-	.verify {
+	.verify-row {
 		display: flex;
-		align-items: center;
-		gap: 10px;
+		align-items: baseline;
+		gap: 12px;
 		margin-top: 10px;
-		padding: 8px 12px;
-		border-radius: 4px;
 		font-size: 12px;
 	}
-	.verify.ok {
-		background: rgba(111, 207, 151, 0.10);
-		border: 1px solid rgba(111, 207, 151, 0.4);
-		color: var(--ok);
-	}
-	.verify.bad {
-		background: rgba(224, 108, 117, 0.10);
-		border: 1px solid rgba(224, 108, 117, 0.4);
+	.breaks summary {
+		cursor: pointer;
 		color: var(--bad);
 	}
-	.verify.warn {
-		background: rgba(235, 203, 139, 0.08);
-		border: 1px solid rgba(235, 203, 139, 0.35);
-		color: #ebcb8b;
-	}
-	.verify .dot {
-		width: 8px;
-		height: 8px;
-		border-radius: 50%;
-		background: currentColor;
-	}
-	.verify .v-detail {
-		color: var(--fg-dim);
-		font-weight: 400;
-	}
-	.verify .breaks summary {
-		cursor: pointer;
-		color: inherit;
-	}
-	.verify .breaks ul {
+	.breaks ul {
 		list-style: none;
 		padding: 6px 0 0 0;
 		margin: 0;
 	}
-	.verify .breaks li {
+	.breaks li {
 		display: flex;
 		gap: 8px;
 		padding: 3px 0;
 		font-size: 11px;
 	}
-	.verify .breaks .reason {
+	.breaks .reason {
 		color: var(--bad);
 	}
 	.live-toggle {

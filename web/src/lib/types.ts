@@ -28,5 +28,9 @@ export type {
 	AuditResponse,
 	AuditFilters,
 	AuditVerifyReport,
-	ChainBreak
+	ChainBreak,
+	ActivityEvent,
+	ActivityKind,
+	ActivityStreamKind,
+	TimelineParams
 } from '@agentstate/lens-core';

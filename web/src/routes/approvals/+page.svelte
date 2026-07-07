@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { getAwaitingApproval, approveEntry, rejectEntry } from '$lib/api';
 	import type { LedgerEntry } from '$lib/types';
-	import { symbols, approvals } from '$lib/stores';
+	import { symbols, approvals } from '$lib/stores.svelte';
 
 	let entries = $state<LedgerEntry[]>([]);
 	let err = $state<string | null>(null);

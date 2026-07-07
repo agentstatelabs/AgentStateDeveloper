@@ -2,7 +2,7 @@
 	import '@agentstate/lens-core/tokens.css';
 	import { getHealth, getSymbols, getAwaitingApproval } from '$lib/api';
 	import type { Health } from '$lib/types';
-	import { symbols, approvals } from '$lib/stores';
+	import { symbols, approvals } from '$lib/stores.svelte';
 	import { page } from '$app/state';
 
 	let { children } = $props();
@@ -51,6 +51,7 @@
 			{/if}
 		</div>
 		<nav class="top-links">
+			<a href="/activity">Activity</a>
 			<a href="/approvals">Approvals</a>
 			<a href="/audit">Audit</a>
 		</nav>
