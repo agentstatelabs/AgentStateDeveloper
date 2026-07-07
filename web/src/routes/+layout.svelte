@@ -52,6 +52,8 @@
 		</div>
 		<nav class="top-links">
 			<a href="/activity">Activity</a>
+			<a href="/graph">Graph</a>
+			<a href="/effects">Effects</a>
 			<a href="/approvals">Approvals</a>
 			<a href="/audit">Audit</a>
 		</nav>

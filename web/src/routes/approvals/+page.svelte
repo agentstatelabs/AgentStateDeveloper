@@ -1,7 +1,15 @@
 <script lang="ts">
-	import { getAwaitingApproval, approveEntry, rejectEntry } from '$lib/api';
+	import {
+		getAwaitingApproval,
+		approveEntry,
+		rejectEntry,
+		withdrawEntry,
+		ApprovalActionError
+	} from '$lib/api';
 	import type { LedgerEntry } from '$lib/types';
 	import { symbols, approvals } from '$lib/stores.svelte';
+
+	type Action = 'approve' | 'reject' | 'withdraw';
 
 	let entries = $state<LedgerEntry[]>([]);
 	let err = $state<string | null>(null);
@@ -10,8 +18,14 @@
 	let approverKind = $state('human');
 	let pendingId = $state<string | null>(null);
 	let rowError = $state<Record<string, string>>({});
+	/** Per-row flag: the last failure was the OSS "commercial feature" stub. */
+	let rowEditionLocked = $state<Record<string, boolean>>({});
 	let rowMessage = $state<Record<string, string>>({});
 	let rowReason = $state<Record<string, string>>({});
+	/** Two-step confirm: which (entry, action) is armed and awaiting a second click. */
+	let confirming = $state<{ id: string; action: Action } | null>(null);
+	/** Sticky page-level flag once ANY action reports the OSS stub. */
+	let editionLocked = $state(false);
 
 	async function refresh() {
 		const list = await getAwaitingApproval();
@@ -30,35 +44,71 @@
 			});
 	});
 
-	async function approve(entryId: string) {
-		pendingId = entryId;
+	function setRowError(entryId: string, e: unknown) {
+		const commercial = e instanceof ApprovalActionError && e.commercial;
+		rowEditionLocked = { ...rowEditionLocked, [entryId]: commercial };
+		if (commercial) editionLocked = true;
+		rowError = {
+			...rowError,
+			[entryId]: e instanceof Error ? e.message : String(e)
+		};
+	}
+
+	function clearRowError(entryId: string) {
 		rowError = { ...rowError, [entryId]: '' };
+		rowEditionLocked = { ...rowEditionLocked, [entryId]: false };
+	}
+
+	/** First click arms the confirm; the second click performs the action. */
+	function requestAction(entryId: string, action: Action): boolean {
+		if (confirming?.id === entryId && confirming.action === action) {
+			confirming = null;
+			return true;
+		}
+		confirming = { id: entryId, action };
+		return false;
+	}
+
+	function isConfirming(entryId: string, action: Action): boolean {
+		return confirming?.id === entryId && confirming.action === action;
+	}
+
+	async function run(entryId: string, work: () => Promise<unknown>) {
+		pendingId = entryId;
+		clearRowError(entryId);
 		try {
-			await approveEntry(entryId, approver, approverKind, rowMessage[entryId] || undefined);
+			await work();
 			await refresh();
 		} catch (e) {
-			rowError = { ...rowError, [entryId]: String(e) };
+			setRowError(entryId, e);
 		} finally {
 			pendingId = null;
 		}
 	}
 
-	async function reject(entryId: string) {
+	function approve(entryId: string) {
+		if (!requestAction(entryId, 'approve')) return;
+		run(entryId, () =>
+			approveEntry(entryId, approver, approverKind, rowMessage[entryId] || undefined)
+		);
+	}
+
+	function reject(entryId: string) {
 		const reason = (rowReason[entryId] || '').trim();
 		if (!reason) {
+			confirming = null;
 			rowError = { ...rowError, [entryId]: 'reason is required to reject' };
 			return;
 		}
-		pendingId = entryId;
-		rowError = { ...rowError, [entryId]: '' };
-		try {
-			await rejectEntry(entryId, approver, reason, approverKind);
-			await refresh();
-		} catch (e) {
-			rowError = { ...rowError, [entryId]: String(e) };
-		} finally {
-			pendingId = null;
-		}
+		if (!requestAction(entryId, 'reject')) return;
+		run(entryId, () => rejectEntry(entryId, approver, reason, approverKind));
+	}
+
+	function withdraw(entry: LedgerEntry) {
+		if (!requestAction(entry.entry_id, 'withdraw')) return;
+		// Withdraw is the author retracting their own proposal — the server
+		// validates author_id against the entry, so we send the recorded author.
+		run(entry.entry_id, () => withdrawEntry(entry.entry_id, entry.author.id));
 	}
 
 	function ts(s: string): string {
@@ -76,10 +126,25 @@
 </script>
 
 <header class="q-header">
-	<h1>Awaiting approval</h1>
+	<div class="title-row">
+		<h1>Awaiting approval</h1>
+		<nav class="tabs" aria-label="approvals views">
+			<a class="tab active" href="/approvals" aria-current="page">Queue</a>
+			<a class="tab" href="/approvals/history">History</a>
+		</nav>
+	</div>
 	<p class="muted">
 		Ledger entries gated by a policy that requires human or senior-agent attestation before they land.
 	</p>
+	{#if editionLocked}
+		<div class="edition-banner">
+			<strong>Approval actions are not available on this server.</strong>
+			<span>
+				This <code>asd-serve</code> is the OSS edition — approve / reject / withdraw are Team-tier
+				features (<code>asd-pro</code>). The queue below is read-only here.
+			</span>
+		</div>
+	{/if}
 	<div class="approver-bar">
 		<label>
 			Approver
@@ -150,22 +215,43 @@
 				<div class="row-actions">
 					<button
 						class="approve-btn"
+						class:arm={isConfirming(le.entry_id, 'approve')}
 						disabled={pendingId === le.entry_id}
 						onclick={() => approve(le.entry_id)}
 					>
-						{pendingId === le.entry_id ? 'working…' : 'approve'}
+						{#if pendingId === le.entry_id}working…{:else if isConfirming(le.entry_id, 'approve')}confirm approve?{:else}approve{/if}
 					</button>
 					<button
 						class="reject-btn"
+						class:arm={isConfirming(le.entry_id, 'reject')}
 						disabled={pendingId === le.entry_id}
 						onclick={() => reject(le.entry_id)}
 					>
-						reject
+						{isConfirming(le.entry_id, 'reject') ? 'confirm reject?' : 'reject'}
 					</button>
-					{#if rowError[le.entry_id]}
-						<span class="row-err">{rowError[le.entry_id]}</span>
+					<button
+						class="withdraw-btn"
+						class:arm={isConfirming(le.entry_id, 'withdraw')}
+						disabled={pendingId === le.entry_id}
+						title="Retract this proposal as its author ({le.author.id})"
+						onclick={() => withdraw(le)}
+					>
+						{isConfirming(le.entry_id, 'withdraw') ? 'confirm withdraw?' : 'withdraw'}
+					</button>
+					{#if confirming?.id === le.entry_id}
+						<button class="cancel-btn" onclick={() => (confirming = null)}>cancel</button>
 					{/if}
 				</div>
+				{#if rowError[le.entry_id]}
+					{#if rowEditionLocked[le.entry_id]}
+						<div class="row-notice edition">
+							<span class="notice-label">team tier</span>
+							{rowError[le.entry_id]}
+						</div>
+					{:else}
+						<div class="row-notice err">{rowError[le.entry_id]}</div>
+					{/if}
+				{/if}
 			</li>
 		{/each}
 	</ul>
@@ -181,6 +267,45 @@
 		margin: 0;
 		font-size: 18px;
 		font-weight: 600;
+	}
+	.title-row {
+		display: flex;
+		align-items: baseline;
+		gap: 16px;
+	}
+	.tabs {
+		display: flex;
+		gap: 4px;
+	}
+	.tab {
+		font-size: 11px;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		font-weight: 600;
+		padding: 3px 10px;
+		border-radius: 999px;
+		border: 1px solid transparent;
+		color: var(--fg-dim);
+	}
+	.tab:hover {
+		color: var(--accent);
+	}
+	.tab.active {
+		color: var(--accent);
+		border-color: rgba(122, 162, 255, 0.4);
+		background: rgba(122, 162, 255, 0.08);
+	}
+	.edition-banner {
+		margin-top: 10px;
+		padding: 8px 12px;
+		background: rgba(235, 203, 139, 0.08);
+		border: 1px solid rgba(235, 203, 139, 0.3);
+		color: #ebcb8b;
+		border-radius: 4px;
+		font-size: 12px;
+	}
+	.edition-banner strong {
+		margin-right: 6px;
 	}
 	.muted {
 		color: var(--fg-dim);
@@ -360,6 +485,75 @@
 	.reject-btn:hover:not(:disabled) {
 		background: rgba(224, 108, 117, 0.25);
 	}
+	.withdraw-btn {
+		background: rgba(235, 203, 139, 0.12);
+		color: #ebcb8b;
+		border: 1px solid rgba(235, 203, 139, 0.4);
+		border-radius: 3px;
+		padding: 4px 12px;
+		font-size: 11px;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		font-weight: 600;
+		cursor: pointer;
+		font-family: inherit;
+	}
+	.withdraw-btn:hover:not(:disabled) {
+		background: rgba(235, 203, 139, 0.22);
+	}
+	.withdraw-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+	/* Armed confirm state — the second click commits. */
+	.approve-btn.arm,
+	.reject-btn.arm,
+	.withdraw-btn.arm {
+		outline: 1px solid currentColor;
+		outline-offset: 1px;
+	}
+	.cancel-btn {
+		background: transparent;
+		color: var(--fg-dim);
+		border: 1px solid var(--border);
+		border-radius: 3px;
+		padding: 4px 10px;
+		font-size: 11px;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		cursor: pointer;
+		font-family: inherit;
+	}
+	.cancel-btn:hover {
+		color: var(--fg);
+	}
+	.row-notice {
+		margin-top: 8px;
+		font-size: 11px;
+		padding: 6px 10px;
+		border-radius: 3px;
+	}
+	.row-notice.err {
+		color: var(--bad);
+		background: rgba(224, 108, 117, 0.08);
+		border: 1px solid rgba(224, 108, 117, 0.3);
+	}
+	.row-notice.edition {
+		color: #ebcb8b;
+		background: rgba(235, 203, 139, 0.08);
+		border: 1px solid rgba(235, 203, 139, 0.3);
+	}
+	.notice-label {
+		display: inline-block;
+		font-size: 9px;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		font-weight: 700;
+		padding: 1px 6px;
+		margin-right: 8px;
+		border-radius: 999px;
+		border: 1px solid rgba(235, 203, 139, 0.45);
+	}
 	.row-inputs {
 		margin-top: 8px;
 		display: flex;
@@ -375,10 +569,6 @@
 		border-radius: 3px;
 		padding: 4px 8px;
 		font-family: inherit;
-		font-size: 11px;
-	}
-	.row-err {
-		color: var(--bad);
 		font-size: 11px;
 	}
 </style>

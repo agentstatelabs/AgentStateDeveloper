@@ -55,31 +55,67 @@ export interface RejectResponse {
 	entry: LedgerEntry;
 }
 
+export interface WithdrawResponse {
+	status: 'withdrawn' | 'already-withdrawn';
+	entry: LedgerEntry;
+}
+
+/**
+ * Error from an approval-family POST. OSS asd-serve has no ratify engine:
+ * approve/reject/withdraw all return 500 with
+ * `{"error": "... is a commercial feature (Team tier) — install asd-pro ..."}`.
+ * `commercial` is true for that case so the UI can present "not available
+ * in this edition" honestly instead of a generic failure.
+ */
+export class ApprovalActionError extends Error {
+	status: number;
+	commercial: boolean;
+
+	constructor(status: number, message: string) {
+		super(message);
+		this.name = 'ApprovalActionError';
+		this.status = status;
+		this.commercial = message.includes('commercial feature');
+	}
+}
+
+async function postApproval<T>(entryId: string, action: string, body: unknown): Promise<T> {
+	const res = await fetch(
+		`${API_BASE}/api/v1/approvals/${encodeURIComponent(entryId)}/${action}`,
+		{
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(body)
+		}
+	);
+	if (!res.ok) {
+		const text = await res.text();
+		// ApiError bodies are `{"error": "..."}` — unwrap for readable UI.
+		let message = `${res.status} ${res.statusText}`;
+		try {
+			const parsed = JSON.parse(text) as { error?: string };
+			message = parsed.error ?? `${message} — ${text}`;
+		} catch {
+			if (text) message = `${message} — ${text}`;
+		}
+		throw new ApprovalActionError(res.status, message);
+	}
+	return (await res.json()) as T;
+}
+
 /// Approve a ledger entry currently tagged `awaiting-approval`.
-export async function approveEntry(
+export function approveEntry(
 	entryId: string,
 	approver: string,
 	approverKind: string = 'human',
 	message?: string
 ): Promise<ApproveResponse> {
-	const res = await fetch(
-		`${API_BASE}/api/v1/approvals/${encodeURIComponent(entryId)}/approve`,
-		{
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({
-				approver,
-				approver_kind: approverKind,
-				agent_id: 'asd-lens',
-				...(message ? { message } : {})
-			})
-		}
-	);
-	if (!res.ok) {
-		const text = await res.text();
-		throw new Error(`${res.status} ${res.statusText} — ${text}`);
-	}
-	return (await res.json()) as ApproveResponse;
+	return postApproval<ApproveResponse>(entryId, 'approve', {
+		approver,
+		approver_kind: approverKind,
+		agent_id: 'asd-lens',
+		...(message ? { message } : {})
+	});
 }
 
 export function getAuditVerify(): Promise<AuditVerifyReport> {
@@ -92,34 +128,31 @@ export function getAudit(filters: AuditFilters = {}): Promise<AuditResponse> {
 	if (filters.since) params.set('since', filters.since);
 	if (filters.actor) params.set('actor', filters.actor);
 	if (filters.outcome) params.set('outcome', filters.outcome);
+	if (filters.subject) params.set('subject', filters.subject);
 	if (filters.limit) params.set('limit', String(filters.limit));
 	const qs = params.toString();
 	return getJson<AuditResponse>(`/api/v1/audit${qs ? '?' + qs : ''}`);
 }
 
 /// Reject an awaiting-approval ledger entry.
-export async function rejectEntry(
+export function rejectEntry(
 	entryId: string,
 	reviewer: string,
 	reason: string,
 	reviewerKind: string = 'human'
 ): Promise<RejectResponse> {
-	const res = await fetch(
-		`${API_BASE}/api/v1/approvals/${encodeURIComponent(entryId)}/reject`,
-		{
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({
-				reviewer,
-				reviewer_kind: reviewerKind,
-				reason,
-				agent_id: 'asd-lens'
-			})
-		}
-	);
-	if (!res.ok) {
-		const text = await res.text();
-		throw new Error(`${res.status} ${res.statusText} — ${text}`);
-	}
-	return (await res.json()) as RejectResponse;
+	return postApproval<RejectResponse>(entryId, 'reject', {
+		reviewer,
+		reviewer_kind: reviewerKind,
+		reason,
+		agent_id: 'asd-lens'
+	});
+}
+
+/// Withdraw an awaiting-approval ledger entry (author retracts their own).
+export function withdrawEntry(entryId: string, authorId: string): Promise<WithdrawResponse> {
+	return postApproval<WithdrawResponse>(entryId, 'withdraw', {
+		author_id: authorId,
+		agent_id: 'asd-lens'
+	});
 }

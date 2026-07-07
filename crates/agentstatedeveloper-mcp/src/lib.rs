@@ -563,6 +563,11 @@ struct AuditQuery {
     actor: Option<String>,
     /// Exact match on outcome.
     outcome: Option<String>,
+    /// Exact match on `subject_id` OR `secondary_id`. Lets consumers pull
+    /// "every audit record naming this entry/symbol" server-side instead
+    /// of scanning the last N events client-side (Plan I t-034; the
+    /// lens-core AccountabilityCard is the primary consumer).
+    subject: Option<String>,
     /// Max events to return (default 200, max 1000).
     #[serde(default)]
     limit: Option<usize>,
@@ -609,6 +614,13 @@ async fn list_audit(
             }
             if let Some(ref o) = q.outcome {
                 if &e.outcome != o {
+                    return false;
+                }
+            }
+            if let Some(ref s) = q.subject {
+                if e.subject_id.as_deref() != Some(s.as_str())
+                    && e.secondary_id.as_deref() != Some(s.as_str())
+                {
                     return false;
                 }
             }
