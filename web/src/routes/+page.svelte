@@ -13,15 +13,21 @@
 	});
 </script>
 
+<svelte:head>
+	<title>ASD Lens</title>
+</svelte:head>
+
 <div class="landing">
-	<h1>AgentStateDeveloper — Lens</h1>
-	<p class="tagline">Code-level context and audit overlay for agent-authored code.</p>
+	<header class="page-header">
+		<h1>AgentStateDeveloper — Lens</h1>
+		<p class="page-desc">Code-level context and audit overlay for agent-authored code.</p>
+	</header>
 
 	<div class="card">
-		<h2>Status</h2>
+		<h2 class="micro-label">Status</h2>
 		{#if err}
-			<div class="bad">API unreachable: {err}</div>
-			<p class="muted">
+			<div class="state-error">API unreachable: {err}</div>
+			<p class="hint">
 				Start the HTTP server: <code>asd-serve</code>
 			</p>
 		{:else if health}
@@ -31,17 +37,17 @@
 				<dt>Database</dt>
 				<dd><code>{health.db_path}</code></dd>
 				<dt>Indexed symbols</dt>
-				<dd>{health.symbol_count}</dd>
+				<dd>{health.symbol_count.toLocaleString()}</dd>
 			</dl>
 		{:else}
-			<div class="muted">loading…</div>
+			<div class="state-loading">loading…</div>
 		{/if}
 	</div>
 
 	<div class="card">
-		<h2>Get started</h2>
+		<h2 class="micro-label">Get started</h2>
 		<p>Select a symbol from the left sidebar to view its declared effects and decision ledger.</p>
-		<p class="muted">
+		<p class="hint">
 			Index a new Python repo with <code>asd index &lt;path&gt;</code>, then refresh this page.
 		</p>
 	</div>
@@ -51,27 +57,15 @@
 	.landing {
 		max-width: 720px;
 	}
-	h1 {
-		margin: 0 0 6px 0;
-		font-size: 20px;
-	}
-	.tagline {
-		color: var(--fg-dim);
-		margin: 0 0 24px 0;
-	}
 	.card {
-		background: var(--bg-alt);
-		border: 1px solid var(--border);
-		border-radius: 6px;
-		padding: 16px 20px;
-		margin-bottom: 16px;
+		background: var(--lens-surface);
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-md);
+		padding: var(--lens-space-4) var(--lens-space-5);
+		margin-bottom: var(--lens-space-4);
 	}
-	h2 {
-		margin: 0 0 10px 0;
-		font-size: 13px;
-		text-transform: uppercase;
-		letter-spacing: 0.08em;
-		color: var(--fg-dim);
+	.card :global(h2.micro-label) {
+		margin: 0 0 10px;
 	}
 	dl {
 		display: grid;
@@ -80,15 +74,12 @@
 		margin: 0;
 	}
 	dt {
-		color: var(--fg-dim);
+		color: var(--lens-muted);
 	}
 	dd {
 		margin: 0;
 	}
-	.bad {
-		color: var(--bad);
-	}
-	.muted {
-		color: var(--fg-dim);
+	.hint {
+		color: var(--lens-muted);
 	}
 </style>

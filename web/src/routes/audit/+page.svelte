@@ -128,13 +128,13 @@
 	}
 </script>
 
-<header class="a-header">
+<header class="page-header">
 	<h1>Audit log</h1>
-	<p class="muted">
+	<p class="page-desc">
 		Append-only, hash-chained JSONL event stream. Every ledger mutation and policy evaluation, across CLI / MCP / HTTP.
 	</p>
 	{#if response?.configured === false}
-		<div class="banner">
+		<div class="banner" data-tone="warn">
 			<strong>No audit log configured.</strong>
 			<span>
 				Start <code>asd-serve</code> with <code>ASD_AUDIT_LOG=/path/to/audit.jsonl</code> to begin capturing events.
@@ -195,11 +195,11 @@
 </div>
 
 {#if err}
-	<div class="error">{err}</div>
+	<div class="state-error">{err}</div>
 {:else if loading && !response}
-	<div class="muted">loading…</div>
+	<div class="state-loading">loading…</div>
 {:else if response && response.events.length === 0}
-	<div class="muted empty">No matching events.</div>
+	<div class="state-empty">No matching events — loosen the filters or raise the limit.</div>
 {:else if response}
 	<div class="path-row">
 		{response.count} event{response.count === 1 ? '' : 's'}
@@ -243,41 +243,14 @@
 {/if}
 
 <style>
-	.a-header {
-		margin-bottom: 20px;
-		border-bottom: 1px solid var(--border);
-		padding-bottom: 12px;
-	}
-	h1 {
-		margin: 0;
-		font-size: 18px;
-		font-weight: 600;
-	}
-	.muted {
-		color: var(--fg-dim);
-	}
-	.a-header .muted {
-		margin: 4px 0 0 0;
-		font-size: 12px;
-	}
-	.banner {
-		margin-top: 10px;
-		padding: 8px 12px;
-		background: rgba(235, 203, 139, 0.08);
-		border: 1px solid rgba(235, 203, 139, 0.3);
-		color: #ebcb8b;
-		border-radius: 4px;
-		font-size: 12px;
-	}
-	.banner strong { margin-right: 6px; }
 	.filters {
 		display: flex;
 		flex-wrap: wrap;
 		gap: 10px;
 		align-items: center;
-		margin-bottom: 12px;
-		font-size: 11px;
-		color: var(--fg-dim);
+		margin-bottom: var(--lens-space-3);
+		font-size: var(--lens-font-size-2xs);
+		color: var(--lens-muted);
 	}
 	.filters label {
 		display: flex;
@@ -285,13 +258,21 @@
 		align-items: center;
 	}
 	.filters input {
-		background: var(--bg);
-		color: var(--fg);
-		border: 1px solid var(--border);
-		border-radius: 3px;
+		background: var(--lens-bg);
+		color: var(--lens-text);
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-sm);
 		padding: 3px 6px;
 		font-family: inherit;
-		font-size: 11px;
+		font-size: var(--lens-font-size-2xs);
+	}
+	.filters input::placeholder {
+		color: var(--lens-text-faint);
+	}
+	.filters input:focus {
+		outline: none;
+		border-color: var(--lens-accent);
+		box-shadow: 0 0 0 3px var(--lens-accent-tint);
 	}
 	.filters input[type='text'] {
 		width: 180px;
@@ -300,22 +281,23 @@
 		width: 70px;
 	}
 	.filters button {
-		background: var(--bg-alt);
-		color: var(--fg);
-		border: 1px solid var(--border);
-		border-radius: 3px;
+		background: var(--lens-surface);
+		color: var(--lens-text);
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-sm);
 		padding: 3px 10px;
-		font-size: 11px;
+		font-size: var(--lens-font-size-2xs);
 		cursor: pointer;
 		font-family: inherit;
+		transition: background var(--lens-dur-fast) var(--lens-ease);
 	}
 	.filters button:hover:not(:disabled) {
-		background: var(--bg-hover);
+		background: var(--lens-surface-raised);
 	}
 	.path-row {
-		color: var(--fg-dim);
-		font-size: 11px;
-		margin-bottom: 12px;
+		color: var(--lens-muted);
+		font-size: var(--lens-font-size-2xs);
+		margin-bottom: var(--lens-space-3);
 	}
 	.events {
 		list-style: none;
@@ -325,62 +307,62 @@
 	.events li {
 		padding: 10px 14px;
 		margin-bottom: 6px;
-		background: var(--bg-alt);
-		border: 1px solid var(--border);
-		border-radius: 4px;
+		background: var(--lens-surface);
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-sm);
 	}
 	.row-head {
 		display: flex;
 		gap: 10px;
 		align-items: baseline;
 		flex-wrap: wrap;
-		font-size: 12px;
+		font-size: var(--lens-font-size-xs);
 	}
 	.type {
-		color: var(--accent);
+		color: var(--lens-accent);
 		font-weight: 600;
-		font-family: 'SF Mono', ui-monospace, monospace;
+		font-family: var(--lens-font-mono);
 	}
 	.outcome {
 		font-size: 10px;
 		text-transform: uppercase;
-		letter-spacing: 0.08em;
+		letter-spacing: var(--lens-tracking-caps);
 		padding: 1px 6px;
-		border-radius: 3px;
+		border-radius: var(--lens-radius-sm);
 	}
 	.outcome.ok {
-		background: rgba(111, 207, 151, 0.15);
-		color: var(--ok);
+		background: var(--lens-ok-tint);
+		color: var(--lens-ok);
 	}
 	.outcome.bad {
-		background: rgba(224, 108, 117, 0.15);
-		color: var(--bad);
+		background: var(--lens-danger-tint);
+		color: var(--lens-danger);
 	}
 	.outcome.warn {
-		background: rgba(235, 203, 139, 0.15);
-		color: #ebcb8b;
+		background: var(--lens-warn-tint);
+		color: var(--lens-warn);
 	}
 	.actor {
-		color: var(--fg-dim);
+		color: var(--lens-muted);
 	}
 	.time {
-		color: var(--fg-dim);
+		color: var(--lens-muted);
 		margin-left: auto;
-		font-size: 11px;
-		font-family: 'SF Mono', ui-monospace, monospace;
+		font-size: var(--lens-font-size-2xs);
+		font-family: var(--lens-font-mono);
 	}
 	.row-ids {
 		margin-top: 4px;
-		color: var(--fg-dim);
-		font-size: 11px;
+		color: var(--lens-muted);
+		font-size: var(--lens-font-size-2xs);
 		display: flex;
 		flex-wrap: wrap;
 		gap: 6px;
 	}
 	.reason {
 		margin-top: 6px;
-		color: var(--bad);
-		font-size: 11px;
+		color: var(--lens-danger);
+		font-size: var(--lens-font-size-2xs);
 		font-style: italic;
 	}
 	.payload {
@@ -388,34 +370,29 @@
 	}
 	.payload summary {
 		cursor: pointer;
-		color: var(--fg-dim);
-		font-size: 11px;
+		color: var(--lens-muted);
+		font-size: var(--lens-font-size-2xs);
 	}
 	.payload pre {
 		margin: 4px 0 0 0;
 		padding: 6px 10px;
-		background: var(--bg);
-		border: 1px solid var(--border);
-		border-radius: 3px;
-		font-size: 11px;
+		background: var(--lens-bg);
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-sm);
+		font-family: var(--lens-font-mono);
+		font-size: var(--lens-font-size-2xs);
 		overflow-x: auto;
-	}
-	.error {
-		color: var(--bad);
-	}
-	.empty {
-		padding: 24px 0;
 	}
 	.verify-row {
 		display: flex;
 		align-items: baseline;
-		gap: 12px;
+		gap: var(--lens-space-3);
 		margin-top: 10px;
-		font-size: 12px;
+		font-size: var(--lens-font-size-xs);
 	}
 	.breaks summary {
 		cursor: pointer;
-		color: var(--bad);
+		color: var(--lens-danger);
 	}
 	.breaks ul {
 		list-style: none;
@@ -424,19 +401,19 @@
 	}
 	.breaks li {
 		display: flex;
-		gap: 8px;
+		gap: var(--lens-space-2);
 		padding: 3px 0;
-		font-size: 11px;
+		font-size: var(--lens-font-size-2xs);
 	}
 	.breaks .reason {
-		color: var(--bad);
+		color: var(--lens-danger);
 	}
 	.live-toggle {
 		display: flex;
 		gap: 4px;
 		align-items: center;
-		padding-left: 8px;
-		border-left: 1px solid var(--border);
+		padding-left: var(--lens-space-2);
+		border-left: 1px solid var(--lens-border);
 		margin-left: 4px;
 	}
 	.live-toggle input {

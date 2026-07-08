@@ -168,12 +168,12 @@
 		width: min(440px, 92%);
 		z-index: 25;
 		overflow-y: auto;
-		background: rgb(13, 16, 22);
-		border-left: 1px solid var(--border);
-		box-shadow: -12px 0 40px rgba(0, 0, 0, 0.5);
+		background: var(--lens-surface);
+		border-left: 1px solid var(--lens-border);
+		box-shadow: var(--lens-shadow-lg);
 		padding: 14px 16px 24px;
 		box-sizing: border-box;
-		animation: drill-in 180ms ease-out;
+		animation: drill-in var(--lens-dur, 180ms) var(--lens-ease-out, ease-out);
 	}
 	@keyframes drill-in {
 		from {
@@ -228,8 +228,8 @@
 		margin: 14px 0 5px;
 		font-size: 10px;
 		text-transform: uppercase;
-		letter-spacing: 0.08em;
-		color: var(--fg-dim);
+		letter-spacing: var(--lens-tracking-caps);
+		color: var(--lens-muted);
 	}
 	.syms,
 	.entries {
@@ -265,7 +265,7 @@
 		flex-shrink: 0;
 	}
 	.entries li {
-		border-top: 1px solid rgba(255, 255, 255, 0.04);
+		border-top: 1px solid var(--lens-border-subtle);
 	}
 	.erow {
 		display: grid;
@@ -282,13 +282,13 @@
 		padding: 6px 4px;
 		cursor: pointer;
 		border-radius: 4px;
-		transition: background 120ms;
+		transition: background var(--lens-dur-fast) var(--lens-ease);
 	}
 	.erow:hover {
-		background: rgba(255, 255, 255, 0.045);
+		background: var(--lens-surface-raised);
 	}
 	.erow.open {
-		background: rgba(122, 162, 255, 0.08);
+		background: var(--lens-accent-tint);
 	}
 	.edot {
 		width: 6px;

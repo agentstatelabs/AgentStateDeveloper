@@ -136,7 +136,7 @@
 	<title>Activity — ASD Lens</title>
 </svelte:head>
 
-<header class="act-header">
+<header class="page-header">
 	<div class="title-row">
 		<h1>Activity</h1>
 		<span class="conn" data-state={conn}>
@@ -147,7 +147,7 @@
 			<VerifyBadge client={asdClient} />
 		</div>
 	</div>
-	<p class="muted">
+	<p class="page-desc">
 		Everything the agent records, as it happens — decisions and their reasoning, declared
 		effects, index runs — each one traceable to the hash-chained audit log. Click any event to
 		see what, why, and the proof.
@@ -174,7 +174,7 @@
 </div>
 
 {#if seedError}
-	<div class="seed-error">
+	<div class="banner" data-tone="danger" style="margin: 0 0 12px;">
 		timeline unavailable: {seedError} — showing live events only
 	</div>
 {/if}
@@ -191,30 +191,6 @@
 />
 
 <style>
-	.act-header {
-		margin-bottom: 16px;
-		border-bottom: 1px solid var(--border);
-		padding-bottom: 12px;
-	}
-	.title-row {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		flex-wrap: wrap;
-	}
-	h1 {
-		margin: 0;
-		font-size: 18px;
-		font-weight: 600;
-	}
-	.muted {
-		color: var(--fg-dim);
-	}
-	.act-header .muted {
-		margin: 6px 0 0 0;
-		font-size: 12px;
-		max-width: 72ch;
-	}
 	.header-badge {
 		margin-left: auto;
 		min-width: 0;
@@ -230,9 +206,9 @@
 		text-transform: uppercase;
 		letter-spacing: 0.12em;
 		padding: 2px 9px;
-		border-radius: 999px;
-		border: 1px solid var(--border);
-		color: var(--fg-dim);
+		border-radius: var(--lens-radius-full);
+		border: 1px solid var(--lens-border);
+		color: var(--lens-muted);
 	}
 	.conn-dot {
 		width: 7px;
@@ -241,25 +217,25 @@
 		background: currentColor;
 	}
 	.conn[data-state='live'] {
-		color: var(--ok);
-		border-color: rgba(111, 207, 151, 0.4);
-		background: rgba(111, 207, 151, 0.07);
+		color: var(--lens-ok);
+		border-color: var(--lens-ok-border);
+		background: var(--lens-ok-tint);
 	}
 	.conn[data-state='live'] .conn-dot {
 		animation: pulse 2s ease-in-out infinite;
 	}
 	.conn[data-state='reconnecting'] {
-		color: #ebcb8b;
-		border-color: rgba(235, 203, 139, 0.4);
-		background: rgba(235, 203, 139, 0.07);
+		color: var(--lens-warn);
+		border-color: var(--lens-warn-border);
+		background: var(--lens-warn-tint);
 	}
 	@keyframes pulse {
 		0%,
 		100% {
-			box-shadow: 0 0 0 0 rgba(111, 207, 151, 0.55);
+			box-shadow: 0 0 0 0 color-mix(in srgb, var(--lens-ok) 55%, transparent);
 		}
 		50% {
-			box-shadow: 0 0 0 5px rgba(111, 207, 151, 0);
+			box-shadow: 0 0 0 5px transparent;
 		}
 	}
 	@media (prefers-reduced-motion: reduce) {
@@ -272,8 +248,8 @@
 	.toolbar {
 		display: flex;
 		align-items: center;
-		gap: 12px;
-		margin-bottom: 16px;
+		gap: var(--lens-space-3);
+		margin-bottom: var(--lens-space-4);
 		flex-wrap: wrap;
 	}
 	.chips {
@@ -284,41 +260,38 @@
 	.chip {
 		appearance: none;
 		font: inherit;
-		font-size: 11px;
+		font-size: var(--lens-font-size-2xs);
 		display: inline-flex;
 		align-items: baseline;
 		gap: 6px;
 		padding: 3px 10px;
-		border-radius: 999px;
-		border: 1px solid var(--border);
-		background: var(--bg-alt);
-		color: var(--fg-dim);
+		border-radius: var(--lens-radius-full);
+		border: 1px solid var(--lens-border);
+		background: var(--lens-surface);
+		color: var(--lens-muted);
 		cursor: pointer;
+		transition:
+			color var(--lens-dur-fast) var(--lens-ease),
+			background var(--lens-dur-fast) var(--lens-ease),
+			border-color var(--lens-dur-fast) var(--lens-ease);
 	}
 	.chip:hover {
-		background: var(--bg-hover);
-		color: var(--fg);
+		background: var(--lens-surface-raised);
+		color: var(--lens-text);
 	}
 	.chip.active {
-		border-color: var(--accent);
-		color: var(--accent);
-		background: rgba(122, 162, 255, 0.08);
+		border-color: var(--lens-accent-border);
+		color: var(--lens-accent);
+		background: var(--lens-accent-tint);
 	}
 	.chip-n {
 		font-size: 10px;
+		font-family: var(--lens-font-mono);
 		opacity: 0.75;
 	}
 	.cap-note {
 		margin-left: auto;
-		font-size: 11px;
-	}
-	.seed-error {
-		margin-bottom: 12px;
-		padding: 8px 12px;
-		border: 1px solid rgba(224, 108, 117, 0.4);
-		border-radius: 4px;
-		background: rgba(224, 108, 117, 0.08);
-		color: var(--bad);
-		font-size: 12px;
+		font-size: var(--lens-font-size-2xs);
+		color: var(--lens-muted);
 	}
 </style>

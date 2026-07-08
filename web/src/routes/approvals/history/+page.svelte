@@ -95,7 +95,7 @@
 	<title>Approval history — ASD Lens</title>
 </svelte:head>
 
-<header class="h-header">
+<header class="page-header">
 	<div class="title-row">
 		<h1>Approval history</h1>
 		<nav class="tabs" aria-label="approvals views">
@@ -103,7 +103,7 @@
 			<a class="tab active" href="/approvals/history" aria-current="page">History</a>
 		</nav>
 	</div>
-	<p class="muted">
+	<p class="page-desc">
 		Who approved what, when — every proposal that entered the approval queue and how it was
 		resolved, straight from the audit log. The raw event stream lives on
 		<a href="/audit">Audit</a>.
@@ -111,11 +111,11 @@
 </header>
 
 {#if loading}
-	<div class="muted">loading…</div>
+	<div class="state-loading">loading…</div>
 {:else if err}
-	<div class="error">{err}</div>
+	<div class="state-error">{err}</div>
 {:else if !configured}
-	<div class="banner">
+	<div class="banner" data-tone="warn">
 		<strong>No audit log configured.</strong>
 		<span>
 			Start <code>asd-serve</code> with <code>ASD_AUDIT_LOG=/path/to/audit.jsonl</code> to begin
@@ -123,7 +123,9 @@
 		</span>
 	</div>
 {:else if events.length === 0}
-	<div class="muted empty">No approval activity recorded yet.</div>
+	<div class="state-empty">
+		No approval activity recorded yet — resolutions appear here as approvers act on the queue.
+	</div>
 {:else}
 	<div class="count-row">
 		{events.length} approval event{events.length === 1 ? '' : 's'} · newest first
@@ -168,92 +170,27 @@
 {/if}
 
 <style>
-	.h-header {
-		margin-bottom: 20px;
-		border-bottom: 1px solid var(--border);
-		padding-bottom: 12px;
-	}
-	h1 {
-		margin: 0;
-		font-size: 18px;
-		font-weight: 600;
-	}
-	.title-row {
-		display: flex;
-		align-items: baseline;
-		gap: 16px;
-	}
-	.tabs {
-		display: flex;
-		gap: 4px;
-	}
-	.tab {
-		font-size: 11px;
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
-		font-weight: 600;
-		padding: 3px 10px;
-		border-radius: 999px;
-		border: 1px solid transparent;
-		color: var(--fg-dim);
-	}
-	.tab:hover {
-		color: var(--accent);
-	}
-	.tab.active {
-		color: var(--accent);
-		border-color: rgba(122, 162, 255, 0.4);
-		background: rgba(122, 162, 255, 0.08);
-	}
-	.muted {
-		color: var(--fg-dim);
-	}
-	.h-header .muted {
-		margin: 4px 0 0 0;
-		font-size: 12px;
-		max-width: 72ch;
-	}
-	.h-header .muted a {
-		color: var(--accent);
-	}
-	.error {
-		color: var(--bad);
-	}
-	.empty {
-		padding: 24px 0;
-	}
-	.banner {
-		padding: 8px 12px;
-		background: rgba(235, 203, 139, 0.08);
-		border: 1px solid rgba(235, 203, 139, 0.3);
-		color: #ebcb8b;
-		border-radius: 4px;
-		font-size: 12px;
-	}
-	.banner strong {
-		margin-right: 6px;
-	}
 	.count-row {
-		color: var(--fg-dim);
-		font-size: 11px;
-		margin-bottom: 16px;
+		color: var(--lens-muted);
+		font-size: var(--lens-font-size-2xs);
+		margin-bottom: var(--lens-space-4);
 	}
 	.day {
-		margin-bottom: 20px;
+		margin-bottom: var(--lens-space-5);
 	}
 	.day-head {
-		margin: 0 0 8px 0;
-		font-size: 11px;
+		margin: 0 0 var(--lens-space-2);
+		font-size: var(--lens-font-size-2xs);
 		font-weight: 600;
 		text-transform: uppercase;
-		letter-spacing: 0.08em;
-		color: var(--fg-dim);
+		letter-spacing: var(--lens-tracking-caps);
+		color: var(--lens-muted);
 	}
 	.tl {
 		list-style: none;
 		margin: 0;
 		padding: 0;
-		border-left: 1px solid var(--border);
+		border-left: 1px solid var(--lens-border);
 	}
 	.tl-row {
 		position: relative;
@@ -266,107 +203,108 @@
 		width: 7px;
 		height: 7px;
 		border-radius: 50%;
-		background: var(--fg-dim);
+		background: var(--lens-muted);
 	}
 	.tl-row[data-tone='ok'] .tl-dot {
-		background: var(--ok);
+		background: var(--lens-ok);
 	}
 	.tl-row[data-tone='bad'] .tl-dot {
-		background: var(--bad);
+		background: var(--lens-danger);
 	}
 	.tl-row[data-tone='warn'] .tl-dot {
-		background: #ebcb8b;
+		background: var(--lens-warn);
 	}
 	.tl-row[data-tone='pending'] .tl-dot {
-		background: var(--accent);
+		background: var(--lens-accent);
 	}
 	.tl-line {
 		display: flex;
 		align-items: baseline;
-		gap: 8px;
+		gap: var(--lens-space-2);
 		flex-wrap: wrap;
-		font-size: 12px;
+		font-size: var(--lens-font-size-xs);
 	}
 	.actor {
 		font-weight: 600;
-		color: var(--fg);
+		color: var(--lens-text);
 	}
 	.verb {
 		font-weight: 600;
 	}
 	.verb[data-tone='ok'] {
-		color: var(--ok);
+		color: var(--lens-ok);
 	}
 	.verb[data-tone='bad'] {
-		color: var(--bad);
+		color: var(--lens-danger);
 	}
 	.verb[data-tone='warn'] {
-		color: #ebcb8b;
+		color: var(--lens-warn);
 	}
 	.verb[data-tone='pending'] {
-		color: var(--accent);
+		color: var(--lens-accent);
 	}
 	.entry {
-		font-size: 11px;
-		background: var(--bg-alt);
-		border: 1px solid var(--border);
+		font-size: var(--lens-font-size-2xs);
+		background: var(--lens-surface);
+		border: 1px solid var(--lens-border);
 	}
 	.on {
-		color: var(--fg-dim);
+		color: var(--lens-muted);
 	}
 	.qname {
-		color: var(--accent);
+		font-family: var(--lens-font-mono);
+		color: var(--lens-accent);
 		text-decoration: underline;
 		text-decoration-style: dotted;
 		overflow-wrap: anywhere;
 	}
 	.qname:hover {
+		color: var(--lens-accent-hover);
 		text-decoration-style: solid;
 	}
 	.sid {
-		font-size: 11px;
-		color: var(--fg-dim);
+		font-size: var(--lens-font-size-2xs);
+		color: var(--lens-muted);
 	}
 	.outcome {
 		font-size: 10px;
 		text-transform: uppercase;
-		letter-spacing: 0.08em;
+		letter-spacing: var(--lens-tracking-caps);
 		padding: 1px 6px;
-		border-radius: 3px;
+		border-radius: var(--lens-radius-sm);
 	}
 	.outcome[data-tone='ok'] {
-		background: rgba(111, 207, 151, 0.15);
-		color: var(--ok);
+		background: var(--lens-ok-tint);
+		color: var(--lens-ok);
 	}
 	.outcome[data-tone='bad'] {
-		background: rgba(224, 108, 117, 0.15);
-		color: var(--bad);
+		background: var(--lens-danger-tint);
+		color: var(--lens-danger);
 	}
-	.outcome[data-tone='warn'],
-	.outcome[data-tone='pending'] {
-		background: rgba(235, 203, 139, 0.15);
-		color: #ebcb8b;
+	.outcome[data-tone='warn'] {
+		background: var(--lens-warn-tint);
+		color: var(--lens-warn);
 	}
 	.outcome[data-tone='pending'] {
-		background: rgba(122, 162, 255, 0.15);
-		color: var(--accent);
+		background: var(--lens-accent-tint);
+		color: var(--lens-accent);
 	}
 	.when {
 		margin-left: auto;
-		font-size: 11px;
-		color: var(--fg-dim);
-		font-family: 'SF Mono', ui-monospace, monospace;
+		font-size: var(--lens-font-size-2xs);
+		color: var(--lens-muted);
+		font-family: var(--lens-font-mono);
 		white-space: nowrap;
 	}
 	.tl-meta {
 		margin-top: 2px;
-		font-size: 11px;
-		color: var(--fg-dim);
+		font-size: var(--lens-font-size-2xs);
+		color: var(--lens-muted);
 	}
 	.tl-reason {
 		margin-top: 2px;
-		font-size: 11px;
-		color: var(--bad);
+		font-size: var(--lens-font-size-2xs);
+		color: var(--lens-danger);
 		font-style: italic;
 	}
 </style>

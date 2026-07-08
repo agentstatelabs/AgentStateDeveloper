@@ -125,7 +125,7 @@
 	}
 </script>
 
-<header class="q-header">
+<header class="page-header">
 	<div class="title-row">
 		<h1>Awaiting approval</h1>
 		<nav class="tabs" aria-label="approvals views">
@@ -133,11 +133,11 @@
 			<a class="tab" href="/approvals/history">History</a>
 		</nav>
 	</div>
-	<p class="muted">
+	<p class="page-desc">
 		Ledger entries gated by a policy that requires human or senior-agent attestation before they land.
 	</p>
 	{#if editionLocked}
-		<div class="edition-banner">
+		<div class="banner" data-tone="warn">
 			<strong>Approval actions are not available on this server.</strong>
 			<span>
 				This <code>asd-serve</code> is the OSS edition — approve / reject / withdraw are Team-tier
@@ -161,11 +161,13 @@
 </header>
 
 {#if loading}
-	<div class="muted">loading…</div>
+	<div class="state-loading">loading…</div>
 {:else if err}
-	<div class="error">{err}</div>
+	<div class="state-error">{err}</div>
 {:else if entries.length === 0}
-	<div class="muted empty">No entries awaiting approval.</div>
+	<div class="state-empty">
+		No entries awaiting approval — proposals land here when a ledger policy requires attestation.
+	</div>
 {:else}
 	<ul class="queue">
 		{#each entries as le (le.entry_id)}
@@ -258,68 +260,6 @@
 {/if}
 
 <style>
-	.q-header {
-		margin-bottom: 20px;
-		border-bottom: 1px solid var(--border);
-		padding-bottom: 12px;
-	}
-	h1 {
-		margin: 0;
-		font-size: 18px;
-		font-weight: 600;
-	}
-	.title-row {
-		display: flex;
-		align-items: baseline;
-		gap: 16px;
-	}
-	.tabs {
-		display: flex;
-		gap: 4px;
-	}
-	.tab {
-		font-size: 11px;
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
-		font-weight: 600;
-		padding: 3px 10px;
-		border-radius: 999px;
-		border: 1px solid transparent;
-		color: var(--fg-dim);
-	}
-	.tab:hover {
-		color: var(--accent);
-	}
-	.tab.active {
-		color: var(--accent);
-		border-color: rgba(122, 162, 255, 0.4);
-		background: rgba(122, 162, 255, 0.08);
-	}
-	.edition-banner {
-		margin-top: 10px;
-		padding: 8px 12px;
-		background: rgba(235, 203, 139, 0.08);
-		border: 1px solid rgba(235, 203, 139, 0.3);
-		color: #ebcb8b;
-		border-radius: 4px;
-		font-size: 12px;
-	}
-	.edition-banner strong {
-		margin-right: 6px;
-	}
-	.muted {
-		color: var(--fg-dim);
-	}
-	.q-header .muted {
-		margin: 4px 0 0 0;
-		font-size: 12px;
-	}
-	.error {
-		color: var(--bad);
-	}
-	.empty {
-		padding: 24px 0;
-	}
 	.queue {
 		list-style: none;
 		margin: 0;
@@ -327,11 +267,11 @@
 	}
 	.queue li {
 		padding: 10px 14px;
-		margin-bottom: 8px;
-		background: var(--bg-alt);
-		border: 1px solid var(--border);
-		border-left: 3px solid #ebcb8b;
-		border-radius: 4px;
+		margin-bottom: var(--lens-space-2);
+		background: var(--lens-surface);
+		border: 1px solid var(--lens-border);
+		border-left: 3px solid var(--lens-warn);
+		border-radius: var(--lens-radius-sm);
 	}
 	.row-head {
 		display: flex;
@@ -341,35 +281,37 @@
 	.le-kind {
 		font-size: 10px;
 		text-transform: uppercase;
-		letter-spacing: 0.08em;
+		letter-spacing: var(--lens-tracking-caps);
 		padding: 2px 6px;
-		border-radius: 3px;
-		background: var(--bg);
+		border-radius: var(--lens-radius-sm);
+		background: var(--lens-bg);
+		color: var(--lens-muted);
 	}
 	.kind-hazard {
-		background: rgba(224, 108, 117, 0.18);
-		color: var(--bad);
+		background: var(--lens-danger-tint);
+		color: var(--lens-danger);
 	}
 	.kind-decision {
-		background: rgba(122, 162, 255, 0.18);
-		color: var(--accent);
+		background: var(--lens-accent-tint);
+		color: var(--lens-accent);
 	}
 	.kind-constraint,
 	.kind-assumption {
-		background: rgba(235, 203, 139, 0.18);
-		color: #ebcb8b;
+		background: var(--lens-warn-tint);
+		color: var(--lens-warn);
 	}
 	.kind-rationale,
 	.kind-tradeoff {
-		background: var(--bg);
-		color: var(--fg-dim);
+		background: var(--lens-bg);
+		color: var(--lens-muted);
 	}
 	.summary {
 		font-weight: 600;
+		color: var(--lens-text-strong);
 	}
 	.row-meta {
-		color: var(--fg-dim);
-		font-size: 11px;
+		color: var(--lens-muted);
+		font-size: var(--lens-font-size-2xs);
 		margin-top: 4px;
 		display: flex;
 		gap: 6px;
@@ -377,19 +319,21 @@
 		flex-wrap: wrap;
 	}
 	.row-meta .qname {
-		color: var(--accent);
+		font-family: var(--lens-font-mono);
+		color: var(--lens-accent);
 		text-decoration: underline;
 		text-decoration-style: dotted;
 	}
 	.row-meta .qname:hover {
+		color: var(--lens-accent-hover);
 		text-decoration-style: solid;
 	}
 	.row-meta .sep {
 		opacity: 0.6;
 	}
 	.sid {
-		font-family: "SF Mono", ui-monospace, monospace;
-		font-size: 11px;
+		font-family: var(--lens-font-mono);
+		font-size: var(--lens-font-size-2xs);
 	}
 	.row-policy {
 		margin-top: 6px;
@@ -397,35 +341,35 @@
 		align-items: baseline;
 		gap: 6px;
 		padding: 3px 8px;
-		background: var(--bg);
-		border: 1px solid var(--border);
-		border-radius: 10px;
-		font-size: 11px;
+		background: var(--lens-bg);
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-full);
+		font-size: var(--lens-font-size-2xs);
 	}
 	.row-policy code {
 		background: transparent;
 		padding: 0;
-		color: var(--fg-dim);
+		color: var(--lens-muted);
 	}
 	.policy-label {
-		color: var(--fg-dim);
+		color: var(--lens-muted);
 		text-transform: uppercase;
-		letter-spacing: 0.08em;
+		letter-spacing: var(--lens-tracking-caps);
 		font-size: 9px;
 	}
 	.row-approvers {
 		margin-top: 4px;
-		color: var(--fg-dim);
-		font-size: 11px;
+		color: var(--lens-muted);
+		font-size: var(--lens-font-size-2xs);
 		font-style: italic;
 	}
 	.approver-bar {
 		display: flex;
-		gap: 16px;
+		gap: var(--lens-space-4);
 		margin-top: 10px;
 		align-items: baseline;
-		font-size: 11px;
-		color: var(--fg-dim);
+		font-size: var(--lens-font-size-2xs);
+		color: var(--lens-muted);
 	}
 	.approver-bar label {
 		display: flex;
@@ -434,73 +378,67 @@
 	}
 	.approver-input,
 	.approver-kind {
-		background: var(--bg);
-		color: var(--fg);
-		border: 1px solid var(--border);
-		border-radius: 3px;
+		background: var(--lens-bg);
+		color: var(--lens-text);
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-sm);
 		padding: 3px 6px;
 		font-family: inherit;
-		font-size: 11px;
+		font-size: var(--lens-font-size-2xs);
+	}
+	.approver-input:focus,
+	.approver-kind:focus {
+		outline: none;
+		border-color: var(--lens-accent);
+		box-shadow: 0 0 0 3px var(--lens-accent-tint);
 	}
 	.row-actions {
-		margin-top: 8px;
+		margin-top: var(--lens-space-2);
 		display: flex;
 		gap: 10px;
 		align-items: baseline;
 	}
-	.approve-btn {
-		background: rgba(111, 207, 151, 0.15);
-		color: var(--ok);
-		border: 1px solid rgba(111, 207, 151, 0.4);
-		border-radius: 3px;
+	/* action buttons — one recipe, three semantic tones */
+	.approve-btn,
+	.reject-btn,
+	.withdraw-btn,
+	.cancel-btn {
+		border-radius: var(--lens-radius-sm);
 		padding: 4px 12px;
-		font-size: 11px;
+		font-size: var(--lens-font-size-2xs);
 		text-transform: uppercase;
-		letter-spacing: 0.06em;
+		letter-spacing: var(--lens-tracking-wide);
 		font-weight: 600;
 		cursor: pointer;
 		font-family: inherit;
+		transition: background var(--lens-dur-fast) var(--lens-ease);
+	}
+	.approve-btn {
+		background: var(--lens-ok-tint);
+		color: var(--lens-ok);
+		border: 1px solid var(--lens-ok-border);
 	}
 	.approve-btn:hover:not(:disabled) {
-		background: rgba(111, 207, 151, 0.25);
-	}
-	.approve-btn:disabled,
-	.reject-btn:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
+		background: color-mix(in srgb, var(--lens-ok) 18%, transparent);
 	}
 	.reject-btn {
-		background: rgba(224, 108, 117, 0.15);
-		color: var(--bad);
-		border: 1px solid rgba(224, 108, 117, 0.4);
-		border-radius: 3px;
-		padding: 4px 12px;
-		font-size: 11px;
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
-		font-weight: 600;
-		cursor: pointer;
-		font-family: inherit;
+		background: var(--lens-danger-tint);
+		color: var(--lens-danger);
+		border: 1px solid var(--lens-danger-border);
 	}
 	.reject-btn:hover:not(:disabled) {
-		background: rgba(224, 108, 117, 0.25);
+		background: color-mix(in srgb, var(--lens-danger) 18%, transparent);
 	}
 	.withdraw-btn {
-		background: rgba(235, 203, 139, 0.12);
-		color: #ebcb8b;
-		border: 1px solid rgba(235, 203, 139, 0.4);
-		border-radius: 3px;
-		padding: 4px 12px;
-		font-size: 11px;
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
-		font-weight: 600;
-		cursor: pointer;
-		font-family: inherit;
+		background: var(--lens-warn-tint);
+		color: var(--lens-warn);
+		border: 1px solid var(--lens-warn-border);
 	}
 	.withdraw-btn:hover:not(:disabled) {
-		background: rgba(235, 203, 139, 0.22);
+		background: color-mix(in srgb, var(--lens-warn) 16%, transparent);
 	}
+	.approve-btn:disabled,
+	.reject-btn:disabled,
 	.withdraw-btn:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
@@ -514,61 +452,62 @@
 	}
 	.cancel-btn {
 		background: transparent;
-		color: var(--fg-dim);
-		border: 1px solid var(--border);
-		border-radius: 3px;
-		padding: 4px 10px;
-		font-size: 11px;
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
-		cursor: pointer;
-		font-family: inherit;
+		color: var(--lens-muted);
+		border: 1px solid var(--lens-border);
 	}
 	.cancel-btn:hover {
-		color: var(--fg);
+		color: var(--lens-text);
 	}
 	.row-notice {
-		margin-top: 8px;
-		font-size: 11px;
+		margin-top: var(--lens-space-2);
+		font-size: var(--lens-font-size-2xs);
 		padding: 6px 10px;
-		border-radius: 3px;
+		border-radius: var(--lens-radius-sm);
 	}
 	.row-notice.err {
-		color: var(--bad);
-		background: rgba(224, 108, 117, 0.08);
-		border: 1px solid rgba(224, 108, 117, 0.3);
+		color: var(--lens-danger);
+		background: var(--lens-danger-tint);
+		border: 1px solid var(--lens-danger-border);
 	}
 	.row-notice.edition {
-		color: #ebcb8b;
-		background: rgba(235, 203, 139, 0.08);
-		border: 1px solid rgba(235, 203, 139, 0.3);
+		color: var(--lens-warn);
+		background: var(--lens-warn-tint);
+		border: 1px solid var(--lens-warn-border);
 	}
 	.notice-label {
 		display: inline-block;
 		font-size: 9px;
 		text-transform: uppercase;
-		letter-spacing: 0.08em;
+		letter-spacing: var(--lens-tracking-caps);
 		font-weight: 700;
 		padding: 1px 6px;
-		margin-right: 8px;
-		border-radius: 999px;
-		border: 1px solid rgba(235, 203, 139, 0.45);
+		margin-right: var(--lens-space-2);
+		border-radius: var(--lens-radius-full);
+		border: 1px solid currentColor;
 	}
 	.row-inputs {
-		margin-top: 8px;
+		margin-top: var(--lens-space-2);
 		display: flex;
-		gap: 8px;
+		gap: var(--lens-space-2);
 		flex-wrap: wrap;
 	}
 	.row-input {
 		flex: 1 1 220px;
 		min-width: 180px;
-		background: var(--bg);
-		color: var(--fg);
-		border: 1px solid var(--border);
-		border-radius: 3px;
+		background: var(--lens-bg);
+		color: var(--lens-text);
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-sm);
 		padding: 4px 8px;
 		font-family: inherit;
-		font-size: 11px;
+		font-size: var(--lens-font-size-2xs);
+	}
+	.row-input::placeholder {
+		color: var(--lens-text-faint);
+	}
+	.row-input:focus {
+		outline: none;
+		border-color: var(--lens-accent);
+		box-shadow: 0 0 0 3px var(--lens-accent-tint);
 	}
 </style>

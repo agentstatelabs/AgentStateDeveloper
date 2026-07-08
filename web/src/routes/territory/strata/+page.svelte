@@ -541,7 +541,7 @@
 	}
 	.legend .hint {
 		margin-left: auto;
-		color: #4e5866;
+		color: var(--lens-text-faint);
 	}
 	.loading {
 		display: flex;

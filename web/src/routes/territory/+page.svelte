@@ -146,14 +146,16 @@
 	}
 	.tile {
 		display: block;
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		padding: 16px;
-		background: var(--bg-alt);
-		transition: border-color 120ms, transform 120ms;
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-md);
+		padding: var(--lens-space-4);
+		background: var(--lens-surface);
+		transition:
+			border-color var(--lens-dur-fast) var(--lens-ease),
+			transform var(--lens-dur-fast) var(--lens-ease);
 	}
 	.tile:hover {
-		border-color: #3a4150;
+		border-color: var(--lens-border-strong);
 		transform: translateY(-2px);
 	}
 	.tname {

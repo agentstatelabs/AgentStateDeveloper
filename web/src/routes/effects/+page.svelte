@@ -56,20 +56,20 @@
 	<title>Effects — ASD Lens</title>
 </svelte:head>
 
-<header class="e-header">
+<header class="page-header">
 	<h1>Effect distribution</h1>
-	<p class="muted">
+	<p class="page-desc">
 		What the codebase touches, per declared effect category — and the declarers whose effects
 		reach the most callers (transitive blast radius). Categories are ranked busiest-first.
 	</p>
 </header>
 
 {#if loading}
-	<div class="muted">loading…</div>
+	<div class="state-loading">loading…</div>
 {:else if err}
-	<div class="error">{err}</div>
+	<div class="state-error">{err}</div>
 {:else if rows.length === 0}
-	<div class="muted empty">
+	<div class="state-empty">
 		No effects declared yet — run <code>asd index .</code> with effect inference, or declare
 		effects via <code>effect_declare</code>.
 	</div>
@@ -134,57 +134,39 @@
 {/if}
 
 <style>
-	.e-header {
-		margin-bottom: 20px;
-		border-bottom: 1px solid var(--border);
-		padding-bottom: 12px;
-	}
-	h1 {
-		margin: 0;
-		font-size: 18px;
-		font-weight: 600;
+	.summary-row {
+		color: var(--lens-muted);
+		font-size: var(--lens-font-size-2xs);
+		margin-bottom: var(--lens-space-3);
 	}
 	.muted {
-		color: var(--fg-dim);
-	}
-	.e-header .muted {
-		margin: 4px 0 0 0;
-		font-size: 12px;
-		max-width: 72ch;
-	}
-	.error {
-		color: var(--bad);
-	}
-	.empty {
-		padding: 24px 0;
-	}
-	.summary-row {
-		color: var(--fg-dim);
-		font-size: 11px;
-		margin-bottom: 12px;
+		color: var(--lens-muted);
 	}
 	.dist {
 		width: 100%;
 		border-collapse: collapse;
-		font-size: 12px;
+		font-size: var(--lens-font-size-xs);
 	}
 	.dist th {
 		text-align: left;
 		font-size: 10px;
 		text-transform: uppercase;
-		letter-spacing: 0.08em;
-		color: var(--fg-dim);
+		letter-spacing: var(--lens-tracking-caps);
+		color: var(--lens-muted);
 		font-weight: 600;
 		padding: 6px 10px;
-		border-bottom: 1px solid var(--border);
+		border-bottom: 1px solid var(--lens-border);
 	}
 	.dist td {
 		padding: 8px 10px;
-		border-bottom: 1px solid var(--border);
+		border-bottom: 1px solid var(--lens-border-subtle);
 		vertical-align: top;
 	}
+	.dist tbody tr {
+		transition: background var(--lens-dur-fast) var(--lens-ease);
+	}
 	.dist tbody tr:hover {
-		background: var(--bg-alt);
+		background: var(--lens-surface);
 	}
 	.col-effect {
 		width: 160px;
@@ -193,28 +175,29 @@
 	.effect-name {
 		background: transparent;
 		padding: 0;
-		font-size: 12px;
+		font-size: var(--lens-font-size-xs);
 	}
 	.effect-name[data-family='io'] {
-		color: var(--kind-function);
+		color: var(--lens-kind-function);
 	}
 	.effect-name[data-family='state'] {
-		color: var(--kind-variable);
+		color: var(--lens-kind-variable);
 	}
 	.effect-name[data-family='proc'] {
-		color: var(--kind-class);
+		color: var(--lens-kind-class);
 	}
 	.effect-name[data-family='env'] {
-		color: var(--kind-module);
+		color: var(--lens-kind-module);
 	}
 	.effect-name[data-family='other'] {
-		color: var(--fg-dim);
+		color: var(--lens-muted);
 	}
 	.col-count {
 		width: 60px;
 		text-align: right;
 		font-variant-numeric: tabular-nums;
-		color: var(--fg);
+		font-family: var(--lens-font-mono);
+		color: var(--lens-text);
 	}
 	.col-bar {
 		width: 30%;
@@ -223,28 +206,28 @@
 	.bar-track {
 		height: 10px;
 		margin-top: 3px;
-		background: var(--bg-alt);
-		border: 1px solid var(--border);
+		background: var(--lens-surface);
+		border: 1px solid var(--lens-border);
 		border-radius: 2px;
 		overflow: hidden;
 	}
 	.bar {
 		height: 100%;
-		background: var(--accent);
+		background: var(--lens-accent);
 		opacity: 0.75;
 		border-radius: 1px;
 	}
 	.bar[data-family='io'] {
-		background: var(--kind-function);
+		background: var(--lens-kind-function);
 	}
 	.bar[data-family='state'] {
-		background: var(--kind-variable);
+		background: var(--lens-kind-variable);
 	}
 	.bar[data-family='proc'] {
-		background: var(--kind-class);
+		background: var(--lens-kind-class);
 	}
 	.bar[data-family='env'] {
-		background: var(--kind-module);
+		background: var(--lens-kind-module);
 	}
 	.top-symbols {
 		list-style: none;
@@ -261,23 +244,26 @@
 		min-width: 0;
 	}
 	.qname {
-		color: var(--accent);
+		font-family: var(--lens-font-mono);
+		color: var(--lens-accent);
 		overflow-wrap: anywhere;
 	}
 	a.qname:hover {
+		color: var(--lens-accent-hover);
 		text-decoration: underline;
 	}
 	.qname.stale {
-		color: var(--fg-dim);
+		color: var(--lens-muted);
 		background: transparent;
 		padding: 0;
 	}
 	.radius {
 		font-size: 10px;
 		font-variant-numeric: tabular-nums;
-		color: var(--fg-dim);
-		border: 1px solid var(--border);
-		border-radius: 999px;
+		font-family: var(--lens-font-mono);
+		color: var(--lens-muted);
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-full);
 		padding: 0 6px;
 	}
 </style>

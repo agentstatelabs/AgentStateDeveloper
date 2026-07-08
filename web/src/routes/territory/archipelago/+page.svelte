@@ -537,10 +537,10 @@
 		gap: 3px;
 		font-size: 10px;
 		color: var(--fg-dim);
-		background: rgba(10, 13, 19, 0.8);
+		background: color-mix(in srgb, var(--lens-bg) 85%, transparent);
 		padding: 8px 10px;
 		border: 1px solid var(--border);
-		border-radius: 6px;
+		border-radius: var(--lens-radius-md);
 	}
 	.legend i {
 		display: inline-block;
@@ -552,7 +552,7 @@
 	}
 	.legend .hint {
 		margin-top: 3px;
-		color: #4e5866;
+		color: var(--lens-text-faint);
 	}
 	.loading {
 		display: flex;

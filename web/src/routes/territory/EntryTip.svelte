@@ -38,13 +38,13 @@
 		position: fixed;
 		z-index: 30;
 		max-width: 360px;
-		background: rgba(17, 20, 27, 0.97);
-		border: 1px solid var(--border);
-		border-radius: 6px;
+		background: color-mix(in srgb, var(--lens-overlay) 97%, transparent);
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-md);
 		padding: 9px 11px;
 		font-size: 12px;
 		pointer-events: none;
-		box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+		box-shadow: var(--lens-shadow-lg);
 	}
 	.tkind {
 		font-size: 10px;
@@ -58,13 +58,14 @@
 	}
 	.tq {
 		margin-top: 5px;
-		color: var(--accent);
+		font-family: var(--lens-font-mono);
+		color: var(--lens-accent);
 		font-size: 11px;
 		overflow-wrap: anywhere;
 	}
 	.thint {
 		margin-top: 5px;
 		font-size: 10px;
-		color: #4e5866;
+		color: var(--lens-text-faint);
 	}
 </style>

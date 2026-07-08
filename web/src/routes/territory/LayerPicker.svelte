@@ -51,7 +51,7 @@
 		font-size: 10px;
 		text-transform: uppercase;
 		letter-spacing: 0.1em;
-		color: var(--fg-dim);
+		color: var(--lens-muted);
 		margin-right: 4px;
 	}
 	.lp-pill {
@@ -59,18 +59,20 @@
 		align-items: center;
 		gap: 6px;
 		font: inherit;
-		font-size: 11px;
-		color: var(--fg-dim);
-		background: var(--bg-alt);
-		border: 1px solid var(--border);
-		border-radius: 12px;
+		font-size: var(--lens-font-size-2xs);
+		color: var(--lens-muted);
+		background: var(--lens-surface);
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-full);
 		padding: 3px 10px;
 		cursor: pointer;
-		transition: color 120ms, border-color 120ms;
+		transition:
+			color var(--lens-dur-fast) var(--lens-ease),
+			border-color var(--lens-dur-fast) var(--lens-ease);
 	}
 	.lp-pill.on {
-		color: var(--fg);
-		border-color: #3a4150;
+		color: var(--lens-text);
+		border-color: var(--lens-border-strong);
 	}
 	.lp-pill.headline.on {
 		border-color: rgba(139, 233, 195, 0.45);

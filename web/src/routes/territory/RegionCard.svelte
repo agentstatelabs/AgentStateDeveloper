@@ -88,16 +88,16 @@
 		width: 320px;
 		max-height: 70vh;
 		overflow-y: auto;
-		background: rgba(17, 20, 27, 0.96);
-		border: 1px solid var(--border);
-		border-radius: 8px;
+		background: color-mix(in srgb, var(--lens-overlay) 96%, transparent);
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-md);
 		padding: 12px 14px;
-		box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+		box-shadow: var(--lens-shadow-lg);
 		font-size: 12px;
 		pointer-events: auto;
 	}
 	.card.pinned {
-		border-color: #3a4150;
+		border-color: var(--lens-border-strong);
 	}
 	.head {
 		display: flex;
@@ -145,8 +145,8 @@
 		margin: 10px 0 4px;
 		font-size: 10px;
 		text-transform: uppercase;
-		letter-spacing: 0.08em;
-		color: var(--fg-dim);
+		letter-spacing: var(--lens-tracking-caps);
+		color: var(--lens-muted);
 	}
 	.entries,
 	.syms {
@@ -156,7 +156,7 @@
 	}
 	.entries li {
 		padding: 5px 0;
-		border-top: 1px solid rgba(255, 255, 255, 0.04);
+		border-top: 1px solid var(--lens-border-subtle);
 	}
 	.ekind {
 		font-size: 10px;

@@ -24,9 +24,9 @@
 	<title>Graph — ASD Lens</title>
 </svelte:head>
 
-<header class="g-header">
+<header class="page-header">
 	<h1>Call graph</h1>
-	<p class="muted">
+	<p class="page-desc">
 		Explore who calls what, up to three hops from any symbol. Toggle “cross-module only” to see
 		just the edges that cross a module boundary — the calls most likely to break someone else.
 	</p>
@@ -40,23 +40,3 @@
 	onViewSymbol={(q) => goto(symbolHref(q))}
 />
 
-<style>
-	.g-header {
-		margin-bottom: 20px;
-		border-bottom: 1px solid var(--border);
-		padding-bottom: 12px;
-	}
-	h1 {
-		margin: 0;
-		font-size: 18px;
-		font-weight: 600;
-	}
-	.muted {
-		color: var(--fg-dim);
-	}
-	.g-header .muted {
-		margin: 4px 0 0 0;
-		font-size: 12px;
-		max-width: 72ch;
-	}
-</style>
