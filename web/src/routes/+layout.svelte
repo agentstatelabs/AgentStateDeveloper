@@ -1,6 +1,6 @@
 <script lang="ts">
 	import '@agentstate/lens-core/tokens.css';
-	import { getHealth, getSymbols, getAwaitingApproval } from '$lib/api';
+	import { getHealth, getSymbolsFast, getAwaitingApproval } from '$lib/api';
 	import type { Health } from '$lib/types';
 	import { symbols, approvals } from '$lib/stores.svelte';
 	import { page } from '$app/state';
@@ -14,7 +14,7 @@
 		getHealth()
 			.then((h) => (health = h))
 			.catch((e) => (healthError = String(e)));
-		getSymbols()
+		getSymbolsFast()
 			.then((s) => symbols.set(s))
 			.catch((e) => symbols.setError(String(e)));
 		getAwaitingApproval()
@@ -23,11 +23,16 @@
 	});
 
 	let filter = $state('');
-	let filtered = $derived(
+	// Search the full list but cap the rendered rows — at 9.8k symbols an
+	// unvirtualized sidebar would add ~40k DOM nodes to every page.
+	const SIDEBAR_MAX = 500;
+	let matched = $derived(
 		filter.trim()
 			? symbols.list.filter((s) => s.qname.toLowerCase().includes(filter.toLowerCase()))
 			: symbols.list
 	);
+	let filtered = $derived(matched.slice(0, SIDEBAR_MAX));
+	let overflow = $derived(Math.max(0, matched.length - SIDEBAR_MAX));
 
 	function kindBadge(k: string): string {
 		return k;
@@ -52,6 +57,7 @@
 		</div>
 		<nav class="top-links">
 			<a href="/activity">Activity</a>
+			<a href="/territory">Territory</a>
 			<a href="/graph">Graph</a>
 			<a href="/effects">Effects</a>
 			<a href="/approvals">Approvals</a>
@@ -98,6 +104,9 @@
 						</li>
 					{/each}
 				</ul>
+				{#if overflow > 0}
+					<div class="muted empty">…{overflow.toLocaleString()} more — refine the filter</div>
+				{/if}
 				{#if filtered.length === 0 && symbols.list.length > 0}
 					<div class="muted empty">no match</div>
 				{:else if symbols.list.length === 0 && !symbols.error}

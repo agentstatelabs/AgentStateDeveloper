@@ -31,6 +31,41 @@ export function getSymbols(): Promise<SymbolSummary[]> {
 	return getJson<SymbolSummary[]>('/api/v1/symbols');
 }
 
+/**
+ * Snapshot-first symbol listing (territory prototype). `/api/v1/symbols`
+ * resolves every qname individually — measured 8m45s for a 2000-row page on
+ * the 9.8k-symbol ExampleProj index — and it holds the engine mutex while doing
+ * so, starving every other API call. Until that endpoint uses the bulk id
+ * map, prefer the setup-time snapshot and fall back to the live API.
+ */
+export async function getSymbolsFast(): Promise<SymbolSummary[]> {
+	try {
+		const res = await fetch('/territory-symbols.json');
+		if (res.ok) {
+			const snap = (await res.json()) as {
+				id: string;
+				q: string;
+				f: string;
+				k: string;
+				l: number;
+			}[];
+			if (Array.isArray(snap) && snap.length > 0) {
+				return snap.map((s) => ({
+					symbol_id: s.id,
+					qname: s.q,
+					file: s.f,
+					kind: s.k,
+					start: { line: s.l, col: 0 },
+					language: 'swift'
+				})) as unknown as SymbolSummary[];
+			}
+		}
+	} catch {
+		/* fall through */
+	}
+	return getSymbols();
+}
+
 // Symbol detail / callers / callees / ledger / effects moved to the shared
 // AsdClient (`asdClient` above) consumed by the lens-core SymbolDetail view.
 
