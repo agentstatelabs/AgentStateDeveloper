@@ -14,11 +14,15 @@
 		loadTerritory,
 		freshness,
 		type TerritoryData,
-		type Region
+		type Region,
+		type Entry
 	} from '$lib/territory/data';
 	import { placeRegionsOnSphere, hashString, rng, type SphericalRegion } from '$lib/territory/layout';
 	import LayerPicker, { type Layers } from '../LayerPicker.svelte';
 	import RegionCard from '../RegionCard.svelte';
+	import EntryTip from '../EntryTip.svelte';
+	import DrillDown from '../DrillDown.svelte';
+	import { untrack } from 'svelte';
 	import * as THREE from 'three';
 	import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
@@ -35,8 +39,12 @@
 	});
 
 	let hovered = $state<Region | null>(null);
-	let pinnedR = $state<Region | null>(null);
-	let shown = $derived(pinnedR ?? hovered);
+	let selected = $state<Region | null>(null);
+	let focusEntry = $state<string | null>(null);
+	let mouse = $state({ x: 0, y: 0 });
+	let markerTip = $state<{ entry: Entry; count: number } | null>(null);
+	// hover card yields to the marker tooltip and to the drill-down panel
+	let shown = $derived(selected || markerTip ? null : hovered);
 
 	let container: HTMLDivElement | undefined = $state();
 	let placed: SphericalRegion[] = [];
@@ -155,7 +163,9 @@
 		const canvas = document.createElement('canvas');
 		canvas.width = TEX_W;
 		canvas.height = TEX_H;
-		paintTexture(canvas, $state.snapshot(layers) as Layers);
+		// untracked: layer toggles must repaint in place (applyLayers below),
+		// NOT re-run this effect — a rebuild would reset the camera.
+		paintTexture(canvas, untrack(() => $state.snapshot(layers)) as Layers);
 		const texture = new THREE.CanvasTexture(canvas);
 		texture.colorSpace = THREE.SRGBColorSpace;
 		const globe = new THREE.Mesh(
@@ -197,6 +207,12 @@
 		const lights = new THREE.Group();
 		scene.add(beacons, auroras, lights);
 		const auroraMats: { mat: THREE.MeshBasicMaterial; base: number }[] = [];
+		/** attached to pickable marker meshes for hover tooltips / drill-down */
+		interface MarkerData {
+			region: Region;
+			entry: Entry;
+			count: number;
+		}
 
 		for (const p of placed) {
 			const surface = latLonToVec(p.lat, p.lon, R);
@@ -204,6 +220,11 @@
 
 			// decision beacon
 			if (p.region.decisions.length) {
+				const marker: MarkerData = {
+					region: p.region,
+					entry: p.region.decisions[0],
+					count: p.region.decisions.length
+				};
 				const h = 6 + Math.log2(1 + p.region.decisions.length) * 7;
 				const beam = new THREE.Mesh(
 					new THREE.CylinderGeometry(0.7, 1.6, h, 6),
@@ -211,16 +232,23 @@
 				);
 				beam.position.copy(normal.clone().multiplyScalar(R + h / 2));
 				beam.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), normal);
+				beam.userData.marker = marker;
 				const tip = new THREE.Mesh(
 					new THREE.SphereGeometry(1.9, 10, 8),
 					new THREE.MeshBasicMaterial({ color: '#d7e3ff' })
 				);
 				tip.position.copy(normal.clone().multiplyScalar(R + h + 1.5));
+				tip.userData.marker = marker;
 				beacons.add(beam, tip);
 			}
 
 			// thinking aurora ring
 			if (p.region.thinking.length) {
+				const marker: MarkerData = {
+					region: p.region,
+					entry: p.region.thinking[0],
+					count: p.region.thinking.length
+				};
 				const conf = p.region.meanConfidence ?? 0.5;
 				const ringR = p.r * 1.15 * (Math.PI / 180) * R;
 				const mat = new THREE.MeshBasicMaterial({
@@ -234,6 +262,7 @@
 				const ring = new THREE.Mesh(new THREE.TorusGeometry(ringR, 0.9 + conf * 1.6, 8, 48), mat);
 				ring.position.copy(normal.clone().multiplyScalar(R + 4.5));
 				ring.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+				ring.userData.marker = marker;
 				auroras.add(ring);
 				auroraMats.push({ mat, base: 0.14 + conf * 0.4 });
 				const ring2 = new THREE.Mesh(
@@ -248,6 +277,7 @@
 				);
 				ring2.position.copy(normal.clone().multiplyScalar(R + 7));
 				ring2.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+				ring2.userData.marker = marker;
 				auroras.add(ring2);
 			}
 
@@ -282,18 +312,61 @@
 			}
 		}
 
-		// hover picking: nearest region center on the sphere
+		// spotlight ring for the hovered region (restrained — soft additive ring)
+		const spot = new THREE.Mesh(
+			new THREE.RingGeometry(0.94, 1.06, 56),
+			new THREE.MeshBasicMaterial({
+				color: '#d7e3ff',
+				transparent: true,
+				opacity: 0.3,
+				side: THREE.DoubleSide,
+				blending: THREE.AdditiveBlending,
+				depthWrite: false
+			})
+		);
+		spot.visible = false;
+		scene.add(spot);
+		const sphOf = new Map(placed.map((p) => [p.region.id, p]));
+		function updateSpot() {
+			const r = hovered ?? selected;
+			const p = r ? sphOf.get(r.id) : undefined;
+			if (!p) {
+				spot.visible = false;
+				return;
+			}
+			const normal = latLonToVec(p.lat, p.lon, R).normalize();
+			const ringR = p.r * 1.35 * (Math.PI / 180) * R;
+			spot.position.copy(normal.clone().multiplyScalar(R + 2.5));
+			spot.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+			spot.scale.set(ringR, ringR, 1);
+			spot.visible = true;
+		}
+
+		// hover picking: judgment markers first, then nearest region center
 		const raycaster = new THREE.Raycaster();
 		const pointer = new THREE.Vector2();
 		const centers = placed.map((p) => ({
 			p,
 			v: latLonToVec(p.lat, p.lon, R).normalize()
 		}));
-		function pickAt(cx: number, cy: number): Region | null {
+		function setPointer(cx: number, cy: number) {
 			const rect = renderer.domElement.getBoundingClientRect();
 			pointer.x = ((cx - rect.left) / rect.width) * 2 - 1;
 			pointer.y = -((cy - rect.top) / rect.height) * 2 + 1;
 			raycaster.setFromCamera(pointer, camera);
+		}
+		function pickMarker(cx: number, cy: number): MarkerData | null {
+			setPointer(cx, cy);
+			const groups = [beacons, auroras].filter((g) => g.visible);
+			if (!groups.length) return null;
+			for (const hit of raycaster.intersectObjects(groups, true)) {
+				const m = hit.object.userData.marker as MarkerData | undefined;
+				if (m) return m;
+			}
+			return null;
+		}
+		function pickAt(cx: number, cy: number): Region | null {
+			setPointer(cx, cy);
 			const hit = raycaster.intersectObject(globe, false)[0];
 			if (!hit) return null;
 			const n = hit.point.clone().normalize();
@@ -309,8 +382,22 @@
 			return best && bestD < best.r * 1.5 ? best.region : null;
 		}
 		function onMove(ev: PointerEvent) {
-			hovered = pickAt(ev.clientX, ev.clientY);
+			mouse = { x: ev.clientX, y: ev.clientY };
+			const m = pickMarker(ev.clientX, ev.clientY);
+			if (m) {
+				markerTip = { entry: m.entry, count: m.count };
+				hovered = m.region;
+			} else {
+				markerTip = null;
+				hovered = pickAt(ev.clientX, ev.clientY);
+			}
+			updateSpot();
 			renderer.domElement.style.cursor = hovered ? 'pointer' : 'grab';
+		}
+		function onLeave() {
+			markerTip = null;
+			hovered = null;
+			updateSpot();
 		}
 		let downAt = { x: 0, y: 0 };
 		function onDown(ev: PointerEvent) {
@@ -318,14 +405,24 @@
 		}
 		function onUp(ev: PointerEvent) {
 			if (Math.hypot(ev.clientX - downAt.x, ev.clientY - downAt.y) > 5) return;
-			const r = pickAt(ev.clientX, ev.clientY);
-			pinnedR = r && pinnedR === r ? null : r;
+			const m = pickMarker(ev.clientX, ev.clientY);
+			if (m) {
+				selected = m.region;
+				focusEntry = m.entry.entry_id;
+				return;
+			}
+			// click a continent → drill down; click open ocean → close
+			selected = pickAt(ev.clientX, ev.clientY);
+			focusEntry = null;
+			updateSpot();
 		}
 		renderer.domElement.addEventListener('pointermove', onMove);
+		renderer.domElement.addEventListener('pointerleave', onLeave);
 		renderer.domElement.addEventListener('pointerdown', onDown);
 		renderer.domElement.addEventListener('pointerup', onUp);
 
-		// layer reactivity
+		// layer reactivity — applied IN PLACE each frame so the camera/orbit
+		// state survives toggles (rebuilding the scene here was the old bug).
 		const applyLayers = (l: Layers) => {
 			beacons.visible = l.decisions;
 			auroras.visible = l.thinking;
@@ -333,13 +430,16 @@
 			paintTexture(canvas, l);
 			texture.needsUpdate = true;
 		};
-		let lastLayers = JSON.stringify($state.snapshot(layers));
+		// untracked: this effect must NOT re-run on layer toggles.
+		let lastLayers = untrack(() => JSON.stringify($state.snapshot(layers)));
 
 		let raf = 0;
 		const clock = new THREE.Clock();
 		function tick() {
 			raf = requestAnimationFrame(tick);
-			const cur = JSON.stringify($state.snapshot(layers));
+			// untracked defensively: the first tick() runs synchronously inside
+			// this $effect, and a tracked read here would rebuild on toggle.
+			const cur = untrack(() => JSON.stringify($state.snapshot(layers)));
 			if (cur !== lastLayers) {
 				lastLayers = cur;
 				applyLayers(JSON.parse(cur));
@@ -396,16 +496,20 @@
 		{/if}
 		{#if shown}
 			<div class="cardpos">
-				<RegionCard region={shown} pinned={pinnedR === shown} onclose={() => (pinnedR = null)} />
+				<RegionCard region={shown} />
 			</div>
 		{/if}
+		{#if markerTip}
+			<EntryTip entry={markerTip.entry} count={markerTip.count} x={mouse.x} y={mouse.y} />
+		{/if}
+		<DrillDown region={selected} focusEntryId={focusEntry} onclose={() => (selected = null)} />
 		{#if data}
 			<div class="legend">
 				<span><i style:background="#8be9c3"></i> thinking aurora (opacity = confidence)</span>
 				<span><i style:background="#7aa2ff"></i> decision beacon (height = count)</span>
 				<span><i style:background="#e0916c"></i> risk heat</span>
 				<span><i style:background="#ebcb8b"></i> activity night-lights (14-day fade)</span>
-				<span class="hint">drag to orbit · scroll to zoom · click continent to pin</span>
+				<span class="hint">drag to orbit · scroll to zoom · hover beacons/auroras · click continent to drill down</span>
 			</div>
 		{/if}
 	</div>

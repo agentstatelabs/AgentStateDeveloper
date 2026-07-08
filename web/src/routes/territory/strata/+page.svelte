@@ -29,6 +29,8 @@
 	import { placeRegions, hashString, rng } from '$lib/territory/layout';
 	import LayerPicker, { type Layers } from '../LayerPicker.svelte';
 	import RegionCard from '../RegionCard.svelte';
+	import EntryTip from '../EntryTip.svelte';
+	import DrillDown from '../DrillDown.svelte';
 
 	let data = $state<TerritoryData | null>(null);
 	let progress = $state('loading…');
@@ -69,11 +71,31 @@
 	let totalW = $state(1200);
 	let totalH = $state(600);
 	const MARGIN_L = 86; // left gutter for the time axis
-	const HEADER_H = 74;
+	// Header must hold the full rise of the rotated column labels: the longest
+	// names climb ~90px above their anchor at -24°, and the old 74px header
+	// clipped them against the toolbar. Labels anchor at HEADER_H - 44.
+	const HEADER_H = 148;
 
 	let hoverEntry = $state<Entry | null>(null);
 	let hoverRegion = $state<Region | null>(null);
+	let hoverWeek = $state(-1);
 	let mouse = $state({ x: 0, y: 0 });
+	let svgEl: SVGSVGElement | undefined = $state();
+
+	// drill-down (shared panel across all three territory views)
+	let selected = $state<Region | null>(null);
+	let focusEntry = $state<string | null>(null);
+	function openEntry(e: Entry) {
+		const r = e.region ? data?.regionById.get(e.region) : undefined;
+		if (!r) return;
+		selected = r;
+		focusEntry = e.entry_id;
+	}
+	function openRegion(r: Region) {
+		selected = r;
+		focusEntry = null;
+	}
+	const hoverCol = $derived(hoverRegion ? (cols.find((c) => c.region === hoverRegion) ?? null) : null);
 
 	const WEEK = 7 * 86_400_000;
 
@@ -177,6 +199,13 @@
 	}
 	function onMove(ev: MouseEvent) {
 		mouse = { x: ev.clientX, y: ev.clientY };
+		// hovered time-band: svg renders 1:1 (width/height attrs == viewBox),
+		// so client offsets map straight to strata coordinates.
+		if (svgEl) {
+			const r = svgEl.getBoundingClientRect();
+			const y = ev.clientY - r.top;
+			hoverWeek = weeks.findIndex((w) => y >= w.y && y <= w.y + w.h);
+		}
 	}
 	const isThinking = (e: Entry) => THINKING_KINDS.has(e.kind);
 	const fmt = (n: number) => n.toLocaleString();
@@ -199,9 +228,10 @@
 	</div>
 
 	{#if data}
+		<div class="stage">
 		<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-		<div class="scroller" onmousemove={onMove} role="presentation">
-			<svg width={totalW} height={totalH} viewBox="0 0 {totalW} {totalH}" role="img" aria-label="Strata cross-section">
+		<div class="scroller" onmousemove={onMove} onmouseleave={() => (hoverWeek = -1)} role="presentation">
+			<svg bind:this={svgEl} width={totalW} height={totalH} viewBox="0 0 {totalW} {totalH}" role="img" aria-label="Strata cross-section">
 				<defs>
 					<linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
 						<stop offset="0%" stop-color="#0b1522" />
@@ -222,10 +252,13 @@
 					{@const fresh = freshness(col.region.recencyDays)}
 					<!-- svelte-ignore a11y_click_events_have_key_events -->
 					<g
+						class="col"
 						onpointerenter={() => (hoverRegion = col.region)}
 						onpointerleave={() => (hoverRegion = null)}
+						onclick={() => openRegion(col.region)}
 						role="button"
 						tabindex="0"
+						aria-label="drill into {col.region.name}"
 					>
 						<text
 							x={col.x + col.w / 2}
@@ -273,11 +306,36 @@
 					</g>
 				{/each}
 
+				<!-- hover highlights: time-band across all columns + hovered column -->
+				{#if hoverWeek >= 0 && weeks[hoverWeek]}
+					<rect
+						class="hl"
+						x={MARGIN_L - 8}
+						y={weeks[hoverWeek].y}
+						width={totalW - MARGIN_L}
+						height={weeks[hoverWeek].h}
+						fill="#8be9c3"
+						opacity="0.055"
+					/>
+				{/if}
+				{#if hoverCol}
+					<rect
+						class="hl"
+						x={hoverCol.x}
+						y={HEADER_H - 2}
+						width={hoverCol.w}
+						height={totalH - HEADER_H - 40}
+						fill="#ffffff"
+						opacity="0.045"
+					/>
+				{/if}
+
 				<!-- mental-model veins -->
 				{#if layers.thinking}
 					{#each veins as v (v.entry.entry_id)}
-						<!-- svelte-ignore a11y_no_static_element_interactions -->
+						<!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
 						<line
+							class="fossil"
 							x1={v.x0}
 							y1={v.y}
 							x2={v.x1}
@@ -288,6 +346,7 @@
 							filter="url(#sglow)"
 							onpointerenter={() => (hoverEntry = v.entry)}
 							onpointerleave={() => (hoverEntry = null)}
+							onclick={() => openEntry(v.entry)}
 						/>
 					{/each}
 				{/if}
@@ -295,13 +354,14 @@
 				<!-- fossils -->
 				{#each fossils as f (f.entry.entry_id)}
 					{#if (isThinking(f.entry) && layers.thinking) || (!isThinking(f.entry) && layers.decisions)}
-						<!-- svelte-ignore a11y_no_static_element_interactions -->
+						<!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
 						<g
 							class="fossil"
 							transform="translate({f.x} {f.y})"
 							opacity={fossilOpacity(f.entry)}
 							onpointerenter={() => (hoverEntry = f.entry)}
 							onpointerleave={() => (hoverEntry = null)}
+							onclick={() => openEntry(f.entry)}
 						>
 							{#if f.entry.kind === 'hypothesis'}
 								<path d="M 0 -4.6 L 4 0 L 0 4.6 L -4 0 Z" fill={THINKING_COLORS.hypothesis} />
@@ -322,7 +382,7 @@
 				<!-- hazard faults -->
 				{#if layers.effects || layers.decisions}
 					{#each faults as f (f.entry.entry_id)}
-						<!-- svelte-ignore a11y_no_static_element_interactions -->
+						<!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
 						<path
 							d={f.path}
 							stroke="#e06c75"
@@ -331,25 +391,19 @@
 							class="fossil"
 							onpointerenter={() => (hoverEntry = f.entry)}
 							onpointerleave={() => (hoverEntry = null)}
+							onclick={() => openEntry(f.entry)}
 						/>
 					{/each}
 				{/if}
 			</svg>
 		</div>
 
+		<DrillDown region={selected} focusEntryId={focusEntry} onclose={() => (selected = null)} />
+		</div>
+
 		{#if hoverEntry}
-			<div class="tip" style:left="{Math.min(mouse.x + 16, window.innerWidth - 380)}px" style:top="{Math.min(mouse.y + 14, window.innerHeight - 180)}px">
-				<div class="tkind" style:color={THINKING_COLORS[hoverEntry.kind] ?? '#7aa2ff'}>
-					{hoverEntry.kind.replace(/_/g, ' ')}
-					{#if typeof hoverEntry.confidence === 'number'}· confidence {hoverEntry.confidence.toFixed(2)}{/if}
-					· {hoverEntry.created_at.slice(0, 10)}
-				</div>
-				<div class="tsum">{hoverEntry.summary}</div>
-				{#if hoverEntry.qname}
-					<a class="tq" href="/symbols/{encodeURIComponent(hoverEntry.qname)}">{hoverEntry.qname}</a>
-				{/if}
-			</div>
-		{:else if hoverRegion}
+			<EntryTip entry={hoverEntry} x={mouse.x} y={mouse.y} />
+		{:else if hoverRegion && !selected}
 			<div class="tip cardtip" style:left="{Math.min(mouse.x + 16, window.innerWidth - 360)}px" style:top="60px">
 				<RegionCard region={hoverRegion} />
 			</div>
@@ -362,7 +416,7 @@
 			<span style:color={THINKING_COLORS.failed_attempt}>✕ failed attempt</span>
 			<span style:color={THINKING_COLORS.open_question}>◌ open question (gas pocket)</span>
 			<span style:color="#e06c75">⚡ hazard fault (cuts younger layers)</span>
-			<span class="hint">surface = today · each band = one week · hover anything</span>
+			<span class="hint">surface = today · each band = one week · hover anything · click to drill down</span>
 		</div>
 	{:else}
 		<div class="loading">{error ?? progress}</div>
@@ -401,10 +455,24 @@
 		font-size: 11px;
 		color: var(--fg-dim);
 	}
+	.stage {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		flex: 1;
+		min-height: 0;
+	}
 	.scroller {
 		flex: 1;
 		overflow: auto;
 		min-height: 0;
+	}
+	.hl {
+		pointer-events: none;
+		transition: y 100ms ease, height 100ms ease;
+	}
+	.col {
+		cursor: pointer;
 	}
 	.axis {
 		font-size: 10px;
@@ -426,6 +494,7 @@
 	}
 	.fossil {
 		cursor: pointer;
+		transition: filter 120ms ease;
 	}
 	.fossil:hover {
 		filter: brightness(1.5);
@@ -434,34 +503,13 @@
 		position: fixed;
 		z-index: 30;
 		max-width: 360px;
-		background: rgba(17, 20, 27, 0.97);
-		border: 1px solid var(--border);
-		border-radius: 6px;
-		padding: 9px 11px;
-		font-size: 12px;
 		pointer-events: none;
-		box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
 	}
 	.cardtip {
 		background: none;
 		border: none;
 		padding: 0;
 		box-shadow: none;
-	}
-	.tkind {
-		font-size: 10px;
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
-		margin-bottom: 4px;
-	}
-	.tsum {
-		line-height: 1.4;
-	}
-	.tq {
-		display: block;
-		margin-top: 5px;
-		color: var(--accent);
-		font-size: 11px;
 	}
 	.legend {
 		display: flex;

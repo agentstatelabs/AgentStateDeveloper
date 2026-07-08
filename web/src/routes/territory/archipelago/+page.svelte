@@ -1,8 +1,10 @@
 <script lang="ts">
-	import { loadTerritory, freshness, type TerritoryData, type Region } from '$lib/territory/data';
+	import { loadTerritory, freshness, type TerritoryData, type Region, type Entry } from '$lib/territory/data';
 	import { placeRegions, islandPath, hashString, rng, type PlacedRegion } from '$lib/territory/layout';
 	import LayerPicker, { type Layers } from '../LayerPicker.svelte';
 	import RegionCard from '../RegionCard.svelte';
+	import EntryTip from '../EntryTip.svelte';
+	import DrillDown from '../DrillDown.svelte';
 	import { tick } from 'svelte';
 
 	let data = $state<TerritoryData | null>(null);
@@ -87,6 +89,7 @@
 		(ev.target as Element).setPointerCapture?.(ev.pointerId);
 	}
 	function onPointerMove(ev: PointerEvent) {
+		mouse = { x: ev.clientX, y: ev.clientY };
 		if (!dragging || !svgEl) return;
 		const rect = svgEl.getBoundingClientRect();
 		vb = {
@@ -98,11 +101,30 @@
 	function onPointerUp() {
 		dragging = false;
 	}
+	/** true when the pointer travelled far enough that this was a pan, not a click */
+	function wasDrag(ev: MouseEvent): boolean {
+		return Math.hypot(ev.clientX - dragStart.x, ev.clientY - dragStart.y) > 5;
+	}
 
-	// ---- hover / pin -------------------------------------------------------
+	// ---- hover / drill-down ------------------------------------------------
 	let hovered = $state<Region | null>(null);
-	let pinnedR = $state<Region | null>(null);
-	let shown = $derived(pinnedR ?? hovered);
+	let selected = $state<Region | null>(null);
+	let focusEntry = $state<string | null>(null);
+	let mouse = $state({ x: 0, y: 0 });
+	let markerTip = $state<{ entry: Entry; count: number } | null>(null);
+	// hover card yields to the marker tooltip and to the drill-down panel
+	let shown = $derived(selected || markerTip ? null : hovered);
+
+	function openRegion(r: Region, entryId: string | null = null) {
+		selected = r;
+		focusEntry = entryId;
+	}
+	function tipEnter(entry: Entry, count = 1) {
+		markerTip = { entry, count };
+	}
+	function tipLeave() {
+		markerTip = null;
+	}
 
 	// ---- per-island render helpers ----------------------------------------
 	function groupHue(group: string): number {
@@ -124,16 +146,17 @@
 		const conf = r.meanConfidence ?? 0.5;
 		return (0.25 + conf * 0.6) * Math.min(1, r.thinking.length / 3);
 	}
-	/** cairn positions along the coast for decision markers (seeded) */
-	function cairns(pr: PlacedRegion): { x: number; y: number }[] {
-		const n = Math.min(9, Math.ceil(Math.sqrt(pr.region.decisions.length)));
-		if (pr.region.decisions.length === 0) return [];
+	/** cairn positions along the coast, each bound to a real decision (seeded) */
+	function cairns(pr: PlacedRegion): { x: number; y: number; entry: Entry }[] {
+		const ds = pr.region.decisions;
+		if (ds.length === 0) return [];
+		const n = Math.min(9, Math.ceil(Math.sqrt(ds.length)));
 		const rand = rng(hashString(pr.region.id + ':cairn'));
-		const out: { x: number; y: number }[] = [];
+		const out: { x: number; y: number; entry: Entry }[] = [];
 		for (let i = 0; i < n; i++) {
 			const a = rand() * Math.PI * 2;
 			const rr = pr.r * (0.45 + rand() * 0.35);
-			out.push({ x: Math.cos(a) * rr, y: Math.sin(a) * rr * 0.82 });
+			out.push({ x: Math.cos(a) * rr, y: Math.sin(a) * rr * 0.82, entry: ds[i] });
 		}
 		return out;
 	}
@@ -167,7 +190,10 @@
 				onpointerdown={onPointerDown}
 				onpointermove={onPointerMove}
 				onpointerup={onPointerUp}
-				onpointerleave={onPointerUp}
+				onpointerleave={() => {
+					onPointerUp();
+					tipLeave();
+				}}
 				role="img"
 				aria-label="Archipelago map of {data.regions.length} code regions"
 			>
@@ -201,12 +227,14 @@
 					<!-- svelte-ignore a11y_click_events_have_key_events -->
 					<g
 						class="island"
+						class:dim={hovered && hovered !== pr.region}
 						transform="translate({pr.x} {pr.y})"
 						onpointerenter={() => (hovered = pr.region)}
 						onpointerleave={() => (hovered = null)}
 						onclick={(e) => {
+							if (wasDrag(e)) return;
 							e.stopPropagation();
-							pinnedR = pinnedR === pr.region ? null : pr.region;
+							openRegion(pr.region);
 						}}
 						role="button"
 						tabindex="0"
@@ -214,22 +242,34 @@
 					>
 						<!-- thinking aurora (headline layer) -->
 						{#if layers.thinking && pr.region.thinking.length}
-							<path
-								d={islandPath(pr.r, seed, pr.region.kindDiversity, 1.7, -6)}
-								fill="none"
-								stroke="#8be9c3"
-								stroke-width={5 + (pr.region.meanConfidence ?? 0.5) * 7}
-								opacity={auroraOpacity(pr.region)}
-								filter="url(#softer)"
-							/>
-							<path
-								d={islandPath(pr.r, seed + 7, pr.region.kindDiversity, 1.45, -10)}
-								fill="none"
-								stroke="#7aa2ff"
-								stroke-width="3"
-								opacity={auroraOpacity(pr.region) * 0.5}
-								filter="url(#softer)"
-							/>
+							<!-- svelte-ignore a11y_no_static_element_interactions -->
+							<g
+								class="marker"
+								onpointerenter={() => tipEnter(pr.region.thinking[0], pr.region.thinking.length)}
+								onpointerleave={tipLeave}
+								onclick={(e) => {
+									if (wasDrag(e)) return;
+									e.stopPropagation();
+									openRegion(pr.region, pr.region.thinking[0].entry_id);
+								}}
+							>
+								<path
+									d={islandPath(pr.r, seed, pr.region.kindDiversity, 1.7, -6)}
+									fill="none"
+									stroke="#8be9c3"
+									stroke-width={5 + (pr.region.meanConfidence ?? 0.5) * 7}
+									opacity={auroraOpacity(pr.region)}
+									filter="url(#softer)"
+								/>
+								<path
+									d={islandPath(pr.r, seed + 7, pr.region.kindDiversity, 1.45, -10)}
+									fill="none"
+									stroke="#7aa2ff"
+									stroke-width="3"
+									opacity={auroraOpacity(pr.region) * 0.5}
+									filter="url(#softer)"
+								/>
+							</g>
 						{/if}
 
 						<!-- risk reef -->
@@ -270,10 +310,36 @@
 
 						<!-- decision cairns + lighthouse -->
 						{#if layers.decisions && pr.region.decisions.length}
-							{#each cairns(pr) as c, i (i)}
-								<circle cx={c.x} cy={c.y} r="2.1" fill="#7aa2ff" opacity="0.9" />
+							{#each cairns(pr) as c (c.entry.entry_id)}
+								<!-- svelte-ignore a11y_no_static_element_interactions -->
+								<circle
+									class="marker cairn"
+									cx={c.x}
+									cy={c.y}
+									r="2.1"
+									fill="#7aa2ff"
+									opacity="0.9"
+									onpointerenter={() => tipEnter(c.entry)}
+									onpointerleave={tipLeave}
+									onclick={(e) => {
+										if (wasDrag(e)) return;
+										e.stopPropagation();
+										openRegion(pr.region, c.entry.entry_id);
+									}}
+								/>
 							{/each}
-							<g transform="translate(0 {-pr.r * 0.34})">
+							<!-- svelte-ignore a11y_no_static_element_interactions -->
+							<g
+								class="marker"
+								transform="translate(0 {-pr.r * 0.34})"
+								onpointerenter={() => tipEnter(pr.region.decisions[0], pr.region.decisions.length)}
+								onpointerleave={tipLeave}
+								onclick={(e) => {
+									if (wasDrag(e)) return;
+									e.stopPropagation();
+									openRegion(pr.region, pr.region.decisions[0].entry_id);
+								}}
+							>
 								<rect x="-2.4" y="-13" width="4.8" height="13" fill="#a8c3ff" rx="1" />
 								<circle cx="0" cy="-15" r="3" fill="#d7e3ff" />
 								{#if fresh > 0.3 && layers.activity}
@@ -285,16 +351,25 @@
 
 						<!-- hazard faults -->
 						{#if layers.effects && pr.region.hazards.length}
-							{#each pr.region.hazards.slice(0, 4) as hz, i (hz.entry_id)}
+							{#each pr.region.hazards.slice(0, 4) as hz (hz.entry_id)}
 								{@const hr = rng(hashString(hz.entry_id))}
 								{@const hx = (hr() - 0.5) * pr.r * 1.1}
 								{@const hy = (hr() - 0.5) * pr.r * 0.8}
+								<!-- svelte-ignore a11y_no_static_element_interactions -->
 								<path
+									class="marker"
 									d="M {hx} {hy} l 3.4 4.4 l -2.2 3.2 l 4 4.6"
 									stroke="#e06c75"
 									stroke-width="1.8"
 									fill="none"
 									opacity="0.95"
+									onpointerenter={() => tipEnter(hz)}
+									onpointerleave={tipLeave}
+									onclick={(e) => {
+										if (wasDrag(e)) return;
+										e.stopPropagation();
+										openRegion(pr.region, hz.entry_id);
+									}}
 								/>
 							{/each}
 						{/if}
@@ -302,13 +377,21 @@
 						<!-- open-question motes -->
 						{#if layers.thinking}
 							{#each pr.region.thinking.filter((t) => t.kind === 'open_question').slice(0, 3) as oq, i (oq.entry_id)}
+								<!-- svelte-ignore a11y_no_static_element_interactions -->
 								<text
 									x={(i - 1) * 13}
 									y={-pr.r * 0.7 - 6}
 									text-anchor="middle"
-									class="mote"
+									class="mote marker"
 									fill="#ebcb8b"
-									opacity="0.85">?</text
+									opacity="0.85"
+									onpointerenter={() => tipEnter(oq)}
+									onpointerleave={tipLeave}
+									onclick={(e) => {
+										if (wasDrag(e)) return;
+										e.stopPropagation();
+										openRegion(pr.region, oq.entry_id);
+									}}>?</text
 								>
 							{/each}
 						{/if}
@@ -321,16 +404,22 @@
 
 			{#if shown}
 				<div class="cardpos">
-					<RegionCard region={shown} pinned={pinnedR === shown} onclose={() => (pinnedR = null)} />
+					<RegionCard region={shown} />
 				</div>
 			{/if}
+
+			{#if markerTip}
+				<EntryTip entry={markerTip.entry} count={markerTip.count} x={mouse.x} y={mouse.y} />
+			{/if}
+
+			<DrillDown region={selected} focusEntryId={focusEntry} onclose={() => (selected = null)} />
 
 			<div class="legend">
 				<span><i style:background="#8be9c3"></i> thinking aurora (opacity = confidence)</span>
 				<span><i style:background="#7aa2ff"></i> decision cairns / lighthouse</span>
 				<span><i style:background="#e0916c"></i> risk reef · <i style:background="#e06c75"></i> hazard fault</span>
 				<span><i style:background="#ebcb8b"></i> activity shoreline (14-day fade)</span>
-				<span class="hint">scroll to zoom · drag to pan · click island to pin</span>
+				<span class="hint">scroll to zoom · drag to pan · hover markers · click island to drill down</span>
 			</div>
 		{:else}
 			<div class="loading">{error ?? progress}</div>
@@ -387,9 +476,27 @@
 	}
 	.island {
 		cursor: pointer;
+		transition: opacity 160ms ease, filter 160ms ease;
 	}
 	.island:hover {
 		filter: brightness(1.18);
+	}
+	/* dim non-hovered islands slightly — flight recorder, not confetti */
+	.island.dim {
+		opacity: 0.55;
+	}
+	.marker {
+		cursor: pointer;
+		transition: filter 120ms ease;
+	}
+	.marker:hover {
+		filter: brightness(1.6);
+	}
+	circle.cairn {
+		transition: r 120ms ease, filter 120ms ease;
+	}
+	circle.cairn:hover {
+		r: 3.4;
 	}
 	.label {
 		font-size: 11px;
