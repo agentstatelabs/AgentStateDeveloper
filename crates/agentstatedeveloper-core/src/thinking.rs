@@ -33,7 +33,7 @@ use serde_json::{Value, json};
 use crate::engine::Engine;
 use crate::index::{AsgIndexStore, IndexStore};
 use crate::ledger::{AsgLedgerStore, LedgerStore};
-use crate::schema::LedgerKind;
+use crate::schema::{LedgerEntry, LedgerKind};
 
 /// Hypotheses with confidence below this are excluded from auto-surface
 /// (still queryable via `asd think list`). Plan G t-001 picked 0.3 as
@@ -145,32 +145,33 @@ fn kind_counter_zero() -> BTreeMap<String, usize> {
 ///
 /// `entries` is `Value::Null` when nothing surfaces; `summary` is
 /// always populated.
-pub fn gather_prior_thinking(
-    engine: &Engine,
-    qnames: &[String],
-    min_confidence: f64,
-) -> PriorThinking {
-    let index = AsgIndexStore::from_engine(engine);
-    let ledger = AsgLedgerStore::from_engine(engine);
-    let ref_name = engine.ref_name.clone();
+/// Shared accumulator for the two gather entry points — field-for-field
+/// the aggregates the original inline loop built.
+struct GatherAcc {
+    hypotheses: Vec<Value>,
+    mental_models: Vec<Value>,
+    open_questions: Vec<Value>,
+    failed_attempts: Vec<Value>,
+    by_kind: BTreeMap<String, usize>,
+    by_kind_dropped: BTreeMap<String, usize>,
+    matched_for_query: usize,
+}
 
-    let mut hypotheses: Vec<Value> = Vec::new();
-    let mut mental_models: Vec<Value> = Vec::new();
-    let mut open_questions: Vec<Value> = Vec::new();
-    let mut failed_attempts: Vec<Value> = Vec::new();
+impl GatherAcc {
+    fn new() -> Self {
+        Self {
+            hypotheses: Vec::new(),
+            mental_models: Vec::new(),
+            open_questions: Vec::new(),
+            failed_attempts: Vec::new(),
+            by_kind: kind_counter_zero(),
+            by_kind_dropped: kind_counter_zero(),
+            matched_for_query: 0,
+        }
+    }
 
-    let mut by_kind = kind_counter_zero();
-    let mut by_kind_dropped = kind_counter_zero();
-    let mut matched_for_query = 0usize;
-
-    for qn in qnames {
-        let sym = match index.get_symbol_by_qname(&ref_name, qn) {
-            Ok(Some(s)) => s,
-            _ => continue,
-        };
-        let entries = ledger
-            .list_entries(&ref_name, &sym.symbol_id)
-            .unwrap_or_default();
+    /// Classify one symbol's live ledger entries into the projection.
+    fn accumulate(&mut self, qn: &str, entries: &[LedgerEntry], min_confidence: f64) {
         let mut had_thinking_entry = false;
         for entry in entries {
             match entry.kind {
@@ -178,15 +179,15 @@ pub fn gather_prior_thinking(
                     had_thinking_entry = true;
                     let conf = entry.confidence.unwrap_or(0.0);
                     if conf < min_confidence {
-                        *by_kind_dropped.get_mut("hypothesis").unwrap() += 1;
+                        *self.by_kind_dropped.get_mut("hypothesis").unwrap() += 1;
                         continue;
                     }
-                    hypotheses.push(json!({
+                    self.hypotheses.push(json!({
                         "qname": qn,
                         "summary": entry.summary,
                         "confidence": conf,
                     }));
-                    *by_kind.get_mut("hypothesis").unwrap() += 1;
+                    *self.by_kind.get_mut("hypothesis").unwrap() += 1;
                 }
                 LedgerKind::MentalModel => {
                     had_thinking_entry = true;
@@ -209,21 +210,21 @@ pub fn gather_prior_thinking(
                         .and_then(|v| v.get("name"))
                         .and_then(Value::as_str)
                         .map(String::from);
-                    mental_models.push(json!({
+                    self.mental_models.push(json!({
                         "qname": qn,
                         "name": name,
                         "summary": entry.summary,
                         "symbols": symbols,
                     }));
-                    *by_kind.get_mut("mental_model").unwrap() += 1;
+                    *self.by_kind.get_mut("mental_model").unwrap() += 1;
                 }
                 LedgerKind::OpenQuestion => {
                     had_thinking_entry = true;
-                    open_questions.push(json!({
+                    self.open_questions.push(json!({
                         "qname": qn,
                         "question": entry.summary,
                     }));
-                    *by_kind.get_mut("open_question").unwrap() += 1;
+                    *self.by_kind.get_mut("open_question").unwrap() += 1;
                 }
                 LedgerKind::FailedAttempt => {
                     had_thinking_entry = true;
@@ -241,102 +242,171 @@ pub fn gather_prior_thinking(
                         .and_then(|v| v.get("because"))
                         .and_then(Value::as_str)
                         .map(String::from);
-                    failed_attempts.push(json!({
+                    self.failed_attempts.push(json!({
                         "qname": qn,
                         "summary": entry.summary,
                         "tried": tried,
                         "because": because,
                     }));
-                    *by_kind.get_mut("failed_attempt").unwrap() += 1;
+                    *self.by_kind.get_mut("failed_attempt").unwrap() += 1;
                 }
                 _ => {}
             }
         }
         if had_thinking_entry {
-            matched_for_query += 1;
+            self.matched_for_query += 1;
         }
     }
 
-    let surfaced = by_kind.values().sum::<usize>();
+    fn finish(self, engine: &Engine, scanned_qnames: usize) -> PriorThinking {
+        let surfaced = self.by_kind.values().sum::<usize>();
 
-    // Lazy workspace count: only walk when nothing matched the query —
-    // that's when the agent might want to know "is there ANY thinking
-    // in this workspace, or should I capture some?"
-    let entries_in_workspace = if matched_for_query == 0 {
-        Some(count_workspace_thinking(engine))
-    } else {
-        None
-    };
+        // Lazy workspace count: only walk when nothing matched the query —
+        // that's when the agent might want to know "is there ANY thinking
+        // in this workspace, or should I capture some?"
+        let entries_in_workspace = if self.matched_for_query == 0 {
+            Some(count_workspace_thinking(engine))
+        } else {
+            None
+        };
 
-    let summary = ThinkingSummary {
-        scanned_qnames: qnames.len(),
-        matched_for_query,
-        surfaced,
-        by_kind,
-        by_kind_dropped,
-        entries_in_workspace,
-    };
+        let summary = ThinkingSummary {
+            scanned_qnames,
+            matched_for_query: self.matched_for_query,
+            surfaced,
+            by_kind: self.by_kind,
+            by_kind_dropped: self.by_kind_dropped,
+            entries_in_workspace,
+        };
 
-    let entries = if surfaced == 0 {
-        Value::Null
-    } else {
-        let mut out = serde_json::Map::new();
-        if !hypotheses.is_empty() {
-            out.insert("hypotheses".into(), json!(hypotheses));
-        }
-        if !mental_models.is_empty() {
-            out.insert("mental_models".into(), json!(mental_models));
-        }
-        if !open_questions.is_empty() {
-            out.insert("open_questions".into(), json!(open_questions));
-        }
-        if !failed_attempts.is_empty() {
-            out.insert("failed_attempts".into(), json!(failed_attempts));
-        }
-        Value::Object(out)
-    };
+        let entries = if surfaced == 0 {
+            Value::Null
+        } else {
+            let mut out = serde_json::Map::new();
+            if !self.hypotheses.is_empty() {
+                out.insert("hypotheses".into(), json!(self.hypotheses));
+            }
+            if !self.mental_models.is_empty() {
+                out.insert("mental_models".into(), json!(self.mental_models));
+            }
+            if !self.open_questions.is_empty() {
+                out.insert("open_questions".into(), json!(self.open_questions));
+            }
+            if !self.failed_attempts.is_empty() {
+                out.insert("failed_attempts".into(), json!(self.failed_attempts));
+            }
+            Value::Object(out)
+        };
 
-    PriorThinking { entries, summary }
+        PriorThinking { entries, summary }
+    }
 }
 
-/// Workspace-wide count of thinking entries across all indexed symbols.
-/// Walks the qname tree once and counts ledger entries of the four
-/// thinking kinds. Used as a fallback signal when prior_thinking finds
-/// nothing on the queried symbols.
-///
-/// Cost: O(symbols) — on a 10k-symbol repo this is ~150-300ms typical.
-/// Only called when `matched_for_query == 0` (see gather_prior_thinking).
-pub fn count_workspace_thinking(engine: &Engine) -> usize {
-    let ledger = AsgLedgerStore::from_engine(engine);
-    let prefix = format!("{}/index/by-qname", crate::paths::ASD_ROOT);
-    let qnames: Vec<String> = match engine.repo.get_tree(&engine.ref_name, &prefix) {
-        Ok(Value::Object(map)) => map.keys().cloned().collect(),
-        _ => return 0,
-    };
+pub fn gather_prior_thinking(
+    engine: &Engine,
+    qnames: &[String],
+    min_confidence: f64,
+) -> PriorThinking {
     let index = AsgIndexStore::from_engine(engine);
-    let mut total = 0usize;
-    for qn in &qnames {
-        let sym = match index.get_symbol_by_qname(&engine.ref_name, qn) {
+    let ledger = AsgLedgerStore::from_engine(engine);
+    let ref_name = engine.ref_name.clone();
+
+    let mut acc = GatherAcc::new();
+    for qn in qnames {
+        let sym = match index.get_symbol_by_qname(&ref_name, qn) {
             Ok(Some(s)) => s,
             _ => continue,
         };
         let entries = ledger
-            .list_entries(&engine.ref_name, &sym.symbol_id)
+            .list_entries(&ref_name, &sym.symbol_id)
             .unwrap_or_default();
-        total += entries
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e.kind,
-                    LedgerKind::Hypothesis
-                        | LedgerKind::MentalModel
-                        | LedgerKind::OpenQuestion
-                        | LedgerKind::FailedAttempt
-                )
-            })
-            .count();
+        acc.accumulate(qn, &entries, min_confidence);
     }
-    total
+    acc.finish(engine, qnames.len())
+}
+
+/// Workspace-wide variant: ONE ledger-tree walk + ONE id-map build instead
+/// of a per-qname symbol lookup + per-symbol ledger read. Same output shape
+/// and filtering rules as calling [`gather_prior_thinking`] with every
+/// indexed qname, but O(entries) instead of O(symbols × tree-depth) — the
+/// per-qname form measured ~9 minutes on a 9.6k-symbol repo with a cold
+/// FTS cache (Plan T t-007 finding); this walk is milliseconds.
+pub fn gather_prior_thinking_all(engine: &Engine, min_confidence: f64) -> PriorThinking {
+    let index = AsgIndexStore::from_engine(engine);
+    let id_map = index.build_id_map(engine);
+
+    let mut acc = GatherAcc::new();
+    for (symbol_id, entries) in all_ledger_buckets(engine) {
+        // Unindexed symbols are skipped, matching the per-qname path
+        // (which can only reach entries through an indexed qname).
+        let Some(sym) = id_map.get(&symbol_id) else {
+            continue;
+        };
+        let live = live_entries(entries);
+        acc.accumulate(&sym.qname, &live, min_confidence);
+    }
+    acc.finish(engine, id_map.len())
+}
+
+/// One-pass read of the whole ledger tree, grouped per symbol bucket.
+fn all_ledger_buckets(engine: &Engine) -> Vec<(String, Vec<LedgerEntry>)> {
+    let prefix = format!("{}/ledger", crate::paths::ASD_ROOT);
+    let tree = match engine.repo.get_tree(&engine.ref_name, &prefix) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let mut buckets = Vec::new();
+    if let Value::Object(by_symbol) = tree {
+        for (symbol_id, symbol_bucket) in by_symbol {
+            if let Value::Object(entry_map) = symbol_bucket {
+                let entries: Vec<LedgerEntry> = entry_map
+                    .into_iter()
+                    .filter_map(|(_, v)| serde_json::from_value(v).ok())
+                    .collect();
+                if !entries.is_empty() {
+                    buckets.push((symbol_id, entries));
+                }
+            }
+        }
+    }
+    buckets
+}
+
+/// Per-bucket supersede filtering — the same rule as
+/// `LedgerStore::list_entries` (supersession never crosses symbols, so
+/// applying it per bucket is equivalent).
+fn live_entries(all: Vec<LedgerEntry>) -> Vec<LedgerEntry> {
+    let superseded: std::collections::HashSet<String> = all
+        .iter()
+        .flat_map(|e| e.supersedes.iter().cloned())
+        .collect();
+    all.into_iter()
+        .filter(|e| !superseded.contains(&e.entry_id))
+        .collect()
+}
+
+/// Workspace-wide count of thinking entries across all symbols.
+/// Used as a fallback signal when prior_thinking finds nothing on the
+/// queried symbols.
+///
+/// Single ledger-tree walk. (Was: a per-qname symbol lookup plus a
+/// per-symbol ledger read — quadratic on big repos, and this function
+/// runs exactly when nothing matched, i.e. on the workspace-wide
+/// slow path. Plan T t-007 finding.)
+pub fn count_workspace_thinking(engine: &Engine) -> usize {
+    all_ledger_buckets(engine)
+        .into_iter()
+        .flat_map(|(_, entries)| live_entries(entries))
+        .filter(|e| {
+            matches!(
+                e.kind,
+                LedgerKind::Hypothesis
+                    | LedgerKind::MentalModel
+                    | LedgerKind::OpenQuestion
+                    | LedgerKind::FailedAttempt
+            )
+        })
+        .count()
 }
 
 #[cfg(test)]
@@ -384,6 +454,72 @@ mod tests {
         entry.confidence = conf;
         entry.body = body.map(str::to_string);
         ledger.append_entry(&engine.ref_name, &entry, "t").unwrap();
+    }
+
+
+    #[test]
+    fn bulk_gather_matches_per_qname_gather() {
+        // gather_prior_thinking_all must be output-identical to the
+        // per-qname form fed every indexed qname — it exists only as the
+        // O(entries) fast path (Plan T t-007 quadratic-listing finding).
+        let (engine, qn) = seed();
+        let index = AsgIndexStore::from_engine(&engine);
+        let sym2 = Symbol {
+            symbol_id: "sym_y".into(),
+            symbol_fp: "fp_y".into(),
+            qname: "pkg.other".into(),
+            language: "python".into(),
+            kind: SymbolKind::Function,
+            file: "src/other.py".into(),
+            start: Position { line: 1, col: 0 },
+            end: Position { line: 3, col: 0 },
+            signature: None,
+            doc: None,
+        };
+        index.put_symbol(&engine.ref_name, &sym2, "test").unwrap();
+
+        append(&engine, "sym_x", LedgerKind::Hypothesis, "likely rc", Some(0.8), None);
+        append(&engine, "sym_x", LedgerKind::Hypothesis, "below floor", Some(0.1), None);
+        append(
+            &engine,
+            "sym_y",
+            LedgerKind::FailedAttempt,
+            "tried caching",
+            None,
+            Some(r#"{"tried":"lru","because":"stale reads"}"#),
+        );
+        append(&engine, "sym_y", LedgerKind::OpenQuestion, "why flaky?", None, None);
+        // Non-thinking entries must not surface in either form.
+        append(&engine, "sym_x", LedgerKind::Decision, "use sqlite", None, None);
+
+        let per_qname = gather_prior_thinking(
+            &engine,
+            &[qn, "pkg.other".to_string()],
+            DEFAULT_CONFIDENCE_FLOOR,
+        );
+        let bulk = gather_prior_thinking_all(&engine, DEFAULT_CONFIDENCE_FLOOR);
+
+        assert_eq!(bulk.summary.scanned_qnames, 2);
+        assert_eq!(bulk.summary.matched_for_query, per_qname.summary.matched_for_query);
+        assert_eq!(bulk.summary.surfaced, per_qname.summary.surfaced);
+        assert_eq!(bulk.summary.by_kind, per_qname.summary.by_kind);
+        assert_eq!(bulk.summary.by_kind_dropped, per_qname.summary.by_kind_dropped);
+
+        // Entry arrays must match as sets (bucket iteration order may
+        // differ from the caller's qname order).
+        for key in ["hypotheses", "mental_models", "open_questions", "failed_attempts"] {
+            let mut a: Vec<String> = per_qname.entries[key]
+                .as_array()
+                .map(|v| v.iter().map(|e| e.to_string()).collect())
+                .unwrap_or_default();
+            let mut b: Vec<String> = bulk.entries[key]
+                .as_array()
+                .map(|v| v.iter().map(|e| e.to_string()).collect())
+                .unwrap_or_default();
+            a.sort();
+            b.sort();
+            assert_eq!(a, b, "mismatch in {key}");
+        }
     }
 
     #[test]

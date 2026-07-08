@@ -219,27 +219,13 @@ async fn list_symbols(
     Query(q): Query<SymbolQuery>,
 ) -> Result<Json<Vec<agentstatedeveloper_core::Symbol>>, ApiError> {
     let engine = state.engine.lock().await;
-    let ref_name = engine.ref_name.clone();
-    let prefix = format!(
-        "{}/index/by-qname",
-        agentstatedeveloper_core::ASD_PATH_PREFIX
-    );
-
-    let qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
-        Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
-        _ => return Ok(Json(Vec::new())),
-    };
-
+    // One bulk read (FTS cache when warm, one tree walk otherwise) instead
+    // of a per-qname lookup — the per-qname form measured 8m45s per page on
+    // a 9.6k-symbol repo with a cold cache, holding the engine mutex the
+    // whole time (Plan T t-007 finding).
     let index = AsgIndexStore::from_engine(&engine);
-    let mut symbols = Vec::new();
-    for qname in qnames {
-        if let Some(sym) = index
-            .get_symbol_by_qname(&ref_name, &qname)
-            .map_err(ApiError::from)?
-        {
-            symbols.push(sym);
-        }
-    }
+    let mut symbols: Vec<agentstatedeveloper_core::Symbol> =
+        index.build_id_map(&engine).into_values().collect();
 
     symbols.sort_by(|a, b| a.qname.cmp(&b.qname));
 
@@ -495,19 +481,22 @@ async fn list_thinking(
     Query(q): Query<ThinkingQuery>,
 ) -> Result<Json<agentstatedeveloper_core::thinking::PriorThinking>, ApiError> {
     let engine = state.engine.lock().await;
-    let qnames = match q.qnames.as_deref() {
-        Some(raw) => raw
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>(),
-        None => all_qnames(&engine)?,
-    };
     let floor = q
         .min_confidence
         .unwrap_or(agentstatedeveloper_core::thinking::DEFAULT_CONFIDENCE_FLOOR);
-    let projection =
-        agentstatedeveloper_core::thinking::gather_prior_thinking(&engine, &qnames, floor);
+    let projection = match q.qnames.as_deref() {
+        Some(raw) => {
+            let qnames = raw
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>();
+            agentstatedeveloper_core::thinking::gather_prior_thinking(&engine, &qnames, floor)
+        }
+        // Workspace-wide: the bulk single-walk variant, not a synthetic
+        // "every qname" list (that form is quadratic — Plan T t-007).
+        None => agentstatedeveloper_core::thinking::gather_prior_thinking_all(&engine, floor),
+    };
     Ok(Json(projection))
 }
 
@@ -534,18 +523,6 @@ async fn get_symbol_thinking(
         floor,
     );
     Ok(Json(projection))
-}
-
-fn all_qnames(engine: &Engine) -> Result<Vec<String>, ApiError> {
-    let ref_name = engine.ref_name.clone();
-    let prefix = format!(
-        "{}/index/by-qname",
-        agentstatedeveloper_core::ASD_PATH_PREFIX
-    );
-    match engine.repo.get_tree(&ref_name, &prefix) {
-        Ok(serde_json::Value::Object(map)) => Ok(map.keys().cloned().collect()),
-        _ => Ok(Vec::new()),
-    }
 }
 
 // -----------------------------------------------------------------------------
