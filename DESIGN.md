@@ -2604,3 +2604,112 @@ provable why-chains, conventional browse/search that beats the CLI for
 inspection, and one distinctive territory view worth a demo video — all on
 a shared lens-core that CTXone consumes.
 
+## Plan U — Maintenance sweep (agent-agnostic refactor/cleanup worklist)
+
+### Motivation
+
+After a stretch of agent-driven feature work, someone has to go back
+through the code: refactor, simplify, dedupe, hunt perf and memory
+problems. Today that's an unscoped "please review the code" prompt.
+ASD holds signals nobody else has for scoping it:
+
+1. **Churn without judgment** — symbols edited repeatedly with zero
+   ledger entries: an agent hacked there under pressure and never
+   recorded why. The best refactor predictor ASD can compute, and only
+   ASD can compute it.
+2. **The debt is already in the ledger** — FollowUps are deferred work,
+   FailedAttempts mark code that fought back, hazards mark the scary
+   corners. A sweep should *consume* these, not rediscover them.
+3. **Structure + effects** — fan-in/out outliers among changed symbols,
+   cross-module edge growth, orphaned symbols, io-heavy transitive
+   closures (the 2026-07-08 scale audit is a working template of this
+   kind of hunt).
+
+**Hard constraint (Craig, 2026-07-08): the executing agent may be a
+local LLM or bare MCP client with NO built-in review skills** (no
+/simplify, no /code-review). The sweep must therefore ship its own
+review instructions per finding — self-contained recipes, not
+references to host-tool capabilities. Same pattern as the shipped
+think-bootstrap prompts: templates compiled into the binary
+(`include_str!`, per the 1.0.61 CWD-relative-path lesson).
+
+### Task table
+
+| Task | Description | Wave |
+|------|-------------|------|
+| t-001 | **`asd sweep [--since <sha>]` + MCP `sweep`**: ranked worklist over the since-scope (default: last sweep or last N commits) from: churn-without-judgment, invariant friction (recorded invariants in changed symbols' blast radius — prepare-change machinery run in reverse), FailedAttempt clusters + open FollowUps, structural outliers (fan-in/out, cross-module growth, newly-orphaned symbols), test-gap overlap (M23 suggested_test_coverage). JSON contract + human table | 1 |
+| t-002 | **Per-finding review recipes**: every worklist item carries a self-contained instruction block — what to inspect, what good looks like for this finding category (simplify / dedupe / decompose / perf-hint / memory-hint / dead-code), how to verify (build+test commands from repo detection), and what to record when done. Written for an agent with no host review skills; templates in-binary | 1 |
+| t-003 | **Convergence loop**: acting on an item records a ledger entry (Decision for the refactor, or explicit KeepAsIs with rationale — absence of action is also a decision); sweep excludes resolved items; FollowUps close on completion; `asd scorecard` gains a debt-trend dimension. A sweep that re-reports the same items forever is a nag, not a tool | 2 |
+| t-004 | **Perf/memory heuristics** (explicitly pointers, not profiling): io-inside-hot-transitive-paths, effect anomalies (declared pure, transitively io), per-language allocation-smell patterns supplied by the language adapters. Each emits a recipe telling the agent what to check, never a verdict | 2 |
+| t-005 | **Lens surface**: sweep worklist page + a "debt" layer on the territory views (unrecorded-churn glow); items drill into the AccountabilityCard pattern | 3 |
+| t-006 | **Field test**: run the sweep on this repo after the Plan T arc (a real multi-week agent-editing stretch), from a non-source checkout, driven by a bare MCP client with no host skills — the acceptance persona | 3 |
+
+### Acceptance
+
+An agent with NO built-in review capability can: run `sweep` → receive
+a ranked item with context + recipe → execute the cleanup → record the
+outcome → next sweep no longer lists it. Debt trend visible in
+scorecard and on the territory debt layer.
+
+### What's NOT in this plan
+
+- Real profiling (heuristics point; profilers measure).
+- CI/scheduled sweeps (natural follow-up once the loop converges).
+- Team-tier gating of sweep items.
+
+### Done when
+
+"Go clean up after the last three features" is one command that any
+agent — hosted or local — can execute end to end, and repeated sweeps
+trend the debt down instead of re-listing it.
+
+## Plan V — Effect-boundary query capture (example queries without QA spins)
+
+### Motivation
+
+Getting the *final* SQL/Elasticsearch/GraphQL query out of code that
+assembles it across many functions today means: spin up QA, find an
+input that reaches the path, add a print at the send site. "Hard but
+should be easy" (Craig, 2026-07-08). ASD already knows *where* the send
+site is — that's exactly what effect declarations are (`io.db.*`,
+`io.net.out`) — and already runs programs under a tracer (`asd trace`,
+Python). Capture the arguments when traced execution crosses a declared
+boundary, and the example query becomes a stored fact about the symbol.
+
+**Scope decisions (Craig, 2026-07-08):** Python tracer only (no
+cross-language work; leave seams); test-suite-time capture only (no
+live/QA instance capture, no proxy interception); mocked data is
+acceptable and expected.
+
+### Task table
+
+| Task | Description | Wave |
+|------|-------------|------|
+| t-001 | **Tracer boundary capture**: when a traced call enters a symbol declaring `io.db.*` / `io.net.out` (or a configured effect set), serialize its arguments — the query string/payload — size-capped, sampled (first N distinct shapes per symbol per run) | 1 |
+| t-002 | **Redaction before storage**: credential patterns, connection-string secrets, configurable denylist; document what redaction can and cannot promise (bound params with PII stay the user's responsibility — say so) | 1 |
+| t-003 | **Storage + retrieval**: samples stored as trace evidence on the symbol (existing traces machinery) with provenance (test name, timestamp, arg shape); surfaced in `asd read <symbol>`, a `samples` listing, and MCP so agents can pull an example query without any QA setup | 1 |
+| t-004 | **`asd query-example <symbol>` static fallback**: when no runnable path exists, assemble the call chain + each function's source into a context package for the agent to reconstruct the query template with placeholders. Works for every indexed language; explicitly labeled reconstruction, not capture | 2 |
+| t-005 | **Lens surface**: "Example queries" panel on the symbol detail page; captured samples in the AccountabilityCard Touches section | 2 |
+| t-006 | **Field test**: a Python fixture (or real repo) that builds an ES/SQL query across ≥3 functions; run its tests under the tracer; verify the stored sample matches what the client library would send — without modifying the code under test | 2 |
+
+### Acceptance
+
+For a query assembled across multiple functions, `asd read <symbol>`
+shows a real example of the final query after one test run under the
+tracer — no QA instance, no added print statements, no code changes.
+
+### What's NOT in this plan
+
+- TypeScript/Java/other tracers (the storage and retrieval layers are
+  language-neutral; only capture is Python).
+- Live-traffic or proxy capture.
+- Timing samples at boundaries (natural future extension — would give
+  "this query took 800ms in tests" for the maintenance sweep's perf
+  recipes; noted, not built).
+
+### Done when
+
+"Show me an example of the query this function sends" is answered from
+stored data in seconds, and the answer's provenance (which test, when)
+is attached.
+
