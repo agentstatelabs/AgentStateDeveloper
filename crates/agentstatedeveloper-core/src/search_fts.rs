@@ -716,6 +716,44 @@ impl SearchFtsDb {
         .unwrap_or_default()
     }
 
+    /// Build both full edge maps from `asd_call_edges` in one query:
+    /// `(callers_of, callees_of)`, each `symbol_id → [neighbor_id, …]`.
+    /// The bulk analog of [`Self::get_neighbors_cached`] — callers that walk
+    /// many nodes (graph BFS) use this instead of one query per node.
+    /// Returns empty maps on any error (caller falls back to git).
+    pub fn build_edge_maps_cached(
+        &self,
+        ref_name: &str,
+    ) -> (HashMap<String, Vec<String>>, HashMap<String, Vec<String>>) {
+        let mut callers_of: HashMap<String, Vec<String>> = HashMap::new();
+        let mut callees_of: HashMap<String, Vec<String>> = HashMap::new();
+        let mut stmt = match self.conn.prepare(
+            "SELECT symbol_id, neighbor_id, direction FROM asd_call_edges
+             WHERE ref_name = ?1",
+        ) {
+            Ok(s) => s,
+            Err(_) => return (callers_of, callees_of),
+        };
+        let rows = match stmt.query_map(params![ref_name], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        }) {
+            Ok(r) => r,
+            Err(_) => return (callers_of, callees_of),
+        };
+        for (symbol_id, neighbor_id, direction) in rows.flatten() {
+            match direction.as_str() {
+                "caller" => callers_of.entry(symbol_id).or_default().push(neighbor_id),
+                "callee" => callees_of.entry(symbol_id).or_default().push(neighbor_id),
+                _ => {}
+            }
+        }
+        (callers_of, callees_of)
+    }
+
     /// Number of rows in the FTS table (total indexed symbols).
     pub fn symbol_count(&self) -> usize {
         self.conn

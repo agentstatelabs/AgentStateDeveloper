@@ -55,6 +55,88 @@ pub struct AppState {
     /// Live-events hub backing `/api/v1/events` (SSE). Spawns its poller
     /// lazily on the first subscriber — see [`events::EventHub`].
     pub events: Arc<events::EventHub>,
+    /// Memoized `symbol_id → Symbol` map keyed by the ASG ref head, shared by
+    /// the graph endpoints (`/callers`, `/callees`, `/graph`). On a cold FTS
+    /// cache `build_id_map` falls back to a full by-qname tree walk (~2s at
+    /// 10k symbols); this memo makes that a once-per-head cost instead of a
+    /// once-per-request cost. `repo.head` is the same cheap change cursor the
+    /// events poller uses, so writes landed by other processes invalidate the
+    /// memo on the next request.
+    id_map_memo: Arc<std::sync::Mutex<IdMapMemo>>,
+    /// Same memo scheme for the bulk call-edge maps `(callers_of,
+    /// callees_of)` used by the `/graph` BFS — one bulk read per head change
+    /// instead of one git read per visited node.
+    edge_maps_memo: Arc<std::sync::Mutex<EdgeMapsMemo>>,
+}
+
+type IdMapMemo = Option<(
+    agentstategraph_core::ObjectId,
+    Arc<std::collections::HashMap<String, agentstatedeveloper_core::Symbol>>,
+)>;
+
+/// `(callers_of, callees_of)`, each `symbol_id → [neighbor_id, …]`.
+type EdgeMaps = (
+    std::collections::HashMap<String, Vec<String>>,
+    std::collections::HashMap<String, Vec<String>>,
+);
+
+type EdgeMapsMemo = Option<(agentstategraph_core::ObjectId, Arc<EdgeMaps>)>;
+
+/// Fetch the shared `symbol_id → Symbol` map, rebuilding only when the ref
+/// head has moved since the last build. Falls back to an unmemoized build
+/// when the head can't be resolved — never worse than one bulk read per
+/// request. Callers hold the engine mutex, so the brief std-mutex locks here
+/// never contend across an `.await`.
+fn shared_id_map(
+    state: &AppState,
+    engine: &Engine,
+) -> Arc<std::collections::HashMap<String, agentstatedeveloper_core::Symbol>> {
+    let head = engine.repo.head(&engine.ref_name).ok();
+    if let Some(h) = &head {
+        if let Some((cached_head, map)) = state
+            .id_map_memo
+            .lock()
+            .expect("id_map_memo poisoned")
+            .as_ref()
+        {
+            if cached_head == h {
+                return Arc::clone(map);
+            }
+        }
+    }
+    let index = AsgIndexStore::from_engine(engine);
+    let map = Arc::new(index.build_id_map(engine));
+    if let Some(h) = head {
+        *state.id_map_memo.lock().expect("id_map_memo poisoned") = Some((h, Arc::clone(&map)));
+    }
+    map
+}
+
+/// Fetch the shared bulk call-edge maps, rebuilding only when the ref head
+/// has moved. Same contract as [`shared_id_map`].
+fn shared_edge_maps(state: &AppState, engine: &Engine) -> Arc<EdgeMaps> {
+    let head = engine.repo.head(&engine.ref_name).ok();
+    if let Some(h) = &head {
+        if let Some((cached_head, maps)) = state
+            .edge_maps_memo
+            .lock()
+            .expect("edge_maps_memo poisoned")
+            .as_ref()
+        {
+            if cached_head == h {
+                return Arc::clone(maps);
+            }
+        }
+    }
+    let index = AsgIndexStore::from_engine(engine);
+    let maps = Arc::new(index.build_edge_maps(engine));
+    if let Some(h) = head {
+        *state
+            .edge_maps_memo
+            .lock()
+            .expect("edge_maps_memo poisoned") = Some((h, Arc::clone(&maps)));
+    }
+    maps
 }
 
 /// Build the axum router wired to the given engine + db path.
@@ -79,6 +161,8 @@ pub fn build_router(
         db_path,
         audit_log_path,
         events,
+        id_map_memo: Arc::new(std::sync::Mutex::new(None)),
+        edge_maps_memo: Arc::new(std::sync::Mutex::new(None)),
     };
 
     let api = Router::new()
@@ -307,7 +391,7 @@ async fn get_symbol_callers(
     let ids = index
         .get_callers(&ref_name, &target.symbol_id)
         .map_err(ApiError::from)?;
-    let syms = resolve_symbols_by_ids(&engine, &ids).map_err(ApiError::from)?;
+    let syms = resolve_symbols_by_ids(&state, &engine, &ids);
     Ok(Json(syms))
 }
 
@@ -325,42 +409,31 @@ async fn get_symbol_callees(
     let ids = index
         .get_callees(&ref_name, &target.symbol_id)
         .map_err(ApiError::from)?;
-    let syms = resolve_symbols_by_ids(&engine, &ids).map_err(ApiError::from)?;
+    let syms = resolve_symbols_by_ids(&state, &engine, &ids);
     Ok(Json(syms))
 }
 
-/// Resolve a list of `symbol_id`s to full `Symbol` records by scanning the
-/// qname index. O(N) per lookup; acceptable for M4 solo-dev scale.
+/// Resolve a list of `symbol_id`s to full `Symbol` records via the shared
+/// (head-memoized) id map — one bulk read per head change, O(ids) per call.
+/// The previous implementation listed every qname and then re-fetched each
+/// symbol with a per-qname `get_symbol_by_qname` — ~10k git reads per request
+/// on a cold cache (measured in minutes on the ExampleProj db); same disease
+/// 91b2aaf cured in `list_symbols`.
 fn resolve_symbols_by_ids(
+    state: &AppState,
     engine: &Engine,
     ids: &[String],
-) -> agentstatedeveloper_core::Result<Vec<agentstatedeveloper_core::Symbol>> {
-    let ref_name = &engine.ref_name;
-    let prefix = format!(
-        "{}/index/by-qname",
-        agentstatedeveloper_core::ASD_PATH_PREFIX
-    );
-    let tree = match engine.repo.get_tree(ref_name, &prefix) {
-        Ok(t) => t,
-        Err(_) => return Ok(Vec::new()),
+) -> Vec<agentstatedeveloper_core::Symbol> {
+    let id_map = shared_id_map(state, engine);
+    let mut out: Vec<agentstatedeveloper_core::Symbol> = {
+        let mut seen = std::collections::HashSet::new();
+        ids.iter()
+            .filter(|id| seen.insert(id.as_str()))
+            .filter_map(|id| id_map.get(id).cloned())
+            .collect()
     };
-    let qnames: Vec<String> = match tree {
-        serde_json::Value::Object(map) => map.keys().cloned().collect(),
-        _ => return Ok(Vec::new()),
-    };
-
-    let index = AsgIndexStore::from_engine(&engine);
-    let id_set: std::collections::HashSet<&String> = ids.iter().collect();
-    let mut out = Vec::new();
-    for qn in qnames {
-        if let Some(sym) = index.get_symbol_by_qname(ref_name, &qn)? {
-            if id_set.contains(&sym.symbol_id) {
-                out.push(sym);
-            }
-        }
-    }
     out.sort_by(|a, b| a.qname.cmp(&b.qname));
-    Ok(out)
+    out
 }
 
 #[derive(Debug, Deserialize)]
@@ -1017,7 +1090,9 @@ async fn get_symbol_graph(
         .get_symbol_by_qname(&ref_name, &qname)
         .map_err(ApiError::from)?
         .ok_or_else(|| ApiError::NotFound(format!("symbol not found: {}", qname)))?;
-    let id_map = index.build_id_map(&engine);
+    let id_map = shared_id_map(&state, &engine);
+    let edge_maps = shared_edge_maps(&state, &engine);
+    let (callers_of, callees_of) = edge_maps.as_ref();
 
     let node_json = |sym: &agentstatedeveloper_core::Symbol| {
         json!({
@@ -1044,15 +1119,15 @@ async fn get_symbol_graph(
         // (neighbor_id, link caller→callee)
         let mut neighbors: Vec<(String, (String, String))> = Vec::new();
         if want_callers {
-            for caller in index.get_callers(&ref_name, &sym_id).unwrap_or_default() {
+            for caller in callers_of.get(&sym_id).into_iter().flatten() {
                 let link = (caller.clone(), sym_id.clone());
-                neighbors.push((caller, link));
+                neighbors.push((caller.clone(), link));
             }
         }
         if want_callees {
-            for callee in index.get_callees(&ref_name, &sym_id).unwrap_or_default() {
+            for callee in callees_of.get(&sym_id).into_iter().flatten() {
                 let link = (sym_id.clone(), callee.clone());
-                neighbors.push((callee, link));
+                neighbors.push((callee.clone(), link));
             }
         }
         for (nbr_id, link) in neighbors {

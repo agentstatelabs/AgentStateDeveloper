@@ -112,6 +112,42 @@ impl<'a> AsgIndexStore<'a> {
             })
             .unwrap_or_default()
     }
+
+    /// Build both full edge maps — `(callers_of, callees_of)`, each
+    /// `symbol_id → [neighbor_id, …]` — using the borrowed FTS connection,
+    /// falling back to one git tree walk per direction on cache miss.
+    ///
+    /// The bulk analog of `get_callers`/`get_callees`: callers that touch
+    /// many nodes per request (e.g. the `/graph` BFS) use this instead of one
+    /// per-node git read. Same cache guard as the per-symbol getters
+    /// (`symbols_cached_for`), so cached and per-symbol reads always agree.
+    pub fn build_edge_maps(
+        &self,
+        engine: &Engine,
+    ) -> (HashMap<String, Vec<String>>, HashMap<String, Vec<String>>) {
+        if let Some(fts) = &self.fts {
+            if fts.symbols_cached_for(&engine.ref_name) {
+                return fts.build_edge_maps_cached(&engine.ref_name);
+            }
+        }
+        // Git fallback (cold cache or first run). Tree shape per direction:
+        //   /asd/v1/index/callers/{symbol_id} = {"callers": [id, …]}
+        //   /asd/v1/index/callees/{symbol_id} = {"callees": [id, …]}
+        let read_direction = |dir: &str, field: &str| -> HashMap<String, Vec<String>> {
+            let prefix = format!("{}/index/{}", paths::ASD_ROOT, dir);
+            match engine.repo.get_tree(&engine.ref_name, &prefix) {
+                Ok(serde_json::Value::Object(map)) => map
+                    .into_iter()
+                    .map(|(symbol_id, v)| (symbol_id, extract_string_array(&v, field)))
+                    .collect(),
+                _ => HashMap::new(),
+            }
+        };
+        (
+            read_direction("callers", "callers"),
+            read_direction("callees", "callees"),
+        )
+    }
 }
 
 impl<'a> IndexStore for AsgIndexStore<'a> {
