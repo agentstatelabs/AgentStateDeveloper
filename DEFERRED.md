@@ -273,3 +273,16 @@ and Plans A–G.
 | Working-style | I t-048 | 1 | Out-of-repo (~/.claude) |
 | Field eval | Plan J (16) | 16 | M25 cluster most urgent |
 | Plan F dormant | Plan H (4) | 4 | Trigger-gated |
+
+## External-callee call graph (2026-07-08, Lens program discussions)
+
+- **DEFERRED — Callers-of-external-symbols.** "Find every caller of a
+  database/ES/library call" fails today: call edges whose callee doesn't
+  resolve to an indexed repo symbol are dropped at index time (visible
+  as `dropped_call_edges` in every index run). Craig's use case is
+  exactly the dropped set. Shape: keep unresolved callees as external
+  pseudo-symbols (`ext:pg.query`), index reverse edges, expose through
+  `asd callers`, the `/graph` endpoint/Lens graph page, and compose with
+  effects ("caller graph converging on this io boundary"). Contained
+  indexing feature; also feeds Plan V (finding the boundary functions
+  worth tracing). Promote to a plan when picked up.
