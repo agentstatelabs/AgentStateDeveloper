@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -81,12 +82,12 @@ impl Engine {
         let sidecar_root = project_root.join(".asd/v1");
         // Fast emptiness check: reuse the already-open FTS connection — avoids
         // a second `Connection::open` that the 0.9.72 code used.
+        let sqlite_has_symbols = engine
+            .fts
+            .as_ref()
+            .map(|fts| fts.symbols_cached_for(&engine.ref_name))
+            .unwrap_or(false);
         let is_empty = {
-            let sqlite_has_symbols = engine
-                .fts
-                .as_ref()
-                .map(|fts| fts.symbols_cached_for(&engine.ref_name))
-                .unwrap_or(false);
             if sqlite_has_symbols {
                 false // SQLite says there are symbols — definitely not empty.
             } else {
@@ -107,6 +108,34 @@ impl Engine {
                 &project_root,
                 "asd-auto-hydrate",
             );
+        }
+
+        // Plan T self-heal: the git trees have symbols but the SQLite symbol
+        // cache is empty — a born-cold DB (hydrate never synced caches before
+        // 1.2.1, or the auto-hydrate above just ran) or a past sync failure
+        // (e.g. SQLITE_BUSY while a server held the DB). Without this, every
+        // read on every subsequent run pays the slow git-walk path forever.
+        // One authoritative walk (~2s at 10k symbols) repairs it here, which
+        // covers CLI, MCP, and asd-serve in one place — they all construct
+        // engines through `open_sqlite`. Safe under concurrent readers:
+        // `sync_symbols`/`sync_call_edges` are transactional full-replaces
+        // (WAL mode, 5s busy timeout) and idempotent, so a concurrent healer
+        // just repeats the same work. In-memory engines (`fts: None`) skip
+        // inside `warm_caches`; failures are logged and non-fatal — the next
+        // open retries.
+        if !sqlite_has_symbols {
+            match engine.warm_caches() {
+                Ok(w) if w.symbols_cached > 0 => {
+                    eprintln!(
+                        "asd: symbol cache was cold — rebuilt from index ({} symbols, {} edges{})",
+                        w.symbols_cached,
+                        w.edges_cached,
+                        if w.fts_rebuilt { ", FTS rebuilt" } else { "" }
+                    );
+                }
+                Ok(_) => {} // nothing indexed yet, or nothing to warm
+                Err(e) => eprintln!("asd: symbol cache self-heal failed (non-fatal): {e}"),
+            }
         }
 
         Ok(engine)
@@ -203,4 +232,123 @@ impl Engine {
         let store = AsgIndexStore::new(&self.repo);
         store.put_symbol(&self.ref_name, symbol, agent_id)
     }
+
+    /// Plan T: populate the SQLite fast-read caches (`asd_symbols_cache`,
+    /// `asd_call_edges`, and — only if empty — the FTS search table) from the
+    /// authoritative git trees.
+    ///
+    /// Reads git directly rather than going through `AsgIndexStore` so a
+    /// stale cache can never be used as its own source. Called from two
+    /// places:
+    ///
+    /// - `open_sqlite` self-heal, when git has symbols but the cache is cold
+    ///   (born-cold hydrate DBs, or a past sync failure such as SQLITE_BUSY);
+    /// - `asd hydrate`, right after loading the sidecar, so hydrate-created
+    ///   DBs are warm before the command exits.
+    ///
+    /// Concurrency: `sync_symbols`/`sync_call_edges` are transactional
+    /// full-replaces on a WAL connection with a busy timeout, and the
+    /// operation is idempotent — concurrent callers converge on the same
+    /// rows. In-memory engines (`fts: None`) return `skipped: true` and do
+    /// nothing.
+    pub fn warm_caches(&self) -> Result<CacheWarmSummary> {
+        let Some(fts) = self.fts.as_ref() else {
+            return Ok(CacheWarmSummary {
+                skipped: true,
+                ..Default::default()
+            });
+        };
+
+        // Authoritative symbol read: one by-qname tree walk (qname-unique by
+        // construction, matching `rebuild_refs`' dedup semantics).
+        let symbols: Vec<Symbol> = self
+            .repo
+            .get_tree(&self.ref_name, "/asd/v1/index/by-qname")
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+            .map(|m| {
+                m.into_values()
+                    .filter_map(|v| serde_json::from_value::<Symbol>(v).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if symbols.is_empty() {
+            // Nothing indexed yet — leave the caches alone so
+            // `symbols_cached_for` keeps routing reads to git.
+            return Ok(CacheWarmSummary::default());
+        }
+
+        // Authoritative edge read: one tree walk per direction. Shape:
+        //   /asd/v1/index/callers/{symbol_id} = {"callers": [id, …]}
+        //   /asd/v1/index/callees/{symbol_id} = {"callees": [id, …]}
+        let read_direction = |dir: &str, field: &str| -> HashMap<String, Vec<String>> {
+            let prefix = format!("{}/index/{}", crate::paths::ASD_ROOT, dir);
+            match self.repo.get_tree(&self.ref_name, &prefix) {
+                Ok(serde_json::Value::Object(map)) => map
+                    .into_iter()
+                    .map(|(symbol_id, v)| {
+                        let ids = v
+                            .get(field)
+                            .and_then(|a| a.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        (symbol_id, ids)
+                    })
+                    .collect(),
+                _ => HashMap::new(),
+            }
+        };
+        let callers_of = read_direction("callers", "callers");
+        let callees_of = read_direction("callees", "callees");
+
+        let sym_refs: Vec<&Symbol> = symbols.iter().collect();
+        fts.sync_symbols(&sym_refs, &self.ref_name)
+            .map_err(|e| AsdError::Other(format!("symbol cache sync failed: {e}")))?;
+        fts.sync_call_edges(&callees_of, &callers_of, &self.ref_name)
+            .map_err(|e| AsdError::Other(format!("edge cache sync failed: {e}")))?;
+
+        // FTS search table: rebuild ONLY when empty. A populated table came
+        // from `asd index` and already carries the ledger_text/ledger_flags
+        // denormalizations; rebuilding it here would be a pure no-op cost.
+        // An empty one (fresh hydrate DB) gets the same rebuild `asd index`
+        // would produce — ledger data comes from the hydrated ledger tree.
+        let mut fts_rebuilt = false;
+        if fts.fts_symbol_row_count() == 0 {
+            let ledger_data =
+                crate::index_pipeline::build_ledger_fts_data(&self.repo, &self.ref_name);
+            let mut deduped = sym_refs.clone();
+            deduped.sort_by(|a, b| a.qname.cmp(&b.qname));
+            match fts.rebuild_refs(&deduped, &ledger_data) {
+                Ok(()) => fts_rebuilt = true,
+                Err(e) => eprintln!("asd: FTS rebuild during cache warm failed: {e}"),
+            }
+        }
+
+        let edges_cached = callers_of.values().map(Vec::len).sum::<usize>()
+            + callees_of.values().map(Vec::len).sum::<usize>();
+        Ok(CacheWarmSummary {
+            symbols_cached: symbols.len(),
+            edges_cached,
+            fts_rebuilt,
+            skipped: false,
+        })
+    }
+}
+
+/// Result of [`Engine::warm_caches`].
+#[derive(Debug, Clone, Default)]
+pub struct CacheWarmSummary {
+    /// Rows written to `asd_symbols_cache` (0 when git had no symbols).
+    pub symbols_cached: usize,
+    /// Directed edge rows written to `asd_call_edges` (both directions).
+    pub edges_cached: usize,
+    /// Whether the FTS search table was empty and got rebuilt from git.
+    pub fts_rebuilt: bool,
+    /// `true` when the engine has no SQLite connection (in-memory engines) —
+    /// there are no caches to warm.
+    pub skipped: bool,
 }

@@ -228,7 +228,12 @@ impl SearchFtsDb {
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
-             PRAGMA temp_store=MEMORY;",
+             PRAGMA temp_store=MEMORY;
+             -- Wait out short-lived writers (e.g. asd-serve holding a sync
+             -- transaction) instead of failing instantly with SQLITE_BUSY.
+             -- A failed cache sync used to leave the DB cold forever; the
+             -- timeout plus the open-time self-heal makes that unreachable.
+             PRAGMA busy_timeout=5000;",
         )?;
 
         // Adaptive cache: scale to ~80 % of the current DB file size, clamped
@@ -530,6 +535,17 @@ impl SearchFtsDb {
     // -----------------------------------------------------------------------
     // Symbol + edge cache — O(1) reads vs. full git tree walks
     // -----------------------------------------------------------------------
+
+    /// Number of rows in the `asd_search_fts` symbol search table. Used by
+    /// `Engine::warm_caches` to decide whether a full-text rebuild is needed:
+    /// a populated FTS table is never clobbered (it carries index-time
+    /// `ledger_text`/`ledger_flags` denormalizations), only an empty one is
+    /// rebuilt.
+    pub fn fts_symbol_row_count(&self) -> i64 {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM asd_search_fts", [], |r| r.get(0))
+            .unwrap_or(0)
+    }
 
     /// Returns `true` when `asd_symbols_cache` has at least one row for
     /// `ref_name`. Used as the primary guard before attempting a cached read —
@@ -3901,7 +3917,12 @@ impl SearchDocsDb {
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
-             PRAGMA temp_store=MEMORY;",
+             PRAGMA temp_store=MEMORY;
+             -- Wait out short-lived writers (e.g. asd-serve holding a sync
+             -- transaction) instead of failing instantly with SQLITE_BUSY.
+             -- A failed cache sync used to leave the DB cold forever; the
+             -- timeout plus the open-time self-heal makes that unreachable.
+             PRAGMA busy_timeout=5000;",
         )?;
         let db_bytes = std::fs::metadata(db_path)
             .map(|m| m.len() as usize)

@@ -91,6 +91,74 @@ pub struct IndexSummary {
     pub dropped_call_edges: usize,
     /// Top unresolved calls, capped at 5 for display.
     pub sample_unresolved: Vec<crate::adapter::UnresolvedCall>,
+    /// Plan T: whether ALL SQLite cache-sync steps (FTS rebuild, symbol
+    /// cache, call-edge cache) succeeded this run. `false` means at least
+    /// one step failed (see `cache_sync_warning`) and reads will fall back
+    /// to the slow git path until the open-time self-heal or the next
+    /// successful `asd index` repairs the cache. Always `false` when the
+    /// pipeline ran without a SQLite `db_path` (no caches to sync).
+    pub caches_synced: bool,
+    /// Human-readable reason(s) when `caches_synced` is false and a sync
+    /// step actually failed. `None` when everything succeeded or when no
+    /// `db_path` was supplied.
+    pub cache_sync_warning: Option<String>,
+}
+
+/// Build the `symbol_id → (ledger_text, ledger_flags)` map used to
+/// denormalize ledger summaries into FTS rows. One `get_tree` call, no
+/// per-symbol git reads. Shared by the index pipeline and
+/// `Engine::warm_caches` (which rebuilds an empty FTS table from git).
+pub(crate) fn build_ledger_fts_data(
+    repo: &Repository,
+    ref_name: &str,
+) -> HashMap<String, (String, String)> {
+    use crate::schema::{LedgerEntry, LedgerKind};
+    let ledger_prefix = format!("{}/ledger", crate::paths::ASD_ROOT);
+    match repo.get_tree(ref_name, &ledger_prefix) {
+        Ok(serde_json::Value::Object(by_symbol)) => {
+            let mut map = HashMap::with_capacity(by_symbol.len());
+            for (sym_id, per_symbol) in by_symbol {
+                if let serde_json::Value::Object(entries_map) = per_symbol {
+                    let mut texts: Vec<String> = Vec::new();
+                    let mut flags: std::collections::BTreeSet<&'static str> =
+                        std::collections::BTreeSet::new();
+                    for (_entry_id, v) in entries_map {
+                        if let Ok(entry) = serde_json::from_value::<LedgerEntry>(v) {
+                            if !entry.summary.is_empty() {
+                                texts.push(entry.summary.to_lowercase());
+                            }
+                            match entry.kind {
+                                LedgerKind::Ownership => {
+                                    flags.insert("ownership");
+                                }
+                                LedgerKind::Invariant => {
+                                    flags.insert("invariant");
+                                }
+                                LedgerKind::Hazard => {
+                                    flags.insert("hazard");
+                                }
+                                LedgerKind::Decision => {
+                                    flags.insert("decision");
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    if !texts.is_empty() || !flags.is_empty() {
+                        map.insert(
+                            sym_id,
+                            (
+                                texts.join(" "),
+                                flags.into_iter().collect::<Vec<_>>().join(","),
+                            ),
+                        );
+                    }
+                }
+            }
+            map
+        }
+        _ => HashMap::new(),
+    }
 }
 
 /// Result of collecting source files under a path.
@@ -639,6 +707,8 @@ pub fn run_index(
     // Deduplicate by qname before rebuilding so FTS row count matches the ASG
     // by-qname tree count (by_qname silently overwrites duplicates; FTS must
     // mirror that behaviour so `asd status` and `asd list stats` agree).
+    let mut caches_synced = false;
+    let mut cache_sync_warnings: Vec<String> = Vec::new();
     if let Some(db) = db_path {
         if let Some(f) = on_phase {
             f("  rebuilding FTS search index…");
@@ -647,55 +717,8 @@ pub fn run_index(
         // M59: build ledger_data map (symbol_id → (ledger_text, ledger_flags))
         // from the ledger tree so FTS rows carry denormalized summaries.
         // One get_tree call, no per-symbol git reads needed later.
-        let ledger_data: HashMap<String, (String, String)> = {
-            use crate::schema::{LedgerEntry, LedgerKind};
-            let ledger_prefix = format!("{}/ledger", crate::paths::ASD_ROOT);
-            match repo.get_tree(ref_name, &ledger_prefix) {
-                Ok(serde_json::Value::Object(by_symbol)) => {
-                    let mut map = HashMap::with_capacity(by_symbol.len());
-                    for (sym_id, per_symbol) in by_symbol {
-                        if let serde_json::Value::Object(entries_map) = per_symbol {
-                            let mut texts: Vec<String> = Vec::new();
-                            let mut flags: std::collections::BTreeSet<&'static str> =
-                                std::collections::BTreeSet::new();
-                            for (_entry_id, v) in entries_map {
-                                if let Ok(entry) = serde_json::from_value::<LedgerEntry>(v) {
-                                    if !entry.summary.is_empty() {
-                                        texts.push(entry.summary.to_lowercase());
-                                    }
-                                    match entry.kind {
-                                        LedgerKind::Ownership => {
-                                            flags.insert("ownership");
-                                        }
-                                        LedgerKind::Invariant => {
-                                            flags.insert("invariant");
-                                        }
-                                        LedgerKind::Hazard => {
-                                            flags.insert("hazard");
-                                        }
-                                        LedgerKind::Decision => {
-                                            flags.insert("decision");
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                            if !texts.is_empty() || !flags.is_empty() {
-                                map.insert(
-                                    sym_id,
-                                    (
-                                        texts.join(" "),
-                                        flags.into_iter().collect::<Vec<_>>().join(","),
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                    map
-                }
-                _ => HashMap::new(),
-            }
-        };
+        let ledger_data: HashMap<String, (String, String)> =
+            build_ledger_fts_data(repo, ref_name);
 
         let fts_ok = match SearchFtsDb::open(db) {
             Ok(fts) => {
@@ -710,6 +733,7 @@ pub fn run_index(
                 deduped.sort_by(|a, b| a.qname.cmp(&b.qname));
                 if let Err(e) = fts.rebuild_refs(&deduped, &ledger_data) {
                     eprintln!("asd: FTS rebuild warning: {e}");
+                    cache_sync_warnings.push(format!("FTS rebuild failed: {e}"));
                     false
                 } else {
                     true
@@ -717,6 +741,7 @@ pub fn run_index(
             }
             Err(e) => {
                 eprintln!("asd: FTS index unavailable (non-fatal): {e}");
+                cache_sync_warnings.push(format!("FTS index unavailable: {e}"));
                 false
             }
         };
@@ -733,16 +758,29 @@ pub fn run_index(
         // `callers`, `callees`, `context-for`, and `investigate` calls can
         // skip the full git tree walk entirely.  Non-fatal: a cache miss just
         // falls back to the authoritative git path.
-        if let Ok(cache) = SearchFtsDb::open(db) {
-            if let Some(f) = on_phase {
-                f("  caching symbols and edges…");
+        match SearchFtsDb::open(db) {
+            Ok(cache) => {
+                if let Some(f) = on_phase {
+                    f("  caching symbols and edges…");
+                }
+                let sym_refs: Vec<&Symbol> = indexed_symbols.iter().collect();
+                let mut sym_ok = true;
+                let mut edges_ok = true;
+                if let Err(e) = cache.sync_symbols(&sym_refs, ref_name) {
+                    eprintln!("asd: symbol cache sync warning: {e}");
+                    cache_sync_warnings.push(format!("symbol cache sync failed: {e}"));
+                    sym_ok = false;
+                }
+                if let Err(e) = cache.sync_call_edges(&callees_of, &callers_of, ref_name) {
+                    eprintln!("asd: edge cache sync warning: {e}");
+                    cache_sync_warnings.push(format!("edge cache sync failed: {e}"));
+                    edges_ok = false;
+                }
+                caches_synced = fts_ok && sym_ok && edges_ok;
             }
-            let sym_refs: Vec<&Symbol> = indexed_symbols.iter().collect();
-            if let Err(e) = cache.sync_symbols(&sym_refs, ref_name) {
-                eprintln!("asd: symbol cache sync warning: {e}");
-            }
-            if let Err(e) = cache.sync_call_edges(&callees_of, &callers_of, ref_name) {
-                eprintln!("asd: edge cache sync warning: {e}");
+            Err(e) => {
+                eprintln!("asd: symbol/edge cache unavailable (non-fatal): {e}");
+                cache_sync_warnings.push(format!("symbol/edge cache unavailable: {e}"));
             }
         }
     }
@@ -798,6 +836,12 @@ pub fn run_index(
             let mut v = all_unresolved;
             v.truncate(5);
             v
+        },
+        caches_synced,
+        cache_sync_warning: if cache_sync_warnings.is_empty() {
+            None
+        } else {
+            Some(cache_sync_warnings.join("; "))
         },
     })
 }

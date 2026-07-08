@@ -349,7 +349,13 @@ pub fn gather_prior_thinking_all(engine: &Engine, min_confidence: f64) -> PriorT
 }
 
 /// One-pass read of the whole ledger tree, grouped per symbol bucket.
-fn all_ledger_buckets(engine: &Engine) -> Vec<(String, Vec<LedgerEntry>)> {
+///
+/// Bulk analog of calling `LedgerStore::list_entries_with_superseded`
+/// for every symbol: ONE tree walk instead of one read per symbol
+/// (~54ms each on a cold FTS cache — minutes at 10k symbols while
+/// holding the engine mutex; Plan T scale finding). Entries are NOT
+/// supersede-filtered — pass each bucket through [`live_entries`].
+pub fn all_ledger_buckets(engine: &Engine) -> Vec<(String, Vec<LedgerEntry>)> {
     let prefix = format!("{}/ledger", crate::paths::ASD_ROOT);
     let tree = match engine.repo.get_tree(&engine.ref_name, &prefix) {
         Ok(t) => t,
@@ -375,7 +381,7 @@ fn all_ledger_buckets(engine: &Engine) -> Vec<(String, Vec<LedgerEntry>)> {
 /// Per-bucket supersede filtering — the same rule as
 /// `LedgerStore::list_entries` (supersession never crosses symbols, so
 /// applying it per bucket is equivalent).
-fn live_entries(all: Vec<LedgerEntry>) -> Vec<LedgerEntry> {
+pub fn live_entries(all: Vec<LedgerEntry>) -> Vec<LedgerEntry> {
     let superseded: std::collections::HashSet<String> = all
         .iter()
         .flat_map(|e| e.supersedes.iter().cloned())
@@ -383,6 +389,37 @@ fn live_entries(all: Vec<LedgerEntry>) -> Vec<LedgerEntry> {
     all.into_iter()
         .filter(|e| !superseded.contains(&e.entry_id))
         .collect()
+}
+
+/// Bulk analog of the "list every indexed symbol's ledger entries"
+/// loop (per-qname `get_symbol_by_qname` + per-symbol `list_entries`,
+/// which is minutes at 10k symbols on a cold FTS cache): ONE id-map
+/// build + ONE ledger-tree walk.
+///
+/// Returns `(qname, live entries)` per indexed symbol, sorted by qname
+/// with entries newest-first — the same visit order and per-symbol
+/// entry order as the per-qname loop it replaces. Symbols without
+/// ledger entries and ledger buckets for unindexed symbols are both
+/// skipped, matching the per-qname path.
+pub fn all_symbol_entries(engine: &Engine) -> Vec<(String, Vec<LedgerEntry>)> {
+    let index = AsgIndexStore::from_engine(engine);
+    let id_map = index.build_id_map(engine);
+
+    let mut out: Vec<(String, Vec<LedgerEntry>)> = Vec::new();
+    for (symbol_id, entries) in all_ledger_buckets(engine) {
+        let Some(sym) = id_map.get(&symbol_id) else {
+            continue;
+        };
+        let mut live = live_entries(entries);
+        if live.is_empty() {
+            continue;
+        }
+        // Newest first — same ordering contract as `list_entries`.
+        live.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        out.push((sym.qname.clone(), live));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }
 
 /// Workspace-wide count of thinking entries across all symbols.
@@ -519,6 +556,73 @@ mod tests {
             a.sort();
             b.sort();
             assert_eq!(a, b, "mismatch in {key}");
+        }
+    }
+
+    #[test]
+    fn all_symbol_entries_matches_per_qname_listing() {
+        // all_symbol_entries must be output-identical to the per-qname
+        // loop it replaces (get_symbol_by_qname + list_entries per
+        // symbol) — same qname order, same newest-first entries, same
+        // supersede filtering, symbols without entries skipped.
+        let (engine, qn) = seed();
+        let index = AsgIndexStore::from_engine(&engine);
+        let ledger = AsgLedgerStore::from_engine(&engine);
+        let sym2 = Symbol {
+            symbol_id: "sym_y".into(),
+            symbol_fp: "fp_y".into(),
+            qname: "pkg.other".into(),
+            language: "python".into(),
+            kind: SymbolKind::Function,
+            file: "src/other.py".into(),
+            start: Position { line: 1, col: 0 },
+            end: Position { line: 3, col: 0 },
+            signature: None,
+            doc: None,
+        };
+        index.put_symbol(&engine.ref_name, &sym2, "test").unwrap();
+        // Third symbol with no entries — must not appear in either form.
+        let sym3 = Symbol {
+            symbol_id: "sym_z".into(),
+            symbol_fp: "fp_z".into(),
+            qname: "pkg.zebra".into(),
+            language: "python".into(),
+            kind: SymbolKind::Function,
+            file: "src/zebra.py".into(),
+            start: Position { line: 1, col: 0 },
+            end: Position { line: 3, col: 0 },
+            signature: None,
+            doc: None,
+        };
+        index.put_symbol(&engine.ref_name, &sym3, "test").unwrap();
+
+        append(&engine, "sym_x", LedgerKind::Hypothesis, "h1", Some(0.8), None);
+        append(&engine, "sym_x", LedgerKind::Decision, "use sqlite", None, None);
+        append(&engine, "sym_y", LedgerKind::OpenQuestion, "why flaky?", None, None);
+
+        // Per-qname reference implementation.
+        let mut per_qname: Vec<(String, Vec<LedgerEntry>)> = Vec::new();
+        for q in [qn.as_str(), "pkg.other", "pkg.zebra"] {
+            let sym = index
+                .get_symbol_by_qname(&engine.ref_name, q)
+                .unwrap()
+                .unwrap();
+            let entries = ledger
+                .list_entries(&engine.ref_name, &sym.symbol_id)
+                .unwrap_or_default();
+            if !entries.is_empty() {
+                per_qname.push((sym.qname, entries));
+            }
+        }
+        per_qname.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let bulk = all_symbol_entries(&engine);
+        assert_eq!(bulk.len(), per_qname.len());
+        for ((bq, be), (pq, pe)) in bulk.iter().zip(per_qname.iter()) {
+            assert_eq!(bq, pq);
+            let b_ids: Vec<&str> = be.iter().map(|e| e.entry_id.as_str()).collect();
+            let p_ids: Vec<&str> = pe.iter().map(|e| e.entry_id.as_str()).collect();
+            assert_eq!(b_ids, p_ids, "entry order mismatch for {bq}");
         }
     }
 

@@ -240,55 +240,41 @@ impl AsdMcpServer {
     async fn code_query(&self, params: Parameters<CodeQueryParams>) -> String {
         let p = params.0;
         let engine = self.engine.lock().await;
-        let ref_name = engine.ref_name.clone();
-        let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-
-        let qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
-            Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
-            _ => return "[]".to_string(),
-        };
 
         let index = AsgIndexStore::from_engine(&engine);
-        let mut symbols = Vec::new();
         let kind_filter = p.kind.as_deref().map(|k| k.to_lowercase());
         let name_filter = p.name_contains.as_deref();
         let lang_filter = p.language.as_deref();
         let limit = p.limit.max(1) as usize;
 
-        for qname in qnames {
-            if let Some(needle) = name_filter
-                && !qname.contains(needle)
-            {
-                continue;
-            }
-            let sym = match index.get_symbol_by_qname(&ref_name, &qname) {
-                Ok(Some(s)) => s,
-                _ => continue,
-            };
-            if let Some(lang) = lang_filter
-                && sym.language != lang
-            {
-                continue;
-            }
-            if let Some(ref k) = kind_filter {
-                let sym_kind = match sym.kind {
-                    agentstatedeveloper_core::SymbolKind::Module => "module",
-                    agentstatedeveloper_core::SymbolKind::Function => "function",
-                    agentstatedeveloper_core::SymbolKind::Method => "method",
-                    agentstatedeveloper_core::SymbolKind::Class => "class",
-                    agentstatedeveloper_core::SymbolKind::Variable => "variable",
-                };
-                if sym_kind != k {
-                    continue;
+        // One bulk id-map read, then filter in memory. (Was: one
+        // get_symbol_by_qname per indexed qname — minutes at 10k
+        // symbols on a cold FTS cache, holding the engine mutex.)
+        let mut symbols: Vec<Symbol> = index
+            .build_id_map(&engine)
+            .into_values()
+            .filter(|sym| {
+                if let Some(needle) = name_filter
+                    && !sym.qname.contains(needle)
+                {
+                    return false;
                 }
-            }
-            symbols.push(sym);
-            if symbols.len() >= limit {
-                break;
-            }
-        }
+                if let Some(lang) = lang_filter
+                    && sym.language != lang
+                {
+                    return false;
+                }
+                if let Some(ref k) = kind_filter
+                    && kind_str(&sym.kind) != k.as_str()
+                {
+                    return false;
+                }
+                true
+            })
+            .collect();
 
         symbols.sort_by(|a, b| a.qname.cmp(&b.qname));
+        symbols.truncate(limit);
         // Plan E t-007: brief = compact per-symbol projection.
         if brief::brief_from_env() {
             let projected: Vec<_> = symbols.iter().map(brief::brief_symbol).collect();
@@ -496,65 +482,16 @@ impl AsdMcpServer {
         }
 
         // --- Fallback: in-memory O(N) scoring ---
-        let kind_filter = filters.kind;
-        let lang_filter = filters.language;
-        let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-        let qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
-            Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
-            _ => return "[]".to_string(),
-        };
-        let index = AsgIndexStore::from_engine(&engine);
-        let ledger_store = AsgLedgerStore::from_engine(&engine);
-        let mut scored: Vec<(u32, agentstatedeveloper_core::Symbol)> = Vec::new();
-        for qname in &qnames {
-            let sym = match index.get_symbol_by_qname(&ref_name, qname) {
-                Ok(Some(s)) => s,
-                _ => continue,
-            };
-            let sk = format!("{:?}", sym.kind).to_lowercase();
-            if let Some(ref k) = kind_filter {
-                if &sk != k {
-                    continue;
-                }
-            }
-            if let Some(ref lang) = lang_filter {
-                if &sym.language != lang {
-                    continue;
-                }
-            }
-            let qn = sym.qname.to_lowercase();
-            let sig = sym.signature.as_deref().unwrap_or("").to_lowercase();
-            let doc = sym.doc.as_deref().unwrap_or("").to_lowercase();
-            let file = sym.file.to_lowercase();
-            let ledger_text: String = ledger_store
-                .list_entries(&ref_name, &sym.symbol_id)
-                .unwrap_or_default()
-                .iter()
-                .map(|e| e.summary.to_lowercase())
-                .collect::<Vec<_>>()
-                .join(" ");
-            let mut score: u32 = 0;
-            for token in &tokens {
-                if qn.contains(token.as_str()) {
-                    score += 4;
-                }
-                if !sig.is_empty() && sig.contains(token.as_str()) {
-                    score += 3;
-                }
-                if !doc.is_empty() && doc.contains(token.as_str()) {
-                    score += 3;
-                }
-                if !ledger_text.is_empty() && ledger_text.contains(token.as_str()) {
-                    score += 2;
-                }
-                if file.contains(token.as_str()) {
-                    score += 1;
-                }
-            }
-            if score > 0 {
-                scored.push((score, sym));
-            }
-        }
+        // Shared core implementation: one by-qname tree read + one
+        // ledger walk (was a per-qname symbol fetch + per-symbol
+        // ledger read — minutes at 10k symbols on a cold FTS cache).
+        let mut scored: Vec<(u32, agentstatedeveloper_core::Symbol)> =
+            agentstatedeveloper_core::in_memory_scored_symbols(
+                &engine,
+                &tokens,
+                filters.kind.as_deref(),
+                filters.language.as_deref(),
+            );
         scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.qname.cmp(&b.1.qname)));
         scored.truncate(limit);
         let recency = gather_recency(200, 14.0);
@@ -640,30 +577,23 @@ impl AsdMcpServer {
             ));
         }
 
-        // Resolve target symbols.
-        let symbol_ids: Vec<(String, String)> = if let Some(qname) = p.symbol.as_deref() {
-            match index.get_symbol_by_qname(&ref_name, qname) {
-                Ok(Some(sym)) => vec![(sym.symbol_id, sym.qname)],
-                _ => Vec::new(),
-            }
-        } else {
-            let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-            let tree = engine
-                .repo
-                .get_tree(&ref_name, &prefix)
-                .unwrap_or(serde_json::Value::Null);
-            let qnames: Vec<String> = match tree {
-                serde_json::Value::Object(m) => m.keys().cloned().collect(),
-                _ => Vec::new(),
-            };
-            let mut out = Vec::new();
-            for qn in qnames {
-                if let Ok(Some(sym)) = index.get_symbol_by_qname(&ref_name, &qn) {
-                    out.push((sym.symbol_id, sym.qname));
+        // Resolve target symbols → (qname, live entries) pairs.
+        // Workspace-wide: one bulk walk (Plan T scale finding) instead
+        // of per-qname symbol + ledger reads.
+        let symbol_entries: Vec<(String, Vec<LedgerEntry>)> =
+            if let Some(qname) = p.symbol.as_deref() {
+                match index.get_symbol_by_qname(&ref_name, qname) {
+                    Ok(Some(sym)) => vec![(
+                        sym.qname,
+                        ledger
+                            .list_entries(&ref_name, &sym.symbol_id)
+                            .unwrap_or_default(),
+                    )],
+                    _ => Vec::new(),
                 }
-            }
-            out
-        };
+            } else {
+                agentstatedeveloper_core::thinking::all_symbol_entries(&engine)
+            };
 
         use std::collections::BTreeMap;
         let mut buckets: BTreeMap<&'static str, Vec<serde_json::Value>> = BTreeMap::new();
@@ -673,9 +603,8 @@ impl AsdMcpServer {
             }
         }
 
-        for (sym_id, qname) in &symbol_ids {
-            let entries = ledger.list_entries(&ref_name, sym_id).unwrap_or_default();
-            for entry in entries {
+        for (qname, entries) in &symbol_entries {
+            for entry in entries.iter().cloned() {
                 let class = entry.kind.conclusion_class();
                 if let Some(filter) = target_class {
                     if class != filter {
@@ -1020,34 +949,27 @@ impl AsdMcpServer {
             );
         }
 
-        let symbol_ids: Vec<(String, String)> = if let Some(qname) = p.symbol.as_deref() {
-            match index.get_symbol_by_qname(&ref_name, qname) {
-                Ok(Some(s)) => vec![(s.symbol_id, s.qname)],
-                _ => return err_json(&format!("symbol not found: {qname}")),
-            }
-        } else {
-            let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-            let tree = engine
-                .repo
-                .get_tree(&ref_name, &prefix)
-                .unwrap_or(serde_json::Value::Null);
-            let qnames: Vec<String> = match tree {
-                serde_json::Value::Object(m) => m.keys().cloned().collect(),
-                _ => Vec::new(),
-            };
-            let mut out = Vec::new();
-            for qn in qnames {
-                if let Ok(Some(s)) = index.get_symbol_by_qname(&ref_name, &qn) {
-                    out.push((s.symbol_id, s.qname));
+        // (qname, live entries) pairs to scan. Workspace-wide: one bulk
+        // walk (Plan T scale finding) instead of per-qname symbol +
+        // ledger reads.
+        let symbol_entries: Vec<(String, Vec<LedgerEntry>)> =
+            if let Some(qname) = p.symbol.as_deref() {
+                match index.get_symbol_by_qname(&ref_name, qname) {
+                    Ok(Some(s)) => vec![(
+                        s.qname,
+                        ledger
+                            .list_entries(&ref_name, &s.symbol_id)
+                            .unwrap_or_default(),
+                    )],
+                    _ => return err_json(&format!("symbol not found: {qname}")),
                 }
-            }
-            out
-        };
+            } else {
+                agentstatedeveloper_core::thinking::all_symbol_entries(&engine)
+            };
 
         let mut entries = Vec::new();
-        for (sid, qname) in &symbol_ids {
-            let les = ledger.list_entries(&ref_name, sid).unwrap_or_default();
-            for entry in les {
+        for (qname, les) in &symbol_entries {
+            for entry in les.iter().cloned() {
                 if entry.kind.conclusion_class() != ConclusionClass::Thinking {
                     continue;
                 }
@@ -1281,19 +1203,10 @@ impl AsdMcpServer {
             apply_feedback_adjustments(&engine, &index, &p.query, &mut top_qnames, &fb);
         }
 
-        // Build id_map for call graph resolution.
-        let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-        let all_qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
-            Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
-            _ => vec![],
-        };
-        let mut id_map: std::collections::HashMap<String, agentstatedeveloper_core::Symbol> =
-            std::collections::HashMap::new();
-        for qn in &all_qnames {
-            if let Ok(Some(s)) = index.get_symbol_by_qname(&ref_name, qn) {
-                id_map.insert(s.symbol_id.clone(), s);
-            }
-        }
+        // Build id_map for call graph resolution — one bulk read (the
+        // per-qname loop this replaces was minutes at 10k symbols on a
+        // cold FTS cache, holding the engine mutex).
+        let id_map = index.build_id_map(&engine);
 
         let recency = gather_recency(200, 14.0);
 
@@ -3016,18 +2929,10 @@ impl AsdMcpServer {
         let ledger_store = AsgLedgerStore::from_engine(&engine);
         let effect_store = AsgEffectStore::from_engine(&engine);
 
-        let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-        let all_qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
-            Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
-            _ => vec![],
-        };
-        let mut id_map: std::collections::HashMap<String, agentstatedeveloper_core::Symbol> =
-            std::collections::HashMap::new();
-        for qn in &all_qnames {
-            if let Ok(Some(s)) = index.get_symbol_by_qname(&ref_name, qn) {
-                id_map.insert(s.symbol_id.clone(), s);
-            }
-        }
+        // One bulk id-map read (the per-qname loop this replaces was
+        // minutes at 10k symbols on a cold FTS cache, holding the
+        // engine mutex). Matches the CLI twin (prepare_change.rs).
+        let id_map = index.build_id_map(&engine);
 
         let mut candidates = find_candidates(
             &engine,
@@ -3494,19 +3399,9 @@ impl AsdMcpServer {
         let ledger_store = AsgLedgerStore::from_engine(&engine);
         let effect_store = AsgEffectStore::from_engine(&engine);
 
-        // Build id_map for test BFS.
-        let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-        let all_qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
-            Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
-            _ => vec![],
-        };
-        let mut id_map: std::collections::HashMap<String, agentstatedeveloper_core::Symbol> =
-            std::collections::HashMap::new();
-        for qn in &all_qnames {
-            if let Ok(Some(s)) = index.get_symbol_by_qname(&ref_name, qn) {
-                id_map.insert(s.symbol_id.clone(), s);
-            }
-        }
+        // Build id_map for test BFS — one bulk read (same Plan T scale
+        // fix as prepare_change/investigate).
+        let id_map = index.build_id_map(&engine);
 
         let mut candidates = find_candidates(
             &engine,
@@ -3788,19 +3683,10 @@ impl AsdMcpServer {
         let tier = symbol_tier(&symbol.file);
         let layer = classify_layer_sym(&symbol.file, &symbol.qname, tier, &layer_overrides);
 
-        // Build id_map for call graph resolution.
-        let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-        let all_qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
-            Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
-            _ => vec![],
-        };
-        let mut id_map: std::collections::HashMap<String, agentstatedeveloper_core::Symbol> =
-            std::collections::HashMap::new();
-        for qn in &all_qnames {
-            if let Ok(Some(s)) = index.get_symbol_by_qname(&ref_name, qn) {
-                id_map.insert(s.symbol_id.clone(), s);
-            }
-        }
+        // Build id_map for call graph resolution — one bulk read (the
+        // per-qname loop this replaces was minutes at 10k symbols on a
+        // cold FTS cache, holding the engine mutex).
+        let id_map = index.build_id_map(&engine);
 
         // BFS transitive callers.
         let max_depth = p.depth.max(1) as usize;
@@ -3960,19 +3846,9 @@ impl AsdMcpServer {
         let ledger_store = AsgLedgerStore::from_engine(&engine);
         let effect_store = AsgEffectStore::from_engine(&engine);
 
-        // Build id_map.
-        let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-        let all_qnames: Vec<String> = match engine.repo.get_tree(&ref_name, &prefix) {
-            Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
-            _ => vec![],
-        };
-        let mut id_map: std::collections::HashMap<String, agentstatedeveloper_core::Symbol> =
-            std::collections::HashMap::new();
-        for qn in &all_qnames {
-            if let Ok(Some(s)) = index.get_symbol_by_qname(&ref_name, qn) {
-                id_map.insert(s.symbol_id.clone(), s);
-            }
-        }
+        // Build id_map — one bulk read (same Plan T scale fix as
+        // prepare_change/investigate).
+        let id_map = index.build_id_map(&engine);
 
         // Get changed files.
         let changed_files: Vec<String> = {
@@ -4197,19 +4073,10 @@ impl AsdMcpServer {
                         .unwrap_or_else(|_| "{}".to_string());
                 }
             };
+            // One bulk id-map read (same Plan T scale fix as
+            // prepare_change/investigate).
             let index_store_all = AsgIndexStore::from_engine(&engine);
-            let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-            let all_qnames: Vec<String> = match engine.repo.get_tree(ref_name, &prefix) {
-                Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
-                _ => vec![],
-            };
-            let mut id_map: std::collections::HashMap<String, agentstatedeveloper_core::Symbol> =
-                std::collections::HashMap::new();
-            for qn in &all_qnames {
-                if let Ok(Some(s)) = index_store_all.get_symbol_by_qname(ref_name, qn) {
-                    id_map.insert(s.symbol_id.clone(), s);
-                }
-            }
+            let id_map = index_store_all.build_id_map(&engine);
             let mut rows: Vec<serde_json::Value> = Vec::new();
             if let Some(sym_map) = tree.as_object() {
                 for per_symbol in sym_map.values() {

@@ -279,6 +279,14 @@ fn design_md_and_changelog_backtick_examples_resolve() {
         // section (commit c37e5b3). Not implemented yet; remove this
         // entry when the Lens server ships.
         "serve",
+        // `sweep` — forward-looking Plan U t-001 maintenance-sweep
+        // command (`asd sweep [--since <sha>]`) described in DESIGN.md
+        // (commit 983472f). Not implemented yet; remove when it ships.
+        "sweep",
+        // `query-example` — forward-looking Plan V t-004 static
+        // fallback command described in DESIGN.md (commit 983472f).
+        // Not implemented yet; remove when it ships.
+        "query-example",
     ];
 
     // CARGO_MANIFEST_DIR for the cli crate → repo/crates/cli;

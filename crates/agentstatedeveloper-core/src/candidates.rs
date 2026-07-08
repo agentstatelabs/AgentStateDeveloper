@@ -110,11 +110,6 @@ pub fn in_memory_score(
     ledger_store: &AsgLedgerStore,
     engine: &Engine,
 ) -> u32 {
-    let qname_lower = sym.qname.to_lowercase();
-    let sig_lower = sym.signature.as_deref().unwrap_or("").to_lowercase();
-    let doc_lower = sym.doc.as_deref().unwrap_or("").to_lowercase();
-    let file_lower = sym.file.to_lowercase();
-
     let ledger_text: String = ledger_store
         .list_entries(&engine.ref_name, &sym.symbol_id)
         .unwrap_or_default()
@@ -122,6 +117,22 @@ pub fn in_memory_score(
         .map(|e| e.summary.to_lowercase())
         .collect::<Vec<_>>()
         .join(" ");
+    in_memory_score_with_text(sym, tokens, &ledger_text)
+}
+
+/// Same scoring rules as [`in_memory_score`], but takes the symbol's
+/// lowercased ledger-summary text directly so bulk callers can supply
+/// it from one ledger-tree walk instead of a per-symbol `list_entries`
+/// read (Plan T scale finding).
+pub fn in_memory_score_with_text(
+    sym: &crate::Symbol,
+    tokens: &[String],
+    ledger_text: &str,
+) -> u32 {
+    let qname_lower = sym.qname.to_lowercase();
+    let sig_lower = sym.signature.as_deref().unwrap_or("").to_lowercase();
+    let doc_lower = sym.doc.as_deref().unwrap_or("").to_lowercase();
+    let file_lower = sym.file.to_lowercase();
 
     let mut score: u32 = 0;
     for token in tokens {
@@ -597,7 +608,10 @@ pub fn find_candidates(
     query: &str,
     tokens: &[String],
     filters: &FtsFilters,
-    ledger_store: &AsgLedgerStore,
+    // Kept for signature compatibility with the many CLI/MCP call sites;
+    // the fallback path now reads the ledger in one bulk tree walk
+    // (`in_memory_scored_symbols`) instead of per-symbol `list_entries`.
+    _ledger_store: &AsgLedgerStore,
     index_store: &AsgIndexStore,
     depth: usize,
 ) -> Vec<(f64, String)> {
@@ -811,15 +825,72 @@ pub fn find_candidates(
     }
 
     // Plan M t-006 (1.0.101): in-memory fallback extracted to a named pipeline stage.
-    fallback_in_memory_search(
-        engine,
-        tokens,
-        filters,
-        ledger_store,
-        index_store,
-        fts,
-        depth,
-    )
+    fallback_in_memory_search(engine, tokens, filters, index_store, fts, depth)
+}
+
+/// Bulk in-memory scorer shared by every fallback-search caller (core
+/// `find_candidates`, MCP `code_search`, CLI `asd search`): ONE
+/// by-qname tree read — deserializing the Symbol values the tree
+/// already contains — plus ONE ledger-tree walk, instead of a
+/// per-qname symbol fetch and a per-symbol ledger read (~54ms each on
+/// a cold FTS cache — ~9 minutes at 10k symbols while holding the
+/// engine mutex; Plan T scale finding).
+///
+/// Returns `(score, Symbol)` for every indexed symbol that passes the
+/// optional kind/language filters and matches at least one token, in
+/// by-qname tree order; callers sort/truncate to their own contract.
+/// `kind_filter` compares against [`kind_str`] output (lowercase).
+pub fn in_memory_scored_symbols(
+    engine: &Engine,
+    tokens: &[String],
+    kind_filter: Option<&str>,
+    lang_filter: Option<&str>,
+) -> Vec<(u32, Symbol)> {
+    let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
+    let symbols: Vec<Symbol> = match engine.repo.get_tree(&engine.ref_name, &prefix) {
+        Ok(serde_json::Value::Object(map)) => map
+            .into_iter()
+            .filter_map(|(_, v)| serde_json::from_value(v).ok())
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    // One ledger walk → symbol_id → lowercased live-entry summary text
+    // (the same text `in_memory_score` derives from `list_entries`).
+    let ledger_text: HashMap<String, String> = crate::thinking::all_ledger_buckets(engine)
+        .into_iter()
+        .map(|(symbol_id, entries)| {
+            let text = crate::thinking::live_entries(entries)
+                .iter()
+                .map(|e| e.summary.to_lowercase())
+                .collect::<Vec<_>>()
+                .join(" ");
+            (symbol_id, text)
+        })
+        .collect();
+
+    let mut scored: Vec<(u32, Symbol)> = Vec::new();
+    for sym in symbols {
+        if let Some(k) = kind_filter {
+            if kind_str(&sym.kind) != k {
+                continue;
+            }
+        }
+        if let Some(lang) = lang_filter {
+            if sym.language != lang {
+                continue;
+            }
+        }
+        let text = ledger_text
+            .get(&sym.symbol_id)
+            .map(String::as_str)
+            .unwrap_or("");
+        let s = in_memory_score_with_text(&sym, tokens, text);
+        if s > 0 {
+            scored.push((s, sym));
+        }
+    }
+    scored
 }
 
 /// Plan M t-006 (1.0.101): in-memory O(N) candidate scoring used when
@@ -830,7 +901,6 @@ fn fallback_in_memory_search(
     engine: &Engine,
     tokens: &[String],
     filters: &FtsFilters,
-    ledger_store: &AsgLedgerStore,
     index_store: &AsgIndexStore,
     fts: Option<&SearchFtsDb>,
     depth: usize,
@@ -840,33 +910,11 @@ fn fallback_in_memory_search(
     let kind_filter = filters.kind.as_deref().map(|k| k.to_lowercase());
     let lang_filter = filters.language.as_deref();
 
-    let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-    let qnames: Vec<String> = match engine.repo.get_tree(&engine.ref_name, &prefix) {
-        Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
-        _ => vec![],
-    };
-
-    let mut scored: Vec<(f64, String)> = Vec::new();
-    for qname in &qnames {
-        let sym = match index_store.get_symbol_by_qname(&engine.ref_name, qname) {
-            Ok(Some(s)) => s,
-            _ => continue,
-        };
-        if let Some(ref k) = kind_filter {
-            if kind_str(&sym.kind) != k.as_str() {
-                continue;
-            }
-        }
-        if let Some(lang) = lang_filter {
-            if sym.language != lang {
-                continue;
-            }
-        }
-        let s = in_memory_score(&sym, tokens, ledger_store, engine);
-        if s > 0 {
-            scored.push((s as f64, sym.qname));
-        }
-    }
+    let mut scored: Vec<(f64, String)> =
+        in_memory_scored_symbols(engine, tokens, kind_filter.as_deref(), lang_filter)
+            .into_iter()
+            .map(|(s, sym)| (s as f64, sym.qname))
+            .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(depth);
     apply_paths_filter(engine, index_store, fts, &filters.paths_filter, &mut scored);

@@ -42,6 +42,16 @@ pub fn run(cfg: &Config, args: HydrateArgs) -> Result<()> {
     // you mean to run `asd sync` first?".
     let summary = hydrate_from_dir(&engine.repo, &engine.ref_name, &dir, &cfg.agent_id)?;
 
+    // Plan T: hydrate used to leave the SQLite fast-read caches
+    // (asd_symbols_cache, asd_call_edges, FTS) empty — a born-cold DB where
+    // every read paid the slow git-walk path until the next `asd index`.
+    // We just wrote every symbol anyway, so populate the caches before exit.
+    // Non-fatal on failure: the open-time self-heal retries on the next run.
+    let (caches_synced, cache_sync_warning) = match engine.warm_caches() {
+        Ok(w) => (!w.skipped, None),
+        Err(e) => (false, Some(e.to_string())),
+    };
+
     let mut out = json!({
         "dir": dir.join(".asd/v1").display().to_string(),
         "symbols_loaded": summary.symbols_loaded,
@@ -52,8 +62,14 @@ pub fn run(cfg: &Config, args: HydrateArgs) -> Result<()> {
         "blobs_rejected": summary.blobs_rejected,
         "refs_dropped": summary.refs_dropped,
         "missing_schema_version": summary.missing_schema_version,
+        "caches_synced": caches_synced,
         "note": "commit history not restored; run `asd index` to rebuild the semantic index and call graph",
     });
+    if let Some(w) = cache_sync_warning {
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert("cache_sync_warning".to_string(), json!(w));
+        }
+    }
 
     if args.verify {
         let result = verify_hydration(&engine, &summary);

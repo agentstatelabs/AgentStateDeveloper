@@ -15,14 +15,12 @@ use agentstatedeveloper_core::{
     compute_uncertainty, confidence_reason, confidence_scores, detect_ambiguous_tokens,
     detect_confidence_warnings, detect_possible_misses, effect_detail_reason, estimate_tokens,
     explain_feedback_impacts, explain_match, extract_summary, gather_recency, hybrid_boost,
-    in_memory_score, intent_focus, kind_str, load_layer_overrides, matches_any_path_glob,
-    parse_intent, parse_query, resolve_scope, result_bucket, stale_warning, suggest_better_queries,
+    intent_focus, kind_str, load_layer_overrides, matches_any_path_glob, parse_intent,
+    parse_query, resolve_scope, result_bucket, stale_warning, suggest_better_queries,
     suggest_scoped_queries, symbol_tier, trim_for_agent,
 };
 
 use crate::config::Config;
-
-const ASD_PATH_PREFIX: &str = "/asd/v1";
 
 #[derive(Debug, Args)]
 pub struct SearchArgs {
@@ -925,38 +923,16 @@ pub fn run(cfg: &Config, args: SearchArgs) -> Result<()> {
     let kind_filter = args.kind.as_deref().map(|k| k.to_lowercase());
     let lang_filter = args.language.as_deref();
 
-    let prefix = format!("{}/index/by-qname", ASD_PATH_PREFIX);
-    let qnames: Vec<String> = match engine.repo.get_tree(&engine.ref_name, &prefix) {
-        Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
-        _ => vec![],
-    };
-
-    let index = AsgIndexStore::from_engine(&engine);
-    let mut scored: Vec<(u32, agentstatedeveloper_core::Symbol)> = Vec::new();
-
-    for qname in &qnames {
-        let sym = match index.get_symbol_by_qname(&engine.ref_name, qname) {
-            Ok(Some(s)) => s,
-            _ => continue,
-        };
-
-        if let Some(ref k) = kind_filter {
-            let sym_kind = kind_str(&sym.kind);
-            if sym_kind != k.as_str() {
-                continue;
-            }
-        }
-        if let Some(lang) = lang_filter {
-            if sym.language != lang {
-                continue;
-            }
-        }
-
-        let score = in_memory_score(&sym, &tokens, &ledger_store, &engine);
-        if score > 0 {
-            scored.push((score, sym));
-        }
-    }
+    // Shared core implementation: one by-qname tree read + one ledger
+    // walk (was a per-qname symbol fetch + per-symbol ledger read —
+    // minutes at 10k symbols on a cold FTS cache; Plan T scale fix).
+    let mut scored: Vec<(u32, agentstatedeveloper_core::Symbol)> =
+        agentstatedeveloper_core::in_memory_scored_symbols(
+            &engine,
+            &tokens,
+            kind_filter.as_deref(),
+            lang_filter,
+        );
 
     // Apply durable feedback on fallback path too.
     // Reuse hoisted all_feedback — no extra list_all() call.

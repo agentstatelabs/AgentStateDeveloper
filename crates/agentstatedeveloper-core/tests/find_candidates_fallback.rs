@@ -4,9 +4,10 @@
 //! Background: `find_candidates` has two code paths:
 //!   1. **FTS path** — fires when `engine.fts.is_some() && fts.has_data()`.
 //!      Indexed lookup, hybrid_boost, ledger-aware dedup, etc.
-//!   2. **In-memory fallback** — `fallback_in_memory_search()`. Walks every
-//!      symbol via `index.get_symbol_by_qname`, scores with `in_memory_score`,
-//!      sorts and truncates. Fires when FTS is missing or empty.
+//!   2. **In-memory fallback** — `fallback_in_memory_search()`. Reads every
+//!      symbol in one by-qname tree pass (`in_memory_scored_symbols`), scores
+//!      with the `in_memory_score` rules, sorts and truncates. Fires when FTS
+//!      is missing or empty.
 //!
 //! The Plan M t-006 (1.0.101) refactor lifted the fallback into a private
 //! helper. The original code path had no direct test coverage — this test

@@ -425,6 +425,11 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
                     "file": c.file, "line": c.line, "callee": c.callee_text,
                 })
             }).collect::<Vec<_>>(),
+            // Plan T: surface cache-sync failures (previously stderr-only
+            // eprintln warnings) so agents parsing this JSON can tell a warm
+            // DB from one that will pay cold git-walk reads until self-heal.
+            "caches_synced": summary.caches_synced,
+            "cache_sync_warning": summary.cache_sync_warning,
         }))?
     );
 

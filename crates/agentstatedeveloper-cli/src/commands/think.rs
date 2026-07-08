@@ -194,35 +194,15 @@ impl InheritanceSummary {
 /// samples for the inheritance preview.
 fn gather_thinking(cfg: &Config) -> Result<InheritanceSummary> {
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let index = AsgIndexStore::from_engine(&engine);
-    let ledger = AsgLedgerStore::from_engine(&engine);
-    let ref_name = engine.ref_name.clone();
-    let prefix = format!(
-        "{}/index/by-qname",
-        agentstatedeveloper_core::ASD_PATH_PREFIX
-    );
-    let tree = engine
-        .repo
-        .get_tree(&ref_name, &prefix)
-        .unwrap_or(serde_json::Value::Null);
-    let qnames: Vec<String> = match tree {
-        serde_json::Value::Object(m) => m.keys().cloned().collect(),
-        _ => Vec::new(),
-    };
 
     let mut counts = ThinkingCounts::default();
     let mut mm_samples: Vec<InheritedSample> = Vec::new();
     let mut hyp_samples: Vec<InheritedSample> = Vec::new();
     let me = cfg.agent_id.as_str();
 
-    for qn in qnames {
-        let sym = match index.get_symbol_by_qname(&ref_name, &qn)? {
-            Some(s) => s,
-            None => continue,
-        };
-        let entries = ledger
-            .list_entries(&ref_name, &sym.symbol_id)
-            .unwrap_or_default();
+    // One bulk walk (Plan T scale fix) instead of a per-qname symbol
+    // fetch + per-symbol ledger read.
+    for (qname, entries) in agentstatedeveloper_core::thinking::all_symbol_entries(&engine) {
         for e in entries {
             let is_me = e.author.id == me;
             match e.kind {
@@ -232,7 +212,7 @@ fn gather_thinking(cfg: &Config) -> Result<InheritanceSummary> {
                         counts.hypothesis_you += 1;
                     }
                     hyp_samples.push(InheritedSample {
-                        qname: sym.qname.clone(),
+                        qname: qname.clone(),
                         summary: e.summary.clone(),
                         confidence: e.confidence,
                         author_id: e.author.id.clone(),
@@ -244,7 +224,7 @@ fn gather_thinking(cfg: &Config) -> Result<InheritanceSummary> {
                         counts.mental_model_you += 1;
                     }
                     mm_samples.push(InheritedSample {
-                        qname: sym.qname.clone(),
+                        qname: qname.clone(),
                         summary: e.summary.clone(),
                         confidence: None,
                         author_id: e.author.id.clone(),
@@ -711,38 +691,27 @@ fn run_list(cfg: &Config, args: ListArgs) -> Result<()> {
         ThinkKind::Question => LedgerKind::OpenQuestion,
     });
 
-    // Resolve which symbols to scan.
-    let symbol_ids: Vec<(String, String)> = if let Some(qname) = args.symbol.as_deref() {
-        match index.get_symbol_by_qname(&ref_name, qname)? {
-            Some(sym) => vec![(sym.symbol_id, sym.qname)],
-            None => return Err(anyhow!("symbol not found: {qname}")),
-        }
-    } else {
-        let prefix = format!(
-            "{}/index/by-qname",
-            agentstatedeveloper_core::ASD_PATH_PREFIX
-        );
-        let tree = engine
-            .repo
-            .get_tree(&ref_name, &prefix)
-            .unwrap_or(serde_json::Value::Null);
-        let qnames: Vec<String> = match tree {
-            serde_json::Value::Object(m) => m.keys().cloned().collect(),
-            _ => Vec::new(),
-        };
-        let mut out = Vec::new();
-        for qn in qnames {
-            if let Some(sym) = index.get_symbol_by_qname(&ref_name, &qn)? {
-                out.push((sym.symbol_id, sym.qname));
+    // Resolve which symbols to scan → (qname, live entries) pairs.
+    // Workspace-wide: one bulk walk (Plan T scale fix) instead of
+    // per-qname symbol + ledger reads.
+    let symbol_entries: Vec<(String, Vec<LedgerEntry>)> =
+        if let Some(qname) = args.symbol.as_deref() {
+            match index.get_symbol_by_qname(&ref_name, qname)? {
+                Some(sym) => vec![(
+                    sym.qname,
+                    ledger
+                        .list_entries(&ref_name, &sym.symbol_id)
+                        .unwrap_or_default(),
+                )],
+                None => return Err(anyhow!("symbol not found: {qname}")),
             }
-        }
-        out
-    };
+        } else {
+            agentstatedeveloper_core::thinking::all_symbol_entries(&engine)
+        };
 
     let mut entries = Vec::new();
-    for (sid, qname) in &symbol_ids {
-        let les = ledger.list_entries(&ref_name, sid).unwrap_or_default();
-        for entry in les {
+    for (qname, les) in &symbol_entries {
+        for entry in les.iter().cloned() {
             if entry.kind.conclusion_class() != ConclusionClass::Thinking {
                 continue;
             }
