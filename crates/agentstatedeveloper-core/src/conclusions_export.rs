@@ -32,6 +32,12 @@ pub struct ExportRecord {
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// Plan T t-007: `LedgerEntry.confidence` (0.0–1.0). Load-bearing
+    /// for the Plan G thinking class (Hypothesis confidence gates both
+    /// the export floor and read-side `gather_prior_thinking`), but
+    /// carried for every kind so no class drops it on round-trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -125,6 +131,7 @@ pub fn gather_buckets(
                 file: sym.file.clone(),
                 summary: entry.summary,
                 body: entry.body,
+                confidence: entry.confidence,
                 role: entry.role,
                 command: entry.command,
                 tags: entry.tags,
@@ -355,6 +362,11 @@ use chrono::{DateTime, Utc};
 pub struct ImportFileResult {
     pub class: &'static str,
     pub file: String,
+    /// Plan T t-007: total non-empty lines read from the file. Always
+    /// equals `imported + skipped_unknown_qname + skipped_parse_error`
+    /// — surfaced so callers can spot silent drops (`read > imported`)
+    /// without doing the arithmetic themselves.
+    pub read: usize,
     pub imported: usize,
     pub skipped_unknown_qname: usize,
     pub skipped_parse_error: usize,
@@ -407,6 +419,7 @@ pub fn import_all(
             out.push(ImportFileResult {
                 class: stem,
                 file: class_file.to_string_lossy().into_owned(),
+                read: 0,
                 imported: 0,
                 skipped_unknown_qname: 0,
                 skipped_parse_error: 0,
@@ -425,6 +438,7 @@ fn import_one(
     let mut result = ImportFileResult {
         class: stem,
         file: path.display().to_string(),
+        read: 0,
         imported: 0,
         skipped_unknown_qname: 0,
         skipped_parse_error: 0,
@@ -442,6 +456,7 @@ fn import_one(
         if line.trim().is_empty() {
             continue;
         }
+        result.read += 1;
         let rec: ExportRecord = match serde_json::from_str(line) {
             Ok(r) => r,
             Err(_) => {
@@ -492,7 +507,7 @@ fn record_to_entry(rec: ExportRecord, symbol_id: &str) -> Option<LedgerEntry> {
         summary: rec.summary,
         body: rec.body,
         author,
-        confidence: None,
+        confidence: rec.confidence,
         evidence,
         supersedes: rec.supersedes,
         created_at,
@@ -503,24 +518,19 @@ fn record_to_entry(rec: ExportRecord, symbol_id: &str) -> Option<LedgerEntry> {
     })
 }
 
+/// Parse the wire string back to a LedgerKind via serde — LedgerKind's
+/// `#[serde(rename_all = "snake_case")]` names are exactly what
+/// `LedgerKind::as_str()` emits on export, so this stays in lockstep
+/// with the enum automatically.
+///
+/// Plan T t-007: the previous hand-written match predated Plan G and
+/// silently rejected the four thinking kinds (hypothesis, mental_model,
+/// failed_attempt, open_question) — export wrote thinking.jsonl but
+/// import counted every row as a parse error, breaking the fresh-clone
+/// restore promise. Serde-derived parsing eliminates that drift class:
+/// any future LedgerKind variant round-trips without touching this file.
 fn parse_kind(s: &str) -> Option<LedgerKind> {
-    match s {
-        "decision" => Some(LedgerKind::Decision),
-        "assumption" => Some(LedgerKind::Assumption),
-        "constraint" => Some(LedgerKind::Constraint),
-        "rationale" => Some(LedgerKind::Rationale),
-        "hazard" => Some(LedgerKind::Hazard),
-        "tradeoff" => Some(LedgerKind::Tradeoff),
-        "invariant" => Some(LedgerKind::Invariant),
-        "ownership" => Some(LedgerKind::Ownership),
-        "proof" => Some(LedgerKind::Proof),
-        "validation_scenario" => Some(LedgerKind::ValidationScenario),
-        "known_bug" => Some(LedgerKind::KnownBug),
-        "concept" => Some(LedgerKind::Concept),
-        "mapping" => Some(LedgerKind::Mapping),
-        "follow_up" => Some(LedgerKind::FollowUp),
-        _ => None,
-    }
+    serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
 }
 
 fn parse_author(s: &str) -> Option<Author> {
@@ -553,6 +563,7 @@ mod tests {
             file: "a.rs".into(),
             summary: "first".into(),
             body: None,
+            confidence: None,
             role: None,
             command: None,
             tags: vec![],
@@ -578,6 +589,7 @@ mod tests {
             file: "src/foo.rs".into(),
             summary: "be careful".into(),
             body: None,
+            confidence: None,
             role: None,
             command: None,
             tags: vec![],
@@ -1316,5 +1328,301 @@ mod tests {
             "id-sort: led_zzz must follow led_aaa; got second line = {}",
             lines[1]
         );
+    }
+
+    // ---- Plan T t-007: lossless round-trip incl. thinking + confidence --
+
+    #[test]
+    fn parse_kind_accepts_every_ledger_kind_string() {
+        // The old hand-written parse_kind predated Plan G and silently
+        // rejected the four thinking kinds. Lock the invariant that
+        // every LedgerKind round-trips as_str → parse_kind.
+        let all = [
+            LedgerKind::Decision,
+            LedgerKind::Assumption,
+            LedgerKind::Constraint,
+            LedgerKind::Rationale,
+            LedgerKind::Hazard,
+            LedgerKind::Tradeoff,
+            LedgerKind::Invariant,
+            LedgerKind::Ownership,
+            LedgerKind::Proof,
+            LedgerKind::ValidationScenario,
+            LedgerKind::KnownBug,
+            LedgerKind::Concept,
+            LedgerKind::Mapping,
+            LedgerKind::FollowUp,
+            LedgerKind::Hypothesis,
+            LedgerKind::MentalModel,
+            LedgerKind::FailedAttempt,
+            LedgerKind::OpenQuestion,
+        ];
+        for kind in all {
+            assert_eq!(
+                parse_kind(kind.as_str()),
+                Some(kind),
+                "parse_kind must accept `{}`",
+                kind.as_str()
+            );
+        }
+        assert_eq!(parse_kind("no_such_kind"), None);
+    }
+
+    #[test]
+    fn export_wipe_import_round_trips_all_classes_losslessly() {
+        // Plan T t-007 acceptance: export → wipe ledger (fresh engine)
+        // → import → field-level diff. Covers all four thinking kinds
+        // with their body payloads (mental-model symbols[], failed-
+        // attempt tried/because), confidence values, tags, and a
+        // representative of every other conclusion class so no class
+        // drops fields silently.
+        use crate::schema::{Author, AuthorKind, LedgerEntry, LedgerKind};
+
+        let (engine, _) = engine_with_decisions_in_order(&[]);
+        let ledger = AsgLedgerStore::from_engine(&engine);
+
+        let mk = |kind: LedgerKind, id: &str, summary: &str| -> LedgerEntry {
+            let mut e = LedgerEntry::new(
+                "sym_order_test",
+                kind,
+                summary,
+                Author {
+                    kind: AuthorKind::Agent,
+                    id: "t".into(),
+                },
+            );
+            e.entry_id = id.to_string();
+            e
+        };
+
+        let mut originals: Vec<LedgerEntry> = Vec::new();
+
+        // Thinking class: all four kinds.
+        let mut hyp = mk(
+            LedgerKind::Hypothesis,
+            "led_rt_hyp",
+            "suspect the cache is stale",
+        );
+        hyp.confidence = Some(0.85);
+        hyp.body = Some("saw stale reads under load".into());
+        hyp.tags = vec!["source:asd-think".into()];
+        originals.push(hyp);
+
+        let mut mm = mk(
+            LedgerKind::MentalModel,
+            "led_rt_mm",
+            "pipeline flows input -> mix -> out",
+        );
+        mm.body = Some(
+            r#"{"symbols":["pkg.target","pkg.other"],"name":"audio-pipeline"}"#.into(),
+        );
+        originals.push(mm);
+
+        let mut fa = mk(
+            LedgerKind::FailedAttempt,
+            "led_rt_fa",
+            "tried batching, failed on ordering",
+        );
+        fa.body = Some(r#"{"tried":"batch writes","because":"reorders events"}"#.into());
+        fa.confidence = Some(0.4);
+        originals.push(fa);
+
+        let mut oq = mk(
+            LedgerKind::OpenQuestion,
+            "led_rt_oq",
+            "what does constant 4096 mean?",
+        );
+        oq.body = Some("partial finding: it's a page size somewhere".into());
+        originals.push(oq);
+
+        // One representative per non-thinking class, with confidence
+        // set where it previously vanished on import.
+        let mut dec = mk(LedgerKind::Decision, "led_rt_dec", "chose sqlite");
+        dec.confidence = Some(0.9);
+        originals.push(dec);
+        let mut own = mk(LedgerKind::Ownership, "led_rt_own", "owned by core team");
+        own.role = Some("fixture-path".into());
+        originals.push(own);
+        let mut map = mk(LedgerKind::Mapping, "led_rt_map", "coverage moved");
+        map.body = Some(r#"{"from_qname":"a","to_qname":"b"}"#.into());
+        originals.push(map);
+        originals.push(mk(LedgerKind::Hazard, "led_rt_haz", "races under load"));
+        let mut val = mk(LedgerKind::ValidationScenario, "led_rt_val", "replay the file");
+        val.command = Some("cargo test -p core".into());
+        originals.push(val);
+        let mut fu = mk(LedgerKind::FollowUp, "led_rt_fu", "migrate diagnostics");
+        fu.supersedes = vec!["led_rt_old".into()];
+        originals.push(fu);
+
+        for e in &originals {
+            ledger.append_entry(&engine.ref_name, e, "t").unwrap();
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        export_all(&engine, tmp.path()).unwrap();
+
+        // "Wipe the ledger": fresh engine, same symbol, empty ledger.
+        let engine2 = Engine::open_in_memory().unwrap();
+        let sym = crate::schema::Symbol {
+            symbol_id: "sym_order_test".into(),
+            symbol_fp: "fp".into(),
+            qname: "pkg.target".into(),
+            language: "python".into(),
+            kind: SymbolKind::Function,
+            file: "src/target.py".into(),
+            start: crate::schema::Position { line: 1, col: 0 },
+            end: crate::schema::Position { line: 5, col: 0 },
+            signature: None,
+            doc: None,
+        };
+        AsgIndexStore::from_engine(&engine2)
+            .put_symbol(&engine2.ref_name, &sym, "t")
+            .unwrap();
+
+        let results = import_all(&engine2, tmp.path(), "t").unwrap();
+
+        // Counted, not silent: every class reports read == imported,
+        // zero skips — including thinking.
+        for r in &results {
+            assert_eq!(
+                r.read,
+                r.imported,
+                "class `{}` must import everything it reads; got {r:?}",
+                r.class
+            );
+            assert_eq!(r.skipped_parse_error, 0, "class `{}`: {r:?}", r.class);
+            assert_eq!(r.skipped_unknown_qname, 0, "class `{}`: {r:?}", r.class);
+        }
+        let thinking = results
+            .iter()
+            .find(|r| r.class == "thinking")
+            .expect("thinking class must be reported");
+        assert_eq!(
+            thinking.imported, 4,
+            "all four thinking kinds must import; got {thinking:?}"
+        );
+        let total: usize = results.iter().map(|r| r.imported).sum();
+        assert_eq!(total, originals.len());
+
+        // Field-level diff: every original entry must come back
+        // byte-equal at the JSON level (entry_id, kind, summary, body,
+        // confidence, tags, role, command, supersedes, evidence,
+        // author, created_at).
+        let imported = AsgLedgerStore::from_engine(&engine2)
+            .list_entries(&engine2.ref_name, "sym_order_test")
+            .unwrap();
+        assert_eq!(imported.len(), originals.len());
+        let by_id: std::collections::BTreeMap<String, &LedgerEntry> = imported
+            .iter()
+            .map(|e| (e.entry_id.clone(), e))
+            .collect();
+        for orig in &originals {
+            let got = by_id
+                .get(&orig.entry_id)
+                .unwrap_or_else(|| panic!("entry {} missing after import", orig.entry_id));
+            assert_eq!(
+                serde_json::to_value(orig).unwrap(),
+                serde_json::to_value(got).unwrap(),
+                "entry {} must round-trip losslessly",
+                orig.entry_id
+            );
+        }
+    }
+
+    #[test]
+    fn import_counts_thinking_and_unknown_kinds_as_reads() {
+        // A future/unknown kind string must not import, but must show
+        // up in `read` and `skipped_parse_error` so the drop is
+        // visible. Hand-write a thinking.jsonl with one good and one
+        // unknown-kind row.
+        let (engine, _) = engine_with_decisions_in_order(&[]);
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("thinking.jsonl"),
+            concat!(
+                r#"{"id":"led_ok","kind":"open_question","qname":"pkg.target","file":"src/target.py","summary":"q?","author":"agent:t","created_at":"2026-05-19T20:00:00+00:00"}"#,
+                "\n",
+                r#"{"id":"led_bad","kind":"from_the_future","qname":"pkg.target","file":"src/target.py","summary":"?","author":"agent:t","created_at":"2026-05-19T20:00:00+00:00"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let results = import_all(&engine, tmp.path(), "t").unwrap();
+        let thinking = results
+            .iter()
+            .find(|r| r.class == "thinking")
+            .expect("thinking reported");
+        assert_eq!(thinking.read, 2);
+        assert_eq!(thinking.imported, 1);
+        assert_eq!(thinking.skipped_parse_error, 1);
+        assert_eq!(
+            thinking.read,
+            thinking.imported + thinking.skipped_unknown_qname + thinking.skipped_parse_error,
+            "read must equal imported + skips"
+        );
+    }
+
+    #[test]
+    fn confidence_survives_export_import_for_thinking_and_decisions() {
+        // Focused regression for the confidence drop: export writes
+        // `confidence`, import restores it (previously hardcoded None).
+        let (engine, _) = engine_with_decisions_in_order(&[]);
+        append_thinking_entry(
+            &engine,
+            LedgerKind::Hypothesis,
+            "led_conf_hyp",
+            "confident hypothesis",
+            Some(0.75),
+        );
+        append_thinking_entry(
+            &engine,
+            LedgerKind::Decision,
+            "led_conf_dec",
+            "confident decision",
+            Some(0.6),
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        export_all(&engine, tmp.path()).unwrap();
+
+        // The serialized lines must carry the confidence field.
+        let thinking_body =
+            std::fs::read_to_string(tmp.path().join("thinking.jsonl")).unwrap();
+        assert!(
+            thinking_body.contains("\"confidence\":0.75"),
+            "export must serialize confidence; got:\n{thinking_body}"
+        );
+
+        let engine2 = Engine::open_in_memory().unwrap();
+        let sym = crate::schema::Symbol {
+            symbol_id: "sym_order_test".into(),
+            symbol_fp: "fp".into(),
+            qname: "pkg.target".into(),
+            language: "python".into(),
+            kind: SymbolKind::Function,
+            file: "src/target.py".into(),
+            start: crate::schema::Position { line: 1, col: 0 },
+            end: crate::schema::Position { line: 5, col: 0 },
+            signature: None,
+            doc: None,
+        };
+        AsgIndexStore::from_engine(&engine2)
+            .put_symbol(&engine2.ref_name, &sym, "t")
+            .unwrap();
+        import_all(&engine2, tmp.path(), "t").unwrap();
+
+        let entries = AsgLedgerStore::from_engine(&engine2)
+            .list_entries(&engine2.ref_name, "sym_order_test")
+            .unwrap();
+        let conf_of = |id: &str| {
+            entries
+                .iter()
+                .find(|e| e.entry_id == id)
+                .unwrap_or_else(|| panic!("{id} must import"))
+                .confidence
+        };
+        assert_eq!(conf_of("led_conf_hyp"), Some(0.75));
+        assert_eq!(conf_of("led_conf_dec"), Some(0.6));
     }
 }

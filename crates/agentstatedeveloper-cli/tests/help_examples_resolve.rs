@@ -274,6 +274,11 @@ fn design_md_and_changelog_backtick_examples_resolve() {
         "plan",
         "savings",
         "enrich",
+        // `serve` — forward-looking Plan T Lens command (`asd serve`
+        // hosting the full ASD web UI) described in DESIGN.md's Plan T
+        // section (commit c37e5b3). Not implemented yet; remove this
+        // entry when the Lens server ships.
+        "serve",
     ];
 
     // CARGO_MANIFEST_DIR for the cli crate → repo/crates/cli;

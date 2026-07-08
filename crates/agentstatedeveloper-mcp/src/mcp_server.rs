@@ -771,6 +771,7 @@ impl AsdMcpServer {
 
         match conclusions_export::import_all(&engine, &in_dir, "asd-mcp") {
             Ok(results) => {
+                let total_read: usize = results.iter().map(|r| r.read).sum();
                 let total_imported: usize = results.iter().map(|r| r.imported).sum();
                 let total_unknown: usize = results.iter().map(|r| r.skipped_unknown_qname).sum();
                 let total_parse: usize = results.iter().map(|r| r.skipped_parse_error).sum();
@@ -779,10 +780,12 @@ impl AsdMcpServer {
                     "files": results.iter().map(|r| serde_json::json!({
                         "class": r.class,
                         "file": r.file,
+                        "read": r.read,
                         "imported": r.imported,
                         "skipped_unknown_qname": r.skipped_unknown_qname,
                         "skipped_parse_error": r.skipped_parse_error,
                     })).collect::<Vec<_>>(),
+                    "total_read": total_read,
                     "total_imported": total_imported,
                     "total_skipped_unknown_qname": total_unknown,
                     "total_skipped_parse_error": total_parse,

@@ -121,15 +121,40 @@ fn import(cfg: &Config, args: ImportArgs) -> Result<()> {
         "files": results.iter().map(|r| json!({
             "class": r.class,
             "file": r.file,
+            "read": r.read,
             "imported": r.imported,
             "skipped_unknown_qname": r.skipped_unknown_qname,
             "skipped_parse_error": r.skipped_parse_error,
         })).collect::<Vec<_>>(),
+        "total_read": results.iter().map(|r| r.read).sum::<usize>(),
         "total_imported": results.iter().map(|r| r.imported).sum::<usize>(),
         "total_skipped_unknown_qname": results.iter().map(|r| r.skipped_unknown_qname).sum::<usize>(),
         "total_skipped_parse_error": results.iter().map(|r| r.skipped_parse_error).sum::<usize>(),
     });
     println!("{}", serde_json::to_string_pretty(&payload)?);
+    // Plan T t-007: skips are no longer silent — anything read but not
+    // imported gets a stderr warning with the per-class breakdown.
+    let dropped: Vec<String> = results
+        .iter()
+        .filter(|r| r.skipped_unknown_qname + r.skipped_parse_error > 0)
+        .map(|r| {
+            format!(
+                "{}: read {}, imported {}, skipped {} (unknown qname {}, parse error {})",
+                r.class,
+                r.read,
+                r.imported,
+                r.skipped_unknown_qname + r.skipped_parse_error,
+                r.skipped_unknown_qname,
+                r.skipped_parse_error
+            )
+        })
+        .collect();
+    if !dropped.is_empty() {
+        eprintln!(
+            "warning: conclusions import skipped entries:\n  {}",
+            dropped.join("\n  ")
+        );
+    }
     Ok(())
 }
 
