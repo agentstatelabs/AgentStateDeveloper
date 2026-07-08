@@ -16,22 +16,7 @@
 	import { AccountabilityCard, type ActivityEvent, type AsdClient } from '@agentstate/lens-core';
 	import { asdClient } from '$lib/api';
 
-	/**
-	 * `/api/v1/symbols/{qname}/callers` re-scans the index per call at ExampleProj
-	 * scale — measured minutes at 100% CPU while holding the engine mutex, the
-	 * same per-qname pathology as `/symbols` and `/thinking` documented in
-	 * $lib/territory/data.ts. One expanded card would starve every other API
-	 * consumer, so the drill-down client declines that endpoint up front;
-	 * AccountabilityCard already degrades to its explicit "absence is
-	 * information" rendering (blast radius simply isn't shown). Drop this
-	 * override once the server answers caller lookups from the reverse-edge
-	 * index.
-	 */
-	const drillClient: AsdClient = {
-		...asdClient,
-		callers: () =>
-			Promise.reject(new Error('callers lookup disabled in territory drill-down (server scan too slow)'))
-	};
+	const drillClient: AsdClient = asdClient;
 
 	let {
 		region,
