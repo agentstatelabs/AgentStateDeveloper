@@ -165,7 +165,10 @@ the CLI surfaces these as distinct exit codes.
   is under a temp directory (`std::env::temp_dir()`, `/tmp`, `/var/folders`,
   and their `/private` forms), and when `ASD_NO_AUTO_REGISTER` is set — use
   that env var to disable it in CI/test harnesses. Explicit `asd repo add`
-  always registers. Dead entries (db since removed) are cleaned by
+  always registers. On a real (non-skipped) index run the registry also
+  **self-heals**: entries whose `.asd-state.db` no longer exists are pruned in
+  the same pass, so a standalone asd install stays clean with no scheduler.
+  Disable just the self-heal with `ASD_NO_AUTO_PRUNE`; run it on demand with
   `asd repo prune` (`--dry-run` to preview).
 - **`asd-mcp`** — reads on startup; mtime-checks on every tool call; reopens
   the SQLite DB when the active repo changes.

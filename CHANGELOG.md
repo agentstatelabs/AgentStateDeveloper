@@ -5,9 +5,9 @@ Versions use semantic versioning; each milestone increments by 0.0.5.
 
 ---
 
-## [Unreleased] — post-1.2.0
+## [1.3.0] — 2026-07-13
 
-Work landed on `main` since the v1.2.0 tag (Plans T–V + workflow hardening).
+Everything on `main` since the v1.2.0 tag (Plans T–V + workflow hardening).
 
 ### Added — agent-workflow surface
 
@@ -20,11 +20,14 @@ Work landed on `main` since the v1.2.0 tag (Plans T–V + workflow hardening).
 - `asd annotate-commit` splits **directly-edited** symbols from **nearby/touched**
   ones when deriving ledger annotations from a commit.
 - Agent-discoverability polish across the CLI help and MCP tool descriptions.
-- **`asd repo prune`** — remove registry entries whose `.asd-state.db` no longer
-  exists (`--dry-run` to preview, `--json` for machine output). Fixes the root
-  cause too: `asd index` no longer auto-registers databases under temp
-  directories, and respects `ASD_NO_AUTO_REGISTER` — so test runs stop
-  polluting `~/.config/asd/repos.toml`.
+- **Registry hygiene** — `asd repo prune` removes entries whose `.asd-state.db`
+  no longer exists (`--dry-run` to preview, `--json` for machine output). Root
+  cause fixed too: `asd index` no longer auto-registers databases under temp
+  directories and respects `ASD_NO_AUTO_REGISTER`, so test runs stop polluting
+  `~/.config/asd/repos.toml`. And a real `asd index` now **opportunistically
+  self-heals** the registry — dropping dead entries as it runs (opt out with
+  `ASD_NO_AUTO_PRUNE`) — so a standalone asd install stays clean with no
+  scheduler or CTXone.
 
 ### Added — Lens (asd-serve) review UI, Plan T
 

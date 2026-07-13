@@ -433,7 +433,7 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
         }))?
     );
 
-    auto_register_in_registry(&cfg.db_path);
+    auto_maintain_registry(&cfg.db_path);
 
     Ok(())
 }
@@ -477,12 +477,14 @@ fn log_skipped(skipped: &[PathBuf], log: &mut Option<IndexLog>, show_on_stderr: 
     }
 }
 
-/// Best-effort: after a successful index, make sure this repo is in the shared
-/// registry at `~/.config/asd/repos.toml`. Prints a one-line notice if a new
-/// entry was added; silently updates the stored path if the same name was
-/// already registered under a different path. All errors are swallowed —
-/// this must never fail an index.
-fn auto_register_in_registry(db_path: &Path) {
+/// Best-effort registry maintenance after a successful index: register this
+/// repo in the shared registry (`~/.config/asd/repos.toml`) and opportunistically
+/// self-heal by dropping entries whose db has vanished. Prints one-line notices
+/// for a new registration and for any pruned stale entries. All errors are
+/// swallowed — this must never fail an index. Skipped entirely for ephemeral
+/// paths and when `ASD_NO_AUTO_REGISTER` is set; self-heal alone can be disabled
+/// with `ASD_NO_AUTO_PRUNE`.
+fn auto_maintain_registry(db_path: &Path) {
     use agentstatedeveloper_core::registry::Registry;
 
     let abs = match db_path.canonicalize().or_else(|_| {
@@ -530,28 +532,48 @@ fn auto_register_in_registry(db_path: &Path) {
         Err(_) => return,
     };
 
-    // Already registered under this name? Update silently if the path drifted.
-    if let Some(existing) = reg.get(&name) {
-        if existing.path == abs {
-            return;
+    // Opportunistic self-heal: drop entries whose db has vanished (dead
+    // temp/test/deleted repos). Keeps the shared registry from rotting without
+    // a scheduler — the standalone-asd hygiene story. Opt out with
+    // ASD_NO_AUTO_PRUNE.
+    let pruned = if std::env::var_os("ASD_NO_AUTO_PRUNE").is_some() {
+        Vec::new()
+    } else {
+        reg.prune_missing()
+    };
+    let mut changed = !pruned.is_empty();
+    let mut registered_new = false;
+
+    match reg.get(&name).map(|e| e.path.clone()) {
+        // Same repo already registered at this exact path — nothing to add.
+        Some(existing) if existing == abs => {}
+        // Registered under this name but the path drifted — update it.
+        Some(_) => {
+            if reg.register(&name, &abs).is_ok() {
+                changed = true;
+            }
         }
-        if reg.register(&name, &abs).is_ok() {
-            let _ = reg.save();
+        // Registered under a *different* name — the user named it on purpose;
+        // leave it.
+        None if reg.list().iter().any(|e| e.path == abs) => {}
+        None => {
+            if reg.register(&name, &abs).is_ok() {
+                changed = true;
+                registered_new = true;
+            }
         }
-        return;
     }
 
-    // Registered under a different name? Silently leave it — the user picked
-    // that name on purpose. Just confirm by walking entries.
-    if reg.list().iter().any(|e| e.path == abs) {
-        return;
-    }
-
-    if reg.register(&name, &abs).is_err() {
-        return;
-    }
-    if reg.save().is_ok() {
-        eprintln!("Registered as '{name}' — use `asd repo use {name}` to make it active.");
+    if changed && reg.save().is_ok() {
+        if registered_new {
+            eprintln!("Registered as '{name}' — use `asd repo use {name}` to make it active.");
+        }
+        if !pruned.is_empty() {
+            eprintln!(
+                "Pruned {} stale repo registration(s) whose db no longer exists.",
+                pruned.len()
+            );
+        }
     }
 }
 
