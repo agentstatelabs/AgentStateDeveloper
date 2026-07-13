@@ -26,6 +26,10 @@ pub enum RepoCmd {
     Use(UseArgs),
     /// Remove a repo.
     Rm(RmArgs),
+    /// Remove every registered repo whose `.asd-state.db` no longer exists —
+    /// the dead entries left behind by ephemeral/test databases. Use
+    /// `--dry-run` to preview.
+    Prune(PruneArgs),
     /// Print the active repo's name and path.
     Show(ShowArgs),
     /// Cross-repo service edges across all registered repos: a client call in
@@ -71,6 +75,16 @@ pub struct RmArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct PruneArgs {
+    /// Show what would be removed without changing the registry.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Emit JSON instead of the human-readable summary.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct ShowArgs {
     /// Emit JSON instead of the default plain-text line.
     #[arg(long)]
@@ -104,6 +118,7 @@ pub fn run(_cfg: &Config, cmd: RepoCmd) -> Result<()> {
         RepoCmd::List(args) => run_list(args),
         RepoCmd::Use(args) => run_use(args),
         RepoCmd::Rm(args) => run_rm(args),
+        RepoCmd::Prune(args) => run_prune(args),
         RepoCmd::Show(args) => run_show(args),
         RepoCmd::Edges(args) => run_edges(args),
         RepoCmd::Impact(args) => run_impact(args),
@@ -213,6 +228,52 @@ fn run_rm(args: RmArgs) -> Result<()> {
     reg.remove(&args.name)?;
     reg.save().context("saving registry")?;
     println!("Removed {}", args.name);
+    Ok(())
+}
+
+fn run_prune(args: PruneArgs) -> Result<()> {
+    let mut reg = Registry::load().context("loading registry")?;
+
+    // Collect the dead entries (owned) before any mutation so the report is the
+    // same whether or not we then write.
+    let dead: Vec<(String, String)> = reg
+        .list()
+        .iter()
+        .filter(|e| !e.path.exists())
+        .map(|e| (e.name.clone(), e.path.display().to_string()))
+        .collect();
+
+    if !args.dry_run && !dead.is_empty() {
+        reg.prune_missing();
+        reg.save().context("saving registry")?;
+    }
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "dry_run": args.dry_run,
+                "removed": dead.iter().map(|(n, p)| json!({ "name": n, "path": p })).collect::<Vec<_>>(),
+                "remaining": reg.list().len(),
+            }))?
+        );
+        return Ok(());
+    }
+
+    if dead.is_empty() {
+        println!("Nothing to prune — every registered repo's db still exists.");
+        return Ok(());
+    }
+    let verb = if args.dry_run { "Would remove" } else { "Removed" };
+    println!("{verb} {} dead repo(s) (db missing):", dead.len());
+    for (name, path) in &dead {
+        println!("  {name}  →  {path}");
+    }
+    if args.dry_run {
+        println!("\nRe-run without --dry-run to apply.");
+    } else {
+        println!("\n{} repo(s) remain.", reg.list().len());
+    }
     Ok(())
 }
 

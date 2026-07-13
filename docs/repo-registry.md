@@ -142,6 +142,10 @@ impl Registry {
     pub fn register(&mut self, name: &str, path: &Path) -> Result<()>;
     pub fn remove(&mut self, name: &str) -> Result<()>;
 
+    /// Remove every entry whose `.asd-state.db` no longer exists; returns the
+    /// removed entries. Clears the active pointer if it named a pruned repo.
+    pub fn prune_missing(&mut self) -> Vec<RepoEntry>;
+
     /// For consumers that want mtime-cached reads.
     pub fn path() -> PathBuf;       // resolved default path
 }
@@ -154,7 +158,15 @@ the CLI surfaces these as distinct exit codes.
 ## Consumer expectations
 
 - **`asd` CLI** — reads/writes directly via `Registry::load` / `save`.
-  Subcommands: `asd repo add|list|use|rm|show`.
+  Subcommands: `asd repo add|list|use|rm|prune|show`.
+- **Auto-registration on `asd index`** — a successful index best-effort adds
+  the repo under its directory name. To avoid polluting the shared registry
+  with throwaway databases, auto-registration is **skipped** when the db path
+  is under a temp directory (`std::env::temp_dir()`, `/tmp`, `/var/folders`,
+  and their `/private` forms), and when `ASD_NO_AUTO_REGISTER` is set — use
+  that env var to disable it in CI/test harnesses. Explicit `asd repo add`
+  always registers. Dead entries (db since removed) are cleaned by
+  `asd repo prune` (`--dry-run` to preview).
 - **`asd-mcp`** — reads on startup; mtime-checks on every tool call; reopens
   the SQLite DB when the active repo changes.
 - **CTXone** — reads on startup to seed the `AsdProcessPool` (one entry per

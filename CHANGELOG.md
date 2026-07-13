@@ -20,6 +20,11 @@ Work landed on `main` since the v1.2.0 tag (Plans T–V + workflow hardening).
 - `asd annotate-commit` splits **directly-edited** symbols from **nearby/touched**
   ones when deriving ledger annotations from a commit.
 - Agent-discoverability polish across the CLI help and MCP tool descriptions.
+- **`asd repo prune`** — remove registry entries whose `.asd-state.db` no longer
+  exists (`--dry-run` to preview, `--json` for machine output). Fixes the root
+  cause too: `asd index` no longer auto-registers databases under temp
+  directories, and respects `ASD_NO_AUTO_REGISTER` — so test runs stop
+  polluting `~/.config/asd/repos.toml`.
 
 ### Added — Lens (asd-serve) review UI, Plan T
 

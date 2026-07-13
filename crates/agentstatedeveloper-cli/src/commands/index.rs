@@ -496,6 +496,16 @@ fn auto_register_in_registry(db_path: &Path) {
         Err(_) => return,
     };
 
+    // Never auto-register ephemeral or explicitly-opted-out repos into the
+    // shared registry. This is the main source of registry clutter: every
+    // `asd index` on a temp db (integration tests, throwaway checkouts) would
+    // otherwise leave a dead entry behind once the temp dir is cleaned. Set
+    // `ASD_NO_AUTO_REGISTER` to opt out regardless of path. Existing dead
+    // entries are cleaned by `asd repo prune`.
+    if std::env::var_os("ASD_NO_AUTO_REGISTER").is_some() || is_ephemeral_path(&abs) {
+        return;
+    }
+
     let default_name = abs
         .parent()
         .and_then(|p| p.file_name())
@@ -543,4 +553,22 @@ fn auto_register_in_registry(db_path: &Path) {
     if reg.save().is_ok() {
         eprintln!("Registered as '{name}' — use `asd repo use {name}` to make it active.");
     }
+}
+
+/// True if `path` lives under a temporary directory — where integration tests
+/// and throwaway checkouts create `.asd-state.db` files. Such repos must never
+/// land in the shared registry (they'd become dead entries the moment the temp
+/// dir is cleaned). `abs` is already canonicalized by the caller, so `/var`
+/// symlinks resolve to `/private/var` on macOS; both spellings are covered.
+fn is_ephemeral_path(path: &Path) -> bool {
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    let td = std::env::temp_dir();
+    if let Ok(c) = td.canonicalize() {
+        roots.push(c);
+    }
+    roots.push(td);
+    for r in ["/tmp", "/private/tmp", "/var/folders", "/private/var/folders"] {
+        roots.push(std::path::PathBuf::from(r));
+    }
+    roots.iter().any(|root| path.starts_with(root))
 }

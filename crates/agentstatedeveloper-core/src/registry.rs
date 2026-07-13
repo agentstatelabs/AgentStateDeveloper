@@ -160,6 +160,29 @@ impl Registry {
         Ok(())
     }
 
+    /// Remove every registered repo whose `.asd-state.db` no longer exists on
+    /// disk — the dead entries left behind by ephemeral/test databases. Returns
+    /// the removed entries (disk order) for reporting. Clears the active pointer
+    /// if it named a pruned repo.
+    pub fn prune_missing(&mut self) -> Vec<RepoEntry> {
+        let dead: Vec<String> = self
+            .repos
+            .values()
+            .filter(|e| !e.path.exists())
+            .map(|e| e.name.clone())
+            .collect();
+        let mut removed = Vec::with_capacity(dead.len());
+        for name in dead {
+            if let Some(entry) = self.repos.remove(&name) {
+                if self.active.as_deref() == Some(name.as_str()) {
+                    self.active = None;
+                }
+                removed.push(entry);
+            }
+        }
+        removed
+    }
+
     /// Resolved default registry path: `$ASD_REGISTRY` if set, else
     /// `$HOME/.config/asd/repos.toml`. Matches the spec — does NOT defer to
     /// platform-specific config dirs.
@@ -397,6 +420,32 @@ mod tests {
         r.set_active("a").unwrap();
         r.remove("a").unwrap();
         assert!(r.active().is_none());
+    }
+
+    #[test]
+    fn prune_missing_drops_dead_and_clears_active() {
+        // One entry whose db exists (kept) + two whose db is gone (pruned).
+        let live = temp_path("live-db");
+        fs::write(&live, b"x").unwrap();
+        let mut r = Registry::default();
+        r.register("live", &live).unwrap();
+        r.register("dead1", &PathBuf::from("/no/such/dir/dead1/.asd-state.db"))
+            .unwrap();
+        r.register("dead2", &PathBuf::from("/no/such/dir/dead2/.asd-state.db"))
+            .unwrap();
+        r.set_active("dead1").unwrap();
+
+        let removed = r.prune_missing();
+
+        let mut names: Vec<&str> = removed.iter().map(|e| e.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["dead1", "dead2"]);
+        assert!(r.get("live").is_some());
+        assert!(r.get("dead1").is_none());
+        assert!(r.active().is_none(), "active pointed at a pruned repo");
+        // Idempotent: a second prune removes nothing.
+        assert!(r.prune_missing().is_empty());
+        let _ = fs::remove_file(&live);
     }
 
     #[test]
