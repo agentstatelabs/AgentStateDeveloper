@@ -23,6 +23,7 @@ pub mod feedback;
 pub mod index;
 pub mod index_pipeline;
 pub mod ledger;
+pub mod map;
 pub mod overview;
 pub mod paths;
 pub mod policy;

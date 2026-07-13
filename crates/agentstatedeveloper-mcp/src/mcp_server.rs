@@ -2453,6 +2453,20 @@ impl AsdMcpServer {
     }
 
     #[tool(
+        description = "Initial-read project map for a cold start: package boundaries and test-file roles (fast-test vs diagnostic-test), and — unless `dry_run` — writes them as Ownership ledger entries so the NEXT session inherits the mental model without re-deriving it. CALL THIS ONCE when first orienting on an indexed repo. Idempotent (re-running overwrites its own tags). Unlike `architecture` (read-only overview), map PERSISTS role/ownership tags. (CLI: `asd map`.)"
+    )]
+    async fn map(&self, params: Parameters<MapParams>) -> String {
+        let engine = self.engine.lock().await;
+        let db_path = self.db_path();
+        let db_parent = std::path::Path::new(&db_path).parent();
+        match agentstatedeveloper_core::map::run_map(&engine, "asd-mcp", db_parent, params.0.dry_run)
+        {
+            Ok(payload) => payload.to_string(),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
         description = "Record that a symbol was renamed or moved. Writes a rebind record so the old symbol_id maps to the new one, then re-parents all ledger entries from the old symbol_id to the new one. Use this whenever an agent or human renames a function, class, or method so its ledger history follows the rename."
     )]
     async fn ledger_rebind(&self, params: Parameters<LedgerRebindParams>) -> String {
@@ -6256,15 +6270,16 @@ mod tool_name_regression {
     }
 
     #[test]
-    fn sync_and_test_summary_tools_are_registered() {
-        // Added so agents can flush the sidecar (the reindex tool points here)
-        // and summarize test output over MCP, not just the CLI.
+    fn sync_test_summary_map_tools_are_registered() {
+        // Added so agents can flush the sidecar (the reindex tool points here),
+        // summarize test output, and build the initial-read map over MCP.
         let r = AsdMcpServer::tool_router();
         assert!(r.has_route("sync"), "expected `sync` MCP tool registered");
         assert!(
             r.has_route("test_summary"),
             "expected `test_summary` MCP tool registered"
         );
+        assert!(r.has_route("map"), "expected `map` MCP tool registered");
     }
 
     #[test]

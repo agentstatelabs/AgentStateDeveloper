@@ -550,6 +550,13 @@ pub struct TestSummaryParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct MapParams {
+    /// Return the summary without writing any Ownership ledger entries.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct LedgerRebindParams {
     /// symbol_id of the old symbol whose ledger entries should be re-parented.
     pub from_symbol_id: String,
