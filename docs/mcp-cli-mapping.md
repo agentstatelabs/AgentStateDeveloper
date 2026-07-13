@@ -19,16 +19,21 @@ namespace hygiene or CLI ergonomics. This document is the canonical map.
 | MCP tool | CLI command |
 |---|---|
 | `annotate_commit` | `asd annotate-commit` |
+| `architecture` | `asd architecture` |
 | `callers` | `asd callers` |
 | `callees` | `asd callees` |
 | `checklist` | `asd checklist` |
 | `context_for` | `asd context-for` |
+| `dead_code` | `asd dead-code` |
+| `effect_declare` | (MCP-only — no CLI verb) |
 | `effects` | (MCP-only — no CLI verb) |
+| `endpoints` | `asd endpoints` |
 | `health` | (MCP-only — HTTP healthcheck) |
 | `impact` | `asd impact` |
 | `investigate` | `asd investigate` |
 | `prepare_change` | `asd prepare-change` |
 | `recipe_classify_test_migration` | `asd recipe classify-test-migration` |
+| `recipe_migrate_stale_tests` | `asd recipe migrate-stale-tests` |
 | `references` | `asd references` |
 | `reindex` | (MCP-only — library call) |
 | `scopes_list` | `asd scopes list` |
@@ -38,6 +43,7 @@ namespace hygiene or CLI ergonomics. This document is the canonical map.
 | `status` | `asd status` |
 | `task_close` | `asd task-close` |
 | `traces` | (MCP-only — execution traces) |
+| `trust` | `asd trust` |
 | `verify_effects` | `asd verify-effects` |
 
 ## `code_*` prefix on MCP (namespace collision avoidance)
@@ -65,13 +71,18 @@ underscore-joined name because MCP has no nested-command concept.
 | `conclusions_import` | `asd conclusions import` |
 | `feedback_list` | `asd feedback list` |
 | `feedback_mark` | `asd feedback mark` |
-| `feedback_promote` | `asd feedback promote` |
+| `feedback_promote` | `asd feedback promote-as-truth` |
 | `invariant_add` | `asd invariant add` |
+| `think_speculate` | `asd think speculate` |
+| `think_model` | `asd think model` |
+| `think_failed` | `asd think failed` |
+| `think_question` | `asd think question` |
+| `think_list` | `asd think list` |
 | `invariant_list` | `asd invariant list` |
 | `ledger_append` | `asd ledger append` |
 | `ledger_approve` | `asd ledger approve` |
-| `ledger_find` | `asd ledger find` |
-| `ledger_get` | `asd ledger get` |
+| `ledger_find` | _(MCP-only — no `asd ledger find`; on the CLI reads go through `asd list ledger` / `asd conclusions list`)_ |
+| `ledger_get` | _(MCP-only — no `asd ledger get`; on the CLI read a symbol's ledger via `asd read <sym>`)_ |
 | `ledger_rebind` | `asd ledger rebind` |
 | `ledger_reject` | `asd ledger reject` |
 | `ledger_supersede` | `asd ledger supersede` |

@@ -89,7 +89,7 @@ commands:
 
 | Command | What it does |
 |---|---|
-| `asd ledger append/get/find/approve/reject/withdraw/supersede/rebind` | Full decision-ledger operations. Append decisions, hazards, rationale, constraints; run the approval workflow; rebind entries across renames. |
+| `asd ledger append/approve/reject/withdraw/supersede/rebind` | Full decision-ledger write operations. Append decisions, hazards, rationale, constraints; run the approval workflow; rebind entries across renames. (Reads are `asd read <sym>` / `asd list ledger`; `ledger_get`/`ledger_find` are MCP-only.) |
 | `asd invariant add/list/withdraw` | Record and manage invariants on symbols — a typed shortcut for `ledger … --kind invariant`. |
 | `asd conclusions` | View ledger entries bucketed by the six conclusion classes (decisions, classifications, mappings, hazards, recipes, followups); `export` / `import` drive the git sidecar. |
 | `asd scratch` | Working notes scoped to a symbol or investigation, with a promote-to-ledger path. Local-only; not synced. |
