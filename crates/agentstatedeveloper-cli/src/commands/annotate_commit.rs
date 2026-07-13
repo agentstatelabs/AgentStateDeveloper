@@ -35,6 +35,86 @@ use agentstatedeveloper_core::{
     schema::{Author, AuthorKind, LedgerEntry},
 };
 
+/// Per-file change detail for a commit, used to split symbols into
+/// "directly edited" (their line span overlaps a changed hunk) vs
+/// "nearby/touched" (in a renamed/moved file, or a changed file but outside
+/// the edited lines) — so ledger annotations don't treat a file move the same
+/// as a real edit.
+#[derive(Default)]
+struct FileChange {
+    /// True when the file was renamed/moved in this commit.
+    renamed: bool,
+    /// 1-based inclusive line ranges on the NEW side that actually changed.
+    /// Empty for a pure rename (100% similarity, no content delta).
+    hunks: Vec<(u32, u32)>,
+}
+
+impl FileChange {
+    /// Does `[start, end]` (1-based inclusive) overlap any changed hunk?
+    fn overlaps(&self, start: u32, end: u32) -> bool {
+        self.hunks.iter().any(|(a, b)| start <= *b && end >= *a)
+    }
+}
+
+/// Parse `git diff-tree -p -M --unified=0` for a commit into new-path →
+/// FileChange. Tracks renames (`rename to`) and new-side hunk ranges (`@@ …
+/// +c,d @@`).
+fn commit_file_changes(commit: &str) -> std::collections::HashMap<String, FileChange> {
+    use std::collections::HashMap;
+    let mut map: HashMap<String, FileChange> = HashMap::new();
+    let out = Command::new("git")
+        .args([
+            "diff-tree",
+            "--no-commit-id",
+            "-r",
+            "-M",
+            "-p",
+            "--unified=0",
+            commit,
+        ])
+        .output();
+    let text = match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+        Err(_) => return map,
+    };
+    let mut cur: Option<String> = None;
+    let mut renamed = false;
+    for line in text.lines() {
+        if line.starts_with("diff --git ") {
+            // New file section; resolve the path from later +++/rename lines.
+            cur = None;
+            renamed = false;
+        } else if let Some(p) = line.strip_prefix("rename to ") {
+            renamed = true;
+            let path = p.trim().to_string();
+            map.entry(path.clone()).or_default().renamed = true;
+            cur = Some(path);
+        } else if let Some(p) = line.strip_prefix("+++ b/") {
+            if p != "/dev/null" {
+                let path = p.trim().to_string();
+                let e = map.entry(path.clone()).or_default();
+                e.renamed = e.renamed || renamed;
+                cur = Some(path);
+            }
+        } else if line.starts_with("@@ ") {
+            // @@ -a,b +c,d @@ ; new range is [c, c+max(d,1)-1]; d==0 → deletion at c.
+            if let Some(rest) = line.split(" +").nth(1)
+                && let Some(spec) = rest.split(' ').next()
+            {
+                let mut it = spec.split(',');
+                let c: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+                let d: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+                let start = c.max(1);
+                let end = if d == 0 { start } else { start + d - 1 };
+                if let Some(ref path) = cur {
+                    map.entry(path.clone()).or_default().hunks.push((start, end));
+                }
+            }
+        }
+    }
+    map
+}
+
 fn is_doc_file(path: &str) -> bool {
     let lower = path.to_lowercase();
     let p = Path::new(&lower);
@@ -578,12 +658,36 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
         }
     }
 
+    // Split touched symbols into those whose own line span was actually edited
+    // vs those merely carried along by a file move / an unrelated same-file
+    // change — computed here, after all mutations to `touched_symbols`.
+    let file_changes = commit_file_changes(&commit_hash);
+    let symbol_directly_edited = |sym: &Symbol| -> bool {
+        file_changes
+            .iter()
+            .find(|(p, _)| sym.file.ends_with(p.as_str()) || &sym.file == *p)
+            .map(|(_, c)| c.overlaps(sym.start.line, sym.end.line))
+            .unwrap_or(false)
+    };
+    let directly_edited: Vec<String> = touched_symbols
+        .iter()
+        .filter(|s| symbol_directly_edited(s))
+        .map(|s| s.qname.clone())
+        .collect();
+    let nearby_touched: Vec<String> = touched_symbols
+        .iter()
+        .filter(|s| !symbol_directly_edited(s))
+        .map(|s| s.qname.clone())
+        .collect();
+
     let out = if args.write {
         json!({
             "commit": commit_hash,
             "subject": subject,
             "changed_files": changed_files,
             "touched_symbols": touched_symbols.len(),
+            "directly_edited": directly_edited,
+            "nearby_touched": nearby_touched,
             "written_entries": written,
         })
     } else {
@@ -592,6 +696,10 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
             "subject": subject,
             "changed_files": changed_files,
             "touched_symbols": touched_symbols.iter().map(|s| &s.qname).collect::<Vec<_>>(),
+            // The signal split: symbols whose own lines changed vs those merely
+            // carried along by a move / unrelated same-file edit.
+            "directly_edited": directly_edited,
+            "nearby_touched": nearby_touched,
             "suggested_entries": suggested,
             "note": "dry-run — pass --write to record these entries",
             "cluster_debug": if args.debug_clusters { json!(cluster_debug) } else { Value::Null },
@@ -600,4 +708,34 @@ pub fn run(cfg: &Config, args: AnnotateCommitArgs) -> Result<()> {
 
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlaps_detects_span_hunk_intersection() {
+        let fc = FileChange {
+            renamed: false,
+            hunks: vec![(10, 12), (40, 40)],
+        };
+        // Symbol [8,15] straddles hunk (10,12) → directly edited.
+        assert!(fc.overlaps(8, 15));
+        // Symbol exactly on a single-line hunk.
+        assert!(fc.overlaps(40, 45));
+        // Symbol [20,30] between hunks → not edited (nearby/touched).
+        assert!(!fc.overlaps(20, 30));
+        // Symbol entirely before the first hunk.
+        assert!(!fc.overlaps(1, 9));
+    }
+
+    #[test]
+    fn pure_rename_has_no_hunks_so_never_directly_edited() {
+        let fc = FileChange {
+            renamed: true,
+            hunks: vec![],
+        };
+        assert!(!fc.overlaps(1, 10_000));
+    }
 }
