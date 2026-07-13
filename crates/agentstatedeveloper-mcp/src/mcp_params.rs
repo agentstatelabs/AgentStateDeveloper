@@ -532,6 +532,24 @@ pub struct ReindexParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct SyncParams {
+    /// Project root to sync into (`.asd/v1/` is appended). Defaults to the
+    /// directory of the active db.
+    #[serde(default)]
+    pub dir: Option<String>,
+    /// Also remove orphaned sidecar files for symbols that no longer exist.
+    #[serde(default)]
+    pub prune: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct TestSummaryParams {
+    /// Raw test-runner output to summarize (cargo/pytest auto-detected; others
+    /// via a generic scan).
+    pub output: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct LedgerRebindParams {
     /// symbol_id of the old symbol whose ledger entries should be re-parented.
     pub from_symbol_id: String,

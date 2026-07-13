@@ -2361,7 +2361,7 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Re-parse a source file or directory and refresh the ASD symbol index, effects, and call graph. Accepts absolute or relative paths. Equivalent to running `asd index <path>` from the CLI. After indexing, run `asd sync --prune` (or the pre-commit hook does it automatically) to flush the updated state into the .asd/v1/ sidecar so it travels with the next git commit."
+        description = "Re-parse a source file or directory and refresh the ASD symbol index, effects, and call graph. Accepts absolute or relative paths. Equivalent to running `asd index <path>` from the CLI. After indexing, call the `sync` tool (or the pre-commit hook runs `asd sync --prune` automatically) to flush the updated state into the .asd/v1/ sidecar so it travels with the next git commit."
     )]
     async fn reindex(&self, params: Parameters<ReindexParams>) -> String {
         let p = params.0;
@@ -2396,6 +2396,60 @@ impl AsdMcpServer {
             .to_string(),
             Err(e) => err_json(&e.to_string()),
         }
+    }
+
+    #[tool(
+        description = "Flush live ASG state (symbols, effects, ledger, rebinds) into the `.asd/v1/` sidecar so it travels with the next `git commit`. CALL THIS after `reindex` (or edits) so committed state stays current — the reindex tool tells you to. `prune` also drops orphaned sidecar files for symbols that no longer exist. `dir` defaults to the active db's directory. (CLI: `asd sync [--prune]`.)"
+    )]
+    async fn sync(&self, params: Parameters<SyncParams>) -> String {
+        let p = params.0;
+        let dir = match p.dir {
+            Some(d) => std::path::PathBuf::from(d),
+            None => std::path::PathBuf::from(&self.db_path())
+                .parent()
+                .map(|d| d.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from(".")),
+        };
+        let engine = self.engine.lock().await;
+        match agentstatedeveloper_core::sync_to_dir(&engine.repo, &engine.ref_name, &dir) {
+            Ok(mut summary) => {
+                if p.prune {
+                    summary.pruned = agentstatedeveloper_core::prune_sidecar(
+                        &engine.repo,
+                        &engine.ref_name,
+                        &dir,
+                    )
+                    .unwrap_or(0);
+                }
+                serde_json::json!({
+                    "symbols_written": summary.symbols_written,
+                    "effects_written": summary.effects_written,
+                    "ledger_entries_written": summary.ledger_entries_written,
+                    "rebinds_synced": summary.rebinds_synced,
+                    "pruned": summary.pruned,
+                    "schema_version": summary.schema_version,
+                })
+                .to_string()
+            }
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Summarize raw test-runner output into a compact, failures-only report: { runner, passed, failed, failures[] }. Cargo and pytest are parsed precisely; other runners via a generic scan. CALL THIS WHEN you've run a test suite and want just the failures (with names + detail) instead of scrolling thousands of lines of passing output. Pass the raw output as `output`. (CLI: `cargo test 2>&1 | asd test-summary`.)"
+    )]
+    async fn test_summary(&self, params: Parameters<TestSummaryParams>) -> String {
+        let s = agentstatedeveloper_core::test_summary::summarize(&params.0.output);
+        serde_json::json!({
+            "runner": s.runner,
+            "passed": s.passed,
+            "failed": s.failed,
+            "failures": s.failures.iter().map(|f| serde_json::json!({
+                "name": f.name,
+                "detail": f.detail,
+            })).collect::<Vec<_>>(),
+        })
+        .to_string()
     }
 
     #[tool(
@@ -6198,6 +6252,18 @@ mod tool_name_regression {
         assert!(
             AsdMcpServer::tool_router().has_route("references"),
             "expected `references` MCP tool to be registered"
+        );
+    }
+
+    #[test]
+    fn sync_and_test_summary_tools_are_registered() {
+        // Added so agents can flush the sidecar (the reindex tool points here)
+        // and summarize test output over MCP, not just the CLI.
+        let r = AsdMcpServer::tool_router();
+        assert!(r.has_route("sync"), "expected `sync` MCP tool registered");
+        assert!(
+            r.has_route("test_summary"),
+            "expected `test_summary` MCP tool registered"
         );
     }
 
