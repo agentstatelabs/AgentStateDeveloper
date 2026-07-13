@@ -78,12 +78,16 @@ pub struct PrepareChangeArgs {
     #[arg(long, default_value = "8000")]
     pub agent_budget: usize,
 
-    /// Comma-separated terms to exclude. Also supports inline minus-prefix
-    /// syntax in the description, e.g. "drift playhead -sample -waveform".
-    #[arg(long)]
+    /// Comma-separated terms to exclude (alias: --avoid). Fights lexical
+    /// over-matching, e.g. --avoid MIDI when "connect" pulls in MIDI code. Also
+    /// supports inline minus-prefix syntax in the description, e.g. "drift
+    /// playhead -sample -waveform".
+    #[arg(long, visible_alias = "avoid")]
     pub exclude: Option<String>,
 
-    /// Comma-separated glob patterns to restrict results to specific paths.
+    /// Comma-separated glob patterns to restrict results to specific paths,
+    /// e.g. --paths 'ExampleFlowCore/*Bus*'. This is the path-scope hint; use
+    /// --scope for a named alias from .asd/scopes.toml.
     #[arg(long)]
     pub paths: Option<String>,
 
