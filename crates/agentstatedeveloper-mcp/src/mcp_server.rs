@@ -103,7 +103,7 @@ impl AsdMcpServer {
     // -- Read tools --
 
     #[tool(
-        description = "Health check: reports MCP server status, ASG db path, indexed symbol count, and total artifact counts (symbols + ledger entries + effects)."
+        description = "Liveness check for the MCP server: reports server status, ASG db path, indexed symbol count, and total artifact counts (symbols + ledger + effects). CALL THIS WHEN you need to confirm the ASD server is reachable and pointed at a db. For index freshness / dirty files / concept gaps use `status`; for a single go/no-go reliability score before relying on ASD use `trust`. Takes no params."
     )]
     async fn health(&self) -> String {
         let engine = self.engine.lock().await;
@@ -226,7 +226,7 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Cross-service endpoints (HTTP routes/clients, pub-sub) detected in this repo, plus the in-repo matched edges (a client call and a server route in THIS repo sharing a contract). Cross-repo matching is a Team-tier feature. (CLI: `asd endpoints`.)"
+        description = "List cross-service endpoints (HTTP routes/clients, pub-sub) detected in this repo, plus in-repo matched edges (a client call and a server route sharing a contract). CALL THIS WHEN mapping how services talk to each other or auditing API surface before a contract change — an unmatched client edge is a candidate contract-drift signal. Cross-repo matching is a Team-tier feature. (CLI: `asd endpoints`.)"
     )]
     async fn endpoints(&self) -> String {
         let engine = self.engine.lock().await;
@@ -235,7 +235,7 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Query indexed symbols. Filters (all optional, AND-combined): name_contains, kind, language. Returns up to `limit` symbol summaries. (CLI: `asd search` covers the search variant.)"
+        description = "Look up indexed symbols by exact structured filters — `name_contains` (substring on qualified name), `kind`, `language` — AND-combined. CALL THIS WHEN you already know part of a symbol's name or want to enumerate all symbols of a kind/language, and do NOT need relevance ranking. For concept/keyword discovery ('auth flow', 'export pipeline') use `code_search`; for exact-identifier occurrences use `references`. Returns up to `limit` (default 50) symbol summaries. (CLI: `asd search` with filters.)"
     )]
     async fn code_query(&self, params: Parameters<CodeQueryParams>) -> String {
         let p = params.0;
@@ -284,7 +284,7 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Ranked concept search over indexed symbols using FTS5/BM25. Returns symbols sorted by relevance. Use this when you need to discover entry points for a feature or concept — 'playhead over clips', 'auth flow', 'export pipeline', etc. (CLI: `asd search`.)"
+        description = "Ranked concept search over indexed symbols (FTS5/BM25). CALL THIS WHEN discovering entry points for a feature or concept ('playhead over clips', 'auth flow'). For structured name/kind filters use `code_query`; for exact identifier matches use `references`. Supports inline exclusion syntax ('drift playhead -sample'). (CLI: `asd search`.)"
     )]
     async fn code_search(&self, params: Parameters<CodeSearchParams>) -> String {
         let p = params.0;
@@ -726,7 +726,7 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Plan C t-004: classify test-tier symbols matching a query into migration actions (Delete / Gate / Run / KeepAsCovered / Review) based on their role-tagged ledger entries. Replaces a raw symbol list with a structured action plan. (CLI: `asd recipe classify-test-migration`.)"
+        description = "Classify test-tier symbols matching a query into migration actions — Delete / Gate / Run / KeepAsCovered / Review — from their role-tagged ledger entries. CALL THIS WHEN you have a batch of stale/uncertain tests and want a structured action plan instead of a raw symbol list. For stale test FILES that may need moving, use `recipe_migrate_stale_tests`. Params: `query`, `limit` (default 50). (CLI: `asd recipe classify-test-migration`.)"
     )]
     async fn recipe_classify_test_migration(
         &self,
@@ -766,7 +766,7 @@ impl AsdMcpServer {
     // -- Plan G t-003: agent-thinking handlers -----------------------------
 
     #[tool(
-        description = "Plan G t-003: record a Hypothesis (speculation with confidence in [0.0, 1.0]). Below 0.3 is excluded from prepare-change/context-for prior_thinking by default. Idempotent — same (qname, summary) re-records over the previous entry. (CLI: `asd think speculate`.)"
+        description = "Record a Hypothesis about a symbol — a hunch with a `confidence` in [0.0, 1.0]. CALL THIS WHEN you form a theory you're not yet sure of ('this cache is probably the drift source'); marks below 0.3 are hidden from prepare_change/context_for prior-thinking by default. Idempotent per (qname, summary). (CLI: `asd think speculate`.)"
     )]
     async fn think_speculate(&self, params: Parameters<ThinkSpeculateParams>) -> String {
         let p = params.0;
@@ -809,7 +809,7 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Plan G t-003: record a MentalModel (multi-symbol structural understanding). Anchored on the FIRST symbol in `symbols`. Body carries the full symbols[] list. Idempotent by (name, summary). (CLI: `asd think model`.)"
+        description = "Record a MentalModel — a multi-symbol structural understanding spanning several qnames (anchored on the FIRST symbol in `symbols`; body carries the full list). CALL THIS WHEN you've worked out how a set of symbols fit together and want the next agent to inherit that map. Idempotent by (name, summary). (CLI: `asd think model`.)"
     )]
     async fn think_model(&self, params: Parameters<ThinkModelParams>) -> String {
         let p = params.0;
@@ -855,7 +855,7 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Plan G t-003: record a FailedAttempt (negative evidence — what was tried + why it didn't work). Saves the next session from re-treading. Idempotent by (qname, tried). (CLI: `asd think failed`.)"
+        description = "Record a FailedAttempt — what you tried and why it didn't work. CALL THIS WHEN an approach fails, so the next session doesn't re-tread it. Idempotent by (qname, tried). (CLI: `asd think failed`.)"
     )]
     async fn think_failed(&self, params: Parameters<ThinkFailedParams>) -> String {
         let p = params.0;
@@ -892,7 +892,7 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Plan G t-003: record an OpenQuestion (known unknown blocking confident action). Be generous — every question recorded is one the next session doesn't have to re-ask. Idempotent by (qname, question). (CLI: `asd think question`.)"
+        description = "Record an OpenQuestion — a known unknown blocking confident action. CALL THIS WHEN you hit something you can't resolve now; be generous, every recorded question is one the next session won't have to re-ask. Idempotent by (qname, question). (CLI: `asd think question`.)"
     )]
     async fn think_question(&self, params: Parameters<ThinkQuestionParams>) -> String {
         let p = params.0;
@@ -927,7 +927,7 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Plan G t-003: list captured thinking entries (Hypothesis/MentalModel/FailedAttempt/OpenQuestion). Optional kind filter: hypothesis | mental_model | failed_attempt | open_question. (CLI: `asd think list`.)"
+        description = "List captured thinking entries (Hypothesis / MentalModel / FailedAttempt / OpenQuestion). CALL THIS WHEN resuming work on an area to see what prior sessions concluded or got stuck on. Optional `kind` filter (hypothesis | mental_model | failed_attempt | open_question) and `symbol` filter. (CLI: `asd think list`.)"
     )]
     async fn think_list(&self, params: Parameters<ThinkListParams>) -> String {
         let p = params.0;
@@ -1001,7 +1001,7 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Plan F t-002: build a migration plan for stale test files. Returns the same shape as recipe_classify_test_migration but adds a Move action when a Mapping ledger entry carries a `move_to` path in its body. Otherwise falls back to the classify decision tree. (CLI: `asd recipe migrate-stale-tests`.)"
+        description = "Build a migration plan for stale test files. Same output shape as `recipe_classify_test_migration` but adds a Move action when a Mapping ledger entry carries a `move_to` path; otherwise falls back to the classify decision tree. CALL THIS WHEN reorganizing test files after a rename/move. Params: `query`, `limit`. (CLI: `asd recipe migrate-stale-tests`.)"
     )]
     async fn recipe_migrate_stale_tests(
         &self,
@@ -1132,7 +1132,7 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Feature archaeology in one pass: FTS5 search for entry points, then expand each with call chains, effects, invariants, and hazards. Use this at the start of any broad investigation — 'playhead over clips', 'auth flow', 'export pipeline', etc."
+        description = "Feature archaeology in one pass: search for entry points, then expand each with call chains, effects, invariants, and hazards. CALL THIS WHEN you need to UNDERSTAND how a feature works before touching it. Differs from siblings: `code_search` only returns a ranked symbol list (no expansion); `prepare_change` is the same expansion PLUS impact + a pre-edit checklist and is the right first call when you intend to EDIT. Supports `intent` (bugfix/feature/refactor/…), `scope`/`paths` narrowing, and inline exclusion syntax."
     )]
     async fn investigate(&self, params: Parameters<InvestigateParams>) -> String {
         let p = params.0;
@@ -1374,7 +1374,7 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Read a symbol by qname. Returns { symbol, effects, ledger } — full context needed to reason about the code unit. (CLI: `asd read`.)"
+        description = "Read a symbol by qname. Returns { symbol, effects, ledger } — its signature, effects, and ledger decisions. CALL THIS WHEN you need one symbol's definition, effects, and ledger. For DEEP context on one or more symbols (callers/callees, covering tests, ownership discovery, token-budgeted) use `context_for` instead. (CLI: `asd read`.)"
     )]
     async fn code_read(&self, params: Parameters<CodeReadParams>) -> String {
         let p = params.0;
@@ -1427,7 +1427,7 @@ impl AsdMcpServer {
         serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())
     }
 
-    #[tool(description = "Return declared + transitive effects for a symbol (resolved via qname).")]
+    #[tool(description = "Return the declared + transitively-inherited side effects for a symbol (I/O, network, filesystem, logging, mutation, etc.), resolved via qname. CALL THIS WHEN you need to know what a function touches before editing or before declaring your own effects. To check declared effects against what the source actually does use `verify_effects`; to change them use `effect_declare`. Requires `qname`. (MCP-only — no CLI verb.)")]
     async fn effects(&self, params: Parameters<EffectsOfParams>) -> String {
         let p = params.0;
         let engine = self.engine.lock().await;
@@ -1548,7 +1548,7 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Search ledger entries across all symbols. Filters (all optional): kind, tag, author_id. O(n) scan — v1 simplicity."
+        description = "Search ledger entries across ALL symbols by optional filters: `kind`, `tag`, `author_id`. CALL THIS WHEN you want conclusions/decisions/hazards matching a criterion without knowing which symbol they hang on. To read one symbol's ledger use `ledger_get`. Returns up to `limit` (default 50). (MCP-only — CLI reads go through `asd list` / `asd read`.)"
     )]
     async fn ledger_find(&self, params: Parameters<LedgerFindParams>) -> String {
         let p = params.0;
@@ -3345,7 +3345,7 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Pre-edit checklist for a query: files to inspect, invariants to preserve, tests to run, known hazards, and effects to verify. Returns structured JSON. Use this before any code edit to get a focused action list."
+        description = "Pre-edit checklist for a query: files to inspect, invariants to preserve, tests to run, known hazards, effects to verify (structured JSON). CALL THIS WHEN you want just the action list for a change described in words. For the fuller package (this checklist + entry points + likely edit files + blast radius) use `prepare_change`; if you already know the exact symbol you're changing, use `impact`. Takes a free-text `query` (not a qname)."
     )]
     async fn checklist(&self, params: Parameters<ChecklistParams>) -> String {
         let p = params.0;
@@ -3661,7 +3661,7 @@ impl AsdMcpServer {
     }
 
     #[tool(
-        description = "Blast-radius analysis for a symbol before editing. Returns transitive callers (up to depth), aggregated effects, invariants/hazards from all callers, affected test symbols, and recent git touches per file. Use this before any code change to understand scope."
+        description = "Blast-radius analysis for ONE known symbol before editing it: transitive callers (to `depth`), aggregated effects, invariants/hazards from all callers, affected tests, recent git touches. CALL THIS WHEN you already have the exact `qname` you intend to change. If you only have a description of the change (no symbol name), use `checklist` or `prepare_change`; for a diff/PR use `since`. Requires `qname`."
     )]
     async fn impact(&self, params: Parameters<ImpactParams>) -> String {
         let p = params.0;
@@ -5215,7 +5215,7 @@ impl AsdMcpServer {
     // -----------------------------------------------------------------------
 
     #[tool(
-        description = "Workspace index health: symbol count, index age, sidecar state, dirty files, concept gaps, and State Trust Score."
+        description = "Workspace index health: symbol count, index age, sidecar state, dirty source files, concept gaps, and the State Trust Score. CALL THIS WHEN deciding whether the index is fresh enough to trust, or to see which files changed since the last commit (`show_dirty=true`). Lighter alternatives: `health` for bare server liveness, `trust` for just the rollup score + blocking flag. (CLI: `asd status`.)"
     )]
     async fn status(&self, params: Parameters<StatusParams>) -> String {
         let p = params.0;
