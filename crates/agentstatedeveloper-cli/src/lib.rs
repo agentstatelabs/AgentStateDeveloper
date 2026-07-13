@@ -78,6 +78,16 @@ Daily loop:
   asd impact <symbol>             # blast radius for a planned change
   asd ledger append ...           # record a decision / invariant / hazard
 
+Which command when (they overlap — pick by intent):
+  Cold repo, don't know the layout      -> asd architecture     (languages, layers, hotspots)
+  \"Where is the code that does X?\"       -> asd search \"X\"       (ranked symbols)
+  \"Explain feature X end-to-end\"         -> asd investigate X    (search + call chains + hazards)
+  About to edit — give me everything    -> asd prepare-change \"<task>\"  (one-call package)
+  I know the symbol; what breaks?       -> asd impact <symbol>           (blast radius)
+  Pre-edit safety checklist             -> asd checklist \"<task>\"
+  Reviewing a diff / PR                 -> asd since <base-sha>
+  Pull full context on named symbols    -> asd context-for a,b,c
+
 When source changes outside ASD's commit hooks, re-run `asd index <path>`
 to refresh the FTS cache. `asd status` will flag staleness if the index
 is more than an hour behind."
@@ -143,7 +153,10 @@ pub enum Command {
     #[command(subcommand)]
     Policy(commands::policy::PolicyCmd),
 
-    /// Verify declared effects for a symbol (M1: prints declared as unverified).
+    /// Verify a symbol's declared effects against its source. Reports each as
+    /// verified or unverified (unverified = source unreadable or no adapter for
+    /// that language). `--write` persists results. Use before trusting
+    /// `impact`'s effect set on a symbol you're about to edit.
     VerifyEffects(commands::verify_effects::VerifyEffectsArgs),
 
     /// Run a program under the ASD runtime tracer and ingest observed effects
@@ -278,16 +291,22 @@ pub enum Command {
     /// any symbol names upfront. Supports --agent, --intent, --depth.
     Since(commands::since::SinceArgs),
 
-    /// List cross-service endpoints (HTTP routes/clients, pub-sub) detected in
-    /// this repo, show in-repo matched edges, and `--export` a service manifest.
+    /// List cross-service endpoints (HTTP routes/clients, pub-sub) and match
+    /// in-repo client calls to the routes that serve them. A client call with NO
+    /// matching route is a candidate contract-drift signal (a caller reaching an
+    /// endpoint the server no longer serves). `--export` emits a service manifest
+    /// for cross-repo matching.
     Endpoints(commands::endpoints::EndpointsArgs),
 
     /// One-call "orient me" overview: languages, packages, layers, routes, and
     /// call-graph hotspots for a cold agent. Supports --agent.
     Architecture(commands::architecture::ArchitectureArgs),
 
-    /// Functions/methods with no inbound call edges (candidate dead code).
-    /// Excludes route handlers, tests, and main/dunder methods. Supports --agent.
+    /// Functions/methods with no inbound call edges (CANDIDATE dead code).
+    /// Excludes route handlers, tests, and main/dunder methods. Candidates only —
+    /// a symbol may still be reached via reflection, a framework entrypoint, or a
+    /// cross-language boundary the call graph doesn't span; confirm with
+    /// `asd references <name>` before deleting. Supports --agent.
     DeadCode(commands::dead_code::DeadCodeArgs),
 
     /// Read test-runner output on stdin; emit a compact failures-only summary
