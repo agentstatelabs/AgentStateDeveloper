@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/agentstatelabs/AgentStateDeveloper/
 ```
 
 Drops the three binaries in `~/.local/bin`. Optional overrides:
-`ASD_VERSION=v1.1.19`, `INSTALL_DIR=/usr/local/bin`.
+`ASD_VERSION=v1.2.0`, `INSTALL_DIR=/usr/local/bin`.
 
 ### Windows — PowerShell
 
@@ -280,13 +280,13 @@ count is always included in the JSON summary.
 
 ## Surfaces
 
-- **`asd`** — CLI: `init`, `index`, `read`, `ledger`, `policy`, `verify-effects`, `trace`, `sync`, `hydrate`, `audit`, `hooks`, `mcp`, `skill`, `bootstrap`, `watch`
-- **`asd-mcp`** — stdio MCP server exposing 60 tools to coding agents
+- **`asd`** — CLI: orientation (`architecture`, `search`, `trust`, `map`), change-prep (`prepare-change`, `impact`, `checklist`, `since`, `investigate`, `annotate-commit`, `task-close`, `test-summary`), the ledger (`ledger`, `invariant`, `conclusions`, `scratch`, `think`), and plumbing (`init`, `index`, `sync`, `audit`, `hooks`, `mcp`, `skill`, `watch`) — see [`asd --help`](docs/FEATURES.md) for the full set
+- **`asd-mcp`** — stdio MCP server exposing 63 tools to coding agents
 - **`asd-serve`** — HTTP server + Lens review UI
 
 ## MCP tools
 
-Agents access ASD through **60 MCP tools** spanning code search/read, the call
+Agents access ASD through **63 MCP tools** spanning code search/read, the call
 graph, orientation (`architecture`, `trust`, `endpoints`, `dead_code`), impact
 and change analysis, the decision ledger, invariants, effects, conclusions,
 scratch notes, agent thinking, feedback, and audit — e.g. `code_search`,

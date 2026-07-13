@@ -71,7 +71,7 @@ commands:
 | `asd context-for <symbol…>` | Assemble query context for one or more symbols: signature, callers/callees, effects, invariants, hazards, and ledger. |
 | `asd impact <symbol>` | **Blast-radius** analysis before an edit: transitive callers, aggregated effects, invariants/hazards, affected tests, and recent git touches. |
 | `asd checklist <symbol>` | A structured pre-edit checklist: files to inspect, invariants to preserve, tests to run, known hazards, effects to verify. |
-| `asd prepare-change` | The one-call agent context package for a planned change: design invariants, layer-grouped entry points, likely edit files, affected tests, effects, and recent git touches — composed into a single JSON response. |
+| `asd prepare-change <desc>` | The one-call agent context package for a planned change: design invariants, layer-grouped entry points, likely edit files, affected tests, effects, and recent git touches — composed into a single JSON response. Takes a free-form description + `--intent bugfix\|feature\|refactor\|test\|architecture\|ui`; narrow lexical over-matching with `--avoid <term>` (alias of `--exclude`), `--paths '<glob>'`, or a named `--scope` from `.asd/scopes.toml`. |
 | `asd since <sha>` | Symbols in files changed since a commit + combined blast radius. The PR-review path: pass a base SHA, get impact without knowing symbol names. |
 | `asd investigate <query>` | Broad feature archaeology: search → expand call chains, invariants, hazards, and effects for the top entry points in one pass. |
 | `asd endpoints` | List cross-service endpoints (HTTP routes/clients, pub-sub) detected in the repo, show matched in-repo edges, and `--export` a service manifest. Resolves nested/aliased/multi-mount router prefixes so a client call and a server route are keyed by the same full runtime contract. |
@@ -94,10 +94,11 @@ commands:
 | `asd conclusions` | View ledger entries bucketed by the six conclusion classes (decisions, classifications, mappings, hazards, recipes, followups); `export` / `import` drive the git sidecar. |
 | `asd scratch` | Working notes scoped to a symbol or investigation, with a promote-to-ledger path. Local-only; not synced. |
 | `asd think speculate/model/failed/question/list` | Capture agent thinking — hypotheses, mental models, failed attempts, open questions — so the next session inherits the reasoning, not just the result. |
-| `asd map` | Initial-read project summary: walk the index, identify package boundaries, tag test files, and write Ownership entries so the next session inherits the mental model. |
+| `asd map` (also MCP `map`) | Initial-read project summary: walk the index, identify package boundaries, tag test files, and **persist Ownership ledger entries** so the next session inherits the mental model. Unlike the read-only `architecture`, `map` writes — `--dry-run` previews without persisting. |
 | `asd recipe` | Structured change-intent recipes — per-file action plans (Delete / Gate / Run / KeepAsCovered / Review) for known task families. |
-| `asd annotate-commit` | Derive ledger annotations from a git commit (changed files + message → touched symbols) and suggest or record decisions, invariants, proofs, and hazards. |
+| `asd annotate-commit` | Derive ledger annotations from a git commit (changed files + message → touched symbols), splitting **directly-edited** symbols from **nearby/touched** ones, and suggest or record decisions, invariants, proofs, and hazards. |
 | `asd task-close` | Close an active task: write proof + validation entries for every symbol affected by HEAD, tagged with CTX plan/task provenance. |
+| `asd test-summary` (also MCP `test_summary`) | Read test-runner output on stdin and emit a compact, **failures-only** summary (cargo/pytest parsed precisely, others via generic scan) — feeds the agent just the failures instead of the full log. |
 | `asd feedback` | Record and list search-quality feedback verdicts for (query, symbol) pairs — the signal that tunes ranking. |
 
 ### Effects, policy & audit
@@ -149,7 +150,8 @@ with other servers). The canonical CLI↔MCP mapping is in
 - **Read & orient:** `health`, `code_search` / `code_query`, `code_read`,
   `references`, `callers`, `callees`, `effects`, `context_for`, `impact`,
   `prepare_change`, `since`, `investigate`, `architecture`, `trust`,
-  `endpoints`, `dead_code`, `status`, `scorecard`, `traces`, `scopes_list`.
+  `endpoints`, `dead_code`, `status`, `scorecard`, `traces`, `scopes_list`,
+  `test_summary`.
 - **Ledger & judgment:** `ledger_get`, `ledger_find`, `ledger_append`,
   `ledger_approve`, `ledger_reject`, `ledger_withdraw`, `ledger_supersede`,
   `ledger_rebind`, `invariant_add`, `invariant_list`, `effect_declare`,
@@ -159,7 +161,7 @@ with other servers). The canonical CLI↔MCP mapping is in
   `think_question`, `think_list`, `scratch_*`.
 - **Sidecar & audit:** `conclusions_export` / `conclusions_import` /
   `conclusions_list`, `audit_tail`, `audit_verify`, `annotate_commit`,
-  `task_close`, `reindex`.
+  `map`, `task_close`, `reindex`, `sync`.
 - **Recipes:** `recipe_classify_test_migration`,
   `recipe_migrate_stale_tests`.
 

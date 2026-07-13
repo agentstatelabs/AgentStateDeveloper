@@ -56,8 +56,8 @@ ASD is a Rust workspace. From the bottom up:
   A cross-language **conformance** crate holds them to one contract (see
   the conformance matrix).
 - **Surfaces** (`cli`, `mcp`, `serve`) are thin — they parse input and call
-  core. `audit-pro`, `ratify`, and `pro` are the commercial crates that
-  layer governance and ratification on top without forking the core.
+  core. This public repo builds **core-only**; any commercial governance /
+  ratification layers live outside it and compose on top without forking core.
 
 ---
 

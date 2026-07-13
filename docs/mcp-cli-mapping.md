@@ -31,6 +31,7 @@ namespace hygiene or CLI ergonomics. This document is the canonical map.
 | `health` | (MCP-only — HTTP healthcheck) |
 | `impact` | `asd impact` |
 | `investigate` | `asd investigate` |
+| `map` | `asd map` |
 | `prepare_change` | `asd prepare-change` |
 | `recipe_classify_test_migration` | `asd recipe classify-test-migration` |
 | `recipe_migrate_stale_tests` | `asd recipe migrate-stale-tests` |
@@ -41,7 +42,9 @@ namespace hygiene or CLI ergonomics. This document is the canonical map.
 | `search` | `asd search` |
 | `since` | `asd since` |
 | `status` | `asd status` |
+| `sync` | `asd sync` |
 | `task_close` | `asd task-close` |
+| `test_summary` | `asd test-summary` |
 | `traces` | (MCP-only — execution traces) |
 | `trust` | `asd trust` |
 | `verify_effects` | `asd verify-effects` |

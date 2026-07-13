@@ -5,6 +5,76 @@ Versions use semantic versioning; each milestone increments by 0.0.5.
 
 ---
 
+## [Unreleased] — post-1.2.0
+
+Work landed on `main` since the v1.2.0 tag (Plans T–V + workflow hardening).
+
+### Added — agent-workflow surface
+
+- **New MCP tools** `map`, `sync`, `test_summary` — bringing the MCP surface to
+  **63 tools**. `map` (also `asd map`) persists Ownership ledger entries on
+  initial read (contrast the read-only `architecture`); `test_summary`
+  (`asd test-summary`) emits a failures-only summary of test-runner output.
+- `asd prepare-change` gains an `--avoid` alias (for `--exclude`) plus documented
+  `--paths` / `--scope` hints to fight lexical over-matching.
+- `asd annotate-commit` splits **directly-edited** symbols from **nearby/touched**
+  ones when deriving ledger annotations from a commit.
+- Agent-discoverability polish across the CLI help and MCP tool descriptions.
+
+### Added — Lens (asd-serve) review UI, Plan T
+
+- `/territory`, `/activity` (live accountability), and the approvals / `/graph` /
+  `/effects` pages; symbol-detail and `/code/*` render from `@agentstate/lens-core`;
+  dark-first visual identity.
+
+### Performance
+
+- P0 bulk-read swaps + hydrate cache population + startup self-heal.
+- `/callers`, `/callees`, `/graph` cut from minutes to <100ms (head-keyed
+  id/edge memos); single-pass `/api/v1/symbols` and `/thinking` from minutes to
+  ~2s at 10k symbols.
+
+### Fixed
+
+- `conclusions import` now round-trips thinking entries and confidence (was
+  silent data loss).
+
+## [1.2.0] — 2026-07-06 — cross-service edges, federation & Lens backend
+
+Consolidates the 1.0.24 → 1.2.0 arc (tags 1.0.44 / 1.0.48 / 1.1.15–1.1.23,
+which shipped without individual entries). Headlines:
+
+### Added — cross-service & cross-repo intelligence
+
+- **Cross-service edge detection across 9 languages** (HTTP + pub-sub):
+  Python (FastAPI/Flask, incl. intra-file / mount-tree / alias-keyed /
+  multi-mount router-prefix resolution), TypeScript/JS, Go, Java/Spring,
+  C#/ASP.NET, Ruby (Sinatra/Rails), Kotlin (Spring + Ktor), Swift (Vapor),
+  and Celery pub-sub. `asd endpoints` keys client calls and server routes by
+  the same normalized contract, so unmatched consumers surface contract drift.
+- **Federation** (Plan Q): decision-aware `asd repo impact` and cross-repo
+  service-edge matching via `asd repo edges`; coherent active-repo resolution
+  and `asd mcp --follow-active`.
+- **Edge-confidence** model (EdgeEvidence) surfaced in `context_for`.
+
+### Added — MCP surface & onboarding
+
+- New MCP tools `trust`, `architecture`, `endpoints`, `dead_code`.
+- `asd skill` (version-stamped SKILL.md install, downgrade refusal, suite
+  detection), `asd bootstrap` (paste-to-your-agent installer), `asd watch`
+  (auto-reindex on source changes).
+- More agent integrations: Kilo Code, Antigravity, Aider, JSONC config support;
+  `asd mcp instructions` / `asd mcp install --project`; non-blocking Claude Code
+  hook.
+
+### Added — Lens backend & conformance
+
+- Lens read APIs (search, graph, effects overview, timeline) and the
+  `/api/v1/events` SSE live-activity stream; `@agentstate/lens-core` as a file dep.
+- Cross-language capability matrix + contract tests; tier-2 conformance realism
+  over real source trees; adapter network-effect detection fixes.
+- `asd scorecard` internal token-economy estimate.
+
 ## [1.0.23] — 2026-06-02 — Plan G complete (agent-thinking layer)
 
 ASD now persists the agent's *thinking* — speculation, mental models,

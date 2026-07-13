@@ -79,9 +79,11 @@ asd search "charge card"    # find the relevant symbols by concept
 
 **b. Scope the change before editing.**
 ```bash
-asd prepare-change --intent "add idempotency key to card charges"
+asd prepare-change "add idempotency key to card charges" --intent feature
 # → invariants to preserve, likely edit files, affected tests,
 #   aggregated effects, recent git touches — one JSON package.
+#   (--intent takes bugfix|feature|refactor|test|architecture|ui; narrow the
+#    search with --avoid <term> or --paths '<glob>' when it over-matches.)
 asd impact payments.chargeCard   # blast radius for a specific symbol
 ```
 This is the highest-value moment: the agent sees the invariants and hazards
