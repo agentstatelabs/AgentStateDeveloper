@@ -1916,7 +1916,7 @@ Three highest-leverage levers. If only Wave 1 lands, ASD has
 already cleared the friction bar graphify cleared with 60k stars.
 
 - **t-001 Frictionless distribution**: macOS + Linux prebuilt
-  binaries, Homebrew tap (`brew install AgentStateLabs/tap/asd`),
+  binaries, Homebrew tap (`brew install agentstatelabs/agentstatedeveloper/asd`),
   curl-pipe installer that detects platform and grabs the right
   binary. CTXone has the curl|sh installer; mirror that pattern
   and add a tap. Kill the `cargo install --path` precondition for

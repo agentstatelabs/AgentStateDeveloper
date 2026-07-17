@@ -5,14 +5,12 @@ Releases are built locally (no CI minutes burned). The one-command flow is
 
 ## What ships where
 
-- **Source:** `github.com/agentstatelabs/agentstatedeveloper`
-  → mirrored to `github.com/agentstatelabs/agentstatedeveloper` (read-only).
+- **Source:** `github.com/agentstatelabs/AgentStateDeveloper`.
 - **Release artifacts:**
   `github.com/agentstatelabs/agentstatedeveloper-releases/releases`
   (a tarball per target, plus a release entry per version).
 - **Homebrew tap:**
-  `github.com/agentstatelabs/homebrew-agentstatedeveloper`
-  → mirrored to `github.com/agentstatelabs/homebrew-agentstatedeveloper`.
+  `github.com/agentstatelabs/homebrew-agentstatedeveloper`.
   End-user command:
   `brew tap agentstatelabs/agentstatedeveloper && brew install asd`.
 

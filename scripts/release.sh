@@ -56,9 +56,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TAP_ROOT="$(cd "$REPO_ROOT/../homebrew-agentstatedeveloper" 2>/dev/null && pwd || \
             cd "$REPO_ROOT/../../homebrew-agentstatedeveloper" 2>/dev/null && pwd || \
-            echo "$HOME/Documents/AgentStateLabs/Apps/homebrew-agentstatedeveloper")"
+            echo "$HOME/homebrew-agentstatedeveloper")"
 RELEASE_REPO="agentstatelabs/agentstatedeveloper-releases"
-TAP_GITLAB="https://github.com/agentstatelabs/homebrew-agentstatedeveloper.git"
+TAP_REMOTE="https://github.com/agentstatelabs/homebrew-agentstatedeveloper.git"
 
 ALL_TARGETS=(
   aarch64-apple-darwin
@@ -188,7 +188,7 @@ if [[ "${SKIP_FORMULA:-0}" == "1" ]]; then
 fi
 
 step "update tap formula"
-[[ -d "$TAP_ROOT" ]] || fail "tap clone not at $TAP_ROOT — clone it: \`git clone $TAP_GITLAB $TAP_ROOT\`"
+[[ -d "$TAP_ROOT" ]] || fail "tap clone not at $TAP_ROOT — clone it: \`git clone $TAP_REMOTE $TAP_ROOT\`"
 
 cd "$TAP_ROOT"
 git pull --ff-only origin main >/dev/null 2>&1 || true

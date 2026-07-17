@@ -23,7 +23,7 @@ edition = "2024"
 authors = ["Craig Brown"]
 license = "BSL-1.1"
 description = "AgentStateDeveloper — code-level context and audit overlay for agent-authored code"
-repository = "https://github.com/agentstatelabs/agentstatedeveloper"
+repository = "https://github.com/agentstatelabs/AgentStateDeveloper"
 
 [workspace.dependencies]
 # ASG family — git deps pinned to an ASG release tag (canonical: bump tag deliberately)
@@ -67,8 +67,8 @@ agentstatedeveloper-kotlin = { path = "crates/agentstatedeveloper-kotlin" }
 agentstatedeveloper-swift = { path = "crates/agentstatedeveloper-swift" }
 agentstatedeveloper-adapters = { path = "crates/agentstatedeveloper-adapters" }
 # Shared agent-onboarding engine (suite-onboarding t-001). Git/tag dep like the
-# ASG family; CI's before_script rewrites github.com to the job
-# token. For local dev against a working copy, patch it back to a path.
+# ASG family, pinned to a public release tag. For local dev against a working
+# copy, patch it back to a path.
 agent-skillgen = { git = "https://github.com/agentstatelabs/agent-skillgen.git", tag = "v0.1.0" }
 agentstatedeveloper-cli = { path = "crates/agentstatedeveloper-cli" }
 agentstatedeveloper-mcp = { path = "crates/agentstatedeveloper-mcp" }

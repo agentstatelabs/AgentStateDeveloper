@@ -85,28 +85,6 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
 
-      # The workspace pulls `agentstategraph` from the private GitLab
-      # origin via a tagged git dep. GitHub runners can't reach that
-      # host without credentials. The GitLab side handles this with
-      # CI_JOB_TOKEN inside .gitlab-ci.yml; on GitHub we need an
-      # external PAT exposed as the GITLAB_TOKEN secret. The token
-      # only needs `read_repository` scope on the agentstategraph project.
-      - name: configure github.com auth
-        shell: bash
-        env:
-          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-        run: |
-          if [ -z "${GITLAB_TOKEN}" ]; then
-            echo "::error::GITLAB_TOKEN secret is unset — cargo will fail to fetch the agentstategraph git dep from private GitLab."
-            exit 1
-          fi
-          git config --global \
-            url."https://oauth2:${GITLAB_TOKEN}@github.com/".insteadOf \
-            "https://github.com/"
-          # Force cargo to shell out to git (which now has the rewrite),
-          # rather than using its built-in libgit2 transport.
-          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
-
       - name: build asd
         run: cargo build --release --locked --target ${{ matrix.target }} -p agentstatedeveloper-cli
 
