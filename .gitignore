@@ -42,3 +42,6 @@ site/package-lock.json
 .asd/cache/
 
 .leakscan.local
+
+# ASD derived log (absolute paths) — never publish
+.asd/index.log
