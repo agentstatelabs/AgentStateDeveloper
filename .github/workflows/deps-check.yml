@@ -1,0 +1,42 @@
+# TEMPORARY smoke test — verifies CI can resolve the private git deps
+# (agentstatelabs/agentstategraph, agentstatelabs/agent-skillgen) using the
+# DEPS_TOKEN secret. No build artifacts, no release, no tap changes.
+# DELETE this workflow once verified (or after the public flip).
+name: deps-check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fetch-deps:
+    name: resolve private git deps
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: check DEPS_TOKEN is present
+        env:
+          DEPS_TOKEN: ${{ secrets.DEPS_TOKEN }}
+        run: |
+          if [ -n "$DEPS_TOKEN" ]; then
+            echo "DEPS_TOKEN is set (length ${#DEPS_TOKEN})"
+          else
+            echo "::error::DEPS_TOKEN is NOT set on this repo"
+            exit 1
+          fi
+
+      - name: configure auth for private git deps
+        env:
+          DEPS_TOKEN: ${{ secrets.DEPS_TOKEN }}
+        run: |
+          git config --global \
+            url."https://x-access-token:${DEPS_TOKEN}@github.com/".insteadOf \
+            "https://github.com/"
+
+      - name: cargo fetch --locked (this is the real test)
+        run: cargo fetch --locked
+
+      - name: confirm the pinned dep commits resolved
+        run: |
+          grep -oE 'git\+https://github.com/agentstatelabs/[a-z-]+\.git\?tag=[^#]+#[0-9a-f]+' Cargo.lock | sort -u
+          echo "OK: private git deps resolved with --locked"
