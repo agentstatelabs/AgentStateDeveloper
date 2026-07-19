@@ -95,3 +95,18 @@ publish-github:
     - printf '%s' "$LEAKSCAN_LOCAL" > .leakscan.local
     - chmod +x scripts/leak-scan.sh scripts/publish-to-github.sh
     - ./scripts/publish-to-github.sh
+# ci-guard: guarantees a NON-EMPTY pipeline and fails loudly if the publish
+# prerequisites are missing. Without this, a mis-scoped publish job produces
+# no pipeline at all — silent, and easy to miss for days.
+ci-guard:
+  stage: build
+  image: alpine:latest
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  script:
+    - echo "pipeline ran for $CI_COMMIT_SHORT_SHA on $CI_COMMIT_BRANCH"
+    - |
+      if [ -z "$GITHUB_REPO" ]; then
+        echo "ERROR: GITHUB_REPO unset -> publish-github will NOT run"; exit 1
+      fi
+      echo "publish-github target: $GITHUB_REPO"
