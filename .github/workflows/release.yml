@@ -94,6 +94,7 @@ jobs:
       # DELETE THIS STEP (and the DEPS_TOKEN secret) after the public flip.
       # ---------------------------------------------------------------------
       - name: configure auth for private git deps (TEMPORARY)
+        shell: bash   # windows-latest defaults to PowerShell; this block is bash
         env:
           DEPS_TOKEN: ${{ secrets.DEPS_TOKEN }}
         run: |
