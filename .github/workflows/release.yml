@@ -1,27 +1,26 @@
-# Release workflow — Plan N t-001 (1.1.14)
+# Release workflow.
 #
-# Triggered on tag push (v*.*.*). Builds asd / asd-mcp / asd-serve for
-# four targets (mac arm64/x86_64, linux x86_64/arm64), packages each as
-# a tarball matching the existing v1.0.93 convention:
+# Builds asd / asd-mcp / asd-serve for FIVE targets — mac arm64/x86_64,
+# linux x86_64/arm64, and Windows x86_64 (.exe) — packaging each as:
 #
-#   asd-<TAG>-<TARGET>/{asd,asd-mcp,asd-serve}
+#   asd-<TAG>-<TARGET>/{asd,asd-mcp,asd-serve}[.exe]
 #   → asd-<TAG>-<TARGET>.tar.gz
 #
-# Publishes the four tarballs to the SEPARATE public mirror repo
-# `agentstatelabs/agentstatedeveloper-releases` using a PAT
-# (RELEASES_REPO_TOKEN). The source repo can stay private; only the
-# release assets are public.
+# TWO ways to run it:
+#   * workflow_dispatch ("Run workflow" button) — TEST build. Builds all
+#     five platforms and uploads the tarballs as downloadable artifacts.
+#     Does NOT publish a release and does NOT touch homebrew. Use this to
+#     verify a build before shipping.
+#   * push a v*.*.* tag — REAL release. Builds, then publishes the tarballs
+#     to agentstatelabs/agentstatedeveloper-releases (RELEASES_REPO_TOKEN),
+#     which fires homebrew-tap.yml to render + commit the formula.
 #
-# Pipeline: GitLab CI (.gitlab-ci.yml) builds/tests on push; mirror to
-# this GitHub repo for release; tag push fires this workflow; after
-# release publishes, homebrew-tap.yml renders + commits the formula.
+# Source repo can stay private; only the release assets are public. A plain
+# code push (no tag) triggers nothing here — it just syncs source.
 #
 # Required secret: RELEASES_REPO_TOKEN (PAT with `repo` write to
-# agentstatelabs/agentstatedeveloper-releases).
-#
-# Windows is intentionally NOT in the matrix today — the v1.0.93
-# baseline didn't include it and install.ps1 handles "no Windows
-# release yet" gracefully. Add a windows-latest entry when ready.
+# agentstatelabs/agentstatedeveloper-releases). For test builds while the
+# git deps are private, DEPS_TOKEN is also needed (see the TEMPORARY step).
 
 name: release
 
@@ -29,6 +28,7 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch: {}   # manual TEST build — builds all platforms, no publish
 
 env:
   RELEASES_REPO: agentstatelabs/agentstatedeveloper-releases
@@ -146,6 +146,10 @@ jobs:
   publish:
     name: publish to agentstatedeveloper-releases
     needs: build
+    # Only publish on a real tag push. workflow_dispatch = test build only:
+    # it produces downloadable artifacts but never creates a release or
+    # touches the homebrew tap.
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-22.04
     steps:
       - name: download all artifacts
