@@ -1,8 +1,8 @@
 //! Plan K t-005: integration tests for `asd onboard`.
 //!
 //! Each test spawns the asd binary against a temp directory so the
-//! end-to-end orchestration (init → index → conclusions import) is
-//! exercised the same way a real user would.
+//! end-to-end orchestration (init → index → conclusions import → mcp install)
+//! is exercised the same way a real user would.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -15,9 +15,16 @@ fn asd_bin() -> PathBuf {
 }
 
 fn run_onboard(dir: &std::path::Path) -> (bool, String, String) {
-    let out = Command::new(asd_bin())
-        .arg("onboard")
-        .arg("--no-hooks")
+    run_onboard_args(dir, &[])
+}
+
+fn run_onboard_args(dir: &std::path::Path, extra: &[&str]) -> (bool, String, String) {
+    let mut cmd = Command::new(asd_bin());
+    cmd.arg("onboard").arg("--no-hooks");
+    for a in extra {
+        cmd.arg(a);
+    }
+    let out = cmd
         .current_dir(dir)
         .output()
         .expect("spawn asd onboard");
@@ -53,10 +60,13 @@ fn onboard_on_fresh_project_succeeds_end_to_end() {
         ok,
         "asd onboard must exit 0 on fresh project; stderr:\n{stderr}"
     );
-    // Each of the three steps must have printed its banner.
+    // Each of the four steps must have printed its banner.
     assert!(
-        stderr.contains("[1/3]") && stderr.contains("[2/3]") && stderr.contains("[3/3]"),
-        "all three onboard steps must run; stderr:\n{stderr}"
+        stderr.contains("[1/4]")
+            && stderr.contains("[2/4]")
+            && stderr.contains("[3/4]")
+            && stderr.contains("[4/4]"),
+        "all four onboard steps must run; stderr:\n{stderr}"
     );
     // Init must have created the SQLite DB.
     assert!(
@@ -67,6 +77,47 @@ fn onboard_on_fresh_project_succeeds_end_to_end() {
     assert!(
         stderr.contains("1 symbol") || stderr.contains("symbols"),
         "index must report at least 1 symbol; stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn onboard_runs_mcp_step_by_default() {
+    // The MCP step is best-effort (warns if asd-mcp is absent) but must always
+    // run and never fail onboard. When asd-mcp IS present it writes a
+    // project-scoped .mcp.json into the repo.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    seed_minimal_python_project(tmp.path());
+
+    let (ok, _stdout, stderr) = run_onboard(tmp.path());
+    assert!(ok, "onboard must exit 0 even if MCP step warns; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("[4/4] asd mcp install"),
+        "MCP step must run by default; stderr:\n{stderr}"
+    );
+    // If registration succeeded (asd-mcp available), the project config exists.
+    // If it warned (asd-mcp absent), onboard still succeeded — both are fine.
+    let wrote_cfg = tmp.path().join(".mcp.json").is_file();
+    let warned = stderr.contains("MCP registration skipped");
+    assert!(
+        wrote_cfg || warned,
+        "MCP step must either write .mcp.json or warn; stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn onboard_no_mcp_skips_registration() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    seed_minimal_python_project(tmp.path());
+
+    let (ok, _stdout, stderr) = run_onboard_args(tmp.path(), &["--no-mcp"]);
+    assert!(ok, "onboard --no-mcp must succeed; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("[4/4] asd mcp install — skipped (--no-mcp)"),
+        "--no-mcp must skip registration; stderr:\n{stderr}"
+    );
+    assert!(
+        !tmp.path().join(".mcp.json").is_file(),
+        "--no-mcp must not write .mcp.json"
     );
 }
 
