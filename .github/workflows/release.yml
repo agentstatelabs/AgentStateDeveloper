@@ -19,8 +19,7 @@
 # code push (no tag) triggers nothing here — it just syncs source.
 #
 # Required secret: RELEASES_REPO_TOKEN (PAT with `repo` write to
-# agentstatelabs/agentstatedeveloper-releases). For test builds while the
-# git deps are private, DEPS_TOKEN is also needed (see the TEMPORARY step).
+# agentstatelabs/agentstatedeveloper-releases).
 
 name: release
 
@@ -86,7 +85,7 @@ jobs:
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
 
       # agentstategraph + agent-skillgen are public git deps now, so cargo
-      # fetches them anonymously — no DEPS_TOKEN / insteadOf auth step needed.
+      # fetches them anonymously — no auth step needed.
       # (Removed post-public-flip 2026-07-27.)
 
       - name: build asd

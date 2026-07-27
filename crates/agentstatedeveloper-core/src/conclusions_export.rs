@@ -1413,9 +1413,7 @@ mod tests {
             "led_rt_mm",
             "pipeline flows input -> mix -> out",
         );
-        mm.body = Some(
-            r#"{"symbols":["pkg.target","pkg.other"],"name":"audio-pipeline"}"#.into(),
-        );
+        mm.body = Some(r#"{"symbols":["pkg.target","pkg.other"],"name":"audio-pipeline"}"#.into());
         originals.push(mm);
 
         let mut fa = mk(
@@ -1447,7 +1445,11 @@ mod tests {
         map.body = Some(r#"{"from_qname":"a","to_qname":"b"}"#.into());
         originals.push(map);
         originals.push(mk(LedgerKind::Hazard, "led_rt_haz", "races under load"));
-        let mut val = mk(LedgerKind::ValidationScenario, "led_rt_val", "replay the file");
+        let mut val = mk(
+            LedgerKind::ValidationScenario,
+            "led_rt_val",
+            "replay the file",
+        );
         val.command = Some("cargo test -p core".into());
         originals.push(val);
         let mut fu = mk(LedgerKind::FollowUp, "led_rt_fu", "migrate diagnostics");
@@ -1485,8 +1487,7 @@ mod tests {
         // zero skips — including thinking.
         for r in &results {
             assert_eq!(
-                r.read,
-                r.imported,
+                r.read, r.imported,
                 "class `{}` must import everything it reads; got {r:?}",
                 r.class
             );
@@ -1512,10 +1513,8 @@ mod tests {
             .list_entries(&engine2.ref_name, "sym_order_test")
             .unwrap();
         assert_eq!(imported.len(), originals.len());
-        let by_id: std::collections::BTreeMap<String, &LedgerEntry> = imported
-            .iter()
-            .map(|e| (e.entry_id.clone(), e))
-            .collect();
+        let by_id: std::collections::BTreeMap<String, &LedgerEntry> =
+            imported.iter().map(|e| (e.entry_id.clone(), e)).collect();
         for orig in &originals {
             let got = by_id
                 .get(&orig.entry_id)
@@ -1587,8 +1586,7 @@ mod tests {
         export_all(&engine, tmp.path()).unwrap();
 
         // The serialized lines must carry the confidence field.
-        let thinking_body =
-            std::fs::read_to_string(tmp.path().join("thinking.jsonl")).unwrap();
+        let thinking_body = std::fs::read_to_string(tmp.path().join("thinking.jsonl")).unwrap();
         assert!(
             thinking_body.contains("\"confidence\":0.75"),
             "export must serialize confidence; got:\n{thinking_body}"

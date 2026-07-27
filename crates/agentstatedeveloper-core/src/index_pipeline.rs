@@ -717,8 +717,7 @@ pub fn run_index(
         // M59: build ledger_data map (symbol_id → (ledger_text, ledger_flags))
         // from the ledger tree so FTS rows carry denormalized summaries.
         // One get_tree call, no per-symbol git reads needed later.
-        let ledger_data: HashMap<String, (String, String)> =
-            build_ledger_fts_data(repo, ref_name);
+        let ledger_data: HashMap<String, (String, String)> = build_ledger_fts_data(repo, ref_name);
 
         let fts_ok = match SearchFtsDb::open(db) {
             Ok(fts) => {

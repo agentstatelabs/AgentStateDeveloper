@@ -10,11 +10,11 @@
 
 use std::path::PathBuf;
 
-use agentstategraph::CommitOptions;
-use agentstategraph_core::IntentCategory;
 use agentstatedeveloper_core::{
     AsgIndexStore, Engine, IndexStore, Position, Symbol, SymbolKind, paths,
 };
+use agentstategraph::CommitOptions;
+use agentstategraph_core::IntentCategory;
 
 fn unique_tempdir(tag: &str) -> PathBuf {
     let id = uuid::Uuid::new_v4().simple().to_string();
@@ -98,7 +98,10 @@ fn warm_caches_populates_symbol_edge_and_fts_caches() {
     assert!(fts.symbols_cached_for(&engine.ref_name));
     let id_map = fts.build_id_map_cached(&engine.ref_name);
     assert_eq!(id_map.len(), 2);
-    assert_eq!(id_map.get(&a.symbol_id).map(|s| s.qname.as_str()), Some("mod.func0"));
+    assert_eq!(
+        id_map.get(&a.symbol_id).map(|s| s.qname.as_str()),
+        Some("mod.func0")
+    );
     assert_eq!(fts.fts_symbol_row_count(), 2, "FTS rebuilt from git");
 
     // Cached edge reads agree with what was seeded.

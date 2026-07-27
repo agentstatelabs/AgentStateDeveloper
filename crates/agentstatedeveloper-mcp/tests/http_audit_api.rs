@@ -22,9 +22,14 @@ use tower::ServiceExt;
 ///   3. ledger.withdraw subject=e-3  secondary=sym-a   (agent:bot)
 fn write_fixture_log(path: &std::path::Path) {
     let events = vec![
-        AuditEvent::new(event_types::LEDGER_APPEND, "bot", "agent", "awaiting-approval")
-            .with_subject("e-1")
-            .with_secondary("sym-a"),
+        AuditEvent::new(
+            event_types::LEDGER_APPEND,
+            "bot",
+            "agent",
+            "awaiting-approval",
+        )
+        .with_subject("e-1")
+        .with_secondary("sym-a"),
         AuditEvent::new(event_types::LEDGER_APPROVE, "alice", "human", "approved")
             .with_subject("e-1")
             .with_secondary("sym-a"),
@@ -61,14 +66,18 @@ async fn get_body(app: axum::Router, uri: &str) -> (StatusCode, serde_json::Valu
         .unwrap();
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
-        serde_json::json!({"_raw": String::from_utf8_lossy(&bytes).to_string()})
-    });
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_else(
+        |_| serde_json::json!({"_raw": String::from_utf8_lossy(&bytes).to_string()}),
+    );
     (status, value)
 }
 
 fn tmp_log(tag: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("asd-audit-api-{}-{}.jsonl", tag, uuid::Uuid::new_v4()))
+    std::env::temp_dir().join(format!(
+        "asd-audit-api-{}-{}.jsonl",
+        tag,
+        uuid::Uuid::new_v4()
+    ))
 }
 
 #[tokio::test]
@@ -83,9 +92,7 @@ async fn audit_subject_filter_matches_subject_id() {
     let events = body["events"].as_array().expect("events array");
     assert_eq!(events.len(), 2, "append + approve name e-1, body={}", body);
     assert!(
-        events
-            .iter()
-            .all(|e| e["subject_id"] == "e-1"),
+        events.iter().all(|e| e["subject_id"] == "e-1"),
         "body={}",
         body
     );
@@ -93,7 +100,12 @@ async fn audit_subject_filter_matches_subject_id() {
         .iter()
         .map(|e| e["event_type"].as_str().unwrap())
         .collect();
-    assert_eq!(types, vec!["ledger.append", "ledger.approve"], "body={}", body);
+    assert_eq!(
+        types,
+        vec!["ledger.append", "ledger.approve"],
+        "body={}",
+        body
+    );
 }
 
 #[tokio::test]
@@ -122,8 +134,11 @@ async fn audit_subject_filter_composes_with_other_filters() {
     let app = router(path.clone()).await;
 
     // subject + event_type substring: only the approve of e-1.
-    let (status, body) =
-        get_body(app.clone(), "/api/v1/audit?subject=e-1&event_type=ledger.approve").await;
+    let (status, body) = get_body(
+        app.clone(),
+        "/api/v1/audit?subject=e-1&event_type=ledger.approve",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "body={}", body);
     let events = body["events"].as_array().unwrap();
     assert_eq!(events.len(), 1, "body={}", body);

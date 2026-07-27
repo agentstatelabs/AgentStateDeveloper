@@ -124,11 +124,7 @@ pub fn in_memory_score(
 /// lowercased ledger-summary text directly so bulk callers can supply
 /// it from one ledger-tree walk instead of a per-symbol `list_entries`
 /// read (Plan T scale finding).
-pub fn in_memory_score_with_text(
-    sym: &crate::Symbol,
-    tokens: &[String],
-    ledger_text: &str,
-) -> u32 {
+pub fn in_memory_score_with_text(sym: &crate::Symbol, tokens: &[String], ledger_text: &str) -> u32 {
     let qname_lower = sym.qname.to_lowercase();
     let sig_lower = sym.signature.as_deref().unwrap_or("").to_lowercase();
     let doc_lower = sym.doc.as_deref().unwrap_or("").to_lowercase();

@@ -165,7 +165,10 @@ async fn sse_emits_ledger_event_within_polling_window() {
     let (status, content_type, mut body) = connect_sse(app).await;
     assert_eq!(status, StatusCode::OK);
     assert!(
-        content_type.as_deref().unwrap_or("").starts_with("text/event-stream"),
+        content_type
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("text/event-stream"),
         "content-type={:?}",
         content_type
     );

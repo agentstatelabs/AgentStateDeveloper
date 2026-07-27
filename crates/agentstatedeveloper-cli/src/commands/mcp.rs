@@ -637,7 +637,11 @@ fn install(args: InstallArgs) -> Result<()> {
 
         eprintln!(
             "  asd {} {}",
-            if already { "updated in" } else { "installed to" },
+            if already {
+                "updated in"
+            } else {
+                "installed to"
+            },
             cfg_path.display()
         );
         eprintln!(
@@ -645,7 +649,9 @@ fn install(args: InstallArgs) -> Result<()> {
             db_opt
                 .as_ref()
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "(unset — server resolves this project by directory)".to_string())
+                .unwrap_or_else(
+                    || "(unset — server resolves this project by directory)".to_string()
+                )
         );
         eprintln!();
         eprintln!(

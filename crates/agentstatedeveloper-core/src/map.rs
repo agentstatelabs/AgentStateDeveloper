@@ -296,7 +296,10 @@ mod tests {
 
     #[test]
     fn test_file_role_classifies_filenames() {
-        assert_eq!(test_file_role("tests/fast_test.py"), Some(RoleTag::FastTest));
+        assert_eq!(
+            test_file_role("tests/fast_test.py"),
+            Some(RoleTag::FastTest)
+        );
         assert_eq!(
             test_file_role("tests/diagnostic_real_file_test.py"),
             Some(RoleTag::DiagnosticTest)
@@ -312,7 +315,11 @@ mod tests {
     fn body_looks_diagnostic_matches_session_drift_markers() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("foo_test.py");
-        std::fs::write(&path, "import subprocess\nsubprocess.run(['swift', 'test'])\n").unwrap();
+        std::fs::write(
+            &path,
+            "import subprocess\nsubprocess.run(['swift', 'test'])\n",
+        )
+        .unwrap();
         assert!(body_looks_diagnostic(path.to_str().unwrap()));
     }
 
@@ -326,7 +333,9 @@ mod tests {
 
     #[test]
     fn body_looks_diagnostic_false_for_missing_file() {
-        assert!(!body_looks_diagnostic("/nonexistent/path/that/cannot/exist.py"));
+        assert!(!body_looks_diagnostic(
+            "/nonexistent/path/that/cannot/exist.py"
+        ));
     }
 
     #[test]
@@ -339,7 +348,10 @@ mod tests {
             r#"{"task_id":"t-007","scope":["x/**"]}"#,
         )
         .unwrap();
-        assert_eq!(read_active_ctx_task_id(Some(tmp.path())).as_deref(), Some("t-007"));
+        assert_eq!(
+            read_active_ctx_task_id(Some(tmp.path())).as_deref(),
+            Some("t-007")
+        );
     }
 
     #[test]

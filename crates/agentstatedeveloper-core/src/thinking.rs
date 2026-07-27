@@ -493,7 +493,6 @@ mod tests {
         ledger.append_entry(&engine.ref_name, &entry, "t").unwrap();
     }
 
-
     #[test]
     fn bulk_gather_matches_per_qname_gather() {
         // gather_prior_thinking_all must be output-identical to the
@@ -515,8 +514,22 @@ mod tests {
         };
         index.put_symbol(&engine.ref_name, &sym2, "test").unwrap();
 
-        append(&engine, "sym_x", LedgerKind::Hypothesis, "likely rc", Some(0.8), None);
-        append(&engine, "sym_x", LedgerKind::Hypothesis, "below floor", Some(0.1), None);
+        append(
+            &engine,
+            "sym_x",
+            LedgerKind::Hypothesis,
+            "likely rc",
+            Some(0.8),
+            None,
+        );
+        append(
+            &engine,
+            "sym_x",
+            LedgerKind::Hypothesis,
+            "below floor",
+            Some(0.1),
+            None,
+        );
         append(
             &engine,
             "sym_y",
@@ -525,9 +538,23 @@ mod tests {
             None,
             Some(r#"{"tried":"lru","because":"stale reads"}"#),
         );
-        append(&engine, "sym_y", LedgerKind::OpenQuestion, "why flaky?", None, None);
+        append(
+            &engine,
+            "sym_y",
+            LedgerKind::OpenQuestion,
+            "why flaky?",
+            None,
+            None,
+        );
         // Non-thinking entries must not surface in either form.
-        append(&engine, "sym_x", LedgerKind::Decision, "use sqlite", None, None);
+        append(
+            &engine,
+            "sym_x",
+            LedgerKind::Decision,
+            "use sqlite",
+            None,
+            None,
+        );
 
         let per_qname = gather_prior_thinking(
             &engine,
@@ -537,14 +564,25 @@ mod tests {
         let bulk = gather_prior_thinking_all(&engine, DEFAULT_CONFIDENCE_FLOOR);
 
         assert_eq!(bulk.summary.scanned_qnames, 2);
-        assert_eq!(bulk.summary.matched_for_query, per_qname.summary.matched_for_query);
+        assert_eq!(
+            bulk.summary.matched_for_query,
+            per_qname.summary.matched_for_query
+        );
         assert_eq!(bulk.summary.surfaced, per_qname.summary.surfaced);
         assert_eq!(bulk.summary.by_kind, per_qname.summary.by_kind);
-        assert_eq!(bulk.summary.by_kind_dropped, per_qname.summary.by_kind_dropped);
+        assert_eq!(
+            bulk.summary.by_kind_dropped,
+            per_qname.summary.by_kind_dropped
+        );
 
         // Entry arrays must match as sets (bucket iteration order may
         // differ from the caller's qname order).
-        for key in ["hypotheses", "mental_models", "open_questions", "failed_attempts"] {
+        for key in [
+            "hypotheses",
+            "mental_models",
+            "open_questions",
+            "failed_attempts",
+        ] {
             let mut a: Vec<String> = per_qname.entries[key]
                 .as_array()
                 .map(|v| v.iter().map(|e| e.to_string()).collect())
@@ -596,9 +634,30 @@ mod tests {
         };
         index.put_symbol(&engine.ref_name, &sym3, "test").unwrap();
 
-        append(&engine, "sym_x", LedgerKind::Hypothesis, "h1", Some(0.8), None);
-        append(&engine, "sym_x", LedgerKind::Decision, "use sqlite", None, None);
-        append(&engine, "sym_y", LedgerKind::OpenQuestion, "why flaky?", None, None);
+        append(
+            &engine,
+            "sym_x",
+            LedgerKind::Hypothesis,
+            "h1",
+            Some(0.8),
+            None,
+        );
+        append(
+            &engine,
+            "sym_x",
+            LedgerKind::Decision,
+            "use sqlite",
+            None,
+            None,
+        );
+        append(
+            &engine,
+            "sym_y",
+            LedgerKind::OpenQuestion,
+            "why flaky?",
+            None,
+            None,
+        );
 
         // Per-qname reference implementation.
         let mut per_qname: Vec<(String, Vec<LedgerEntry>)> = Vec::new();

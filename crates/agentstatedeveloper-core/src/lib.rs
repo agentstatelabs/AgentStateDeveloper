@@ -57,13 +57,11 @@ pub use candidates::{
     detect_ambiguous_tokens, detect_confidence_warnings, detect_possible_misses,
     explain_feedback_impacts, explain_match, find_candidates, glob_match, in_memory_score,
     in_memory_score_with_text, in_memory_scored_symbols, kind_str, load_exclude_sets,
-    load_scope_aliases, matches_any_path_glob, parse_query,
-    query_tokens, resolve_exclude_set, resolve_scope, result_bucket, suggest_better_queries,
-    suggest_scoped_queries,
+    load_scope_aliases, matches_any_path_glob, parse_query, query_tokens, resolve_exclude_set,
+    resolve_scope, result_bucket, suggest_better_queries, suggest_scoped_queries,
 };
 pub use community::detect_communities;
 pub use context::assemble_symbol_context;
-pub use overview::{architecture_overview, build_id_map, dead_code_report, endpoints_report};
 pub use cross_service::{
     CrossServiceEdge, DetectedEndpoint, Direction, EndpointRef, ServiceEndpoint, ServiceManifest,
     Transport, contract_hash, endpoints_from_tree, federated_edges, http_contract, match_edges,
@@ -85,6 +83,7 @@ pub use index_pipeline::{CollectResult, IndexSummary, collect_source_files, run_
 pub use ledger::{
     ApprovalOutcome, AsgLedgerStore, LedgerStore, RatifyOps, ReviewOutcome, detect_orphaned_entries,
 };
+pub use overview::{architecture_overview, build_id_map, dead_code_report, endpoints_report};
 pub use policy::{
     Decision, FilePolicyGate, PermissivePolicyGate, PolicyFile, PolicyGate, PolicyRule, Situation,
     actions,

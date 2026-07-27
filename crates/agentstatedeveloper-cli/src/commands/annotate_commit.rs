@@ -107,7 +107,10 @@ fn commit_file_changes(commit: &str) -> std::collections::HashMap<String, FileCh
                 let start = c.max(1);
                 let end = if d == 0 { start } else { start + d - 1 };
                 if let Some(ref path) = cur {
-                    map.entry(path.clone()).or_default().hunks.push((start, end));
+                    map.entry(path.clone())
+                        .or_default()
+                        .hunks
+                        .push((start, end));
                 }
             }
         }

@@ -15,9 +15,9 @@ use agentstatedeveloper_core::{
     compute_uncertainty, confidence_reason, confidence_scores, detect_ambiguous_tokens,
     detect_confidence_warnings, detect_possible_misses, effect_detail_reason, estimate_tokens,
     explain_feedback_impacts, explain_match, extract_summary, gather_recency, hybrid_boost,
-    intent_focus, kind_str, load_layer_overrides, matches_any_path_glob, parse_intent,
-    parse_query, resolve_scope, result_bucket, stale_warning, suggest_better_queries,
-    suggest_scoped_queries, symbol_tier, trim_for_agent,
+    intent_focus, kind_str, load_layer_overrides, matches_any_path_glob, parse_intent, parse_query,
+    resolve_scope, result_bucket, stale_warning, suggest_better_queries, suggest_scoped_queries,
+    symbol_tier, trim_for_agent,
 };
 
 use crate::config::Config;
