@@ -87,6 +87,10 @@ publish-github:
   image: alpine:latest
   rules:
     - if: '$CI_COMMIT_BRANCH == "main" && $GITHUB_REPO'
+    # Also mirror on tag pipelines so a release tag (v*) reaches GitHub and
+    # fires its release.yml Action. Matches agentstategraph/ctxone. The .post
+    # stage still anchors because fmt/clippy/build/test run on tag pipelines.
+    - if: '$CI_COMMIT_TAG && $GITHUB_REPO'
   variables:
     GIT_DEPTH: 0
   before_script:
