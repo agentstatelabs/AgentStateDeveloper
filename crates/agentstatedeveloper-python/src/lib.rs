@@ -915,7 +915,10 @@ fn join_route(prefix: &str, path: &str) -> String {
 /// their **qname** (`module.var`), so an `include_router(alias)` mount connects
 /// to the aliased router's routes even across files and generic `router` names
 /// (t-004c: aliases resolved via `from … import … as …`).
-fn resolve_python_endpoint_prefixes(files: &[(String, String)], endpoints: &mut Vec<ServiceEndpoint>) {
+fn resolve_python_endpoint_prefixes(
+    files: &[(String, String)],
+    endpoints: &mut Vec<ServiceEndpoint>,
+) {
     // Per-file module qname + import alias map (local name -> imported qname).
     let module_by_path: HashMap<&str, String> = files
         .iter()
@@ -923,7 +926,12 @@ fn resolve_python_endpoint_prefixes(files: &[(String, String)], endpoints: &mut 
         .collect();
     let imports_by_path: HashMap<&str, HashMap<String, String>> = files
         .iter()
-        .map(|(p, s)| (p.as_str(), file_import_qnames(s, &module_by_path[p.as_str()])))
+        .map(|(p, s)| {
+            (
+                p.as_str(),
+                file_import_qnames(s, &module_by_path[p.as_str()]),
+            )
+        })
         .collect();
 
     // Global router tables keyed by qname (globally unique — no ambiguity).
@@ -990,8 +998,10 @@ fn resolve_python_endpoint_prefixes(files: &[(String, String)], endpoints: &mut 
 
     let mut cache: HashMap<String, Option<Vec<String>>> = HashMap::new();
     let mut local: HashMap<String, HashMap<String, String>> = HashMap::new();
-    let src_by_path: HashMap<&str, &str> =
-        files.iter().map(|(p, s)| (p.as_str(), s.as_str())).collect();
+    let src_by_path: HashMap<&str, &str> = files
+        .iter()
+        .map(|(p, s)| (p.as_str(), s.as_str()))
+        .collect();
     // Routes served under >1 mount prefix produce extra endpoints (t-004d),
     // appended after the in-place rewrite pass.
     let mut additions: Vec<ServiceEndpoint> = Vec::new();
@@ -1148,7 +1158,11 @@ fn resolve_full_q(
                 acc.push(normalize_prefix(&format!("{pf}{mount}{self_p}")));
             }
         }
-        if acc.is_empty() { vec![self_p.clone()] } else { acc }
+        if acc.is_empty() {
+            vec![self_p.clone()]
+        } else {
+            acc
+        }
     } else {
         vec![self_p.clone()]
     };
@@ -2834,20 +2848,37 @@ router = APIRouter(prefix="/api/notifications", tags=["x"])
 def unread(): ...
 "#;
         let p = collect_router_prefixes(src);
-        assert_eq!(p.get("router").map(String::as_str), Some("/api/notifications"));
-        assert_eq!(route_receiver("@router.get(\"/unread\")").as_deref(), Some("router"));
-        assert_eq!(join_route("/api/notifications", "/unread"), "/api/notifications/unread");
+        assert_eq!(
+            p.get("router").map(String::as_str),
+            Some("/api/notifications")
+        );
+        assert_eq!(
+            route_receiver("@router.get(\"/unread\")").as_deref(),
+            Some("router")
+        );
+        assert_eq!(
+            join_route("/api/notifications", "/unread"),
+            "/api/notifications/unread"
+        );
 
         // Flask blueprint url_prefix.
         let flask = r#"bp = Blueprint("acct", __name__, url_prefix="/accounts")"#;
-        assert_eq!(collect_router_prefixes(flask).get("bp").map(String::as_str), Some("/accounts"));
+        assert_eq!(
+            collect_router_prefixes(flask).get("bp").map(String::as_str),
+            Some("/accounts")
+        );
 
         // Same-file mount: include_router prefix precedes the router's own prefix.
         let mounted = r#"
 sub = APIRouter(prefix="/items")
 app.include_router(sub, prefix="/api")
 "#;
-        assert_eq!(collect_router_prefixes(mounted).get("sub").map(String::as_str), Some("/api/items"));
+        assert_eq!(
+            collect_router_prefixes(mounted)
+                .get("sub")
+                .map(String::as_str),
+            Some("/api/items")
+        );
     }
 
     #[test]
@@ -2855,7 +2886,10 @@ app.include_router(sub, prefix="/api")
         // `prefix` must not be matched inside `url_prefix`, and a plain FastAPI()
         // app with no prefix yields nothing.
         assert_eq!(string_kwarg(r#"url_prefix="/z""#, "prefix"), None);
-        assert_eq!(string_kwarg(r#"url_prefix="/z""#, "url_prefix").as_deref(), Some("/z"));
+        assert_eq!(
+            string_kwarg(r#"url_prefix="/z""#, "url_prefix").as_deref(),
+            Some("/z")
+        );
         assert!(collect_router_prefixes("app = FastAPI()").is_empty());
         // join handles missing/extra slashes and root paths.
         assert_eq!(join_route("/api", "items"), "/api/items");
@@ -2916,11 +2950,13 @@ app.include_router(sub, prefix="/api")
         let files = vec![
             (
                 "a.py".to_string(),
-                "router = APIRouter(prefix=\"/api/notif\")\n\n@router.get(\"/x\")\ndef x(): ...\n".to_string(),
+                "router = APIRouter(prefix=\"/api/notif\")\n\n@router.get(\"/x\")\ndef x(): ...\n"
+                    .to_string(),
             ),
             (
                 "b.py".to_string(),
-                "router = APIRouter(prefix=\"/api/inst\")\n\n@router.get(\"/y\")\ndef y(): ...\n".to_string(),
+                "router = APIRouter(prefix=\"/api/inst\")\n\n@router.get(\"/y\")\ndef y(): ...\n"
+                    .to_string(),
             ),
         ];
         let mut eps = vec![
@@ -2950,7 +2986,10 @@ app.include_router(sub, prefix="/api")
         let contracts: std::collections::HashSet<String> =
             eps.iter().map(|e| e.contract.clone()).collect();
         assert_eq!(eps.len(), 2, "{contracts:?}");
-        assert!(contracts.contains("http:GET /api/v1/health"), "{contracts:?}");
+        assert!(
+            contracts.contains("http:GET /api/v1/health"),
+            "{contracts:?}"
+        );
         assert!(contracts.contains("http:GET /api/health"), "{contracts:?}");
     }
 

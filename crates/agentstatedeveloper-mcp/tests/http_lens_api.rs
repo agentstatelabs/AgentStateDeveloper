@@ -18,14 +18,14 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agentstategraph::CommitOptions;
-use agentstategraph_core::IntentCategory;
 use agentstatedeveloper_core::{
     AsgEffectStore, AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Effect, EffectCategory,
     EffectDecl, Engine, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Position, Symbol,
     SymbolKind, paths, propagate_transitive,
 };
 use agentstatedeveloper_mcp::build_router;
+use agentstategraph::CommitOptions;
+use agentstategraph_core::IntentCategory;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{TimeZone, Utc};
@@ -97,7 +97,14 @@ fn put_decl(engine: &Engine, qname: &str, declared: Vec<EffectCategory>) {
         .expect("put effects");
 }
 
-fn put_ledger(engine: &Engine, qname: &str, entry_id: &str, kind: LedgerKind, summary: &str, day: u32) {
+fn put_ledger(
+    engine: &Engine,
+    qname: &str,
+    entry_id: &str,
+    kind: LedgerKind,
+    summary: &str,
+    day: u32,
+) {
     let store = AsgLedgerStore::new(&engine.repo);
     let entry = LedgerEntry {
         entry_id: entry_id.to_string(),
@@ -135,7 +142,11 @@ async fn router() -> axum::Router {
         ("util.log", "util.py", 30),
     ] {
         index_store
-            .put_symbol(&engine.ref_name, &make_symbol(qname, file, line), "lens-test")
+            .put_symbol(
+                &engine.ref_name,
+                &make_symbol(qname, file, line),
+                "lens-test",
+            )
             .expect("put symbol");
     }
 
@@ -250,7 +261,10 @@ async fn search_rejects_empty_query() {
     let (status, body) = get_body(router().await, "/api/v1/search?q=%20").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body={}", body);
     assert!(
-        body["error"].as_str().unwrap().contains("must not be empty"),
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("must not be empty"),
         "body={}",
         body
     );
@@ -296,9 +310,21 @@ async fn graph_default_is_one_hop_both_directions() {
         body
     );
     // Links always point caller → callee, whichever direction found them.
-    assert!(has_link(&body, "app.main", "pay.charge_card"), "body={}", body);
-    assert!(has_link(&body, "pay.charge_card", "net.post"), "body={}", body);
-    assert!(has_link(&body, "pay.charge_card", "util.log"), "body={}", body);
+    assert!(
+        has_link(&body, "app.main", "pay.charge_card"),
+        "body={}",
+        body
+    );
+    assert!(
+        has_link(&body, "pay.charge_card", "net.post"),
+        "body={}",
+        body
+    );
+    assert!(
+        has_link(&body, "pay.charge_card", "util.log"),
+        "body={}",
+        body
+    );
 
     // Node shape: stable id + render fields.
     let node = body["nodes"]
@@ -331,11 +357,19 @@ async fn graph_callees_only_walks_down_two_hops() {
         body
     );
     // net.post is only reachable at hop 2 through pay.charge_card.
-    assert!(has_link(&body, "pay.charge_card", "net.post"), "body={}", body);
+    assert!(
+        has_link(&body, "pay.charge_card", "net.post"),
+        "body={}",
+        body
+    );
     // No links deduped away: app.main→util.log (hop 1) and
     // pay.charge_card→util.log (hop 2) are distinct edges.
     assert!(has_link(&body, "app.main", "util.log"), "body={}", body);
-    assert!(has_link(&body, "pay.charge_card", "util.log"), "body={}", body);
+    assert!(
+        has_link(&body, "pay.charge_card", "util.log"),
+        "body={}",
+        body
+    );
 }
 
 #[tokio::test]
@@ -390,7 +424,12 @@ async fn effects_overview_counts_declarers_and_ranks_blast_radius() {
     let (status, body) = get_body(router().await, "/api/v1/effects/overview").await;
     assert_eq!(status, StatusCode::OK, "body={}", body);
     let rows = body.as_array().expect("array response");
-    assert_eq!(rows.len(), 2, "one row per declared category, body={}", body);
+    assert_eq!(
+        rows.len(),
+        2,
+        "one row per declared category, body={}",
+        body
+    );
 
     let row = |effect: &str| -> &serde_json::Value {
         rows.iter()

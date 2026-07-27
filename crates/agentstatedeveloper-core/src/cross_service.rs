@@ -383,7 +383,10 @@ pub fn match_edges(endpoints: &[ServiceEndpoint]) -> Vec<CrossServiceEdge> {
 /// and producer in different repos). With `cross_repo_only`, in-repo edges are
 /// dropped — the federated view a Team-tier tool wants: "a client in repo A
 /// calls a route served by repo B" (Plan Q t-005).
-pub fn federated_edges(manifests: &[ServiceManifest], cross_repo_only: bool) -> Vec<CrossServiceEdge> {
+pub fn federated_edges(
+    manifests: &[ServiceManifest],
+    cross_repo_only: bool,
+) -> Vec<CrossServiceEdge> {
     let all: Vec<ServiceEndpoint> = manifests
         .iter()
         .flat_map(|m| m.endpoints.iter().cloned())
@@ -427,7 +430,11 @@ mod tests {
             },
             ServiceManifest {
                 repo_id: "backend".into(),
-                endpoints: vec![endpoint("backend", Direction::Inbound, "http:GET /api/orders/{}")],
+                endpoints: vec![endpoint(
+                    "backend",
+                    Direction::Inbound,
+                    "http:GET /api/orders/{}",
+                )],
             },
         ];
         let edges = federated_edges(&manifests, true);

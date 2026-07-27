@@ -30,7 +30,13 @@ impl Config {
         explicit_audit_log: Option<PathBuf>,
     ) -> Self {
         // Generic helper — conservative (local-only) default.
-        Self::resolve_with_brief(explicit_db, explicit_policy, explicit_audit_log, false, true)
+        Self::resolve_with_brief(
+            explicit_db,
+            explicit_policy,
+            explicit_audit_log,
+            false,
+            true,
+        )
     }
 
     /// `local_only = true` restricts the default to `./.asd-state.db` (for

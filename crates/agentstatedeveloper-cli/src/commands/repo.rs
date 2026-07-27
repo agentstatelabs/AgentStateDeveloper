@@ -264,7 +264,11 @@ fn run_prune(args: PruneArgs) -> Result<()> {
         println!("Nothing to prune — every registered repo's db still exists.");
         return Ok(());
     }
-    let verb = if args.dry_run { "Would remove" } else { "Removed" };
+    let verb = if args.dry_run {
+        "Would remove"
+    } else {
+        "Removed"
+    };
     println!("{verb} {} dead repo(s) (db missing):", dead.len());
     for (name, path) in &dead {
         println!("  {name}  →  {path}");
@@ -472,8 +476,16 @@ fn run_impact(args: ImpactArgs) -> Result<()> {
         return Ok(());
     }
 
-    let ctr = target_contracts.iter().cloned().collect::<Vec<_>>().join(", ");
-    let served = producer_repos.iter().cloned().collect::<Vec<_>>().join(", ");
+    let ctr = target_contracts
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let served = producer_repos
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
     println!("Changing {target}  (contract: {ctr}; served by: {served})");
     if rows.is_empty() {
         println!("  No downstream consumers found across registered repos.");
@@ -483,7 +495,10 @@ fn run_impact(args: ImpactArgs) -> Result<()> {
         .iter()
         .filter(|r| r["cross_repo"].as_bool().unwrap_or(false))
         .count();
-    println!("  {} downstream consumer(s), {cross} cross-repo:", rows.len());
+    println!(
+        "  {} downstream consumer(s), {cross} cross-repo:",
+        rows.len()
+    );
     for r in &rows {
         let scope = if r["cross_repo"].as_bool().unwrap_or(false) {
             "[cross-repo] "

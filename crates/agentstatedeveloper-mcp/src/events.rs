@@ -253,8 +253,8 @@ fn commit_events(engine: &Engine, last_head: Option<&ObjectId>) -> Vec<serde_jso
     let mut id_map: Option<std::collections::HashMap<String, agentstatedeveloper_core::Symbol>> =
         None;
     let mut qname_of = |engine: &Engine, symbol_id: &str| -> serde_json::Value {
-        let map = id_map
-            .get_or_insert_with(|| AsgIndexStore::from_engine(engine).build_id_map(engine));
+        let map =
+            id_map.get_or_insert_with(|| AsgIndexStore::from_engine(engine).build_id_map(engine));
         map.get(symbol_id)
             .map(|s| serde_json::Value::String(s.qname.clone()))
             .unwrap_or(serde_json::Value::Null)
@@ -294,9 +294,10 @@ fn commit_events(engine: &Engine, last_head: Option<&ObjectId>) -> Vec<serde_jso
             // Verification reuses put_effects (same commit description);
             // a verification stamp written in the same breath as this
             // commit means "verified", otherwise it's a (re)declaration.
-            let verified = decl.as_ref().and_then(|d| d.verification.as_ref()).filter(
-                |v| (commit.timestamp - v.at).num_seconds().abs() <= VERIFY_WINDOW_SECS,
-            );
+            let verified = decl
+                .as_ref()
+                .and_then(|d| d.verification.as_ref())
+                .filter(|v| (commit.timestamp - v.at).num_seconds().abs() <= VERIFY_WINDOW_SECS);
             let (kind, summary) = match (verified, &decl) {
                 (Some(v), _) => (
                     "effect_verified",
@@ -378,7 +379,10 @@ fn load_ledger_entry(engine: &Engine, entry_id: &str) -> Option<LedgerEntry> {
     let symbol_id = idx.as_str()?.to_string();
     let val = engine
         .repo
-        .get_json(&engine.ref_name, &paths::ledger_entry_path(&symbol_id, entry_id))
+        .get_json(
+            &engine.ref_name,
+            &paths::ledger_entry_path(&symbol_id, entry_id),
+        )
         .ok()?;
     serde_json::from_value(val).ok()
 }

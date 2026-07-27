@@ -26,13 +26,13 @@ use agentstatedeveloper_core::{
     build_feedback_state_from_entries, classify_layer_sym, compute_trust_score,
     compute_uncertainty, conclusions_export, confidence_reason, confidence_scores,
     derive_cold_hints, detect_ambiguous_tokens, detect_confidence_warnings, detect_possible_misses,
-    detect_workflow, effect_detail_reason, emit_audit, estimate_tokens,
-    event_types, explain_feedback_impacts, explain_match, extract_summary, find_candidates,
-    gather_recency, git_dirty_files, glob_match, hybrid_boost, intent_focus,
-    intent_layer_order, kind_str, load_layer_overrides, load_scope_aliases, parse_intent,
-    parse_query, paths, propose_test_path, recipes, resolve_scope, result_bucket,
-    score_evidence_quality, sidecar_lifecycle_state, stale_warning, suggest_better_queries,
-    suggest_scoped_queries, symbol_tier, thinking, trim_for_agent,
+    detect_workflow, effect_detail_reason, emit_audit, estimate_tokens, event_types,
+    explain_feedback_impacts, explain_match, extract_summary, find_candidates, gather_recency,
+    git_dirty_files, glob_match, hybrid_boost, intent_focus, intent_layer_order, kind_str,
+    load_layer_overrides, load_scope_aliases, parse_intent, parse_query, paths, propose_test_path,
+    recipes, resolve_scope, result_bucket, score_evidence_quality, sidecar_lifecycle_state,
+    stale_warning, suggest_better_queries, suggest_scoped_queries, symbol_tier, thinking,
+    trim_for_agent,
 };
 
 /// The AgentStateDeveloper MCP server.
@@ -1427,7 +1427,9 @@ impl AsdMcpServer {
         serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())
     }
 
-    #[tool(description = "Return the declared + transitively-inherited side effects for a symbol (I/O, network, filesystem, logging, mutation, etc.), resolved via qname. CALL THIS WHEN you need to know what a function touches before editing or before declaring your own effects. To check declared effects against what the source actually does use `verify_effects`; to change them use `effect_declare`. Requires `qname`. (MCP-only — no CLI verb.)")]
+    #[tool(
+        description = "Return the declared + transitively-inherited side effects for a symbol (I/O, network, filesystem, logging, mutation, etc.), resolved via qname. CALL THIS WHEN you need to know what a function touches before editing or before declaring your own effects. To check declared effects against what the source actually does use `verify_effects`; to change them use `effect_declare`. Requires `qname`. (MCP-only — no CLI verb.)"
+    )]
     async fn effects(&self, params: Parameters<EffectsOfParams>) -> String {
         let p = params.0;
         let engine = self.engine.lock().await;
@@ -2459,8 +2461,12 @@ impl AsdMcpServer {
         let engine = self.engine.lock().await;
         let db_path = self.db_path();
         let db_parent = std::path::Path::new(&db_path).parent();
-        match agentstatedeveloper_core::map::run_map(&engine, "asd-mcp", db_parent, params.0.dry_run)
-        {
+        match agentstatedeveloper_core::map::run_map(
+            &engine,
+            "asd-mcp",
+            db_parent,
+            params.0.dry_run,
+        ) {
             Ok(payload) => payload.to_string(),
             Err(e) => err_json(&e.to_string()),
         }

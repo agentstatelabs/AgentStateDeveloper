@@ -24,10 +24,7 @@ fn run_onboard_args(dir: &std::path::Path, extra: &[&str]) -> (bool, String, Str
     for a in extra {
         cmd.arg(a);
     }
-    let out = cmd
-        .current_dir(dir)
-        .output()
-        .expect("spawn asd onboard");
+    let out = cmd.current_dir(dir).output().expect("spawn asd onboard");
     (
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -89,7 +86,10 @@ fn onboard_runs_mcp_step_by_default() {
     seed_minimal_python_project(tmp.path());
 
     let (ok, _stdout, stderr) = run_onboard(tmp.path());
-    assert!(ok, "onboard must exit 0 even if MCP step warns; stderr:\n{stderr}");
+    assert!(
+        ok,
+        "onboard must exit 0 even if MCP step warns; stderr:\n{stderr}"
+    );
     assert!(
         stderr.contains("[4/4] asd mcp install"),
         "MCP step must run by default; stderr:\n{stderr}"

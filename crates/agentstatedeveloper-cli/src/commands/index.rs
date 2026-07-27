@@ -589,7 +589,12 @@ fn is_ephemeral_path(path: &Path) -> bool {
         roots.push(c);
     }
     roots.push(td);
-    for r in ["/tmp", "/private/tmp", "/var/folders", "/private/var/folders"] {
+    for r in [
+        "/tmp",
+        "/private/tmp",
+        "/var/folders",
+        "/private/var/folders",
+    ] {
         roots.push(std::path::PathBuf::from(r));
     }
     roots.iter().any(|root| path.starts_with(root))

@@ -394,8 +394,14 @@ mod tests {
 
     #[test]
     fn test_symbols_detected_by_path_and_qname() {
-        assert!(is_test_symbol("crates/x/src/lib.rs", "x.lib.tests.it_works"));
-        assert!(is_test_symbol("crates/x/src/lib.rs", "x::lib::tests::it_works"));
+        assert!(is_test_symbol(
+            "crates/x/src/lib.rs",
+            "x.lib.tests.it_works"
+        ));
+        assert!(is_test_symbol(
+            "crates/x/src/lib.rs",
+            "x::lib::tests::it_works"
+        ));
         assert!(is_test_symbol("crates/x/tests/foo.rs", "x.foo.bar"));
         assert!(!is_test_symbol("crates/x/src/lib.rs", "x.lib.compute"));
         assert!(!is_test_symbol("src/lib.rs", "app.latest_value"));
