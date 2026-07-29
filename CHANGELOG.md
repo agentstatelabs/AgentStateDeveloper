@@ -5,7 +5,7 @@ Versions use semantic versioning; each milestone increments by 0.0.5.
 
 ---
 
-## [1.3.0] — 2026-07-13
+## [v1.3.0] — 2026-07-13
 
 Everything on `main` since the v1.2.0 tag (Plans T–V + workflow hardening).
 
@@ -47,7 +47,7 @@ Everything on `main` since the v1.2.0 tag (Plans T–V + workflow hardening).
 - `conclusions import` now round-trips thinking entries and confidence (was
   silent data loss).
 
-## [1.2.0] — 2026-07-06 — cross-service edges, federation & Lens backend
+## [v1.2.0] — 2026-07-06 — cross-service edges, federation & Lens backend
 
 Consolidates the 1.0.24 → 1.2.0 arc (tags 1.0.44 / 1.0.48 / 1.1.15–1.1.23,
 which shipped without individual entries). Headlines:
@@ -83,7 +83,7 @@ which shipped without individual entries). Headlines:
   over real source trees; adapter network-effect detection fixes.
 - `asd scorecard` internal token-economy estimate.
 
-## [1.0.23] — 2026-06-02 — Plan G complete (agent-thinking layer)
+## [v1.0.23] — 2026-06-02 — Plan G complete (agent-thinking layer)
 
 ASD now persists the agent's *thinking* — speculation, mental models,
 failed attempts, open questions — so a fresh session resumes with
@@ -167,7 +167,7 @@ asd think bootstrap --check
 
 ---
 
-## [0.9.99] — 2026-05-20 — Plan C complete (semantic-layer moat)
+## [v0.9.99] — 2026-05-20 — Plan C complete (semantic-layer moat)
 
 The defining-feature release. Plan A built trust, Plan B built durable
 storage, Plan C makes ASD remember the expensive task-specific
@@ -227,7 +227,7 @@ asd-map-writes-classifications, stale-api-constraint-demotes-symbol.
 
 ---
 
-## [0.9.89] — 2026-05-20 — Plan D complete (Crucible token-efficiency)
+## [v0.9.89] — 2026-05-20 — Plan D complete (Crucible token-efficiency)
 
 Five fixes driven by AgentStateCrucible's A/B testing, which showed
 the assisted arm paying 2.5–5.7× baseline tokens despite making
@@ -270,7 +270,7 @@ Crucible posts the empirical delta report when the re-run completes.
 
 ---
 
-## [0.9.84] — 2026-05-19 — Plan B complete (compact conclusion sidecar)
+## [v0.9.84] — 2026-05-19 — Plan B complete (compact conclusion sidecar)
 
 ### Migrating an existing repo
 
@@ -313,7 +313,7 @@ post-merge / post-checkout → `asd conclusions import`).
 
 ---
 
-## [0.8.5] — 2026-05-05
+## [v0.8.5] — 2026-05-05
 
 ### Added
 - **Swift function signatures** — `asd index` now captures full Swift function
@@ -336,7 +336,7 @@ post-merge / post-checkout → `asd conclusions import`).
 
 ---
 
-## [0.8.0] — 2026-05-05
+## [v0.8.0] — 2026-05-05
 
 ### Added
 - **`asd callers <qname>`** — show direct or transitive callers of a symbol
@@ -358,7 +358,7 @@ post-merge / post-checkout → `asd conclusions import`).
 
 ---
 
-## [0.7.5] — 2026-05-05
+## [v0.7.5] — 2026-05-05
 
 ### Fixed
 - **O(N²) object storage in `asd index`** — `spec_set_json` per symbol created
@@ -388,7 +388,7 @@ post-merge / post-checkout → `asd conclusions import`).
 
 ---
 
-## [0.6.2] — 2026-05-05
+## [v0.6.2] — 2026-05-05
 
 ### Added
 - **`asd list symbols/effects/ledger`** — enumerate indexed objects with optional
@@ -402,7 +402,7 @@ post-merge / post-checkout → `asd conclusions import`).
 
 ---
 
-## [0.6.1] — 2026-05-05
+## [v0.6.1] — 2026-05-05
 
 ### Added
 - **Always-on index log** — every `asd index` run writes full per-file progress
@@ -411,7 +411,7 @@ post-merge / post-checkout → `asd conclusions import`).
 
 ---
 
-## [0.6.0] — 2026-05-05
+## [v0.6.0] — 2026-05-05
 
 ### Added
 - **`asd mcp install/uninstall/status`** — registers `asd-mcp` in known agent
@@ -441,7 +441,7 @@ post-merge / post-checkout → `asd conclusions import`).
 
 ---
 
-## [0.5.5] — 2026-05-05
+## [v0.5.5] — 2026-05-05
 
 ### Added
 - **30 new CLI integration tests** across 5 test modules:
@@ -456,7 +456,7 @@ post-merge / post-checkout → `asd conclusions import`).
 
 ---
 
-## [0.5.0] — 2026-05-04 (M19)
+## [v0.5.0] — 2026-05-04 (M19)
 
 ### Added
 - **Git-native sidecar** — `.asd/v1/` directory tracked in git; ledger entries and effects travel with every clone
@@ -472,7 +472,7 @@ post-merge / post-checkout → `asd conclusions import`).
 
 ---
 
-## [0.4.5] — 2026-05-03 (M17–M18)
+## [v0.4.5] — 2026-05-03 (M17–M18)
 
 ### Added
 - OSS / commercial tier split: `approve`, `reject`, `withdraw` ledger operations gated behind `asd-pro`
@@ -482,7 +482,7 @@ post-merge / post-checkout → `asd conclusions import`).
 
 ---
 
-## [0.4.0] — 2026-04-28 (M13–M16)
+## [v0.4.0] — 2026-04-28 (M13–M16)
 
 ### Added
 - Marketing and docs site (`agentstatedeveloper.dev`) built with Astro
@@ -492,7 +492,7 @@ post-merge / post-checkout → `asd conclusions import`).
 
 ---
 
-## [0.3.0] — 2026-04-20 (M1–M12)
+## [v0.3.0] — 2026-04-20 (M1–M12)
 
 ### Added
 - Core semantic index (tree-sitter), decision ledger, effect declarations, call graph
