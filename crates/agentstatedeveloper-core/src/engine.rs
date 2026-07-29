@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use agentstategraph::Repository;
+use agentstategraph_core::Namespace;
 use agentstategraph_storage::SqliteStorage;
 
 use crate::audit::{AuditEvent, AuditSink, NullSink, emit_audit, event_types};
@@ -47,6 +48,72 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Derive the ASG namespace from the project directory that owns the
+    /// database. Relative database paths are resolved from the caller's
+    /// working directory so the default `./.asd-state.db` maps to the current
+    /// project directory name.
+    fn namespace_for_db(db_path: &Path) -> Result<Namespace> {
+        let absolute_db_path = if db_path.is_absolute() {
+            db_path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|e| AsdError::Other(format!("resolve current directory: {e}")))?
+                .join(db_path)
+        };
+        let project_dir = absolute_db_path.parent().ok_or_else(|| {
+            AsdError::Other(format!(
+                "ASD database path has no project directory: {}",
+                db_path.display()
+            ))
+        })?;
+        let project_name = project_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                AsdError::Other(format!(
+                    "ASD project directory is not a valid UTF-8 name: {}",
+                    project_dir.display()
+                ))
+            })?;
+        Namespace::new(Self::sanitize_namespace(project_name)).map_err(|e| {
+            AsdError::Other(format!(
+                "ASD project directory cannot be used as an ASG namespace ({project_name:?}): {e}"
+            ))
+        })
+    }
+
+    /// Map an arbitrary project-directory name onto a valid ASG namespace.
+    ///
+    /// ASG namespaces accept only `[A-Za-z0-9_-]` (max 64 chars); the engine
+    /// began rejecting anything else in v0.9.10. Directory names in the wild
+    /// contain dots, spaces, and other characters (a tempdir like `.tmpAbc`,
+    /// or `my project`), so replace every out-of-charset character with `_`,
+    /// cap the length, and fall back to a placeholder if nothing survives.
+    /// Names already in the valid charset pass through unchanged, so existing
+    /// projects keep their namespace and no data moves.
+    fn sanitize_namespace(name: &str) -> String {
+        const MAX: usize = 64; // agentstategraph_core::MAX_NAMESPACE_LEN
+        let mut out: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        // Sanitized chars are all single-byte ASCII, so truncating by bytes is
+        // safe on char boundaries.
+        if out.len() > MAX {
+            out.truncate(MAX);
+        }
+        if out.is_empty() {
+            out.push_str("project");
+        }
+        out
+    }
+
     /// Open (or create) an ASD engine backed by a SQLite file.
     ///
     /// If the repository has no symbols and a `.asd/v1/` sidecar exists next
@@ -54,7 +121,8 @@ impl Engine {
     /// case without requiring a manual `asd hydrate` invocation.
     pub fn open_sqlite(db_path: &Path) -> Result<Self> {
         let storage = SqliteStorage::open(db_path).map_err(|e| AsdError::Other(e.to_string()))?;
-        let repo = Repository::new(Box::new(storage));
+        let namespace = Self::namespace_for_db(db_path)?;
+        let repo = Repository::new(Box::new(storage)).with_namespace(namespace);
         repo.init()?;
 
         // Open FTS connection once — reused by all stores for this engine's lifetime.
@@ -351,4 +419,49 @@ pub struct CacheWarmSummary {
     /// `true` when the engine has no SQLite connection (in-memory engines) —
     /// there are no caches to warm.
     pub skipped: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Engine;
+
+    #[test]
+    fn sqlite_namespace_uses_project_directory_name() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let project = temp.path().join("ExampleFlow-ios");
+        std::fs::create_dir(&project).expect("project directory");
+        let namespace =
+            Engine::namespace_for_db(&project.join(".asd-state.db")).expect("valid namespace");
+
+        assert_eq!(namespace.as_str(), "ExampleFlow-ios");
+    }
+
+    #[test]
+    fn sanitize_namespace_maps_invalid_dir_names() {
+        // Valid names pass through unchanged (existing projects keep their ns).
+        assert_eq!(
+            Engine::sanitize_namespace("ExampleFlow-ios"),
+            "ExampleFlow-ios"
+        );
+        assert_eq!(Engine::sanitize_namespace("my_repo-2"), "my_repo-2");
+        // Dots, spaces, and other chars → '_' (e.g. tempdirs like `.tmpAbc`).
+        assert_eq!(Engine::sanitize_namespace(".tmpAbc"), "_tmpAbc");
+        assert_eq!(Engine::sanitize_namespace("my project.v2"), "my_project_v2");
+        // Length is capped at the engine's 64-char max.
+        assert_eq!(Engine::sanitize_namespace(&"a".repeat(100)).len(), 64);
+        // Non-ASCII chars each become '_' (still a valid, non-empty namespace).
+        assert_eq!(Engine::sanitize_namespace("。。"), "__");
+        // Only a genuinely empty name falls back to the placeholder.
+        assert_eq!(Engine::sanitize_namespace(""), "project");
+    }
+
+    #[test]
+    fn namespace_for_dotted_dir_no_longer_errors() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let project = temp.path().join(".hidden.proj");
+        std::fs::create_dir(&project).expect("project directory");
+        let namespace =
+            Engine::namespace_for_db(&project.join(".asd-state.db")).expect("valid namespace");
+        assert_eq!(namespace.as_str(), "_hidden_proj");
+    }
 }
