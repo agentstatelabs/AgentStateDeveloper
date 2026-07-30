@@ -210,7 +210,7 @@ dependencies = [
 [[package]]
 name = "agentstategraph"
 version = "0.9.10"
-source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v0.9.10#bbbfea02d85d44481d6a7462431765b315f95a0f"
+source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v0.9.10#c1e5f0f769b13e58e0194b55ffeea8cf8a502384"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-reminders",
@@ -226,7 +226,7 @@ dependencies = [
 [[package]]
 name = "agentstategraph-core"
 version = "0.9.10"
-source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v0.9.10#bbbfea02d85d44481d6a7462431765b315f95a0f"
+source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v0.9.10#c1e5f0f769b13e58e0194b55ffeea8cf8a502384"
 dependencies = [
  "blake3",
  "chrono",
@@ -239,7 +239,7 @@ dependencies = [
 [[package]]
 name = "agentstategraph-policy"
 version = "0.9.10"
-source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v0.9.10#bbbfea02d85d44481d6a7462431765b315f95a0f"
+source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v0.9.10#c1e5f0f769b13e58e0194b55ffeea8cf8a502384"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -254,7 +254,7 @@ dependencies = [
 [[package]]
 name = "agentstategraph-reminders"
 version = "0.9.10"
-source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v0.9.10#bbbfea02d85d44481d6a7462431765b315f95a0f"
+source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v0.9.10#c1e5f0f769b13e58e0194b55ffeea8cf8a502384"
 dependencies = [
  "agentstategraph-core",
  "chrono",
@@ -267,7 +267,7 @@ dependencies = [
 [[package]]
 name = "agentstategraph-storage"
 version = "0.9.10"
-source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v0.9.10#bbbfea02d85d44481d6a7462431765b315f95a0f"
+source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v0.9.10#c1e5f0f769b13e58e0194b55ffeea8cf8a502384"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-reminders",
@@ -282,7 +282,7 @@ dependencies = [
 [[package]]
 name = "agentstategraph-taint"
 version = "0.9.10"
-source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v0.9.10#bbbfea02d85d44481d6a7462431765b315f95a0f"
+source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v0.9.10#c1e5f0f769b13e58e0194b55ffeea8cf8a502384"
 dependencies = [
  "agentstategraph-core",
  "chrono",
