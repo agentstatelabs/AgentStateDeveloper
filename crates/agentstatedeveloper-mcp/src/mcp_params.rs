@@ -282,6 +282,14 @@ pub struct ImpactParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct HelpParams {
+    /// Feature name (e.g. "impact") or a phrase (e.g. "blast radius") to
+    /// fuzzy-match. Omit to get the full grouped catalog of every feature.
+    #[serde(default)]
+    pub topic: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct ArchitectureParams {
     /// How many packages, hotspots, and clusters to list (default: 12).
     #[serde(default = "default_arch_top")]

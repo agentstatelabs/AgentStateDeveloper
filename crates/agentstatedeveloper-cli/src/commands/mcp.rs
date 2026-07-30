@@ -312,7 +312,19 @@ pub struct InstructionsArgs {
 
 pub fn run(_cfg: &Config, cmd: McpCmd) -> Result<()> {
     match cmd {
-        McpCmd::Install(args) => install(args),
+        McpCmd::Install(args) => {
+            let result = install(args);
+            // Best-effort: refresh the shared cross-tool help index after
+            // registering asd, so a unified `help` can discover asd's features.
+            // A write failure must not fail the install.
+            if result.is_ok() {
+                match crate::commands::help::publish_help_index() {
+                    Ok(path) => eprintln!("  help index: {}", path.display()),
+                    Err(e) => eprintln!("  help index skipped: {e}"),
+                }
+            }
+            result
+        }
         McpCmd::Uninstall(args) => uninstall(args),
         McpCmd::Status(_) => status(),
         McpCmd::Instructions(args) => instructions(args),

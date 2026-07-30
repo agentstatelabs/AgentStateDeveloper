@@ -4,6 +4,7 @@ pub mod audit;
 pub mod bootstrap;
 pub mod brief;
 pub mod checklist;
+pub mod help;
 pub mod conclusions;
 pub mod context_for;
 pub mod dead_code;

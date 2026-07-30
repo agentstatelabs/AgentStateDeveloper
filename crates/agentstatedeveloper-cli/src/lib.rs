@@ -56,6 +56,9 @@ pub(crate) fn ratify_ops_override() -> Option<Arc<dyn RatifyOps>> {
     name = "asd",
     version,
     about = "AgentStateDeveloper CLI",
+    // We ship our own `help` subcommand (on-demand asd/ctx feature docs), so the
+    // auto-generated clap `help` subcommand is disabled. `-h`/`--help` still work.
+    disable_help_subcommand = true,
     long_about = "AgentStateDeveloper CLI — code-level context and audit overlay.
 
 Bootstrap a NEW repo (no sidecar yet) — manual sequence:
@@ -122,6 +125,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// On-demand feature docs: syntax, examples, gotchas. `asd help` lists the
+    /// catalog; `asd help <feature>` details one; `--publish` writes the shared
+    /// cross-tool help index.
+    Help(commands::help::HelpArgs),
+
     /// Initialize an ASD repository and install git hooks.
     Init(commands::init::InitArgs),
 
@@ -381,6 +389,7 @@ pub fn run(cli: Cli) -> Result<()> {
 pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
     use commands::*;
     match cmd {
+        Command::Help(args) => help::run(cfg, args),
         Command::Init(args) => init::run(cfg, args),
         Command::Onboard(args) => onboard::run(cfg, args),
         Command::Hooks(args) => hooks::run(cfg, args),
