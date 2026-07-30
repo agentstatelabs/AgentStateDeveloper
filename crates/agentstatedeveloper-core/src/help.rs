@@ -49,7 +49,11 @@ pub struct HelpDoc {
 
 macro_rules! p {
     ($name:literal, $req:literal, $desc:literal) => {
-        HelpParam { name: $name, required: $req, desc: $desc }
+        HelpParam {
+            name: $name,
+            required: $req,
+            desc: $desc,
+        }
     };
 }
 
@@ -63,7 +67,11 @@ pub const REGISTRY: &[HelpDoc] = &[
         synopsis: "One-call cold-start overview: languages, packages, layers, call-graph communities, routes, hotspots.",
         syntax: "asd architecture [--top <n=12>] [--agent]",
         params: &[
-            p!("--top", false, "How many packages/hotspots to list (default 12)."),
+            p!(
+                "--top",
+                false,
+                "How many packages/hotspots to list (default 12)."
+            ),
             p!("--agent", false, "Machine-readable JSON output."),
         ],
         examples: &["asd architecture", "asd architecture --top 20 --agent"],
@@ -77,7 +85,9 @@ pub const REGISTRY: &[HelpDoc] = &[
         syntax: "asd map [--agent]",
         params: &[p!("--agent", false, "Machine-readable JSON output.")],
         examples: &["asd map"],
-        gotchas: &["Writes Ownership ledger entries — this is a read/orient step that also records structure."],
+        gotchas: &[
+            "Writes Ownership ledger entries — this is a read/orient step that also records structure.",
+        ],
         related: &["architecture", "status"],
     },
     HelpDoc {
@@ -87,7 +97,9 @@ pub const REGISTRY: &[HelpDoc] = &[
         syntax: "asd status [--agent]",
         params: &[p!("--agent", false, "Machine-readable JSON output.")],
         examples: &["asd status"],
-        gotchas: &["For a single go/no-go reliability number use `trust`; to refresh a stale index use `index`/`reindex`."],
+        gotchas: &[
+            "For a single go/no-go reliability number use `trust`; to refresh a stale index use `index`/`reindex`.",
+        ],
         related: &["trust", "index"],
     },
     HelpDoc {
@@ -106,9 +118,15 @@ pub const REGISTRY: &[HelpDoc] = &[
         group: "understand",
         synopsis: "One-call agent-ready context package for a planned change (investigate + impact + checklist).",
         syntax: "asd prepare-change <query> [--agent]",
-        params: &[p!("query", true, "Free-text description of the change you intend to make.")],
+        params: &[p!(
+            "query",
+            true,
+            "Free-text description of the change you intend to make."
+        )],
         examples: &["asd prepare-change \"add rate limiting to the login endpoint\""],
-        gotchas: &["Call this FIRST before any non-trivial change — it bundles the understand+impact+checklist steps."],
+        gotchas: &[
+            "Call this FIRST before any non-trivial change — it bundles the understand+impact+checklist steps.",
+        ],
         related: &["investigate", "impact", "checklist"],
     },
     HelpDoc {
@@ -116,9 +134,15 @@ pub const REGISTRY: &[HelpDoc] = &[
         group: "understand",
         synopsis: "Feature archaeology in one pass: entry points + call chains, effects, invariants, hazards.",
         syntax: "asd investigate <query> [--agent]",
-        params: &[p!("query", true, "Feature/behavior to trace through the codebase.")],
+        params: &[p!(
+            "query",
+            true,
+            "Feature/behavior to trace through the codebase."
+        )],
         examples: &["asd investigate \"how does session token refresh work\""],
-        gotchas: &["Understand before touching. For blast radius of ONE known symbol use `impact` instead."],
+        gotchas: &[
+            "Understand before touching. For blast radius of ONE known symbol use `impact` instead.",
+        ],
         related: &["prepare_change", "impact", "context_for"],
     },
     HelpDoc {
@@ -126,7 +150,11 @@ pub const REGISTRY: &[HelpDoc] = &[
         group: "understand",
         synopsis: "Blast-radius for ONE known symbol before editing: transitive callers, effects, invariants, tests, git touches.",
         syntax: "asd impact <symbol> [--agent]",
-        params: &[p!("symbol", true, "Fully-qualified symbol name to analyze.")],
+        params: &[p!(
+            "symbol",
+            true,
+            "Fully-qualified symbol name to analyze."
+        )],
         examples: &["asd impact myapp::auth::verify_token"],
         gotchas: &["Needs a known symbol. To find the symbol first use `search`/`references`."],
         related: &["investigate", "since", "references"],
@@ -146,7 +174,11 @@ pub const REGISTRY: &[HelpDoc] = &[
         group: "understand",
         synopsis: "Deep per-symbol context for comma-separated qnames: signature, callers/callees, effects, ledger, tests.",
         syntax: "asd context-for <qnames> [--agent]",
-        params: &[p!("qnames", true, "Comma-separated fully-qualified symbol names.")],
+        params: &[p!(
+            "qnames",
+            true,
+            "Comma-separated fully-qualified symbol names."
+        )],
         examples: &["asd context-for myapp::db::pool,myapp::db::migrate"],
         gotchas: &["For a whole-feature trace rather than named symbols, use `investigate`."],
         related: &["impact", "investigate", "references"],
@@ -156,7 +188,11 @@ pub const REGISTRY: &[HelpDoc] = &[
         group: "understand",
         synopsis: "Symbols changed since a commit + combined blast radius (PR review).",
         syntax: "asd since <ref> [--agent]",
-        params: &[p!("ref", true, "Git ref/commit to diff from (e.g. main, a SHA).")],
+        params: &[p!(
+            "ref",
+            true,
+            "Git ref/commit to diff from (e.g. main, a SHA)."
+        )],
         examples: &["asd since main"],
         gotchas: &["Pairs with `impact` — this is the multi-symbol version for a whole diff."],
         related: &["impact", "task_close"],
@@ -169,7 +205,9 @@ pub const REGISTRY: &[HelpDoc] = &[
         syntax: "asd search <query> [--agent]",
         params: &[p!("query", true, "Concept or symbol to search for.")],
         examples: &["asd search \"rate limiter\""],
-        gotchas: &["Heavier/ranked. For a lighter BM25 concept scan use `code_search`; for exact identifier hits use `references`."],
+        gotchas: &[
+            "Heavier/ranked. For a lighter BM25 concept scan use `code_search`; for exact identifier hits use `references`.",
+        ],
         related: &["code_search", "references", "context_for"],
     },
     HelpDoc {
@@ -189,9 +227,15 @@ pub const REGISTRY: &[HelpDoc] = &[
         group: "search",
         synopsis: "Exact-identifier occurrences across the repo (rg-style completeness).",
         syntax: "asd references <identifier> [--agent]",
-        params: &[p!("identifier", true, "Exact identifier to find every occurrence of.")],
+        params: &[p!(
+            "identifier",
+            true,
+            "Exact identifier to find every occurrence of."
+        )],
         examples: &["asd references verify_token"],
-        gotchas: &["Exact-match, not ranked concept search — use `search`/`code_search` for fuzzy concepts."],
+        gotchas: &[
+            "Exact-match, not ranked concept search — use `search`/`code_search` for fuzzy concepts.",
+        ],
         related: &["search", "impact"],
     },
     // ---- ledger -----------------------------------------------------------
@@ -202,7 +246,9 @@ pub const REGISTRY: &[HelpDoc] = &[
         syntax: "asd task-close [--agent]",
         params: &[],
         examples: &["asd task-close"],
-        gotchas: &["Run after making a change to record proof; pairs with `since` to know what HEAD touched."],
+        gotchas: &[
+            "Run after making a change to record proof; pairs with `since` to know what HEAD touched.",
+        ],
         related: &["since", "scorecard"],
     },
     // ---- meta -------------------------------------------------------------
@@ -211,9 +257,15 @@ pub const REGISTRY: &[HelpDoc] = &[
         group: "meta",
         synopsis: "Get exact syntax, examples, and gotchas for a feature on demand — call before using one you're unsure of.",
         syntax: "asd help [topic]",
-        params: &[p!("topic", false, "Feature name or a phrase; omit to list the whole catalog.")],
+        params: &[p!(
+            "topic",
+            false,
+            "Feature name or a phrase; omit to list the whole catalog."
+        )],
         examples: &["asd help", "asd help impact", "asd help \"blast radius\""],
-        gotchas: &["Docs are version-pinned to the running binary, so they can't drift from the code."],
+        gotchas: &[
+            "Docs are version-pinned to the running binary, so they can't drift from the code.",
+        ],
         related: &["architecture", "status"],
     },
 ];
@@ -225,10 +277,18 @@ const STRONG_MATCH: u32 = 200;
 
 fn est_tokens(doc: &HelpDoc) -> usize {
     let mut chars = doc.synopsis.len() + doc.syntax.len();
-    for p in doc.params { chars += p.name.len() + p.desc.len(); }
-    for e in doc.examples { chars += e.len(); }
-    for g in doc.gotchas { chars += g.len(); }
-    for r in doc.related { chars += r.len(); }
+    for p in doc.params {
+        chars += p.name.len() + p.desc.len();
+    }
+    for e in doc.examples {
+        chars += e.len();
+    }
+    for g in doc.gotchas {
+        chars += g.len();
+    }
+    for r in doc.related {
+        chars += r.len();
+    }
     chars / 4
 }
 
@@ -252,13 +312,24 @@ fn doc_json(doc: &HelpDoc) -> Value {
 /// (identical across a group, it would make every sibling tie on the group word).
 fn score(doc: &HelpDoc, q: &str) -> u32 {
     let feat = doc.feature.to_lowercase();
-    if feat == q { return 1000; }
+    if feat == q {
+        return 1000;
+    }
     let mut s = 0u32;
-    if feat.contains(q) || q.contains(&feat) { s += STRONG_MATCH; }
+    if feat.contains(q) || q.contains(&feat) {
+        s += STRONG_MATCH;
+    }
     let syn = doc.synopsis.to_lowercase();
-    for tok in q.split(|c: char| !c.is_alphanumeric()).filter(|t| t.len() > 2) {
-        if feat.contains(tok) { s += 100; }
-        if syn.contains(tok) { s += 20; }
+    for tok in q
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() > 2)
+    {
+        if feat.contains(tok) {
+            s += 100;
+        }
+        if syn.contains(tok) {
+            s += 20;
+        }
     }
     s
 }
@@ -288,14 +359,22 @@ pub fn respond(topic: Option<&str>) -> Value {
     if q.is_empty() {
         return catalog();
     }
-    let mut ranked: Vec<(&HelpDoc, u32)> =
-        REGISTRY.iter().map(|d| (d, score(d, &q))).filter(|(_, s)| *s > 0).collect();
+    let mut ranked: Vec<(&HelpDoc, u32)> = REGISTRY
+        .iter()
+        .map(|d| (d, score(d, &q)))
+        .filter(|(_, s)| *s > 0)
+        .collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.feature.cmp(b.0.feature)));
 
     match ranked.first() {
         Some((doc, s)) if *s >= STRONG_MATCH => {
             let mut out = doc_json(doc);
-            let also: Vec<&str> = ranked.iter().skip(1).take(4).map(|(d, _)| d.feature).collect();
+            let also: Vec<&str> = ranked
+                .iter()
+                .skip(1)
+                .take(4)
+                .map(|(d, _)| d.feature)
+                .collect();
             if let Some(obj) = out.as_object_mut() {
                 obj.insert("also".into(), json!(also));
             }
@@ -316,6 +395,90 @@ pub fn respond(topic: Option<&str>) -> Value {
             "did_you_mean": REGISTRY.iter().map(|d| d.feature).collect::<Vec<_>>(),
             "hint": "No asd feature matched. It may be a `ctx` (CTXone) feature — try `ctx help <topic>`.",
         }),
+    }
+}
+
+/// Local resolve with a cross-binary proxy fallback: if `topic` doesn't match
+/// any local feature, consult the shared index for other tools and ask the
+/// owning binary directly (e.g. asd proxies an unknown topic to `ctx help`).
+///
+/// `allow_proxy` is false for the proxied child call (via `--no-proxy`), which
+/// makes this collapse to a pure local `respond` — the single-hop loop guard.
+/// A successful proxy returns the owner's doc annotated with `proxied_from`.
+pub fn resolve(topic: Option<&str>, allow_proxy: bool) -> Value {
+    let local = respond(topic);
+    if !allow_proxy || local.get("not_found").is_none() {
+        return local;
+    }
+    let Some(t) = topic.map(str::trim).filter(|t| !t.is_empty()) else {
+        return local;
+    };
+    let Some(index) = read_index() else {
+        return local;
+    };
+    let Some(tools) = index.get("tools").and_then(|v| v.as_object()) else {
+        return local;
+    };
+    // Let the owning binary do its own matching — just ask each other tool.
+    for tool in tools.keys().filter(|k| k.as_str() != OWNER) {
+        let Some((bin, args)) = json_invocation(tool, t) else {
+            continue;
+        };
+        let Ok(out) = std::process::Command::new(bin).args(&args).output() else {
+            continue;
+        };
+        if !out.status.success() {
+            continue;
+        }
+        if let Ok(mut v) = serde_json::from_slice::<Value>(&out.stdout)
+            && v.get("feature").is_some()
+            && let Some(obj) = v.as_object_mut()
+        {
+            obj.insert("proxied_from".into(), json!(tool));
+            return v;
+        }
+    }
+    local
+}
+
+/// Read the shared cross-tool help index, if present.
+fn read_index() -> Option<Value> {
+    let path = if let Some(p) = std::env::var_os("AGENTSTATE_HELP_INDEX") {
+        std::path::PathBuf::from(p)
+    } else {
+        std::path::PathBuf::from(std::env::var_os("HOME")?)
+            .join(".config/agentstate/help-index.json")
+    };
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+}
+
+/// How to invoke a given tool's `help` for JSON output, with proxy disabled so
+/// the child never bounces back (single-hop guard). Returns None for unknown
+/// tools (nothing to exec).
+fn json_invocation(tool: &str, topic: &str) -> Option<(&'static str, Vec<String>)> {
+    match tool {
+        "ctx" => Some((
+            "ctx",
+            vec![
+                "help".into(),
+                topic.into(),
+                "--format".into(),
+                "json".into(),
+                "--no-proxy".into(),
+            ],
+        )),
+        "asd" => Some((
+            "asd",
+            vec![
+                "help".into(),
+                topic.into(),
+                "--agent".into(),
+                "--no-proxy".into(),
+            ],
+        )),
+        _ => None,
     }
 }
 
@@ -353,14 +516,23 @@ mod tests {
     #[test]
     fn weak_phrase_disambiguates_not_guesses() {
         let v = respond(Some("understand the code"));
-        assert!(v.get("feature").is_none(), "should not guess a single doc: {v}");
-        assert!(v["matches"].is_array() || v["not_found"].is_string(), "got {v}");
+        assert!(
+            v.get("feature").is_none(),
+            "should not guess a single doc: {v}"
+        );
+        assert!(
+            v["matches"].is_array() || v["not_found"].is_string(),
+            "got {v}"
+        );
     }
 
     #[test]
     fn empty_topic_returns_catalog() {
         let v = respond(None);
-        assert_eq!(v["feature_count"].as_u64().unwrap() as usize, REGISTRY.len());
+        assert_eq!(
+            v["feature_count"].as_u64().unwrap() as usize,
+            REGISTRY.len()
+        );
         assert!(v["groups"].is_object());
     }
 

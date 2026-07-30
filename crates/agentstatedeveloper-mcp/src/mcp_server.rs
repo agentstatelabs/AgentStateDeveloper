@@ -106,7 +106,9 @@ impl AsdMcpServer {
         description = "Get exact syntax, examples, and gotchas for an asd/ctx feature ON DEMAND, instead of carrying every tool's full docs in context every turn. CALL THIS BEFORE using an asd feature whose exact syntax you're unsure of — it costs ~150-250 tokens and returns synopsis, syntax, params, examples, gotchas, and related features. Pass `topic` (a feature name like 'impact', or a phrase like 'blast radius' — it fuzzy-matches). Omit `topic` for the full grouped catalog of every feature; browse it to discover capabilities you'd miss. Docs are compiled into the running binary, so they always match the code. If nothing matches here it may be a `ctx` (CTXone) feature — the response says so. (CLI: `asd help`.)"
     )]
     async fn help(&self, params: Parameters<HelpParams>) -> String {
-        let result = agentstatedeveloper_core::help::respond(params.0.topic.as_deref());
+        // allow_proxy=true: an unknown topic falls through to `ctx help` so the
+        // agent sees one seamless manual across both binaries.
+        let result = agentstatedeveloper_core::help::resolve(params.0.topic.as_deref(), true);
         serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string())
     }
 

@@ -37,6 +37,11 @@ pub struct HelpArgs {
     /// merging alongside any other tool's entry. Prints the path written.
     #[arg(long)]
     pub publish: bool,
+
+    /// Resolve locally only — do not proxy an unknown topic to the other tool.
+    /// Used internally to break the proxy chain (single-hop guard).
+    #[arg(long, hide = true)]
+    pub no_proxy: bool,
 }
 
 pub fn run(_cfg: &Config, args: HelpArgs) -> Result<()> {
@@ -49,7 +54,7 @@ pub fn run(_cfg: &Config, args: HelpArgs) -> Result<()> {
     let value = if args.manifest {
         help::manifest()
     } else {
-        help::respond(args.topic.as_deref())
+        help::resolve(args.topic.as_deref(), !args.no_proxy)
     };
 
     if args.agent || args.manifest {
@@ -101,8 +106,11 @@ pub(crate) fn publish_help_index() -> Result<PathBuf> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&path, format!("{}\n", serde_json::to_string_pretty(&index)?))
-        .map_err(|e| anyhow!("writing {}: {e}", path.display()))?;
+    std::fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string_pretty(&index)?),
+    )
+    .map_err(|e| anyhow!("writing {}: {e}", path.display()))?;
     Ok(path)
 }
 
@@ -159,6 +167,9 @@ fn render_help(v: &Value) {
 
     // Single feature.
     let get = |k: &str| v.get(k).and_then(|s| s.as_str()).unwrap_or("");
+    if let Some(from) = v.get("proxied_from").and_then(|s| s.as_str()) {
+        println!("(via {from})");
+    }
     println!("{} — {}", get("feature"), get("synopsis"));
     println!("  syntax: {}", get("syntax"));
     if let Some(params) = v.get("params").and_then(|p| p.as_array())
