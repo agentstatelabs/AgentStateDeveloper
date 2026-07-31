@@ -1,6 +1,6 @@
-# ExampleFlow regression probe template (Plan A, t-010).
+# AcmeFlow regression probe template (Plan A, t-010).
 #
-# Copy this file to ExampleFlow's .asd/probes.toml (or merge with an existing
+# Copy this file to AcmeFlow's .asd/probes.toml (or merge with an existing
 # probes.toml). The six probes here capture the queries that drove Plan A's
 # field-feedback gap analysis. They establish a baseline so future ASD changes
 # can be measured against the same audit cases.
@@ -9,7 +9,7 @@
 #     asd probe run
 #     asd probe run --filter-tag plan-a
 #
-# Each probe asserts a structural property the ExampleFlow session previously
+# Each probe asserts a structural property the AcmeFlow session previously
 # had to verify by hand (ASD result + rg cross-check). Tighten thresholds as
 # ASD ranking improves.
 
@@ -104,7 +104,7 @@ assert = { kind = "file_in_key", key = "occurrences", field = "file", value = "S
 # --------------------------------------------------------------------------
 # Plan B acceptance: the headline metric. After `asd sidecar migrate`, the
 # committed conclusion bytes must stay tiny — kilobytes, not megabytes.
-# 500_000 bytes ≈ 500KB; pre-migration ExampleFlow was ~75MB (150x larger).
+# 500_000 bytes ≈ 500KB; pre-migration AcmeFlow was ~75MB (150x larger).
 # --------------------------------------------------------------------------
 [[probe]]
 name = "conclusions-export-stays-small"
@@ -124,11 +124,11 @@ command = "asd"
 args = ["sidecar", "migrate"]
 tags = ["plan-b", "migration"]
 # Smoke-only — any exit-0 run is success. Tighten once we know the
-# baseline for ExampleFlow.
+# baseline for AcmeFlow.
 
 # --------------------------------------------------------------------------
 # Plan C semantic-layer probes. These exercise the moat features that
-# Plan A/B made possible. Each probe assumes the ExampleFlow ledger has
+# Plan A/B made possible. Each probe assumes the AcmeFlow ledger has
 # been seeded with at least one of the relevant entries (via `asd ledger
 # append --role <tag>` or `asd map`). On a freshly indexed project they
 # pass trivially (empty arrays).
@@ -153,7 +153,7 @@ description = "Once a diagnostic-only verdict is recorded, the symbol is dropped
 command = "asd"
 args = ["search", "diagnostic", "--limit", "20"]
 tags = ["plan-c", "feedback", "manual-seed"]
-# Smoke. Tighten with a file_not_in_key assertion once ExampleFlow
+# Smoke. Tighten with a file_not_in_key assertion once AcmeFlow
 # has a recorded diagnostic-only verdict.
 
 # t-006: `asd map` writes Ownership entries with role tags. After running
@@ -172,7 +172,7 @@ assert = { kind = "field_gte", field = "total", min_value = 1 }
 
 # t-003: a Constraint with role=stale-api on a symbol demotes it on
 # unrelated queries — proves "decisions-as-constraints" works end-to-end.
-# Requires ExampleFlow to seed `asd ledger append --kind constraint
+# Requires AcmeFlow to seed `asd ledger append --kind constraint
 # --role stale-api` on at least one symbol matching a known query.
 [[probe]]
 name = "stale-api-constraint-demotes-symbol"
@@ -180,5 +180,5 @@ description = "A role=stale-api Constraint demotes its symbol in ranked search (
 command = "asd"
 args = ["search", "legacy", "--limit", "20"]
 tags = ["plan-c", "decisions-as-constraints", "manual-seed"]
-# Smoke. Tighten with file_not_in_key once ExampleFlow has a recorded
+# Smoke. Tighten with file_not_in_key once AcmeFlow has a recorded
 # stale-api Constraint on a known legacy symbol.

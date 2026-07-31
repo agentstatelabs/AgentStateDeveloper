@@ -246,7 +246,7 @@ and Plans A–G.
 ### Plan F dormant tasks (Plan H)
 
 - **DEFERRED until external signal** — Index-time penalty denorm,
-  Crucible re-run validation, ExampleFlow sidecar-size validation,
+  Crucible re-run validation, AcmeFlow sidecar-size validation,
   full `prepare_change` orchestration extract. All four tracked as
   Plan H with concrete trigger conditions in DESIGN.md.
 

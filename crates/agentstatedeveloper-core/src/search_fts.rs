@@ -782,7 +782,7 @@ impl SearchFtsDb {
 
     /// Count symbols that have any ledger entries.
     ///
-    /// Field-test refinement (ExampleFlow feedback, 2026-06-04): this used
+    /// Field-test refinement (AcmeFlow feedback, 2026-06-04): this used
     /// to read `SELECT COUNT(*) FROM asd_search_fts WHERE ledger_text != ''`,
     /// but `ledger_text` is only populated at full `asd index` time. Any
     /// entries written via `asd think`, `asd ledger append`, or
@@ -1001,7 +1001,7 @@ impl SearchFtsDb {
     ///
     /// Used by the uncertainty override guard to distinguish "exact symbol lookup"
     /// from generic broad queries, preventing false-high uncertainty on direct
-    /// symbol names like `ExampleFlowViewModel`.
+    /// symbol names like `AcmeFlowViewModel`.
     pub fn has_exact_symbol_name(&self, name: &str) -> bool {
         if name.len() < 3 {
             return false;
@@ -1314,7 +1314,7 @@ impl SearchFtsDb {
 
     /// Insert or replace a single ledger entry for `ref_name`.
     ///
-    /// Field-test refinement (ExampleFlow, 2026-06-04): also backfills
+    /// Field-test refinement (AcmeFlow, 2026-06-04): also backfills
     /// the symbol's row in `asd_search_fts` so the ledger_text /
     /// ledger_flags columns stay warm between reindexes. Previously these
     /// columns were ONLY populated at full `asd index` time, which meant
@@ -1723,7 +1723,7 @@ impl SearchFtsDb {
 ///
 /// **Path word boost (+1.5 / token)** — camelCase-expands each file path
 /// segment and checks for exact word matches. "drift" matches the segment
-/// "ExampleFlow" (expanded → ["session","drift"]) but NOT "overlap" for
+/// "AcmeFlow" (expanded → ["session","drift"]) but NOT "overlap" for
 /// the token "over". Rewards symbols that live in a subsystem named after
 /// a query concept without rewarding false substring matches.
 ///
@@ -1925,7 +1925,7 @@ pub fn stale_warning(db_path: &std::path::Path, threshold_secs: u64) -> Option<S
     }
 }
 
-/// ExampleFlow refinement (1.0.77): same as `stale_warning` but
+/// AcmeFlow refinement (1.0.77): same as `stale_warning` but
 /// returns a struct so callers can distinguish a soft "index is old
 /// but results came back fine" hint from a hard "FTS is broken /
 /// empty" alert. The MCP response includes `stale_severity` as a
@@ -1997,7 +1997,7 @@ pub fn stale_warning_classified(
     }
 }
 
-/// ExampleFlow refinement: 24h soft-threshold for handlers that
+/// AcmeFlow refinement: 24h soft-threshold for handlers that
 /// have a "did the query resolve" signal (prepare-change,
 /// context_for). Matches a typical dev day — index built this
 /// morning is fine all afternoon. Other commands (status, search,
@@ -3492,7 +3492,7 @@ pub fn classify_layer_sym(
         return layer;
     }
     // Secondary: walk all qname components (split on `.`, `::`, `/`).
-    // For method qnames like `ExampleFlowViewModel.refreshDriftPlayhead` the
+    // For method qnames like `AcmeFlowViewModel.refreshDriftPlayhead` the
     // method leaf won't match, but the class component will — so we check every
     // component and return the *highest-priority* layer found across any of them.
     let components: Vec<&str> = qname
@@ -4293,7 +4293,7 @@ mod tests {
         assert!(v.is_null());
     }
 
-    // ExampleFlow refinement (1.0.77): stale_warning_classified
+    // AcmeFlow refinement (1.0.77): stale_warning_classified
     // distinguishes critical (empty/broken FTS) from soft (just-past-
     // age-threshold). Critical fires regardless of age; soft is
     // demotable when the consuming handler had a successful query.
@@ -4451,11 +4451,11 @@ mod tests {
 
     #[test]
     fn expand_identifier_roundtrip() {
-        let exp = expand_identifier("App.ExampleFlow.refreshDriftPlayhead");
+        let exp = expand_identifier("App.AcmeFlow.refreshDriftPlayhead");
         assert!(exp.contains("refreshDriftPlayhead"), "original preserved");
         assert!(exp.contains("refresh"), "camel split");
         assert!(exp.contains("playhead"), "camel split tail");
-        assert!(exp.contains("exampleflow"), "segment lowercased");
+        assert!(exp.contains("acmeflow"), "segment lowercased");
     }
 
     #[test]
@@ -4468,7 +4468,7 @@ mod tests {
         assert!(is_test_file("payments/test_stripe.py"));
         assert!(is_test_file("pkg/payments/charge_test.go"));
         assert!(is_test_file("src/auth/auth_spec.rb"));
-        assert!(!is_test_file("App/ExampleFlow/ExampleFlowApp.swift"));
+        assert!(!is_test_file("App/AcmeFlow/AcmeFlowApp.swift"));
         assert!(!is_test_file("src/payments/charge.py"));
         assert!(!is_test_file(
             "Packages/AudioEngine/Sources/KarplusStrong.swift"
@@ -4768,23 +4768,23 @@ mod tests {
     fn layer_classification_qname_fallback() {
         // File named after app, but qname carries the ViewModel suffix.
         assert_eq!(
-            classify_layer_sym("App/ExampleFlow.swift", "ExampleFlowViewModel", 0, &[]),
+            classify_layer_sym("App/AcmeFlow.swift", "AcmeFlowViewModel", 0, &[]),
             "viewmodel"
         );
         assert_eq!(
-            classify_layer_sym("App/ExampleFlow.swift", "ExampleFlowController", 0, &[]),
+            classify_layer_sym("App/AcmeFlow.swift", "AcmeFlowController", 0, &[]),
             "viewmodel"
         );
         assert_eq!(
-            classify_layer_sym("App/ExampleFlow.swift", "DriftCompiler", 0, &[]),
+            classify_layer_sym("App/AcmeFlow.swift", "DriftCompiler", 0, &[]),
             "scheduler"
         );
         assert_eq!(
-            classify_layer_sym("App/ExampleFlow.swift", "ClipStore", 0, &[]),
+            classify_layer_sym("App/AcmeFlow.swift", "ClipStore", 0, &[]),
             "persistence"
         );
         assert_eq!(
-            classify_layer_sym("App/ExampleFlow.swift", "DriftEngine", 0, &[]),
+            classify_layer_sym("App/AcmeFlow.swift", "DriftEngine", 0, &[]),
             "scheduler"
         );
         // File-based classification still wins when it fires.
@@ -4800,24 +4800,24 @@ mod tests {
         // Method qnames: class component must propagate even when the method leaf doesn't match.
         assert_eq!(
             classify_layer_sym(
-                "App/ExampleFlow.swift",
-                "ExampleFlowViewModel.refreshDriftPlayhead",
+                "App/AcmeFlow.swift",
+                "AcmeFlowViewModel.refreshDriftPlayhead",
                 0,
                 &[]
             ),
             "viewmodel"
         );
         assert_eq!(
-            classify_layer_sym("App/ExampleFlow.swift", "DriftCompiler.compile", 0, &[]),
+            classify_layer_sym("App/AcmeFlow.swift", "DriftCompiler.compile", 0, &[]),
             "scheduler"
         );
         assert_eq!(
-            classify_layer_sym("App/ExampleFlow.swift", "ClipStore.save", 0, &[]),
+            classify_layer_sym("App/AcmeFlow.swift", "ClipStore.save", 0, &[]),
             "persistence"
         );
         // Rust-style :: separators.
         assert_eq!(
-            classify_layer_sym("src/drift.rs", "ExampleFlowViewModel::refresh", 0, &[]),
+            classify_layer_sym("src/drift.rs", "AcmeFlowViewModel::refresh", 0, &[]),
             "viewmodel"
         );
     }
@@ -5071,7 +5071,7 @@ mod plan_j_t007_test_stub_tests {
 mod plan_j_t003_classify_file_role_tests {
     //! Plan J t-003: locks the unified file-role classifier and
     //! exercises the new `view` / `viewmodel` patterns. Previously
-    //! a file like `ExampleFlowViewModel.swift` fell through to
+    //! a file like `AcmeFlowViewModel.swift` fell through to
     //! `impl`; M21 field-eval flagged it as mis-bucketed "other".
 
     use super::classify_file_role;
@@ -5087,7 +5087,7 @@ mod plan_j_t003_classify_file_role_tests {
         // `ViewTests.swift` must be `test`, not `view` — the
         // /test predicate runs first.
         assert_eq!(
-            classify_file_role("App/Tests/ExampleFlowViewTests.swift"),
+            classify_file_role("App/Tests/AcmeFlowViewTests.swift"),
             "test"
         );
         assert_eq!(classify_file_role("src/lib_test.py"), "test");
@@ -5098,7 +5098,7 @@ mod plan_j_t003_classify_file_role_tests {
     fn viewmodel_by_filename_suffix() {
         // The key M21 reproducer.
         assert_eq!(
-            classify_file_role("App/Sources/ExampleFlowViewModel.swift"),
+            classify_file_role("App/Sources/AcmeFlowViewModel.swift"),
             "viewmodel"
         );
         assert_eq!(
@@ -5110,7 +5110,7 @@ mod plan_j_t003_classify_file_role_tests {
     #[test]
     fn viewmodel_by_path_pattern() {
         assert_eq!(
-            classify_file_role("App/Sources/viewmodels/ExampleFlow.swift"),
+            classify_file_role("App/Sources/viewmodels/AcmeFlow.swift"),
             "viewmodel"
         );
         assert_eq!(classify_file_role("web/viewmodel/foo.ts"), "viewmodel");
@@ -5118,17 +5118,14 @@ mod plan_j_t003_classify_file_role_tests {
 
     #[test]
     fn view_by_filename_suffix() {
-        assert_eq!(
-            classify_file_role("App/Sources/ExampleFlowView.swift"),
-            "view"
-        );
+        assert_eq!(classify_file_role("App/Sources/AcmeFlowView.swift"), "view");
         assert_eq!(classify_file_role("web/src/TrackView.tsx"), "view");
     }
 
     #[test]
     fn view_by_path_pattern() {
         assert_eq!(
-            classify_file_role("App/Sources/views/ExampleFlow.swift"),
+            classify_file_role("App/Sources/views/AcmeFlow.swift"),
             "view"
         );
         assert_eq!(classify_file_role("web/view/index.ts"), "view");
@@ -5146,7 +5143,7 @@ mod plan_j_t003_classify_file_role_tests {
         // The viewmodel branch runs before the view branch in the
         // classifier; without that ordering, `*ViewModel.*` would
         // hit `stem_ends_with(view)` first and mis-classify.
-        let r = classify_file_role("App/Sources/ExampleFlowViewModel.swift");
+        let r = classify_file_role("App/Sources/AcmeFlowViewModel.swift");
         assert_eq!(r, "viewmodel", "ViewModel must NOT fall to `view`; got {r}");
     }
 

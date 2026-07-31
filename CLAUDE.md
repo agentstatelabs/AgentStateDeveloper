@@ -32,7 +32,7 @@ data before catching that `crates/agentstatedeveloper-core/src/
 calibration.rs::bucket_advice` had the uncertainty axis
 inverted — it assumed "low" meant "low quality" instead of "low
 uncertainty". Every unit test passed because they encoded the
-same wrong assumption. Only real ExampleProj data exposed it.
+same wrong assumption. Only real AcmeProj data exposed it.
 
 When you add a new label scheme to ASD or a new predictor that
 emits one, write down the table's expected pass rates as comments
@@ -47,7 +47,7 @@ See DESIGN.md Plan J t-015 for the full four-round arc.
 ## Field-test loop ships UX bugs you can't synthesize
 
 Several rough edges in this session only surfaced when the
-binary was actually run on a different repo (ExampleProj):
+binary was actually run on a different repo (AcmeProj):
 
 - `asd think bootstrap` told users to run `asd reindex` — no
   such CLI subcommand until 1.0.62 added the alias.
@@ -94,7 +94,7 @@ collapse to one entry; layer-mismatched files demote to
 reference-only).
 
 The 1.0.85 → 1.0.87 → 1.0.88 cliff-detection arc burned three
-field-test iterations before catching this. ExampleFlow's
+field-test iterations before catching this. AcmeFlow's
 "Drift Pad scheduler sync" query had scores 42/31/19/18 at
 stage 3 — a clean cliff at 19/31=0.61 — but the same query at
 stage 1 looked like a smooth gradient (42/31/29/27/25/19/18,

@@ -52,7 +52,7 @@ pub struct TrustSignals {
     pub concept_gap_count: usize,
     /// Ledger entries per symbol (raw float).
     pub ledger_density: f64,
-    /// Field-test refinement (ExampleFlow, 2026-06-04): raw count of
+    /// Field-test refinement (AcmeFlow, 2026-06-04): raw count of
     /// distinct annotated symbols, sourced from live `asd_ledger_cache`.
     /// Drives the classify_data_quality `unannotated` → `sparse_but_active`
     /// rename when any annotations exist, even if density is tiny on a
@@ -179,7 +179,7 @@ pub fn compute_trust_score(db_path: &Path) -> TrustScore {
     // `unannotated` → `sparse_but_active` reclassification when the
     // density is tiny but real entries exist (5 entries on 9000 symbols
     // rounds to 0.0006 density; old code mislabeled this as
-    // "no annotations yet"). See ExampleFlow field-test feedback,
+    // "no annotations yet"). See AcmeFlow field-test feedback,
     // 2026-06-04.
     let annotated_symbol_count = SearchFtsDb::open(db_path).ok().map(|fts| {
         // ref_name lives on Engine; reopen here to avoid threading it
@@ -438,7 +438,7 @@ fn classify_data_quality(sig: &TrustSignals, project_root: &std::path::Path) -> 
         || file_line_count(&dot_asd.join("trust-history.jsonl")) >= 3;
 
     if sig.ledger_density < 0.05 {
-        // Field-test refinement (ExampleFlow, 2026-06-04): if the live
+        // Field-test refinement (AcmeFlow, 2026-06-04): if the live
         // ledger cache has ANY annotated symbols, we're not "unannotated"
         // — we're sparse-but-active. The density-only gate misclassified
         // projects with a handful of entries spread across thousands of
@@ -591,8 +591,8 @@ fn ledger_signals(db_path: &Path, _symbol_count: u64) -> (f64, usize) {
 }
 
 #[cfg(test)]
-mod exampleflow_unannotated_fix_tests {
-    //! Field-test refinement (ExampleFlow, 2026-06-04): the
+mod acmeflow_unannotated_fix_tests {
+    //! Field-test refinement (AcmeFlow, 2026-06-04): the
     //! `unannotated` label was firing on projects with live ledger
     //! entries because the density gate ignored `asd_ledger_cache`
     //! and the count gate read from a stale FTS column. Lock the
@@ -603,7 +603,7 @@ mod exampleflow_unannotated_fix_tests {
     fn mk_signals(density: f64, annotated_count: Option<usize>) -> TrustSignals {
         TrustSignals {
             age_hours: 1.0,
-            symbol_count: 9675, // ExampleProj-shaped large repo
+            symbol_count: 9675, // AcmeProj-shaped large repo
             sidecar_state: "present".into(),
             dirty_file_count: 0,
             concept_gap_count: 0,
@@ -615,7 +615,7 @@ mod exampleflow_unannotated_fix_tests {
 
     #[test]
     fn sparse_density_with_live_annotations_classifies_as_sparse_but_active() {
-        // The ExampleFlow scenario: 13 entries on 9675 symbols →
+        // The AcmeFlow scenario: 13 entries on 9675 symbols →
         // density 0.0013, BUT annotated_symbol_count > 0. Must NOT
         // be labeled `unannotated`.
         let sig = mk_signals(0.0013, Some(13));

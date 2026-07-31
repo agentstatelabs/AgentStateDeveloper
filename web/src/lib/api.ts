@@ -34,7 +34,7 @@ export function getSymbols(): Promise<SymbolSummary[]> {
 /**
  * Snapshot-first symbol listing (territory prototype). `/api/v1/symbols`
  * resolves every qname individually — measured 8m45s for a 2000-row page on
- * the 9.8k-symbol ExampleProj index — and it holds the engine mutex while doing
+ * the 9.8k-symbol AcmeProj index — and it holds the engine mutex while doing
  * so, starving every other API call. Until that endpoint uses the bulk id
  * map, prefer the setup-time snapshot and fall back to the live API.
  */

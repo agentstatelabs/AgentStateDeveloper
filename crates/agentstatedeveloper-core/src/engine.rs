@@ -428,21 +428,18 @@ mod tests {
     #[test]
     fn sqlite_namespace_uses_project_directory_name() {
         let temp = tempfile::tempdir().expect("temp directory");
-        let project = temp.path().join("ExampleFlow-ios");
+        let project = temp.path().join("AcmeFlow-ios");
         std::fs::create_dir(&project).expect("project directory");
         let namespace =
             Engine::namespace_for_db(&project.join(".asd-state.db")).expect("valid namespace");
 
-        assert_eq!(namespace.as_str(), "ExampleFlow-ios");
+        assert_eq!(namespace.as_str(), "AcmeFlow-ios");
     }
 
     #[test]
     fn sanitize_namespace_maps_invalid_dir_names() {
         // Valid names pass through unchanged (existing projects keep their ns).
-        assert_eq!(
-            Engine::sanitize_namespace("ExampleFlow-ios"),
-            "ExampleFlow-ios"
-        );
+        assert_eq!(Engine::sanitize_namespace("AcmeFlow-ios"), "AcmeFlow-ios");
         assert_eq!(Engine::sanitize_namespace("my_repo-2"), "my_repo-2");
         // Dots, spaces, and other chars → '_' (e.g. tempdirs like `.tmpAbc`).
         assert_eq!(Engine::sanitize_namespace(".tmpAbc"), "_tmpAbc");

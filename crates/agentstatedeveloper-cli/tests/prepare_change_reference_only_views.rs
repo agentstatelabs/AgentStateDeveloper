@@ -43,20 +43,20 @@ fn seed(db: &Path) {
     let symbols = vec![
         mk_sym(
             "active_drift_clip",
-            "App.ExampleFlow.ExampleFlowViewModel.activeDriftClipForPlayhead",
-            "App/ExampleFlow/ExampleFlowApp.swift",
+            "App.AcmeFlow.AcmeFlowViewModel.activeDriftClipForPlayhead",
+            "App/AcmeFlow/AcmeFlowApp.swift",
             40,
         ),
         mk_sym(
             "sheet_music_playhead",
-            "App.ExampleFlow.Views.SheetMusicView.SheetMusicView.localSchedulerPlayheadClip",
-            "App/ExampleFlow/Views/SheetMusicView.swift",
+            "App.AcmeFlow.Views.SheetMusicView.SheetMusicView.localSchedulerPlayheadClip",
+            "App/AcmeFlow/Views/SheetMusicView.swift",
             90,
         ),
         mk_sym(
             "waveform_canvas",
-            "App.ExampleFlow.Views.WaveformCanvas.WaveformCanvas",
-            "App/ExampleFlow/Views/WaveformCanvas.swift",
+            "App.AcmeFlow.Views.WaveformCanvas.WaveformCanvas",
+            "App/AcmeFlow/Views/WaveformCanvas.swift",
             5,
         ),
     ];

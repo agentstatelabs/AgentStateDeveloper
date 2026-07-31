@@ -38,7 +38,7 @@ pub enum ShardBy {
 }
 
 /// Plan K t-008: size budget for the committed sidecar. Defaults
-/// chosen for ExampleFlow-scale projects: 1 MB total, 200 KB per
+/// chosen for AcmeFlow-scale projects: 1 MB total, 200 KB per
 /// shard file. Configurable per-project via `.asd/config.toml`.
 #[derive(Debug, Clone, Copy)]
 pub struct BudgetConfig {

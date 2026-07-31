@@ -86,7 +86,7 @@ pub struct PrepareChangeArgs {
     pub exclude: Option<String>,
 
     /// Comma-separated glob patterns to restrict results to specific paths,
-    /// e.g. --paths 'ExampleFlowCore/*Bus*'. This is the path-scope hint; use
+    /// e.g. --paths 'AcmeFlowCore/*Bus*'. This is the path-scope hint; use
     /// --scope for a named alias from .asd/scopes.toml.
     #[arg(long)]
     pub paths: Option<String>,
@@ -113,7 +113,7 @@ pub struct PrepareChangeArgs {
     #[arg(long)]
     pub check_commit: Option<String>,
 
-    /// ExampleFlow refinement (1.0.76): minimum confidence for a
+    /// AcmeFlow refinement (1.0.76): minimum confidence for a
     /// Hypothesis to surface in `prior_thinking`. Defaults to 0.3
     /// (matches `core::thinking::DEFAULT_CONFIDENCE_FLOOR`). Lower
     /// to see speculative hypotheses; raise to suppress noise.
@@ -124,7 +124,7 @@ pub struct PrepareChangeArgs {
 }
 
 pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
-    // ExampleFlow refinement (1.0.77): use the 24h soft threshold +
+    // AcmeFlow refinement (1.0.77): use the 24h soft threshold +
     // classify severity. Only print Critical to stderr unconditionally;
     // Soft warnings (just-past-threshold but FTS healthy) are demoted
     // into the JSON output's `stale_severity` field, where downstream
@@ -384,7 +384,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     let (test_gap, proposed_test_path, proposed_test_stub) =
         detect_test_gap(&file_scores, &affected_tests, &all_test_file_paths);
     // 1.0.86: suggested_test_coverage was emitting bare summary
-    // strings duplicated from design_invariants. ExampleFlow probe
+    // strings duplicated from design_invariants. AcmeFlow probe
     // 2 confirmed the overlap. Now emits structured entries:
     //   { ref: "<entry_id>" }   for invariant-derived hints
     //   { hint: "<text>" }      for effect-derived / cold-start hints
@@ -834,7 +834,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     // where intermediate scores from soon-to-be-demoted files
     // smoothed the gradient. After recipe_edit demotes
     // reference-only files, the remaining edit-list often shows the
-    // cliff cleanly. ExampleFlow case: file_scores might have
+    // cliff cleanly. AcmeFlow case: file_scores might have
     // 42/31/29/27/25/19/18 (no cliff at file-scores time), but
     // post-demotion only the impl-layer files remain — 42/31/19/18
     // with the 19/31=0.61 cliff visible.
@@ -1115,7 +1115,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
         })
         .collect();
 
-    // ExampleFlow refinement #1 (1.0.84): recursively drop empty
+    // AcmeFlow refinement #1 (1.0.84): recursively drop empty
     // sub-fields (preserve:[], reference_only:[],
     // likely_omitted_files:[], nested empty layer_distribution maps,
     // etc). This is a NESTED clean — top-level drop_empty in the
@@ -1167,7 +1167,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
             "injected": ctx_text.is_some(),
         }),
     };
-    // ExampleFlow refinement (1.0.76): surface captured thinking on
+    // AcmeFlow refinement (1.0.76): surface captured thinking on
     // the symbols that matter for this query. Mirrors the MCP handler
     // (mcp_server.rs:4189-4201). Pull top_symbol off each
     // likely_edit_files entry; gather_prior_thinking walks the ledger
@@ -1192,7 +1192,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     let prior_thinking = pt.entries;
     let thinking_summary = serde_json::to_value(&pt.summary).unwrap_or(Value::Null);
 
-    // ExampleFlow refinement: compute once (cheap) for both fields.
+    // AcmeFlow refinement: compute once (cheap) for both fields.
     let stale_classified = agentstatedeveloper_core::stale_warning_classified(
         &cfg.db_path,
         agentstatedeveloper_core::SOFT_STALE_THRESHOLD_SECS,
@@ -1341,7 +1341,7 @@ pub fn run(cfg: &Config, args: PrepareChangeArgs) -> Result<()> {
     //           whitespace). Token estimate matches the compact form.
     //   1.0.79: drop top-level empty/null fields + input echoes +
     //           redundant stale string in agent mode.
-    //   1.0.81: ExampleFlow field-eval (2026-06-04) caught that
+    //   1.0.81: AcmeFlow field-eval (2026-06-04) caught that
     //           drop_empty_top_level was --agent-only. Agents
     //           consuming the default JSON path were still getting
     //           feedback_summary:{}, intent:null, etc. Fix: apply
@@ -1819,7 +1819,7 @@ fn compute_edit_precision(likely_edit_files: &[Value], sha: &str) -> Value {
     }
 
     // Use suffix matching so that repo-relative paths match index-relative paths.
-    // predicted: "Sources/ExampleProj/Foo.swift"  actual: "ExampleProj/Sources/ExampleProj/Foo.swift"
+    // predicted: "Sources/AcmeProj/Foo.swift"  actual: "AcmeProj/Sources/AcmeProj/Foo.swift"
     let is_match = |pred: &str, actual: &str| -> bool {
         actual.ends_with(pred) || pred.ends_with(actual) || actual == pred
     };

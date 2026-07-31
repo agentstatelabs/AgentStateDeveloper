@@ -1,7 +1,7 @@
 //! Plan J t-018: command examples in user-facing output must
 //! actually resolve.
 //!
-//! Two consecutive field-test catches on ExampleProj in one session
+//! Two consecutive field-test catches on AcmeProj in one session
 //! triggered this:
 //!   - `asd think bootstrap` told users to run `asd reindex` —
 //!     no such CLI subcommand until 1.0.62 added the alias.

@@ -43,9 +43,9 @@ pub struct FileScoreEntry {
 
 /// Relative score floor for file inclusion in `likely_edit_files`.
 ///
-/// ExampleFlow field-eval (2026-06-04, refinement #2): the prior 0.25
+/// AcmeFlow field-eval (2026-06-04, refinement #2): the prior 0.25
 /// floor (25% of top score) was too permissive on targeted queries.
-/// ExampleProj observation: a query like "ProjectManager save logic" with
+/// AcmeProj observation: a query like "ProjectManager save logic" with
 /// top BM25 ~10 would admit files scoring 2.5+, sweeping in
 /// project/session/UI files that share no query tokens but had hotness
 /// boost from recent edits. Raising to 0.40 cuts that noise while
@@ -55,12 +55,12 @@ pub struct FileScoreEntry {
 /// are unaffected because the floor scales with the top score).
 pub const FILE_SCORE_FLOOR_RATIO: f64 = 0.40;
 
-/// Cliff detection threshold (1.0.85, ExampleFlow refinement #2 deep
+/// Cliff detection threshold (1.0.85, AcmeFlow refinement #2 deep
 /// half): when a consecutive score ratio drops below this, the lower
 /// score is treated as the start of a new "also-ran" cohort and the
 /// floor is raised to exclude it.
 ///
-/// ExampleFlow case: query "Drift Pad scheduler sync" produced
+/// AcmeFlow case: query "Drift Pad scheduler sync" produced
 /// scores 42 / 31 / 19 / 18. Ratios: 31/42=0.74, 19/31=0.61, 18/19=0.95.
 /// The 19/31 ratio (0.61 < 0.70) marks the cliff between cohort 1
 /// (genuine matches at 42 and 31) and cohort 2 (path-name false
@@ -90,7 +90,7 @@ pub const CLIFF_RATIO_THRESHOLD: f64 = 0.70;
 /// after the last pre-cliff score), or `scores.len()` when there's
 /// no cliff in the list.
 ///
-/// ExampleFlow 1.0.86 regression (2026-06-04): the candidate-level
+/// AcmeFlow 1.0.86 regression (2026-06-04): the candidate-level
 /// cliff in `file_score_floor` missed cliffs that appear only after
 /// file aggregation. Symbol candidates had a smooth gradient
 /// (42/31/29/27/25/19/18) — no consecutive pair triggered 0.70.
@@ -251,7 +251,7 @@ pub fn aggregate_candidate_data(
     // Only include effects from symbols scoring ≥25% of the top score to reduce noise.
     let effect_score_floor = candidates.first().map(|(s, _)| s * 0.25).unwrap_or(0.0);
 
-    // ExampleFlow refinement #2 (1.0.83): file_score_floor was bumped
+    // AcmeFlow refinement #2 (1.0.83): file_score_floor was bumped
     // 0.25 → 0.40 to cut targeted-query noise.
     let mut file_scores: Vec<FileScoreTuple> = Vec::new();
     let mut seen_files: HashSet<String> = HashSet::new();
@@ -633,7 +633,7 @@ mod tests {
 
     #[test]
     fn file_score_floor_cliff_cuts_at_cohort_boundary() {
-        // ExampleFlow refinement #2 (1.0.85, deep half): the
+        // AcmeFlow refinement #2 (1.0.85, deep half): the
         // literal field-eval case. Query "Drift Pad scheduler sync"
         // produced 42 / 31 / 19 / 18. Ratios:
         //   31/42 = 0.74 (above threshold, no cut)
@@ -710,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn cliff_cutoff_index_matches_exampleflow_file_scores() {
+    fn cliff_cutoff_index_matches_acmeflow_file_scores() {
         // 1.0.87 regression case: file-level scores 42/31/19/18.
         // 31/42 = 0.74 (no cut), 19/31 = 0.61 (cut at index 2).
         // Keep first 2 entries; cut starting at index 2.

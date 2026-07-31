@@ -18,7 +18,7 @@ pub struct ReadArgs {
     pub qname: String,
 
     /// Maximum callers/callees to emit. Default 10 — most agent
-    /// queries care about the immediate few. ExampleFlow field-eval
+    /// queries care about the immediate few. AcmeFlow field-eval
     /// (2026-06-04) reported `asd read` was "verbose in callers/
     /// callees, though the ledger section is now very useful." Cap
     /// is per-direction (10 callers + 10 callees). When truncated,
@@ -69,7 +69,7 @@ pub fn run(cfg: &Config, args: ReadArgs) -> Result<()> {
     let mut callers = resolve(caller_ids);
     let mut callees = resolve(callee_ids);
 
-    // ExampleFlow refinement (1.0.82): cap callers/callees by
+    // AcmeFlow refinement (1.0.82): cap callers/callees by
     // default. `--full` to bypass. Truncation marker appended so
     // the agent knows there's more — matches the pattern from
     // trim_for_agent in core::search_fts.
@@ -77,7 +77,7 @@ pub fn run(cfg: &Config, args: ReadArgs) -> Result<()> {
     // 1.0.85: --limit N now means "at most N entries TOTAL,
     // including any truncation sentinel." Pre-fix the cap left
     // N entries then appended a sentinel for a total of N+1.
-    // Off-by-one caught by ExampleFlow field-eval 2026-06-04.
+    // Off-by-one caught by AcmeFlow field-eval 2026-06-04.
     if !args.full {
         if callers.len() > args.limit {
             // Reserve a slot for the truncation sentinel: keep

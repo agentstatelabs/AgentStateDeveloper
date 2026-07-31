@@ -417,7 +417,7 @@ async fn get_symbol_callees(
 /// (head-memoized) id map — one bulk read per head change, O(ids) per call.
 /// The previous implementation listed every qname and then re-fetched each
 /// symbol with a per-qname `get_symbol_by_qname` — ~10k git reads per request
-/// on a cold cache (measured in minutes on the ExampleProj db); same disease
+/// on a cold cache (measured in minutes on the AcmeProj db); same disease
 /// 91b2aaf cured in `list_symbols`.
 fn resolve_symbols_by_ids(
     state: &AppState,

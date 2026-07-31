@@ -402,7 +402,7 @@ pub fn run_index(
     // Seed from the FULL by-qname map — which at this point contains both
     // previously-indexed symbols (seeded from the repo at the start of Pass 1)
     // AND the symbols parsed in this run.  This allows cross-package edges to
-    // resolve: e.g., when indexing ExampleFlow, calls to DriftCompiler.compile
+    // resolve: e.g., when indexing AcmeFlow, calls to DriftCompiler.compile
     // resolve because SequencerCore was indexed in a prior run and its symbols
     // are already in by_qname.
     //

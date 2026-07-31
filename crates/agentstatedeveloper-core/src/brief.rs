@@ -232,12 +232,12 @@ pub fn brief_prepare_change(full: &Value) -> Value {
             }
         }
     }
-    // ExampleFlow refinement (1.0.76): thinking_summary passes
+    // AcmeFlow refinement (1.0.76): thinking_summary passes
     // through (small, load-bearing — agents read it to tell "filtered"
     // from "absent" even when prior_thinking is empty/missing).
     // Token economy (1.0.80): drop_empty_top_level still strips it if
     // the struct's own skip-predicates collapsed it to `{}` — the
-    // ExampleFlow signal needs at LEAST one non-zero field to be
+    // AcmeFlow signal needs at LEAST one non-zero field to be
     // worth emitting.
     if let Some(v) = full.get("thinking_summary") {
         out.insert("thinking_summary".into(), v.clone());

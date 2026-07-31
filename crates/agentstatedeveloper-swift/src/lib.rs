@@ -106,8 +106,8 @@ impl LanguageAdapter for SwiftAdapter {
 /// Examples:
 /// - `Packages/SequencerCore/Sources/Engine/DriftCompiler`
 ///   → `Engine/DriftCompiler`
-/// - `App/ExampleFlow/Sources/ExampleFlow/ExampleFlowViewModel`
-///   → `ExampleFlow/ExampleFlowViewModel`
+/// - `App/AcmeFlow/Sources/AcmeFlow/AcmeFlowViewModel`
+///   → `AcmeFlow/AcmeFlowViewModel`
 /// - `Sources/Engine/DriftCompiler`  (already at Sources)
 ///   → `Engine/DriftCompiler`
 /// - `Engine/DriftCompiler`  (no Sources segment; no-op)
@@ -131,8 +131,8 @@ fn strip_sources_prefix(path: &str) -> &str {
 /// Strips everything up to and including the first `Sources/` segment so that
 /// the prefix is anchored to the SPM target name, not the indexing root.
 ///
-/// `App/ExampleFlow/Sources/ExampleFlow/ExampleFlowViewModel.swift`
-///   → `ExampleFlow.ExampleFlowViewModel`
+/// `App/AcmeFlow/Sources/AcmeFlow/AcmeFlowViewModel.swift`
+///   → `AcmeFlow.AcmeFlowViewModel`
 fn file_qname_prefix(file: &str) -> String {
     let s = file.strip_prefix("./").unwrap_or(file);
     let s = s.strip_suffix(".swift").unwrap_or(s);
@@ -144,10 +144,10 @@ fn file_qname_prefix(file: &str) -> String {
 /// Collapse consecutive identical path segments after the `/` → `.`
 /// join. Xcode projects routinely nest the project name (no SPM
 /// `Sources/` marker to strip), producing paths like
-/// `App/ExampleFlow/ExampleFlow/ExampleFlow/Views/DriftPad/...`
+/// `App/AcmeFlow/AcmeFlow/AcmeFlow/Views/DriftPad/...`
 /// which yield qnames like
-/// `App.ExampleFlow.ExampleFlow.ExampleFlow.Views.DriftPad.DriftPadView`.
-/// The triple `ExampleFlow` is noise: it inflates token count for
+/// `App.AcmeFlow.AcmeFlow.AcmeFlow.Views.DriftPad.DriftPadView`.
+/// The triple `AcmeFlow` is noise: it inflates token count for
 /// every Swift result, distorts BM25 against multi-word queries
 /// that match the duplicated stem, and lengthens display output.
 ///
@@ -1005,9 +1005,9 @@ fn build_property_type_map(symbols: &[ParsedSymbol]) -> HashMap<String, String> 
 ///
 /// 2. **Suffix search**: extension files embed the source file name in the
 ///    scope, producing qnames like:
-///      `"ExampleFlow.ExampleFlowViewModel+DriftPad.ExampleFlowViewModel.method"`
+///      `"AcmeFlow.AcmeFlowViewModel+DriftPad.AcmeFlowViewModel.method"`
 ///    The canonical class qname in the workspace is:
-///      `"ExampleFlow.ExampleFlowViewModel.ExampleFlowViewModel"`
+///      `"AcmeFlow.AcmeFlowViewModel.AcmeFlowViewModel"`
 ///    We recover it by searching for the class simple name (last component of
 ///    the parent) via the suffix index.
 ///
@@ -1366,8 +1366,8 @@ enum Currency {
         );
         // Xcode app target path
         assert_eq!(
-            file_qname_prefix("App/ExampleFlow/Sources/ExampleFlow/ExampleFlowViewModel.swift"),
-            "ExampleFlow.ExampleFlowViewModel"
+            file_qname_prefix("App/AcmeFlow/Sources/AcmeFlow/AcmeFlowViewModel.swift"),
+            "AcmeFlow.AcmeFlowViewModel"
         );
         // Flat file with no Sources segment — unchanged
         assert_eq!(
@@ -1387,19 +1387,17 @@ enum Currency {
     fn file_prefix_dedupes_consecutive_repeated_segments() {
         // Refinement (1.0.74): Xcode-style nested project naming
         // produces paths like
-        //   App/ExampleFlow/ExampleFlow/ExampleFlow/Views/DriftPad/DriftPadView.swift
+        //   App/AcmeFlow/AcmeFlow/AcmeFlow/Views/DriftPad/DriftPadView.swift
         // (no SPM `Sources/` marker — strip_sources_prefix is a
         // no-op). Pre-fix this yielded
-        //   App.ExampleFlow.ExampleFlow.ExampleFlow.Views.DriftPad.DriftPadView
-        // — the triple ExampleFlow inflates tokens, distorts
+        //   App.AcmeFlow.AcmeFlow.AcmeFlow.Views.DriftPad.DriftPadView
+        // — the triple AcmeFlow inflates tokens, distorts
         // BM25, and pollutes search output. Field-test surfaced
-        // in ExampleProj 1.0.72.
+        // in AcmeProj 1.0.72.
         assert_eq!(
-            file_qname_prefix(
-                "App/ExampleFlow/ExampleFlow/ExampleFlow/Views/DriftPad/DriftPadView.swift"
-            ),
-            "App.ExampleFlow.Views.DriftPad.DriftPadView",
-            "consecutive `ExampleFlow` segments should collapse to one"
+            file_qname_prefix("App/AcmeFlow/AcmeFlow/AcmeFlow/Views/DriftPad/DriftPadView.swift"),
+            "App.AcmeFlow.Views.DriftPad.DriftPadView",
+            "consecutive `AcmeFlow` segments should collapse to one"
         );
         // Double, not triple
         assert_eq!(file_qname_prefix("Foo/Bar/Bar/baz.swift"), "Foo.Bar.baz");
@@ -1411,9 +1409,9 @@ enum Currency {
         );
         // Doesn't collide with the SPM Sources-strip path
         assert_eq!(
-            file_qname_prefix("App/ExampleFlow/Sources/ExampleFlow/ExampleFlow/foo.swift"),
-            "ExampleFlow.foo",
-            "after Sources-strip, the ExampleFlow/ExampleFlow/ also dedupes"
+            file_qname_prefix("App/AcmeFlow/Sources/AcmeFlow/AcmeFlow/foo.swift"),
+            "AcmeFlow.foo",
+            "after Sources-strip, the AcmeFlow/AcmeFlow/ also dedupes"
         );
     }
 
@@ -1425,8 +1423,8 @@ enum Currency {
         assert_eq!(dedupe_consecutive_segments("a"), "a");
         assert_eq!(dedupe_consecutive_segments("a.b.a"), "a.b.a"); // non-consecutive
         assert_eq!(
-            dedupe_consecutive_segments("App.ExampleFlow.ExampleFlow.ExampleFlow.Views"),
-            "App.ExampleFlow.Views"
+            dedupe_consecutive_segments("App.AcmeFlow.AcmeFlow.AcmeFlow.Views"),
+            "App.AcmeFlow.Views"
         );
     }
 
@@ -1801,15 +1799,15 @@ class SessionViewModel {
     /// Regression: extension methods calling stored properties via labeled arguments
     /// must produce call edges even when the class declaration is in a different file.
     ///
-    /// Real-world pattern: `ExampleFlowViewModel+DriftPad.swift` calls
+    /// Real-world pattern: `AcmeFlowViewModel+DriftPad.swift` calls
     /// `scheduler.restartLane(laneID, at: tick)` and
     /// `scheduler.laneLoopPositions(currentTick: tick)`, but `scheduler: Scheduler`
-    /// is declared in `ExampleFlowViewModel.swift`.
+    /// is declared in `AcmeFlowViewModel.swift`.
     #[test]
     fn extension_file_property_call_cross_file() {
-        // ---- "class file" symbols (ExampleFlowViewModel.swift) ----
+        // ---- "class file" symbols (AcmeFlowViewModel.swift) ----
         let class_src = r#"
-class ExampleFlowViewModel {
+class AcmeFlowViewModel {
     let scheduler: Scheduler
 
     func mainMethod() {}
@@ -1817,14 +1815,14 @@ class ExampleFlowViewModel {
 "#;
         let class_syms = adapter()
             .parse_symbols(
-                "App/ExampleFlow/Sources/ExampleFlow/ExampleFlowViewModel.swift",
+                "App/AcmeFlow/Sources/AcmeFlow/AcmeFlowViewModel.swift",
                 class_src,
             )
             .unwrap();
 
-        // ---- "extension file" symbols (ExampleFlowViewModel+DriftPad.swift) ----
+        // ---- "extension file" symbols (AcmeFlowViewModel+DriftPad.swift) ----
         let ext_src = r#"
-extension ExampleFlowViewModel {
+extension AcmeFlowViewModel {
     func driftPadMethod(laneID: Int, tick: Int) {
         let pos = scheduler.laneLoopPositions(currentTick: tick)
         scheduler.restartLane(laneID, at: tick)
@@ -1834,7 +1832,7 @@ extension ExampleFlowViewModel {
 "#;
         let ext_syms = adapter()
             .parse_symbols(
-                "App/ExampleFlow/Sources/ExampleFlow/ExampleFlowViewModel+DriftPad.swift",
+                "App/AcmeFlow/Sources/AcmeFlow/AcmeFlowViewModel+DriftPad.swift",
                 ext_src,
             )
             .unwrap();
@@ -1859,7 +1857,7 @@ extension ExampleFlowViewModel {
 
         // ---- extract edges from the extension file ----
         let edges = adapter().extract_call_edges(
-            "App/ExampleFlow/Sources/ExampleFlow/ExampleFlowViewModel+DriftPad.swift",
+            "App/AcmeFlow/Sources/AcmeFlow/AcmeFlowViewModel+DriftPad.swift",
             ext_src,
             &ext_syms,
             &ws,

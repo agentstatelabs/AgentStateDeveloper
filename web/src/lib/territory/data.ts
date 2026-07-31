@@ -10,7 +10,7 @@
  * - `/territory-symbols.json` — static snapshot of the live by-qname index
  *   (9.8k symbols). Generated at demo-setup time directly from the ASD
  *   object store because `/api/v1/symbols` resolves each qname individually
- *   (~53ms each → 8m45s per 2000-row page at ExampleProj scale). Falls back to
+ *   (~53ms each → 8m45s per 2000-row page at AcmeProj scale). Falls back to
  *   the paginated API when the snapshot is missing.
  * - `/api/v1/ledger?limit=1000` — every ledger entry, including Plan G
  *   thinking kinds (hypothesis / mental_model / failed_attempt /
@@ -163,7 +163,7 @@ async function fetchSymbols(onProgress: (msg: string) => void): Promise<SnapSymb
 	} catch {
 		/* fall through to the live API */
 	}
-	// Fallback: paginated live API. Slow at ExampleProj scale (see module doc).
+	// Fallback: paginated live API. Slow at AcmeProj scale (see module doc).
 	const out: SnapSymbol[] = [];
 	const LIMIT = 2000;
 	for (let offset = 0; ; offset += LIMIT) {
@@ -210,7 +210,7 @@ async function doLoad(onProgress: (msg: string) => void): Promise<TerritoryData>
 			() => ({}) as Record<string, { d?: string[]; t?: string[] }>
 		)
 	]);
-	// Context-only; ~3.6s at ExampleProj scale, so it must not block first paint.
+	// Context-only; ~3.6s at AcmeProj scale, so it must not block first paint.
 	const effectsOverview: EffectOverviewRow[] = [];
 	getJson<EffectOverviewRow[]>('/api/v1/effects/overview')
 		.then((rows) => effectsOverview.push(...rows))

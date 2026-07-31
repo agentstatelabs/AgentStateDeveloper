@@ -3307,7 +3307,7 @@ impl AsdMcpServer {
                 "kind": "missing_test",
             }));
         }
-        // ExampleFlow refinement #1 (1.0.84): recursively drop
+        // AcmeFlow refinement #1 (1.0.84): recursively drop
         // empty sub-fields. Matches CLI prepare_change handling.
         let safe_change_recipe =
             agentstatedeveloper_core::drop_empty_recursive(serde_json::json!({
@@ -3338,7 +3338,7 @@ impl AsdMcpServer {
                     .map(String::from)
             })
             .collect();
-        // ExampleFlow refinement (2026-06-04): gather now returns
+        // AcmeFlow refinement (2026-06-04): gather now returns
         // PriorThinking { entries, summary }. `thinking_summary` always
         // emits (load-bearing signal: tells agents whether thinking
         // exists but was filtered, vs. doesn't exist at all).
@@ -3373,7 +3373,7 @@ impl AsdMcpServer {
             "recently_touched": recently_touched,
             "prior_thinking": prior_thinking,
             "thinking_summary": thinking_summary,
-            // ExampleFlow refinement (1.0.77): 24h soft threshold for
+            // AcmeFlow refinement (1.0.77): 24h soft threshold for
             // prepare-change (matches a typical dev day; index built
             // this morning is fine all afternoon). When age exceeds the
             // threshold but the query DID resolve, downstream UIs can
@@ -4897,7 +4897,7 @@ impl AsdMcpServer {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        // ExampleFlow refinement: thinking_summary always emits, even
+        // AcmeFlow refinement: thinking_summary always emits, even
         // when prior_thinking is Null — load-bearing signal for agents
         // ("entries exist but filtered" vs "no entries on these symbols").
         let pt = thinking::gather_prior_thinking(

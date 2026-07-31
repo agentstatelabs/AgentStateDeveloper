@@ -41,7 +41,7 @@ pub struct BucketStats {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub advice: String,
     /// Why `advice` looks the way it does. Field-eval refinement
-    /// (1.0.73 ExampleProj run): an empty `advice` string had three
+    /// (1.0.73 AcmeProj run): an empty `advice` string had three
     /// possible meanings — well-calibrated, sample-too-small,
     /// or unknown-label — and consumers couldn't tell which from
     /// the JSON alone. This explicit status lets downstream tools
@@ -138,7 +138,7 @@ where
 
 /// Bucket-semantics advisory. ASD uses TWO bucket axes with
 /// OPPOSITE directions — getting this wrong was the original
-/// 1.0.59-through-1.0.66 calibration bug (ExampleProj's `low`
+/// 1.0.59-through-1.0.66 calibration bug (AcmeProj's `low`
 /// bucket at 100% pass rate looked miscalibrated only because
 /// this table had the uncertainty axis inverted).
 ///
@@ -183,7 +183,7 @@ fn bucket_advice_with_status(label: &str, count: usize, rate: f64) -> (String, A
     };
     let gap = rate - expected;
     if gap > 0.15 {
-        // Field-eval (2026-06-04, ExampleProj 1.0.65): first real run
+        // Field-eval (2026-06-04, AcmeProj 1.0.65): first real run
         // showed 7 `low` observations at 100% pass rate. The original
         // wording asserted "bucket threshold is too strict" — but
         // that's only one of three possible explanations. The probes
@@ -333,8 +333,8 @@ mod tests {
     }
 
     #[test]
-    fn exampleproj_field_signal_now_well_calibrated() {
-        // Regression test for the ExampleProj 1.0.65/66/67 case: 10
+    fn acmeproj_field_signal_now_well_calibrated() {
+        // Regression test for the AcmeProj 1.0.65/66/67 case: 10
         // observations in the `low` bucket all passing. With the
         // semantics-inverted advice table (1.0.59-1.0.67), this
         // produced a confidently-wrong "threshold too strict"

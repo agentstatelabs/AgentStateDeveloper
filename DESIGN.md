@@ -530,7 +530,7 @@ Follows the same pattern as `/Apps/stategraph/` and `/Apps/CTXone/`.
 
 Plan B redesigns the committed sidecar around *conclusions* — the expensive
 LLM-formed facts that are hard to reproduce — and drops everything that is
-derivable from source. Driven by the ExampleFlow field report showing the
+derivable from source. Driven by the AcmeFlow field report showing the
 `.asd/v1/` sidecar reaching 75 MB.
 
 ### Reframe from the t-001 audit
@@ -604,7 +604,7 @@ the heavy `asd hydrate` flow).
 
 ### Acceptance
 
-ExampleFlow sidecar drops from 75 MB → < 500 KB (t-008 probe).
+AcmeFlow sidecar drops from 75 MB → < 500 KB (t-008 probe).
 
 ## Plan C — semantic-layer moat (in design)
 
@@ -852,7 +852,7 @@ t-005 (bootstrap entry point) → t-007 (provenance tags) → t-008
 
 ### Acceptance probes (t-008)
 
-Add to `examples/exampleflow-probes.toml`:
+Add to `examples/acmeflow-probes.toml`:
 - A recorded `role=stale-api` Constraint on a symbol demotes it on
   unrelated queries (decisions-as-constraints works).
 - A `Noisy` verdict on `(query, symbol)` persists across runs.
@@ -860,7 +860,7 @@ Add to `examples/exampleflow-probes.toml`:
   list.
 - `asd map` writes ≥1 Classification entry per source-tier package.
 
-Acceptance: ExampleFlow queries that previously surfaced
+Acceptance: AcmeFlow queries that previously surfaced
 `AudioEngine` files for `SongPlayers` test work no longer do, because
 the relevant Constraint actively demotes them.
 
@@ -877,7 +877,7 @@ rather than sitting in DEFERRED limbo forever.
 ### t-001 — Index-time denorm of penalty tuple
 
 **Status:** dormant. **Trigger:** measurable perf regression on
-penalty application (>20ms per query on ExampleProj DB) OR ledger row
+penalty application (>20ms per query on AcmeProj DB) OR ledger row
 count > 50k.
 
 Today `apply_constraint_penalties` does a per-candidate ledger walk.
@@ -886,7 +886,7 @@ into `asd_symbols_meta` at index time, and have penalty application
 read the table instead.
 
 **Acceptance:** bench harness in `crates/agentstatedeveloper-cli/
-benches/penalty.rs`; ExampleProj DB query latency drops by ≥30% on
+benches/penalty.rs`; AcmeProj DB query latency drops by ≥30% on
 queries that hit ≥100 candidates.
 
 ### t-003 — Crucible re-run validation
@@ -902,16 +902,16 @@ new gaps in `MEMORY/project_crucible_followup.md`.
 **Acceptance:** memory file written; any new pain becomes Plan J
 tasks (not new code in this task).
 
-### t-004 — ExampleFlow sidecar-size validation
+### t-004 — AcmeFlow sidecar-size validation
 
-**Status:** dormant. **Trigger:** new ExampleFlow repo state
+**Status:** dormant. **Trigger:** new AcmeFlow repo state
 captured (post-Plan G writes for thinking entries).
 
 The Plan B promise was 75 MB → 500 KB sidecar. Verify the promise
 still holds with Plan G's 4 new LedgerKinds + Plan E's
 `asd_symbols_meta`. Add a probe to `tools/sidecar-size-check.sh`.
 
-**Acceptance:** `du -sb .asd/conclusions/` on ExampleFlow < 1 MB.
+**Acceptance:** `du -sb .asd/conclusions/` on AcmeFlow < 1 MB.
 Probe wired into CI as a soft gate (warns on regression, doesn't
 fail).
 
@@ -1094,7 +1094,7 @@ some need new code.
 
 ### From M21
 
-- **t-003** — `ExampleFlowViewModel "other"` mis-bucketing fix in
+- **t-003** — `AcmeFlowViewModel "other"` mis-bucketing fix in
   `file_role` classifier. Add a `viewmodel/` path pattern.
 - **t-004** — Broad-search miss diagnosis: when `search` returns
   <3 hits, run a fallback that drops `intent_focus` and
@@ -1182,7 +1182,7 @@ some need new code.
 
     1.0.59  Synthetic only — 10 unit tests pass against the
             (wrong) bucket-semantics assumption. Kernel ships.
-    1.0.65  First ExampleProj run produces empty calibration block.
+    1.0.65  First AcmeProj run produces empty calibration block.
             Root cause: debug_payload is Some(_) only on probe
             FAILURE; the calibration harvester read from there,
             so an all-passing run produced no observations.
@@ -1207,7 +1207,7 @@ some need new code.
             Inverted from the calibration table's assumption.
             Fix: split the table into two explicit axes
             (uncertainty + quality) with opposite directions.
-            New regression `exampleproj_field_signal_now_well_
+            New regression `acmeproj_field_signal_now_well_
             calibrated` locks the corrected semantics.
 
   **Postmortem — guideline pinned for future predictors:**
@@ -1288,7 +1288,7 @@ some need new code.
   documentation.
 
 - **t-019** — Precision-mode probe assertions to disambiguate
-  calibration signal. Triggered by 1.0.65 ExampleProj field run:
+  calibration signal. Triggered by 1.0.65 AcmeProj field run:
   `asd probe run --json | jq .calibration` showed 7 of 9
   uncertainty-bearing probes in the `low` bucket with 100% pass
   rate (75pp over the bucket's expected midpoint). The advisory
@@ -1350,7 +1350,7 @@ For this story to work the sidecar must:
    (no opaque blob, no symbol_id-only references the reader can't
    resolve).
 2. Stay compact enough that reading it doesn't blow the agent's
-   context window (per-shard target: ≤ 200 KB on ExampleFlow-scale
+   context window (per-shard target: ≤ 200 KB on AcmeFlow-scale
    projects).
 3. Survive concurrent edits without spurious conflicts (judgment
    conflicts are meaningful and worth surfacing; ordering noise
@@ -1366,8 +1366,8 @@ For this story to work the sidecar must:
 | t-004 | Self-describing entries — **RESOLVED 1.0.38 (already done)**. Audit: `ExportRecord` already carries `id`, `kind`, `qname`, `file`, `summary`, `body` (where present), `role`, `command`, `tags`, `evidence`, `supersedes`, `author`, `created_at` all inline. No opaque `symbol_id` reference in the export shape. The L meta-lesson applied: the original Plan K t-001 draft inherited DEFERRED.md's wishlist wording without checking — this was already done back in Plan B t-004 when ExportRecord was designed. New regression test `exported_entries_are_self_describing` locks in the property: parses a serialized line, asserts id/kind/qname/summary are present and non-empty, asserts no `symbol_id` field leak. | Test confirms qname grep-by works; structural fields present and non-empty; no symbol_id leak. |
 | t-005 | `asd onboard` one-shot for new clones | Today's boot order is `init → index → hydrate`. A new dev shouldn't have to know that. One command, right order, idempotent. | `asd onboard` on a fresh clone: installs hooks, indexes the project, hydrates committed sidecar into SQLite. Re-running is a no-op. CHANGELOG entry documents the onboarding story. |
 | t-006 | `asd think bootstrap --existing` mode | When sidecar already has thinking entries (new dev joining a project that's already been mapped), bootstrap should *summarize what's there* instead of pushing the agent through the initial-read prompt again. | Detects ≥1 MentalModel or ≥3 Hypotheses in the ledger → prints a "Inherited thinking from prior session(s)" summary block before the checklist. With `--check`, distinguishes "you" gaps from "team" gaps. |
-| t-007 | Optional per-package sharding under `.asd/config.toml` | One-shard-per-class is fine for ExampleFlow; monorepos with two teams editing the same class will see false conflicts. Opt-in finer granularity. | `.asd/config.toml` key `sidecar.shard_by = "package"` produces `.asd/conclusions/decisions/<package-key>.jsonl`. Default unchanged. `asd hydrate` reads either layout transparently. |
-| t-008 | `asd sync --check-budget` + CI gate | "Compact" becomes enforced, not aspirational. Pairs with Plan H t-004 (ExampleFlow size validation). | Threshold configurable in `.asd/config.toml` (default 1 MB total, 200 KB per shard). Exits non-zero when exceeded. CI surfaces as a soft gate (warns, doesn't fail) with `--soft`. |
+| t-007 | Optional per-package sharding under `.asd/config.toml` | One-shard-per-class is fine for AcmeFlow; monorepos with two teams editing the same class will see false conflicts. Opt-in finer granularity. | `.asd/config.toml` key `sidecar.shard_by = "package"` produces `.asd/conclusions/decisions/<package-key>.jsonl`. Default unchanged. `asd hydrate` reads either layout transparently. |
+| t-008 | `asd sync --check-budget` + CI gate | "Compact" becomes enforced, not aspirational. Pairs with Plan H t-004 (AcmeFlow size validation). | Threshold configurable in `.asd/config.toml` (default 1 MB total, 200 KB per shard). Exits non-zero when exceeded. CI surfaces as a soft gate (warns, doesn't fail) with `--soft`. |
 | t-009 | Audit `.asd/v1/` legacy + clarify storage layout — **DONE 1.0.35** (scope adjusted from "purge" to "audit + document"). Audit found: (a) `/asd/v1/` is BOTH the SQLite tree prefix (alive, `ASD_PATH_PREFIX`) AND a vestigial on-disk directory; (b) `.asd/v1/` on-disk is gitignored, `sync_to_dir`/`hydrate_from_dir` still write/read it for local debug; (c) README incorrectly told users to `git add .asd/v1/`. Fixed: rewrote README "Git-native sidecar" section, added DESIGN.md "Storage layout" canonical reference, updated DEFERRED.md. Did NOT delete `sync_to_dir`/`hydrate_from_dir` — they're still used by `asd sync`/`asd hydrate` for local-debug workflows and removal would break those without user benefit. | README has no stale `.asd/v1/` instructions; DESIGN.md has a single canonical storage-layout table; the SQLite-prefix-vs-on-disk distinction is explicit in docs. |
 | t-010 | Document the principle in `DESIGN.md` + emit lint warning on violations | The principle is only useful if new code respects it. A future contributor adding a new LedgerKind or artifact needs a single rule to test against. | New `DESIGN.md` section "Sidecar inclusion rule" with the boundary table from this plan. `asd repair` learns to detect & warn on regenerable artifacts that leaked into `.asd/conclusions/`. |
 
@@ -2563,7 +2563,7 @@ adopts lens-core + the identity defined here.
 | t-004 | **Live activity stream**: SSE on asd-serve emitting index/ledger/thinking/audit events as they land; Hub passthrough so CTXone Lens gets it per-repo; Lens "now" feed | 2 |
 | t-005 | **Accountability view** (the centerpiece): per-session/per-commit timeline where every event links its ledger entry (why), thinking entries (reasoning), effect verification (what it touches), and hash-chained audit record (proof); includes verify-badge (absorbs Plan I t-046) | 2 |
 | t-006 | **Deferred-UI absorption**: approvals wiring incl. reject/withdraw (t-029), cross-module graph render (t-030), effect-distribution route (t-031), "who approved what, when" timeline (t-034) — all against existing backends | 2 |
-| t-007 | **Territory-view prototypes**: 2–3 renderings against the ExampleProj golden DB — true 3D globe (WebGL) vs deterministic 2.5D archipelago (SVG/canvas; stable layout run-to-run so devs build spatial memory) vs one wildcard. Islands/regions from module/dir structure, named/shaped by ledger Concept/Ownership entries where present. Selectable layers: thinking/decision density (headline), effects/risk, activity/recency, structure base. Pick winner, kill the rest | 3 |
+| t-007 | **Territory-view prototypes**: 2–3 renderings against the AcmeProj golden DB — true 3D globe (WebGL) vs deterministic 2.5D archipelago (SVG/canvas; stable layout run-to-run so devs build spatial memory) vs one wildcard. Islands/regions from module/dir structure, named/shaped by ledger Concept/Ownership entries where present. Selectable layers: thinking/decision density (headline), effects/risk, activity/recency, structure base. Pick winner, kill the rest | 3 |
 | t-008 | **Visual identity**: dark-first design tokens + theme in lens-core (no existing brand — this defines it); applied across ASD Lens; CTXone inherits in Milestone 3 | 3 |
 | t-009 | **Docs + field test**: `docs/LENS.md` (serve, build, ASD_LENS_DIR, CORS); smoke-test Lens served from a non-source checkout against a foreign repo db per the CLAUDE.md field-test rule | 3 |
 
@@ -2585,7 +2585,7 @@ adopts lens-core + the identity defined here.
   verifiable audit-chain badge.
 - CTXone Lens `/code/*` renders from lens-core components with no fork
   drift; a component fix lands once and ships to both.
-- The chosen territory view renders ExampleProj deterministically (same map
+- The chosen territory view renders AcmeProj deterministically (same map
   twice in a row) with at least the thinking-density and effects layers
   toggleable.
 

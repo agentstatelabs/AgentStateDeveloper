@@ -22,7 +22,7 @@ use agentstatedeveloper_core::{
 use crate::config::Config;
 
 /// Initial-read prompt template, embedded at compile time so
-/// `asd think prompt` works from any CWD (ExampleProj or any other
+/// `asd think prompt` works from any CWD (AcmeProj or any other
 /// project that asd indexes — not just the AgentStateDeveloper
 /// source checkout). The path is resolved relative to think.rs:
 /// repo-root/docs/initial-read-prompt.md.

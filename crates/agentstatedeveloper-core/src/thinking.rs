@@ -2,7 +2,7 @@
 //! (Hypothesis / MentalModel / FailedAttempt / OpenQuestion) into
 //! prepare-change and context-for responses.
 //!
-//! ExampleFlow refinement (2026-06-04): the helper now returns a
+//! AcmeFlow refinement (2026-06-04): the helper now returns a
 //! struct (`PriorThinking`) carrying BOTH the projected entries and
 //! a `ThinkingSummary` metadata block. The summary always emits even
 //! when no entries surface, so callers can distinguish:
@@ -21,7 +21,7 @@
 //!     → action: broaden the query, or this symbol cluster is unmapped.
 //!
 //! `entries_in_workspace` is the only field that requires a workspace-
-//! wide scan; per the ExampleFlow design call (Craig, 2026-06-04) it's
+//! wide scan; per the AcmeFlow design call (Craig, 2026-06-04) it's
 //! computed ONLY when `matched_for_query == 0` so the typical hot-path
 //! call pays nothing extra.
 

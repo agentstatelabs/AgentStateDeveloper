@@ -878,7 +878,7 @@ fn run_probes(cfg: &Config, args: ProbeRunArgs) -> Result<()> {
     // Top-5 slowest — full result shape, pre-sorted descending by
     // duration_ms.
     //
-    // Refinement (1.0.73, after ExampleProj 1.0.72 field run): probes
+    // Refinement (1.0.73, after AcmeProj 1.0.72 field run): probes
     // that share a subprocess via the command-cache (e.g.
     // `rank-projectmanager-top5` + `rank-projectmanager-eq1` both
     // hit the same `asd search ProjectManager --agent` invocation)

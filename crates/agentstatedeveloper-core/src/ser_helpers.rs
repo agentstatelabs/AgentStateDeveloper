@@ -55,7 +55,7 @@ fn is_empty_signal(v: &Value) -> bool {
 /// but the array itself is preserved at its length — position
 /// often matters in arrays.
 ///
-/// ExampleFlow refinement #1 (1.0.84): applied selectively to
+/// AcmeFlow refinement #1 (1.0.84): applied selectively to
 /// `safe_change_recipe` in prepare-change responses. Without this,
 /// `safe_change_recipe.preserve:[]`, `reference_only:[]`,
 /// `likely_omitted_files:[]` etc. bloat the response on the
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn drop_empty_recursive_strips_nested_empties() {
-        // ExampleFlow refinement #1 (1.0.84): the recursive
+        // AcmeFlow refinement #1 (1.0.84): the recursive
         // variant walks into nested objects. safe_change_recipe
         // shape — many empty sibling arrays inside the recipe
         // object.

@@ -42,7 +42,7 @@
 		captured thinking, declared side-effects, and activity — painted as toggleable layers on a map
 		that never rearranges itself. Three competing prototypes against the same live data
 		{#if data}
-			({data.symbolCount.toLocaleString()} ExampleProj symbols · {data.regions.length} regions ·
+			({data.symbolCount.toLocaleString()} AcmeProj symbols · {data.regions.length} regions ·
 			{data.entries.length} ledger entries · aggregated in {(data.loadMs / 1000).toFixed(2)}s)
 		{:else}
 			({progress})
@@ -105,7 +105,7 @@
 			<tr>
 				<td>Honest caveats</td>
 				<td rowspan="1" colspan="3" class="caveat">
-					Data notes for all three: the golden ExampleProj DB had an index + effects but zero ledger
+					Data notes for all three: the golden AcmeProj DB had an index + effects but zero ledger
 					entries, so the judgment history (101 entries, Mar–Jul 2026, mirroring the real M18–M25
 					field-eval arcs) was seeded into a scratch copy via the sidecar-hydrate path; four
 					thinking entries were captured live with <code>asd think</code>. Symbols and per-symbol

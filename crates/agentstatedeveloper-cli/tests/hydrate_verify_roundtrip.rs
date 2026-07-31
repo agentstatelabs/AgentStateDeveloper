@@ -72,8 +72,8 @@ fn seed_source_engine(db: &Path) -> (usize, usize, usize, usize) {
         ),
         mk_sym(
             "sym_d",
-            "ui.session.ExampleFlowView",
-            "app/components/ExampleFlowView.swift",
+            "ui.session.AcmeFlowView",
+            "app/components/AcmeFlowView.swift",
         ),
     ];
     for s in &syms {

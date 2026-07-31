@@ -198,10 +198,10 @@ fn invariant_survives_hydrate_roundtrip() {
     let sym = Symbol {
         symbol_id: "sym_refreshDriftPlayhead".to_string(),
         symbol_fp: "fp_inv_test".to_string(),
-        qname: "ExampleFlowViewModel.refreshDriftPlayhead".to_string(),
+        qname: "AcmeFlowViewModel.refreshDriftPlayhead".to_string(),
         language: "swift".to_string(),
         kind: SymbolKind::Function,
-        file: "ExampleFlow.swift".to_string(),
+        file: "AcmeFlow.swift".to_string(),
         start: Position { line: 42, col: 0 },
         end: Position { line: 55, col: 0 },
         signature: Some("func refreshDriftPlayhead()".to_string()),

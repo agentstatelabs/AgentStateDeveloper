@@ -1,10 +1,10 @@
-//! ExampleFlow refinement (1.0.76): `asd prepare-change` must
+//! AcmeFlow refinement (1.0.76): `asd prepare-change` must
 //! surface captured thinking in a `prior_thinking` block + a
 //! `thinking_summary` metadata block that always emits.
 //!
 //! Pre-fix behavior: the CLI handler called feedback/ledger code
 //! but never invoked `gather_prior_thinking`. The MCP handler did.
-//! Agents using the CLI surface (the ExampleFlow field-tester)
+//! Agents using the CLI surface (the AcmeFlow field-tester)
 //! got invariants but no hypotheses/mental models/open questions/
 //! failed attempts — and no signal that thinking entries existed
 //! but had been filtered.
@@ -67,7 +67,7 @@ fn seed_drift_pad_world(db: &Path) {
     let idx = AsgIndexStore::from_engine(&engine);
 
     // Realistic Drift Pad-shaped symbol + the kind of thinking
-    // the ExampleFlow agent captured.
+    // the AcmeFlow agent captured.
     let sym = mk_sym(
         "sym_sync",
         "Sources.Sequencer.syncDriftScheduler",

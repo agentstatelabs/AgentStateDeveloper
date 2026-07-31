@@ -440,7 +440,7 @@ pub fn run(cfg: &Config, args: InvestigateArgs) -> Result<()> {
     // Token economy:
     //   1.0.78/79: agent mode compact + drop input echo.
     //   1.0.81: drop_empty_top_level applied unconditionally
-    //           (ExampleFlow case: agents using default JSON
+    //           (AcmeFlow case: agents using default JSON
     //           path were still getting feedback_summary:{} etc.)
     let out = agentstatedeveloper_core::drop_empty_top_level(out);
 

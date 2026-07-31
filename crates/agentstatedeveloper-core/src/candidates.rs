@@ -3645,7 +3645,7 @@ mod plan_j_t006_view_layer_matches_tests {
         // a /views/ directory used to miss the boost.
         assert!(view_layer_matches(
             "other",
-            "app/components/ExampleFlowView.swift"
+            "app/components/AcmeFlowView.swift"
         ));
     }
 

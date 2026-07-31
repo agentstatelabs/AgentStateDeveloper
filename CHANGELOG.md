@@ -221,7 +221,7 @@ per session to bias all queries toward the current task's scope.
 
 ### Acceptance probes
 
-Four new probes in `examples/exampleflow-probes.toml` tagged `plan-c`:
+Four new probes in `examples/acmeflow-probes.toml` tagged `plan-c`:
 recipe-returns-structured, diagnostic-only-verdict-suppresses,
 asd-map-writes-classifications, stale-api-constraint-demotes-symbol.
 
