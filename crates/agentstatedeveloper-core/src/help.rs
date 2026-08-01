@@ -1198,6 +1198,39 @@ pub const REGISTRY: &[HelpDoc] = &[
         gotchas: &["Use drill_down to see which symbols are dragging a dimension down."],
         related: &["trust", "status", "test_summary"],
     },
+    HelpDoc {
+        feature: "worktree",
+        group: "workflow",
+        synopsis: "Plan-scoped git worktrees: isolated files + HEAD per unit of work so parallel agents don't clobber each other.",
+        syntax: "asd worktree start|list|finish <plan> [--from <ref>] [--shared-target] [--push] [--keep]",
+        params: &[
+            p!(
+                "plan",
+                true,
+                "Plan name; the worktree is ../<repo>-wt-<plan> on branch plan/<plan>."
+            ),
+            p!(
+                "--shared-target",
+                false,
+                "start: share one Rust build cache (<repo>/.wt-target) instead of a per-worktree target/."
+            ),
+            p!(
+                "--push",
+                false,
+                "finish: git push the target branch after merging."
+            ),
+        ],
+        examples: &[
+            "asd worktree start add-oauth",
+            "asd worktree list",
+            "asd worktree finish add-oauth --push",
+        ],
+        gotchas: &[
+            "The CLI can't cd you — `start` prints the path; open your session there.",
+            "`finish` refuses on a dirty worktree and never switches the main checkout's HEAD; it force-tears-down (removes target/ too).",
+        ],
+        related: &["status", "trust"],
+    },
 ];
 
 /// A score at or above this means we matched the feature NAME (exact or
