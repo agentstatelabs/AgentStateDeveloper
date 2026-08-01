@@ -32,6 +32,8 @@ pub fn asd_skill_spec() -> SkillSpec {
     .rule("To orient in an unfamiliar area, run `asd architecture` for languages, packages, layers, routes, and hotspots.")
     .rule("Prefer `asd search` over raw grep for symbol-level lookups.")
     .rule("After editing code, run `asd reindex` so the index stays current.")
+    .rule("For exact syntax, params, and examples of any command, run `asd help <feature>` (`asd help` lists the whole catalog) instead of guessing.")
+    .command("asd help", "on-demand syntax, examples, and gotchas for any feature")
     .command("asd prepare-change", "scope a change: files, impact, invariants")
     .command("asd context-for", "focused context for one symbol")
     .command("asd impact", "downstream blast radius of a change")
