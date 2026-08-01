@@ -48,3 +48,4 @@ pub mod trust;
 pub mod verify_effects;
 pub mod watch;
 pub mod workflow;
+pub mod worktree;

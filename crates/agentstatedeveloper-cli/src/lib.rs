@@ -225,6 +225,12 @@ pub enum Command {
     #[command(subcommand)]
     Scratch(commands::scratch::ScratchCmd),
 
+    /// Plan-scoped git worktrees: isolated files + HEAD per unit of work so
+    /// parallel agents can't clobber each other. `start`, work, then `finish`
+    /// to merge back + tear down.
+    #[command(subcommand)]
+    Worktree(commands::worktree::WorktreeCmd),
+
     /// Ranked concept search over indexed symbols.
     /// Plan D t-003: also accepts `code_search` and `code_query` (MCP-era aliases).
     #[command(aliases = ["code_search", "code_query"])]
@@ -412,6 +418,7 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::ContextFor(args) => context_for::run(cfg, args),
         Command::Repair(args) => repair::run(cfg, args),
         Command::Scratch(cmd) => scratch::run(cfg, cmd),
+        Command::Worktree(cmd) => worktree::run(cmd),
         Command::Search(args) => search::run(cfg, args),
         Command::References(args) => references::run(cfg, args),
         Command::Scopes(cmd) => scopes::run(cfg, cmd),
