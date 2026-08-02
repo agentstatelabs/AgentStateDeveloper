@@ -1202,7 +1202,7 @@ pub const REGISTRY: &[HelpDoc] = &[
         feature: "worktree",
         group: "workflow",
         synopsis: "Plan-scoped git worktrees: isolated files + HEAD per unit of work so parallel agents don't clobber each other.",
-        syntax: "asd worktree start|list|finish <plan> [--from <ref>] [--shared-target] [--push] [--keep]",
+        syntax: "asd worktree start|list|finish <plan> [--from <ref>] [--shared-target] [--clone [--url <remote>]] [--push] [--keep]",
         params: &[
             p!(
                 "plan",
@@ -1215,19 +1215,26 @@ pub const REGISTRY: &[HelpDoc] = &[
                 "start: share one Rust build cache (<repo>/.wt-target) instead of a per-worktree target/."
             ),
             p!(
+                "--clone",
+                false,
+                "isolate via a fresh clone (own .git, ../<repo>-clone-<plan>) for remote agents; merge-back is via origin."
+            ),
+            p!(
                 "--push",
                 false,
-                "finish: git push the target branch after merging."
+                "finish: git push the branch (with --clone, pushes to origin before teardown)."
             ),
         ],
         examples: &[
             "asd worktree start add-oauth",
             "asd worktree list",
             "asd worktree finish add-oauth --push",
+            "asd worktree start add-oauth --clone",
         ],
         gotchas: &[
             "The CLI can't cd you — `start` prints the path; open your session there.",
-            "`finish` refuses on a dirty worktree and never switches the main checkout's HEAD; it force-tears-down (removes target/ too).",
+            "`finish` refuses on a dirty worktree/clone and never switches the main checkout's HEAD; it force-tears-down (removes target/ too).",
+            "worktree = local isolation (shared .git); --clone = remote isolation (own .git, merge-back via origin).",
         ],
         related: &["status", "trust"],
     },
