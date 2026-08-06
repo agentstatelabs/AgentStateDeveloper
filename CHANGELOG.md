@@ -5,6 +5,69 @@ Versions use semantic versioning; each milestone increments by 0.0.5.
 
 ---
 
+## [Unreleased]
+
+Everything on `main` since the v1.3.1 tag.
+
+### Added — parallel-agent worktrees
+
+- **`asd worktree`** — plan-scoped git worktrees, mirroring CTXone's
+  `ctx worktree`. Each unit of work gets its own worktree + `plan/<name>`
+  branch, so parallel agents get isolated files and HEAD (they can't clobber
+  each other) while sharing context through the hub.
+  - `asd worktree start <plan>` adds `../<repo>-wt-<plan>` on `plan/<plan>`;
+    `list` recovers the plan↔worktree binding from `git worktree list`;
+    `finish <plan>` merges back and (by default) tears the worktree down
+    (`--keep` to skip teardown, `--push` to push the merged branch).
+  - `--shared-target` shares one Rust build cache across worktrees (points
+    `target-dir` at `<repo>/.wt-target`, avoiding a multi-GB `target/` per
+    tree).
+  - `--clone` isolates via a fresh clone with its own `.git`
+    (`../<repo>-clone-<plan>`) for remote/cloud agents on another machine,
+    merging back via `origin` instead of a local merge.
+  - New worktrees auto-enable the repo's `.githooks`.
+
+### Added — on-demand instruction disclosure
+
+- **`asd help [topic]`** and the **`asd-mcp` `help` tool** (the **64th** MCP
+  tool) — return compiled-in feature docs (synopsis, syntax, params,
+  examples, gotchas) for one feature or the full catalog, instead of carrying
+  every tool's full docs in context every turn. Docs are version-pinned to the
+  running binary, so the CLI and MCP tool return byte-identical payloads.
+  - `--agent` for machine-readable JSON; `--manifest` prints this binary's
+    feature manifest.
+  - **Cross-binary proxy**: an unknown topic is resolved by the owning tool
+    (asd ↔ ctx). `--publish` writes this binary's manifest into the shared
+    cross-tool help index so a unified `help` discovers asd's features
+    alongside ctx's (tool-keyed — publishing asd never clobbers ctx's slice).
+  - Comprehensive asd feature registry (15 → 64 features).
+  - `asd skill`'s always-on block now points agents at `asd help` for
+    on-demand syntax.
+
+### Changed
+
+- **`asd onboard`** now also folds in project-scoped MCP registration, so the
+  one-shot post-clone setup connects the agent's tools as part of the same
+  command.
+
+## [v1.3.1] — 2026-07-29
+
+Patch release: ASG integrity-gate bump + namespace sanitization.
+
+### Changed
+
+- Bumped `agentstategraph` v0.9.6 → v0.9.10 (merge integrity gate).
+
+### Fixed
+
+- **Project namespaces with out-of-charset characters no longer error.**
+  ASG v0.9.10 tightened namespace validation to `[A-Za-z0-9_-]`, but asd
+  derived its namespace straight from the project directory name — so dirs
+  with dots or spaces (including tempdirs like `.tmpXXXX`) began failing. Added
+  `Engine::sanitize_namespace` to map out-of-charset characters to `_` before
+  `Namespace::new`. Valid names pass through unchanged, so existing projects
+  keep their namespace and no data moves.
+
 ## [v1.3.0] — 2026-07-13
 
 Everything on `main` since the v1.2.0 tag (Plans T–V + workflow hardening).

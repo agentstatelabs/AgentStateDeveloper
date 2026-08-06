@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/agentstatelabs/AgentStateDeveloper/
 ```
 
 Drops the three binaries in `~/.local/bin`. Optional overrides:
-`ASD_VERSION=v1.2.0`, `INSTALL_DIR=/usr/local/bin`.
+`ASD_VERSION=v1.3.1`, `INSTALL_DIR=/usr/local/bin`.
 
 ### Windows — PowerShell
 
@@ -109,10 +109,11 @@ cd AgentStateDeveloper
 cargo install --path crates/agentstatedeveloper-cli
 cargo install --path crates/agentstatedeveloper-mcp
 
-# Initialize your project
+# Initialize your project (one-shot: init → index → conclusions import,
+# in the right order — idempotent, safe to re-run)
 cd my-project
-asd init
-asd index .
+asd onboard
+# (or, step by step: asd init && asd index .)
 
 # Read a symbol
 asd read payments.chargeCard
@@ -203,6 +204,37 @@ asd skill --dry-run            # preview without writing
 The MCP server reads `ASD_DB` (set by `install` in the env block) so agents
 always connect to the right project database.
 
+### On-demand help for agents
+
+`asd help` returns compiled-in feature docs (synopsis, syntax, params,
+examples, gotchas) — version-pinned to the running binary, so the CLI and
+the `asd-mcp` `help` tool return byte-identical payloads. An agent that hits
+an unfamiliar feature can pull just that page instead of loading an
+always-on instruction block.
+
+```bash
+asd help                 # full feature catalog
+asd help impact          # one feature (also accepts a phrase, e.g. "blast radius")
+asd help --agent         # machine-readable JSON
+```
+
+### Parallel agents — plan-scoped worktrees
+
+`asd worktree` gives each unit of work its own git worktree + `plan/<name>`
+branch, so parallel agents get isolated files and HEAD (they can't clobber
+each other) while sharing context through the hub.
+
+```bash
+asd worktree start <plan>            # add ../<repo>-wt-<plan> on plan/<plan>
+asd worktree list                    # this repo's plan-scoped worktrees and clones
+asd worktree finish <plan> --push    # merge back, push, then tear down
+```
+
+`--shared-target` shares one Rust build cache across worktrees (avoids a
+multi-GB `target/` per tree); `--clone` isolates via a fresh clone with its
+own `.git` (for remote/cloud agents on another machine), merging back via
+`origin` instead of a local merge.
+
 ## Git-native sidecar
 
 ASD has two on-disk locations and one in-SQLite namespace. Knowing which
@@ -255,10 +287,19 @@ automatically on every commit — no manual steps.
 
 ```bash
 git clone <repo>
+cd <repo>
+asd onboard               # one-shot: init → index → conclusions import
+asd mcp install           # registers asd-mcp with your agent tools
+```
+
+`asd onboard` runs the right sequence for either a fresh repo or a fresh
+clone, in the correct order, and is idempotent (safe to re-run). The
+equivalent manual steps:
+
+```bash
 asd init                  # installs hooks, updates .gitignore
 asd conclusions import    # loads .asd/conclusions/*.jsonl → local ledger
 asd index .               # rebuilds derived semantic index from source
-asd mcp install           # registers asd-mcp with your agent tools
 ```
 
 ## Indexing
@@ -280,20 +321,20 @@ count is always included in the JSON summary.
 
 ## Surfaces
 
-- **`asd`** — CLI: orientation (`architecture`, `search`, `trust`, `map`), change-prep (`prepare-change`, `impact`, `checklist`, `since`, `investigate`, `annotate-commit`, `task-close`, `test-summary`), the ledger (`ledger`, `invariant`, `conclusions`, `scratch`, `think`), and plumbing (`init`, `index`, `sync`, `audit`, `hooks`, `mcp`, `skill`, `watch`) — see [`asd --help`](docs/FEATURES.md) for the full set
-- **`asd-mcp`** — stdio MCP server exposing 63 tools to coding agents
+- **`asd`** — CLI: orientation (`architecture`, `search`, `trust`, `map`), change-prep (`prepare-change`, `impact`, `checklist`, `since`, `investigate`, `annotate-commit`, `task-close`, `test-summary`), the ledger (`ledger`, `invariant`, `conclusions`, `scratch`, `think`), and plumbing (`onboard`, `init`, `index`, `sync`, `hydrate`, `audit`, `hooks`, `mcp`, `skill`, `watch`, `worktree`, `help`) — see [`asd --help`](docs/FEATURES.md) for the full set
+- **`asd-mcp`** — stdio MCP server exposing 64 tools to coding agents
 - **`asd-serve`** — HTTP server + Lens review UI
 
 ## MCP tools
 
-Agents access ASD through **63 MCP tools** spanning code search/read, the call
+Agents access ASD through **64 MCP tools** spanning code search/read, the call
 graph, orientation (`architecture`, `trust`, `endpoints`, `dead_code`), impact
 and change analysis, the decision ledger, invariants, effects, conclusions,
 scratch notes, agent thinking, feedback, and audit — e.g. `code_search`,
 `code_read`, `callers`, `callees`, `context_for`, `impact`, `prepare_change`,
 `since`, `architecture`, `trust`, `ledger_append`, `invariant_add`,
 `effect_declare`, `conclusions_export`, `scratch_write`, `think_speculate`,
-`feedback_promote`, `audit_verify`, `reindex`. The full list is in
+`feedback_promote`, `audit_verify`, `reindex`, `help`. The full list is in
 [docs/FEATURES.md](docs/FEATURES.md#mcp-tools).
 
 ## Documentation
