@@ -78,33 +78,63 @@ pub fn gather_buckets(
     engine: &Engine,
 ) -> std::io::Result<BTreeMap<&'static str, Vec<ExportRecord>>> {
     let index = AsgIndexStore::from_engine(engine);
-    let ledger = AsgLedgerStore::from_engine(engine);
     let ref_name = engine.ref_name.clone();
-
-    let prefix = format!("{}/index/by-qname", ASD_ROOT);
-    let tree = engine
-        .repo
-        .get_tree(&ref_name, &prefix)
-        .unwrap_or(serde_json::Value::Null);
-    let mut qnames: Vec<String> = match tree {
-        serde_json::Value::Object(map) => map.keys().cloned().collect(),
-        _ => Vec::new(),
-    };
-    qnames.sort();
 
     let mut buckets: BTreeMap<&'static str, Vec<ExportRecord>> = BTreeMap::new();
     for class in ConclusionClass::all() {
         buckets.insert(class.filename_stem(), Vec::new());
     }
 
-    for qn in qnames {
-        let sym = match index.get_symbol_by_qname(&ref_name, &qn) {
-            Ok(Some(s)) => s,
+    // Drive the walk from the LEDGER tree, not the symbol index. Nearly
+    // every symbol in a large repo carries zero conclusions, and the
+    // per-symbol `list_entries` falls through to an authoritative git
+    // `get_json` on a cache-miss (count == 0) — so iterating all 97k+
+    // symbols meant ~97k git probes to collect a few hundred entries.
+    // The ledger tree has one child per symbol that ACTUALLY has an
+    // entry, so this is O(symbols_with_conclusions), matching
+    // `detect_orphaned_entries`. Resolve qname/file via the cached
+    // symbol_id → Symbol map (one SQLite-backed build, no per-symbol
+    // git reads).
+    let id_map = index.build_id_map(engine);
+    let ledger_prefix = format!("{}/ledger", ASD_ROOT);
+    let ledger_tree = engine
+        .repo
+        .get_tree(&ref_name, &ledger_prefix)
+        .unwrap_or(serde_json::Value::Null);
+    let by_symbol = match ledger_tree {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+
+    // Sort symbol_ids for deterministic traversal (final output is
+    // id-sorted below, but a stable walk keeps behavior reproducible).
+    let mut symbol_ids: Vec<String> = by_symbol.keys().cloned().collect();
+    symbol_ids.sort();
+
+    for symbol_id in symbol_ids {
+        let sym = match id_map.get(&symbol_id) {
+            Some(s) => s,
+            // Orphaned ledger entry: symbol no longer in the index.
+            // Matches the prior behavior, which skipped any qname that
+            // didn't resolve to a symbol.
+            None => continue,
+        };
+        let per_symbol = match by_symbol.get(&symbol_id) {
+            Some(serde_json::Value::Object(m)) => m,
             _ => continue,
         };
-        let entries = ledger
-            .list_entries(&ref_name, &sym.symbol_id)
-            .unwrap_or_default();
+        // Parse entries and apply the same superseded-entry filter that
+        // `LedgerStore::list_entries` applies (drop any entry that a
+        // later entry supersedes).
+        let mut entries: Vec<crate::schema::LedgerEntry> = per_symbol
+            .values()
+            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+            .collect();
+        let superseded: std::collections::HashSet<String> = entries
+            .iter()
+            .flat_map(|e| e.supersedes.iter().cloned())
+            .collect();
+        entries.retain(|e| !superseded.contains(&e.entry_id));
         for entry in entries {
             // Plan K t-003: confidence-floor filter at sync time.
             // Hypotheses below DEFAULT_CONFIDENCE_FLOOR (0.3) are

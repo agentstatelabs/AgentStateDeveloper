@@ -11,7 +11,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde_json::json;
 
 use agentstatedeveloper_core::{
-    AsgIndexStore, AsgLedgerStore, ConclusionClass, Engine, IndexStore, LedgerKind, LedgerStore,
+    AsgIndexStore, ConclusionClass, Engine, IndexStore, LedgerKind,
     conclusions_export::{self},
 };
 
@@ -159,17 +159,18 @@ fn import(cfg: &Config, args: ImportArgs) -> Result<()> {
 }
 
 fn list(cfg: &Config, args: ListArgs) -> Result<()> {
+    use std::collections::{BTreeMap, HashSet};
     let engine = Engine::open_sqlite(&cfg.db_path)?;
     let index = AsgIndexStore::from_engine(&engine);
-    let ledger = AsgLedgerStore::from_engine(&engine);
     let ref_name = engine.ref_name.clone();
 
     let target_class = args.class.map(ConclusionClass::from);
 
-    // Resolve which symbols to scan: one specific qname or all indexed.
-    let symbol_ids: Vec<(String, String)> = if let Some(qname) = args.symbol.as_deref() {
+    // If a specific symbol was requested, resolve it up front so we can
+    // both validate it and restrict the ledger walk to its id.
+    let target_symbol_id: Option<String> = if let Some(qname) = args.symbol.as_deref() {
         match index.get_symbol_by_qname(&ref_name, qname)? {
-            Some(sym) => vec![(sym.symbol_id, sym.qname)],
+            Some(sym) => Some(sym.symbol_id),
             None => {
                 println!(
                     "{}",
@@ -184,29 +185,9 @@ fn list(cfg: &Config, args: ListArgs) -> Result<()> {
             }
         }
     } else {
-        let prefix = format!(
-            "{}/index/by-qname",
-            agentstatedeveloper_core::ASD_PATH_PREFIX
-        );
-        let tree = engine
-            .repo
-            .get_tree(&ref_name, &prefix)
-            .unwrap_or(serde_json::Value::Null);
-        let qnames: Vec<String> = match tree {
-            serde_json::Value::Object(map) => map.keys().cloned().collect(),
-            _ => Vec::new(),
-        };
-        let mut out = Vec::new();
-        for qn in qnames {
-            if let Some(sym) = index.get_symbol_by_qname(&ref_name, &qn)? {
-                out.push((sym.symbol_id, sym.qname));
-            }
-        }
-        out
+        None
     };
 
-    // Bucket entries by class. Walk all symbols' ledger entries once.
-    use std::collections::BTreeMap;
     let mut buckets: BTreeMap<&'static str, Vec<serde_json::Value>> = BTreeMap::new();
     for class in ConclusionClass::all() {
         if target_class.is_none() || target_class == Some(*class) {
@@ -214,8 +195,54 @@ fn list(cfg: &Config, args: ListArgs) -> Result<()> {
         }
     }
 
-    for (sym_id, qname) in &symbol_ids {
-        let entries = ledger.list_entries(&ref_name, sym_id).unwrap_or_default();
+    // Drive the walk from the LEDGER tree, not the symbol index. The
+    // previous version resolved every indexed qname and called
+    // `list_entries` per symbol — for a symbol with no conclusions that
+    // falls through to an authoritative git `get_json`, so the cost
+    // scaled with total symbol count (97k+ git probes on a large repo,
+    // >12s and climbing). The ledger tree has one child per symbol that
+    // actually has an entry, so this is O(symbols_with_conclusions);
+    // qname/file resolve via the cached id map. Mirrors the
+    // `conclusions_export::gather_buckets` fix.
+    let id_map = index.build_id_map(&engine);
+    let ledger_tree = engine
+        .repo
+        .get_tree(&ref_name, "/asd/v1/ledger")
+        .unwrap_or(serde_json::Value::Null);
+    let by_symbol = match ledger_tree {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+
+    for (sym_id, per_symbol) in &by_symbol {
+        if let Some(ref target) = target_symbol_id {
+            if sym_id != target {
+                continue;
+            }
+        }
+        // Orphaned ledger entry (symbol no longer indexed): skip, same
+        // as the prior code which only surfaced entries for resolvable
+        // qnames.
+        let qname = match id_map.get(sym_id) {
+            Some(s) => s.qname.clone(),
+            None => continue,
+        };
+        let entries_map = match per_symbol {
+            serde_json::Value::Object(m) => m,
+            _ => continue,
+        };
+        // Parse + apply the same superseded filter and newest-first sort
+        // that `LedgerStore::list_entries` applied.
+        let mut entries: Vec<agentstatedeveloper_core::LedgerEntry> = entries_map
+            .values()
+            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+            .collect();
+        let superseded: HashSet<String> = entries
+            .iter()
+            .flat_map(|e| e.supersedes.iter().cloned())
+            .collect();
+        entries.retain(|e| !superseded.contains(&e.entry_id));
+        entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         for entry in entries {
             let class = entry.kind.conclusion_class();
             if let Some(filter) = target_class {
