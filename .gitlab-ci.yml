@@ -58,6 +58,19 @@ realism:self:
   script:
     - cargo test -p agentstatedeveloper-conformance --test realism realism_asd_self -- --ignored --nocapture
 
+# Regression guard for the O(all-symbols) conclusions hang (fix branch
+# fix/conclusions-export-o-n-symbols). Generates a large synthetic index
+# on-disk with the real binary, seeds a few conclusions, and asserts
+# `conclusions export`/`list` stay O(conclusions) under a wall-clock budget.
+# Zero network, fully synthetic — always-on like realism:self. Must NOT be a
+# unit test: the pathology only reproduces on an on-disk store WITH the
+# FTS-cache-backed index the real pipeline builds (see the script header).
+realism:conclusions-scale:
+  stage: realism
+  script:
+    - cargo build --release -p agentstatedeveloper-cli --locked
+    - ASD_BIN="$CI_PROJECT_DIR/target/release/asd" bash scripts/perf-conclusions-scale.sh
+
 # Polyglot corpus of real third-party repos. Heavy (clones repos), so it runs
 # only on scheduled pipelines and manual ("Run pipeline") triggers — wire a
 # nightly schedule in GitLab → CI/CD → Schedules. Resilient to no network: if
