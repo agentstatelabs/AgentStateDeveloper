@@ -173,11 +173,21 @@ impl<'a> LedgerStore for AsgLedgerStore<'a> {
     fn append_entry(&self, ref_name: &str, entry: &LedgerEntry, agent_id: &str) -> Result<()> {
         let path = paths::ledger_entry_path(&entry.symbol_id, &entry.entry_id);
         let value = serde_json::to_value(entry)?;
-        let opts = CommitOptions::new(
+        let mut opts = CommitOptions::new(
             agent_id,
             IntentCategory::Refine,
             format!("ledger {} for {}", entry.kind.as_str(), entry.symbol_id),
         );
+        // Carry the decision's own rationale and confidence onto the commit as
+        // provenance (Plan C t-001). Prefer the detailed body; fall back to the
+        // summary so `reasoning` is never emptier than what the entry records.
+        let reasoning = entry.body.clone().unwrap_or_else(|| entry.summary.clone());
+        if !reasoning.is_empty() {
+            opts = opts.with_reasoning(reasoning);
+        }
+        if let Some(confidence) = entry.confidence {
+            opts = opts.with_confidence(confidence);
+        }
         self.repo.set_json(ref_name, &path, &value, opts)?;
 
         // Write reverse index: entry_id → symbol_id for O(1) find_entry.
