@@ -152,6 +152,10 @@ pub fn run(cfg: &Config, args: InitArgs) -> Result<()> {
     // Update .gitignore.
     update_gitignore(&project_root)?;
 
+    // Ensure `.asd/conclusions/*.jsonl` use the union merge driver so
+    // concurrent branches never raise a textual conflict on the sidecar.
+    update_gitattributes(&project_root)?;
+
     // Plan B t-006: scaffold the two new sidecar subdirs.
     // `.asd/conclusions/` is the committed compact-JSONL home.
     // `.asd/cache/` is the gitignored derived-cache home (call graph, etc.).
@@ -246,6 +250,38 @@ fn update_gitignore(root: &Path) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// .gitattributes management (conclusions merge driver)
+// ---------------------------------------------------------------------------
+
+/// Marker line binding the committed conclusions JSONL to the union merge
+/// driver registered by [`install_hooks`]. `.gitattributes` is committed so the
+/// binding travels to every clone; the driver itself is registered per-clone in
+/// git config (a fresh clone gets it on its own `asd init`).
+const CONCLUSIONS_MERGE_ATTR: &str = ".asd/conclusions/*.jsonl merge=asdconclusions";
+
+fn update_gitattributes(root: &Path) -> Result<()> {
+    let ga_path = root.join(".gitattributes");
+    let existing = if ga_path.exists() {
+        fs::read_to_string(&ga_path).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    if existing.lines().any(|l| l.trim() == CONCLUSIONS_MERGE_ATTR) {
+        return Ok(());
+    }
+    let mut content = existing;
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(CONCLUSIONS_MERGE_ATTR);
+    content.push('\n');
+    fs::write(&ga_path, content)
+        .with_context(|| format!("failed to write {}", ga_path.display()))?;
+    println!(".gitattributes: conclusions JSONL bound to the `asdconclusions` union merge driver");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Plan B sidecar scaffolding
 // ---------------------------------------------------------------------------
 
@@ -305,6 +341,12 @@ fn install_hooks(root: &Path) -> Result<()> {
 
     let hooks_path_set = matches!(status, Ok(s) if s.success());
 
+    // Register the conclusions union merge driver referenced by
+    // `.gitattributes` (merge=asdconclusions). git config is per-clone, so this
+    // runs on every `asd init` — a fresh clone gets the driver here even though
+    // the `.gitattributes` binding arrived with the checkout.
+    let driver_set = register_merge_driver(root);
+
     // Print the hook table.
     println!("\nASD git hooks installed (.asd/hooks/):\n");
     for hook in &installed {
@@ -321,10 +363,38 @@ fn install_hooks(root: &Path) -> Result<()> {
         println!("  Run manually: git config core.hooksPath .asd/hooks");
     }
 
+    if driver_set {
+        println!("  merge.asdconclusions → asd conclusions merge  (sidecar auto-unions on merge)");
+    } else {
+        println!("  WARNING: could not register the conclusions merge driver automatically.");
+        println!("  Run manually:");
+        println!("      git config merge.asdconclusions.name 'ASD conclusions union merge'");
+        println!("      git config merge.asdconclusions.driver 'asd conclusions merge %O %A %B'");
+    }
+
     println!("\n  To skip hook installation: asd init --no-hooks");
     println!("  To review hooks later:     asd hooks");
 
     Ok(())
+}
+
+/// Register the `asdconclusions` git merge driver in the repo's local git
+/// config. Returns whether both config writes succeeded.
+fn register_merge_driver(root: &Path) -> bool {
+    let set = |key: &str, val: &str| -> bool {
+        std::process::Command::new("git")
+            .args(["config", key, val])
+            .current_dir(root)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    let name_ok = set("merge.asdconclusions.name", "ASD conclusions union merge");
+    let driver_ok = set(
+        "merge.asdconclusions.driver",
+        "asd conclusions merge %O %A %B",
+    );
+    name_ok && driver_ok
 }
 
 // ---------------------------------------------------------------------------
