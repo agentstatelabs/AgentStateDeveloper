@@ -205,6 +205,78 @@ pub fn write_jsonl(path: &Path, records: &[ExportRecord]) -> std::io::Result<u64
     Ok(buf.len() as u64)
 }
 
+/// Read a conclusions JSONL file into records. A missing file is treated as
+/// empty (an add/add merge can hand us a nonexistent ancestor). Blank lines are
+/// skipped; a malformed line is a hard error so the driver falls back to a plain
+/// git conflict rather than silently dropping judgment.
+pub fn read_jsonl(path: &Path) -> std::io::Result<Vec<ExportRecord>> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let rec: ExportRecord = serde_json::from_str(line).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "conclusions merge: unparseable line in {}: {e}",
+                    path.display()
+                ),
+            )
+        })?;
+        out.push(rec);
+    }
+    Ok(out)
+}
+
+/// Git merge driver for `.asd/conclusions/*.jsonl`.
+///
+/// Unions the records of `ours` and `theirs` keyed by `id` and rewrites `ours`
+/// in canonical export form (sorted by `id`, one compact record per line) —
+/// byte-identical to what [`write_jsonl`] would produce for that set, so the
+/// merge result is conflict-free and stable, and the next `export` is a no-op.
+///
+/// Union semantics (append-and-supersede sidecar): an entry survives iff it is
+/// present on either side, so entries superseded away on both sides stay gone,
+/// while an entry kept on one side is preserved. `base` is intentionally not
+/// consulted for inclusion; the ledger reconciles authoritatively on the next
+/// `import`, which is idempotent and keyed by `id`. On the (hash-keyed, so
+/// expected-impossible) event of one `id` carrying two different payloads, the
+/// lexicographically-greater serialization wins so the output is independent of
+/// which side git labeled `ours`.
+///
+/// Returns the number of records written.
+pub fn merge_jsonl(ours: &Path, theirs: &Path) -> std::io::Result<usize> {
+    let mut by_id: std::collections::BTreeMap<String, (String, ExportRecord)> =
+        std::collections::BTreeMap::new();
+    for path in [ours, theirs] {
+        for rec in read_jsonl(path)? {
+            let ser = serde_json::to_string(&rec)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+            match by_id.entry(rec.id.clone()) {
+                std::collections::btree_map::Entry::Vacant(v) => {
+                    v.insert((ser, rec));
+                }
+                std::collections::btree_map::Entry::Occupied(mut o) => {
+                    if ser > o.get().0 {
+                        o.insert((ser, rec));
+                    }
+                }
+            }
+        }
+    }
+    // BTreeMap iteration is ordered by `id`, matching `gather_buckets`' sort.
+    let records: Vec<ExportRecord> = by_id.into_values().map(|(_, rec)| rec).collect();
+    write_jsonl(ours, &records)?;
+    Ok(records.len())
+}
+
 /// One-shot: gather + write all six files under `out_dir`. Returns per-class
 /// (stem, entry_count, byte_count).
 ///
@@ -1652,5 +1724,80 @@ mod tests {
         };
         assert_eq!(conf_of("led_conf_hyp"), Some(0.75));
         assert_eq!(conf_of("led_conf_dec"), Some(0.6));
+    }
+
+    fn rec(id: &str, summary: &str) -> ExportRecord {
+        ExportRecord {
+            id: id.into(),
+            kind: "decision".into(),
+            qname: "App.A".into(),
+            file: "a.rs".into(),
+            summary: summary.into(),
+            body: None,
+            confidence: None,
+            role: None,
+            command: None,
+            tags: vec![],
+            evidence: vec![],
+            supersedes: vec![],
+            author: "agent:c".into(),
+            created_at: "2026-05-19T20:00:00+00:00".into(),
+        }
+    }
+
+    #[test]
+    fn merge_unions_dedups_and_sorts_by_id() {
+        let tmp = tempdir().unwrap();
+        let ours = tmp.path().join("ours.jsonl");
+        let theirs = tmp.path().join("theirs.jsonl");
+        // Out-of-order on purpose; `led_a` appears on both sides.
+        write_jsonl(&ours, &[rec("led_b", "b"), rec("led_a", "a")]).unwrap();
+        write_jsonl(&theirs, &[rec("led_a", "a"), rec("led_c", "c")]).unwrap();
+
+        let n = merge_jsonl(&ours, &theirs).unwrap();
+        assert_eq!(n, 3, "union of {{a,b}} and {{a,c}} is {{a,b,c}}");
+
+        // Byte-identical to a fresh canonical export of the unioned set.
+        let expected_path = tmp.path().join("expected.jsonl");
+        write_jsonl(
+            &expected_path,
+            &[rec("led_a", "a"), rec("led_b", "b"), rec("led_c", "c")],
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&ours).unwrap(),
+            std::fs::read(&expected_path).unwrap(),
+            "merge output must match canonical id-sorted export bytes"
+        );
+    }
+
+    #[test]
+    fn merge_is_idempotent() {
+        let tmp = tempdir().unwrap();
+        let ours = tmp.path().join("ours.jsonl");
+        let theirs = tmp.path().join("theirs.jsonl");
+        write_jsonl(&ours, &[rec("led_a", "a")]).unwrap();
+        write_jsonl(&theirs, &[rec("led_b", "b")]).unwrap();
+        merge_jsonl(&ours, &theirs).unwrap();
+        let once = std::fs::read(&ours).unwrap();
+        merge_jsonl(&ours, &theirs).unwrap();
+        assert_eq!(once, std::fs::read(&ours).unwrap());
+    }
+
+    #[test]
+    fn merge_treats_missing_side_as_empty() {
+        let tmp = tempdir().unwrap();
+        let ours = tmp.path().join("ours.jsonl");
+        let missing = tmp.path().join("does_not_exist.jsonl");
+        write_jsonl(&ours, &[rec("led_b", "b"), rec("led_a", "a")]).unwrap();
+        let n = merge_jsonl(&ours, &missing).unwrap();
+        assert_eq!(n, 2);
+        // Still canonicalized (sorted) even with an absent counterpart.
+        let expected = tmp.path().join("expected.jsonl");
+        write_jsonl(&expected, &[rec("led_a", "a"), rec("led_b", "b")]).unwrap();
+        assert_eq!(
+            std::fs::read(&ours).unwrap(),
+            std::fs::read(&expected).unwrap()
+        );
     }
 }

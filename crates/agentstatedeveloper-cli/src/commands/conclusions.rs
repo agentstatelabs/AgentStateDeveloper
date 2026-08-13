@@ -29,6 +29,12 @@ pub enum ConclusionsCmd {
     /// Idempotent — entries are keyed by entry_id. Use after `git pull`
     /// or on a fresh clone to populate ASG with the committed conclusions.
     Import(ImportArgs),
+    /// Git merge driver for `.asd/conclusions/*.jsonl`. Not called
+    /// directly — `asd init` registers it as `merge=asdconclusions` so
+    /// git invokes `asd conclusions merge %O %A %B` to union the records
+    /// of two branches instead of raising a textual conflict. Operates
+    /// purely on the three files; never opens the database.
+    Merge(MergeArgs),
 }
 
 #[derive(Debug, Args)]
@@ -98,12 +104,38 @@ pub struct ImportArgs {
     pub in_dir: Option<std::path::PathBuf>,
 }
 
+#[derive(Debug, Args)]
+pub struct MergeArgs {
+    /// Common ancestor version (git `%O`). Accepted for the standard
+    /// merge-driver signature; not consulted for inclusion (union semantics).
+    pub base: std::path::PathBuf,
+    /// "Ours" version (git `%A`). The merged result is written back here —
+    /// the path git reads the resolution from.
+    pub ours: std::path::PathBuf,
+    /// "Theirs" version (git `%B`).
+    pub theirs: std::path::PathBuf,
+}
+
 pub fn run(cfg: &Config, cmd: ConclusionsCmd) -> Result<()> {
     match cmd {
         ConclusionsCmd::List(args) => list(cfg, args),
         ConclusionsCmd::Export(args) => export(cfg, args),
         ConclusionsCmd::Import(args) => import(cfg, args),
+        ConclusionsCmd::Merge(args) => merge(args),
     }
+}
+
+/// Git merge driver. Pure file operation — must not open the database, since
+/// git invokes it mid-merge/rebase while ASG state may be in flux.
+fn merge(args: MergeArgs) -> Result<()> {
+    let n = conclusions_export::merge_jsonl(&args.ours, &args.theirs)?;
+    eprintln!(
+        "asd conclusions merge: unioned {} into {} ({} records)",
+        args.theirs.display(),
+        args.ours.display(),
+        n
+    );
+    Ok(())
 }
 
 fn import(cfg: &Config, args: ImportArgs) -> Result<()> {
