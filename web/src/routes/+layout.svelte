@@ -37,6 +37,7 @@
 
 	const NAV = [
 		{ href: '/activity', label: 'Activity' },
+		{ href: '/history', label: 'History' },
 		{ href: '/territory', label: 'Territory' },
 		{ href: '/graph', label: 'Graph' },
 		{ href: '/effects', label: 'Effects' },
