@@ -54,9 +54,18 @@ VER_NUM="${VERSION#v}"
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-TAP_ROOT="$(cd "$REPO_ROOT/../homebrew-agentstatedeveloper" 2>/dev/null && pwd || \
-            cd "$REPO_ROOT/../../homebrew-agentstatedeveloper" 2>/dev/null && pwd || \
-            echo "$HOME/homebrew-agentstatedeveloper")"
+resolve_tap_root() {
+  # NB: `cd A && pwd || cd B && pwd` does NOT do what it looks like — after a
+  # successful first branch the trailing `&& pwd` runs a second time and the
+  # command substitution captures the path twice. Use explicit returns.
+  local c
+  for c in "$REPO_ROOT/../homebrew-agentstatedeveloper" \
+           "$REPO_ROOT/../../homebrew-agentstatedeveloper"; do
+    if [[ -d "$c" ]]; then ( cd "$c" && pwd ); return 0; fi
+  done
+  echo "$HOME/homebrew-agentstatedeveloper"
+}
+TAP_ROOT="$(resolve_tap_root)"
 RELEASE_REPO="agentstatelabs/agentstatedeveloper-releases"
 TAP_REMOTE="https://github.com/agentstatelabs/homebrew-agentstatedeveloper.git"
 
@@ -94,7 +103,9 @@ if [[ "${SKIP_TAG:-0}" != "1" ]]; then
     git tag -a "$VERSION" -m "$VERSION"
     ok "tagged $VERSION at $(git rev-parse --short HEAD)"
   else
-    EXISTING=$(git rev-parse "$VERSION")
+    # ^{commit} is required: line 94 creates ANNOTATED tags, so a bare
+    # `git rev-parse $VERSION` yields the tag object, never the commit.
+    EXISTING=$(git rev-parse "$VERSION^{commit}")
     HEAD_SHA=$(git rev-parse HEAD)
     if [[ "$EXISTING" != "$HEAD_SHA" ]]; then
       fail "tag $VERSION already exists pointing at $EXISTING, but HEAD is $HEAD_SHA"
