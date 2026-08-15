@@ -171,6 +171,8 @@ pub fn build_router(
         .route("/search", get(search_symbols))
         .route("/effects/overview", get(effects_overview))
         .route("/timeline", get(list_timeline))
+        .route("/history", get(list_history))
+        .route("/gc/dry-run", get(gc_dry_run))
         .route("/symbols", get(list_symbols))
         .route("/symbols/{qname}", get(get_symbol))
         .route("/symbols/{qname}/graph", get(get_symbol_graph))
@@ -251,6 +253,121 @@ impl From<agentstatedeveloper_core::AsdError> for ApiError {
     fn from(e: agentstatedeveloper_core::AsdError) -> Self {
         ApiError::Internal(e.to_string())
     }
+}
+
+// -----------------------------------------------------------------------------
+// Project history + store health / GC (ASG Plan A / Plan B) — powers the Lens
+// `/history` page. These proxy the ASG `Repository` history/GC surface exposed
+// in agentstategraph ≥ 0.9.22; the JSON shapes match the lens-core
+// `HistoryReport` / `GcDryRun` types.
+// -----------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct HistoryQuery {
+    /// Velocity bucket granularity: `day` (default) or `week`.
+    granularity: Option<String>,
+    /// Milestone cap (default 50).
+    limit: Option<usize>,
+    /// Include the physical `store_shape` (a `dbstat` scan). Accepts `1`/`true`.
+    store: Option<String>,
+}
+
+fn truthy(v: Option<&str>) -> bool {
+    matches!(v, Some("1") | Some("true") | Some("yes"))
+}
+
+/// GET /api/v1/history — distilled project history (velocity, intent mix,
+/// authorship, milestones) and, with `store`, the physical store shape.
+///
+/// Adapts the ASG engine's `history_report` JSON to the lens-core
+/// `HistoryReport` contract: adds `totals.milestones` (a count), mirrors
+/// `velocity.by` to `granularity`, and flattens
+/// `store_shape.path_copy_amplification.objects_per_commit` to
+/// `store_shape.objects_per_commit`. Everything else passes through unchanged.
+async fn list_history(
+    State(state): State<AppState>,
+    Query(q): Query<HistoryQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let engine = state.engine.lock().await;
+    let by = q.granularity.as_deref().unwrap_or("day");
+    // Default high enough that `totals.milestones` reflects the true count for
+    // real repos (the array doubles as both the count source and the timeline).
+    let milestones = q.limit.unwrap_or(2000);
+    let store = truthy(q.store.as_deref());
+    // `refresh = true` lazily materializes the `asg_history_*` tables (cheap
+    // after the first, incremental call).
+    let mut report = engine
+        .repo
+        .history_report(None, by, milestones, true, store)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let milestone_count = report
+        .get("milestones")
+        .and_then(|m| m.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    if let Some(totals) = report.get_mut("totals").and_then(|t| t.as_object_mut()) {
+        totals.insert("milestones".into(), json!(milestone_count));
+    }
+    if let Some(by_val) = report.get("velocity").and_then(|v| v.get("by")).cloned() {
+        if let Some(vel) = report.get_mut("velocity").and_then(|v| v.as_object_mut()) {
+            vel.insert("granularity".into(), by_val);
+        }
+    }
+    if let Some(opc) = report
+        .get("store_shape")
+        .and_then(|s| s.get("path_copy_amplification"))
+        .and_then(|p| p.get("objects_per_commit"))
+        .cloned()
+    {
+        if let Some(ss) = report
+            .get_mut("store_shape")
+            .and_then(|s| s.as_object_mut())
+        {
+            ss.insert("objects_per_commit".into(), opc);
+        }
+    }
+    Ok(Json(report))
+}
+
+/// GET /api/v1/gc/dry-run — what a GC sweep would reclaim under the default
+/// retention policy, computed without mutating anything.
+///
+/// Adapts the ASG engine's nested `gc_dry_run` JSON (`objects`/`bytes`/`safety`
+/// sub-objects) to the lens-core `GcDryRun` contract's flat fields.
+async fn gc_dry_run(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+    let engine = state.engine.lock().await;
+    let raw = engine
+        .repo
+        .gc_dry_run()
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // Deep-get a nested field by path, returning Null if any hop is missing.
+    let at = |path: &[&str]| -> serde_json::Value {
+        let mut cur = &raw;
+        for key in path {
+            match cur.get(key) {
+                Some(v) => cur = v,
+                None => return serde_json::Value::Null,
+            }
+        }
+        cur.clone()
+    };
+    let pct = at(&["objects", "reclaimable_pct"]).as_f64().unwrap_or(0.0);
+
+    let out = json!({
+        "objects_before": at(&["objects", "total"]),
+        "objects_after": at(&["objects", "live"]),
+        "reclaimable_objects": at(&["objects", "reclaimable"]),
+        "bytes_before": at(&["bytes", "current_total"]),
+        "bytes_after": at(&["bytes", "estimated_post_vacuum"]),
+        "estimated_reclaimable_bytes": at(&["bytes", "estimated_reclaimable"]),
+        "reclaimable_fraction": pct / 100.0,
+        "safe": raw.get("safe").cloned().unwrap_or(json!(false)),
+        "undistilled_commits": at(&["safety", "undistilled_commits"]),
+        "policy": {},
+    });
+    Ok(Json(out))
 }
 
 // -----------------------------------------------------------------------------
