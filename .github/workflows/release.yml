@@ -176,14 +176,21 @@ jobs:
       # Fail fast and loudly rather than skipping: a silently-absent token
       # would leave the tap pinned to the PREVIOUS release with a green
       # pipeline, which is exactly how `brew install asd` broke at v0.9.38.
-      - name: require GITLAB_TAP_TOKEN
+      - name: require tap secrets
         env:
           TOKEN: ${{ secrets.GITLAB_TAP_TOKEN }}
         run: |
           set -eu
-          if [ -z "${TOKEN}" ]; then
-            echo "::error::GITLAB_TAP_TOKEN is not set. Add a GitLab PAT with"
-            echo "::error::write_repository scope on ${TAP_PROJECT} as a repo secret."
+          missing=""
+          [ -n "${TOKEN}" ]       || missing="${missing} GITLAB_TAP_TOKEN"
+          [ -n "${GITLAB_HOST}" ] || missing="${missing} GITLAB_TAP_HOST"
+          if [ -n "${missing}" ]; then
+            echo "::error::missing repo secret(s):${missing}"
+            echo "::error::GITLAB_TAP_TOKEN = GitLab PAT, write_repository on ${TAP_PROJECT}"
+            echo "::error::GITLAB_TAP_HOST  = the GitLab hostname. It lives in a secret,"
+            echo "::error::  not in this file: leak-scan BLOCKs internal hostnames from"
+            echo "::error::  reaching the public GitHub mirror, and a literal here fails"
+            echo "::error::  publish-github fail-closed for the whole repo."
             exit 1
           fi
 
