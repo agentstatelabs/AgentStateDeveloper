@@ -19,7 +19,8 @@
 #   1. Refuse if the working tree is dirty or the branch is behind origin.
 #   2. Verify the workspace version in Cargo.toml matches the tag.
 #   3. Tag $VERSION on HEAD (annotated) if not already there.
-#   4. Push the tag to GitLab origin and the public GitHub mirror.
+#   4. Push the tag to GitLab origin. GitLab CI mirrors it to GitHub
+#      through the leak-scan gate, which fires the release workflow.
 #   5. Print the Actions run to watch.
 #
 # Env overrides:
@@ -38,7 +39,6 @@ VER_NUM="${VERSION#v}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-GITHUB_REMOTE="https://github.com/agentstatelabs/AgentStateDeveloper.git"
 ACTIONS_REPO="agentstatelabs/AgentStateDeveloper"
 
 step()  { printf '\n\033[1;36m▸ %s\033[0m\n' "$*"; }
@@ -100,15 +100,17 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. Push — GitLab is origin; GitHub is the mirror whose Actions build it.
-#    GitLab CI also mirrors tags, but push directly too so the release does
-#    not silently wait on a mirror job.
+# 3. Push to GitLab only.
+#
+# Do NOT push the tag to GitHub from here. GitLab's publish-github job is
+# fail-closed on scripts/leak-scan.sh, and a direct push from a workstation
+# bypasses that gate entirely — the tag reaches the public mirror unscanned.
+# GitLab CI mirrors main and release tags itself, which is what fires the
+# GitHub release workflow.
 # ---------------------------------------------------------------------------
 step "push $VERSION"
 git push origin "$VERSION" 2>&1 | tail -2 | sed 's/^/  /'
-ok "pushed to GitLab origin"
-git push "$GITHUB_REMOTE" "$VERSION" 2>&1 | tail -2 | sed 's/^/  /'
-ok "pushed to GitHub mirror"
+ok "pushed to GitLab origin — CI will mirror the tag to GitHub"
 
 step "done — CI is building $VERSION"
 echo "  watch:    gh run watch -R $ACTIONS_REPO"
