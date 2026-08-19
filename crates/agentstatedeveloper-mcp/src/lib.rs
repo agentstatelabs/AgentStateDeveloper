@@ -173,6 +173,7 @@ pub fn build_router(
         .route("/timeline", get(list_timeline))
         .route("/history", get(list_history))
         .route("/gc/dry-run", get(gc_dry_run))
+        .route("/files", get(list_files))
         .route("/symbols", get(list_symbols))
         .route("/symbols/{qname}", get(get_symbol))
         .route("/symbols/{qname}/graph", get(get_symbol_graph))
@@ -413,6 +414,56 @@ struct SymbolQuery {
     /// Zero-based offset for pagination (default 0).
     #[serde(default)]
     offset: Option<usize>,
+}
+
+/// One entry per file that contains at least one indexed symbol.
+///
+/// The Lens Code Overview derives its file count, language breakdown and
+/// "largest files" list from this. It was calling GET /files against a route
+/// that never existed, so every repo 404'd and the page's Promise.all
+/// rejected — health and symbols both succeeded, but the view rendered as
+/// "ASD server unreachable".
+#[derive(Serialize)]
+struct FileEntry {
+    path: String,
+    language: String,
+    symbol_count: usize,
+}
+
+async fn list_files(State(state): State<AppState>) -> Result<Json<Vec<FileEntry>>, ApiError> {
+    let engine = state.engine.lock().await;
+    // Same bulk read as list_symbols — a per-file query would reintroduce the
+    // per-qname blowup measured in Plan T t-007.
+    let index = AsgIndexStore::from_engine(&engine);
+
+    let mut by_path: std::collections::HashMap<String, (String, usize)> =
+        std::collections::HashMap::new();
+    for sym in index.build_id_map(&engine).into_values() {
+        let entry = by_path
+            .entry(sym.file)
+            .or_insert_with(|| (sym.language.clone(), 0));
+        // First language wins; a file is one language in practice, and
+        // disagreement is not worth a second pass to resolve.
+        entry.1 += 1;
+    }
+
+    let mut files: Vec<FileEntry> = by_path
+        .into_iter()
+        .map(|(path, (language, symbol_count))| FileEntry {
+            path,
+            language,
+            symbol_count,
+        })
+        .collect();
+
+    // Largest first — the overview slices the top 8 straight off the front.
+    files.sort_by(|a, b| {
+        b.symbol_count
+            .cmp(&a.symbol_count)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+
+    Ok(Json(files))
 }
 
 async fn list_symbols(
