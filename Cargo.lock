@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-adapters"
-version = "0.9.40"
+version = "0.9.41"
 dependencies = [
  "agentstatedeveloper-core",
  "agentstatedeveloper-csharp",
@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-cli"
-version = "0.9.40"
+version = "0.9.41"
 dependencies = [
  "agent-skillgen",
  "agentstatedeveloper-adapters",
@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-conformance"
-version = "0.9.40"
+version = "0.9.41"
 dependencies = [
  "agentstatedeveloper-adapters",
  "agentstatedeveloper-core",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-core"
-version = "0.9.40"
+version = "0.9.41"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -81,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-csharp"
-version = "0.9.40"
+version = "0.9.41"
 dependencies = [
  "agentstatedeveloper-core",
  "serde_json",
@@ -92,7 +92,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-go"
-version = "0.9.40"
+version = "0.9.41"
 dependencies = [
  "agentstatedeveloper-core",
  "serde_json",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-java"
-version = "0.9.40"
+version = "0.9.41"
 dependencies = [
  "agentstatedeveloper-core",
  "serde_json",
@@ -114,7 +114,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-kotlin"
-version = "0.9.40"
+version = "0.9.41"
 dependencies = [
  "agentstatedeveloper-core",
  "cc",
@@ -126,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-mcp"
-version = "0.9.40"
+version = "0.9.41"
 dependencies = [
  "agentstatedeveloper-adapters",
  "agentstatedeveloper-core",
@@ -153,7 +153,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-python"
-version = "0.9.40"
+version = "0.9.41"
 dependencies = [
  "agentstatedeveloper-core",
  "serde_json",
@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-ruby"
-version = "0.9.40"
+version = "0.9.41"
 dependencies = [
  "agentstatedeveloper-core",
  "serde_json",
@@ -175,7 +175,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-rust"
-version = "0.9.40"
+version = "0.9.41"
 dependencies = [
  "agentstatedeveloper-core",
  "serde_json",
@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-swift"
-version = "0.9.40"
+version = "0.9.41"
 dependencies = [
  "agentstatedeveloper-core",
  "cc",
@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-typescript"
-version = "0.9.40"
+version = "0.9.41"
 dependencies = [
  "agentstatedeveloper-core",
  "serde_json",
