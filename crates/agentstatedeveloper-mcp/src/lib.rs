@@ -174,6 +174,7 @@ pub fn build_router(
         .route("/history", get(list_history))
         .route("/gc/dry-run", get(gc_dry_run))
         .route("/files", get(list_files))
+        .route("/files/{*path}", get(read_file))
         .route("/symbols", get(list_symbols))
         .route("/symbols/{qname}", get(get_symbol))
         .route("/symbols/{qname}/graph", get(get_symbol_graph))
@@ -464,6 +465,58 @@ async fn list_files(State(state): State<AppState>) -> Result<Json<Vec<FileEntry>
     });
 
     Ok(Json(files))
+}
+
+/// Raw source of one indexed file, as text/plain.
+///
+/// lens-core's `readFile()` calls GET /files/{path} through `fetchText`, and
+/// the Lens file view links to it from every entry in /files. Without it the
+/// list rendered but every link 404'd.
+///
+/// Only files the index already knows about are readable. That is the whole
+/// access-control story here: the handler serves contents off disk over an
+/// HTTP port, so it refuses anything that is not a path already present in the
+/// symbol index, and re-checks the resolved path against the repo root so a
+/// traversal segment cannot escape even if one somehow reached the index.
+async fn read_file(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+) -> Result<String, ApiError> {
+    let engine = state.engine.lock().await;
+    let index = AsgIndexStore::from_engine(&engine);
+    let known = index
+        .build_id_map(&engine)
+        .into_values()
+        .any(|sym| sym.file == path);
+    if !known {
+        return Err(ApiError::NotFound(format!("{path} is not an indexed file")));
+    }
+
+    // The db lives at <repo>/.asd-state.db, so its parent is the repo root
+    // that indexed `file` paths are relative to.
+    let root = state
+        .db_path
+        .parent()
+        .ok_or_else(|| ApiError::Internal("db path has no parent directory".into()))?
+        .to_path_buf();
+    let target = root.join(&path);
+
+    // canonicalize resolves .. and symlinks; both sides must canonicalize so
+    // the prefix check compares real paths, not lexical ones.
+    let real_root = root
+        .canonicalize()
+        .map_err(|e| ApiError::Internal(format!("cannot resolve repo root: {e}")))?;
+    let real_target = target
+        .canonicalize()
+        .map_err(|_| ApiError::NotFound(format!("{path} is indexed but missing on disk")))?;
+    if !real_target.starts_with(&real_root) {
+        return Err(ApiError::BadRequest(format!(
+            "{path} resolves outside the repo"
+        )));
+    }
+
+    std::fs::read_to_string(&real_target)
+        .map_err(|e| ApiError::Internal(format!("cannot read {path}: {e}")))
 }
 
 async fn list_symbols(
