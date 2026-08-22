@@ -10,6 +10,8 @@ all checked into git so they travel with every clone.
 **[CTXone](https://github.com/ctxone/ctxone)** (shared team memory). Installing
 either offers the other — see [Pairs with CTXone](#pairs-with-ctxone).
 
+![ASD Lens — the codebase rendered as territory: regions sized by symbol count, with structure, decisions, thinking, effects, and activity as toggleable layers](docs/img/asd-lens-territory.png)
+
 ## Install
 
 ### macOS / Linux — Homebrew (recommended)
@@ -80,6 +82,17 @@ brew uninstall asd
 | **Ratification** | Approve, reject, or withdraw ledger entries. Full approval workflow. |
 | **Audit event stream** | Hash-chained JSONL log of every ledger mutation and policy evaluation. |
 | **Git-native sidecar** | The committed, compact subset of ledger entries (decisions, hazards, recipes, mappings, classifications, follow-ups, agent thinking) lives in `.asd/conclusions/*.jsonl` — checked into git, travels with every clone. Kilobytes, not megabytes. |
+
+## The Lens review UI
+
+`asd-serve` ships a web UI for reviewing what ASD knows about your code — the same index and audit overlay your agents query, in the browser.
+
+| | |
+|---|---|
+| [![Symbol detail — callers/callees, verified effects, and the decision ledger and inherited thinking attached to one symbol](docs/img/asd-lens-symbol.png)](docs/img/asd-lens-symbol.png) | [![Effect distribution — per-category effect counts and the declarers with the widest transitive blast radius](docs/img/asd-lens-effects.png)](docs/img/asd-lens-effects.png) |
+| **Symbol detail** — callers/callees, static-checker-verified effects, and the full decision ledger, invariants, and inherited thinking for one symbol. | **Effect distribution** — per-category effect counts and the declarers whose effects reach the most callers (transitive blast radius). |
+
+The [Territory](docs/img/asd-lens-territory.png) view above renders the whole codebase as a stable map; a [3D globe](docs/img/asd-lens-globe.png) variant paints the same layers on a planet for a hero-scale overview.
 
 ## Pairs with CTXone
 
