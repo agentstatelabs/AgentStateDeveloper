@@ -70,6 +70,26 @@ The script:
 
 About ~7 minutes wall-clock; less on incremental rebuilds.
 
+## After the release: bump the site footer
+
+The marketing site carries a hardcoded version string that nothing derives
+from this repo. It will not update itself.
+
+In `AgentStateDeveloper-site`, `src/layouts/Site.astro`, the `footer-bottom`
+line:
+
+```
+AgentStateDeveloper v1.0.0 · BSL 1.1 → Apache 2.0 · © {year} AgentStateLabs, LLC.
+```
+
+Bump it, commit, push. The site deploys in two hops (GitLab CI mirrors to
+GitHub, GitHub Actions builds Pages), so confirm the live page rather than
+the pipeline — a green pipeline only means the mirror landed.
+
+This is not hypothetical: agentstategraph.dev advertised `0.9.21` while the
+real release was `0.9.24`, stale by three patches, because this step had no
+home in a checklist.
+
 ## Partial / recovery flags
 
 | env var | effect |
