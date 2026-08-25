@@ -364,23 +364,14 @@ scratch notes, agent thinking, feedback, and audit — e.g. `code_search`,
 - [Pairing with RTK](docs/PAIRING_WITH_RTK.md)
 
 **Licensing:**
-- [Licensing & editions](LICENSING.md) — BSL-1.1 plain-English + OSS / Team / Enterprise
+- [Licensing](LICENSING.md) — BSL-1.1 in plain English
 
-## License & editions
+## License
 
-ASD is **open source, commercially supported**, and ships in three editions:
-
-- **OSS** (this repo) — the full per-developer engine: index, ledger, effects,
-  call graph, impact, invariants, in-repo cross-service edges, and agent
-  onboarding. Self-hosted, no account.
-- **Team** — the cross-repo layer (portfolio architecture, cross-repo impact
-  and dead-endpoints, team-shared runtime confidence), paired with
-  **[CTXone](https://github.com/ctxone/ctxone)** as the shared team memory.
-- **Enterprise** — org-scale governance: endpoint registry, change-governance
-  gates, audit/SIEM export, org dashboards, and RBAC-scoped agent rollout.
+ASD is the full per-developer engine: index, ledger, effects, call graph,
+impact, invariants, in-repo cross-service edges, and agent onboarding.
+Self-hosted, no account.
 
 The code is licensed under **BSL-1.1** and converts to **Apache-2.0** four
-years after each release — internal use is free; redistribution or hosted
-resale needs a commercial license. Full plain-English summary and the edition
-breakdown: **[LICENSING.md](LICENSING.md)**. Team/Enterprise or commercial
-questions: [licensing@agentstatelabs.com](mailto:licensing@agentstatelabs.com).
+years after each release — internal use is free. Full plain-English summary:
+**[LICENSING.md](LICENSING.md)**.
