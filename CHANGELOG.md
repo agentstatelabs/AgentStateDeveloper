@@ -1,13 +1,75 @@
 # Changelog
 
 All notable changes to AgentStateDeveloper are documented here.
-Versions use semantic versioning; each milestone increments by 0.0.5.
+Versions use semantic versioning.
+
+> **Note on numbering.** Releases up to `v1.3.1` used an earlier scheme that
+> was never tagged in this repository. Commit `b332c4a` renumbered the
+> workspace `1.3.1 -> 0.9.38` so asd would line up with the rest of the suite
+> ahead of a coordinated `1.0.0`. Version numbers therefore go *down* between
+> `v1.3.1` and `v0.9.38` below. The older entries are kept: the work is real,
+> only its numbering was abandoned.
 
 ---
 
 ## [Unreleased]
 
-Everything on `main` since the v1.3.1 tag.
+## [v1.0.0] — 2026-08-24
+
+First stable release. No functional change from `v0.9.41` — the version marks
+the suite's coordinated 1.0, alongside agentstategraph and ctxone.
+
+### Added
+- ASD Lens screenshots in the README (territory hero, symbol/effects gallery).
+
+## [v0.9.41] — 2026-08-19
+
+### Added
+- **`GET /api/v1/files`** and **`GET /api/v1/files/{path}`** — list the indexed
+  file set and read a file's contents over the serve API.
+
+### Fixed
+- Releases no longer push tags straight to GitHub, which bypassed the
+  fail-closed leak-scan gate on the public mirror.
+
+## [v0.9.40] — 2026-08-17
+
+### Changed
+- The Homebrew formula is rendered GitLab-side, dropping both tap secrets.
+
+### Fixed
+- The GitLab host moved into a CI secret — as a literal it tripped the
+  leak-scan gate and blocked the pipeline.
+
+## [v0.9.39] — 2026-08-15
+
+### Changed
+- **GitHub Actions is the sole release publisher**; local builds are retired.
+  Two publishers racing on one release is how assets end up with `sha256`s that
+  disagree with what CI built.
+
+### Fixed
+- `TAP_ROOT` resolution and annotated-tag comparison in the release script.
+
+## [v0.9.38] — 2026-08-14
+
+The first release on the renumbered line — see the note at the top of this
+file. Carries the worktree, help and onboarding work that had accumulated on
+`main` since `v1.3.1`.
+
+### Added — code intelligence
+- **Lens History page** — project-history and store-health dashboards, backed
+  by new `/history` and `/gc/dry-run` endpoints (agentstategraph rolled to
+  v0.9.22).
+- **Decision rationale and confidence** are carried onto the commit in the
+  ledger.
+- **A git union merge driver for the conclusions sidecar JSONL**, so parallel
+  agents appending conclusions no longer conflict on every merge.
+
+### Fixed
+- `conclusions list` and `conclusions export` are driven from the ledger tree
+  rather than every symbol — the previous walk did not scale, and a large-DB
+  regression guard now pins it in CI.
 
 ### Added — parallel-agent worktrees
 
@@ -49,6 +111,8 @@ Everything on `main` since the v1.3.1 tag.
 - **`asd onboard`** now also folds in project-scoped MCP registration, so the
   one-shot post-clone setup connects the agent's tools as part of the same
   command.
+
+<!-- Numbering pivot: everything below predates the 1.3.1 -> 0.9.38 renumber. -->
 
 ## [v1.3.1] — 2026-07-29
 
