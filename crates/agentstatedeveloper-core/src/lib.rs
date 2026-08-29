@@ -33,6 +33,7 @@ pub mod recipes;
 pub mod registry;
 pub mod repair;
 pub mod schema;
+pub mod scorecard;
 pub mod scratch;
 pub mod search_fts;
 pub mod ser_helpers;

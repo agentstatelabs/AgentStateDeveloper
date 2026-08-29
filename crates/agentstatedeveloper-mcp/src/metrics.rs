@@ -24,10 +24,8 @@
 use std::collections::{BTreeMap, HashSet};
 
 use agentstatedeveloper_core::{
-    AsgEffectStore, AsgFeedbackStore, EffectStore, Engine, FeedbackStore, SearchFtsDb,
-    compute_index_consistency, estimate_tokens, format_age, glob_match, resolve_scope,
-    schema::{LedgerEntry, LedgerKind, Symbol, VerificationStatus},
-    stale_warning_classified,
+    AsgFeedbackStore, Engine, FeedbackStore, SearchFtsDb, compute_index_consistency, format_age,
+    scorecard as core_scorecard, stale_warning_classified,
 };
 use axum::{
     Json,
@@ -801,333 +799,41 @@ pub struct ScorecardQuery {
 /// GET /api/v1/scorecard — truth / feedback / change / uncertainty /
 /// workflow, each 0-100, plus the data-quality and token-economy blocks.
 ///
-/// The arithmetic mirrors `asd scorecard --json`, minus its snapshot-history
-/// side effect: an HTTP read should not write a trend file that the next CLI
-/// run then compares against. `--trend` stays CLI-only for that reason.
-///
-/// NOTE: this is the third implementation of these scores — the others are
-/// `agentstatedeveloper-cli/src/commands/scorecard.rs` and the `scorecard`
-/// MCP tool in `mcp_server.rs`. Keep them in step until they are unified.
+/// The arithmetic lives in `core::scorecard`, shared with `asd scorecard`
+/// and the `scorecard` MCP tool. What differs here is the envelope: no
+/// snapshot-history side effect, because an HTTP read must not write the
+/// trend file the next CLI run compares against — which is why `--trend`
+/// stays CLI-only.
 pub async fn scorecard(
     State(state): State<AppState>,
     Query(q): Query<ScorecardQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let engine = state.engine.lock().await;
-    Ok(Json(compute_scorecard(
+    let card = core_scorecard::compute(
         &engine,
         &state.db_path,
-        q.scope.as_deref(),
-        q.paths.as_deref(),
-        q.drill_down.as_deref(),
-        q.limit.unwrap_or(50).clamp(1, 2_000),
-    )))
-}
+        &core_scorecard::ScorecardOptions {
+            scope: q.scope.as_deref(),
+            paths: q.paths.as_deref(),
+            drill_down: q.drill_down.as_deref(),
+            drill_limit: q.limit.unwrap_or(50).clamp(1, 2_000),
+        },
+    );
 
-fn compute_scorecard(
-    engine: &Engine,
-    db_path: &std::path::Path,
-    scope: Option<&str>,
-    paths: Option<&str>,
-    drill_down: Option<&str>,
-    drill_limit: usize,
-) -> Value {
-    let ref_name = engine.ref_name.clone();
-    let effect_store = AsgEffectStore::from_engine(engine);
-    let feedback_store = AsgFeedbackStore::from_engine(engine);
-
-    let mut paths_filter: Vec<String> = Vec::new();
-    if let Some(s) = scope {
-        paths_filter.extend(resolve_scope(s, db_path));
-    }
-    if let Some(p) = paths {
-        paths_filter.extend(
-            p.split(',')
-                .map(|x| x.trim().to_string())
-                .filter(|x| !x.is_empty()),
-        );
-    }
-    let scoped = !paths_filter.is_empty();
-
-    let all_syms: Vec<Symbol> = {
-        let tree = engine
-            .repo
-            .get_tree(&ref_name, "/asd/v1/index/by-qname")
-            .unwrap_or(Value::Object(Default::default()));
-        tree.as_object()
-            .map(|m| {
-                m.values()
-                    .filter_map(|v| serde_json::from_value::<Symbol>(v.clone()).ok())
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-
-    let scored_syms: Vec<&Symbol> = if scoped {
-        all_syms
-            .iter()
-            .filter(|s| paths_filter.iter().any(|p| glob_match(p, &s.file)))
-            .collect()
-    } else {
-        all_syms.iter().collect()
-    };
-    let total_symbols = scored_syms.len();
-
-    if total_symbols == 0 {
-        let note = if scoped {
-            "no symbols matched the path filter — try broadening scope/paths"
-        } else {
-            "no symbols indexed — run `asd index` first"
-        };
-        return json!({
-            "note": note,
-            "capability_scores": { "truth": 0, "feedback": 0, "change": 0, "uncertainty": 0, "workflow": 0, "overall": 0 },
-            "scores": { "truth": 0, "feedback": 0, "change": 0, "uncertainty": 0, "workflow": 0, "overall": 0 },
-        });
-    }
-
-    // One tree read for the whole ledger instead of N per-symbol reads.
-    let ledger_by_sym: std::collections::HashMap<String, Vec<LedgerEntry>> = {
-        let tree = engine
-            .repo
-            .get_tree(&ref_name, "/asd/v1/ledger")
-            .unwrap_or(Value::Object(Default::default()));
-        let mut map: std::collections::HashMap<String, Vec<LedgerEntry>> = Default::default();
-        if let Value::Object(by_symbol) = tree {
-            for (sym_id, per_symbol) in by_symbol {
-                if let Value::Object(entries_map) = per_symbol {
-                    let mut entries: Vec<LedgerEntry> = entries_map
-                        .values()
-                        .filter_map(|v| serde_json::from_value::<LedgerEntry>(v.clone()).ok())
-                        .collect();
-                    entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-                    let superseded: HashSet<String> = entries
-                        .iter()
-                        .flat_map(|e| e.supersedes.iter().cloned())
-                        .collect();
-                    entries.retain(|e| !superseded.contains(&e.entry_id));
-                    map.insert(sym_id, entries);
-                }
-            }
-        }
-        map
-    };
-
-    let drill = drill_down.unwrap_or("").to_lowercase();
-    let need_drill = !drill.is_empty();
-    let mut drill_rows: Vec<Value> = Vec::new();
-
-    let mut verified_count = 0usize;
-    let mut owned_count = 0usize;
-    let mut has_invariant = 0usize;
-    let mut has_validation = 0usize;
-    let mut total_ledger_entries = 0usize;
-    let mut ctx_tagged_entries = 0usize;
-
-    // Token economy: ASD's structured per-symbol cost against the cost of
-    // reading the source files those symbols live in.
-    let mut structured_tokens = 0usize;
-    let mut file_max_line: std::collections::HashMap<&str, u32> = Default::default();
-
-    for sym in &scored_syms {
-        let has_verified =
-            if let Ok(Some(decl)) = effect_store.get_effects(&ref_name, &sym.symbol_id) {
-                decl.verification
-                    .as_ref()
-                    .map(|v| matches!(v.status, VerificationStatus::Ok))
-                    .unwrap_or(false)
+    let mut out = card.to_json();
+    let obj = out.as_object_mut().expect("to_json built an object");
+    obj.insert("timestamp".into(), json!(chrono::Utc::now().to_rfc3339()));
+    if card.matched_nothing {
+        // Phrased for an API consumer: the CLI's "try broadening
+        // --scope/--paths" names flags that do not exist over HTTP.
+        obj.insert(
+            "note".into(),
+            json!(if card.scoped {
+                "no symbols matched the paths filter"
             } else {
-                false
-            };
-        if has_verified {
-            verified_count += 1;
-        }
-
-        let record = format!(
-            "{} {} {}",
-            sym.qname,
-            sym.signature.as_deref().unwrap_or(""),
-            sym.doc
-                .as_deref()
-                .unwrap_or("")
-                .lines()
-                .next()
-                .unwrap_or("")
-        );
-        structured_tokens += estimate_tokens(&record);
-        let f = file_max_line.entry(sym.file.as_str()).or_insert(0);
-        *f = (*f).max(sym.end.line);
-
-        let entries = ledger_by_sym
-            .get(&sym.symbol_id)
-            .cloned()
-            .unwrap_or_default();
-        total_ledger_entries += entries.len();
-
-        let mut sym_owned = false;
-        let mut sym_inv = false;
-        let mut sym_vs = false;
-        let mut sym_ctx = false;
-        for entry in &entries {
-            match entry.kind {
-                LedgerKind::Invariant => sym_inv = true,
-                LedgerKind::ValidationScenario => sym_vs = true,
-                LedgerKind::Ownership => sym_owned = true,
-                _ => {}
-            }
-            if entry.tags.iter().any(|t| t.starts_with("ctx:")) {
-                sym_ctx = true;
-                ctx_tagged_entries += 1;
-            }
-        }
-        if sym_owned {
-            owned_count += 1;
-        }
-        if sym_inv {
-            has_invariant += 1;
-        }
-        if sym_vs {
-            has_validation += 1;
-        }
-
-        if need_drill {
-            let include = match drill.as_str() {
-                "truth" => !has_verified || !sym_owned,
-                "change" => !sym_inv || !sym_vs,
-                "workflow" => entries.is_empty() || !sym_ctx,
-                "uncertainty" => !has_verified,
-                _ => false,
-            };
-            if include {
-                drill_rows.push(json!({
-                    "qname": sym.qname,
-                    "file": sym.file,
-                    "has_verified_effects": has_verified,
-                    "has_ownership": sym_owned,
-                    "has_invariant": sym_inv,
-                    "has_validation_scenario": sym_vs,
-                    "ledger_entries": entries.len(),
-                    "ctx_tagged": sym_ctx,
-                }));
-            }
-        }
-    }
-
-    let feedback_count = feedback_store
-        .list_all(&ref_name)
-        .map(|v| v.len())
-        .unwrap_or(0);
-
-    let total = total_symbols as f64;
-    let truth =
-        ((verified_count as f64 / total + owned_count as f64 / total) / 2.0 * 100.0).min(100.0);
-    let feedback_score = (feedback_count as f64 / 50.0 * 100.0).min(100.0);
-    let change =
-        ((has_invariant as f64 / total + has_validation as f64 / total) / 2.0 * 100.0).min(100.0);
-    let uncertainty = {
-        let effect_rate = verified_count as f64 / total;
-        let volume_score = (total / 500.0).min(1.0);
-        ((effect_rate + volume_score) / 2.0 * 100.0).min(100.0)
-    };
-    let workflow = {
-        let density = (total_ledger_entries as f64 / total / 2.0).min(1.0);
-        let ctx_adoption = if total_ledger_entries == 0 {
-            0.0
-        } else {
-            (ctx_tagged_entries as f64 / total_ledger_entries as f64).min(1.0)
-        };
-        ((density * 0.6 + ctx_adoption * 0.4) * 100.0).min(100.0)
-    };
-    let overall = (truth + feedback_score + change + uncertainty + workflow) / 5.0;
-    let scores = json!({
-        "truth": truth.round() as u64,
-        "feedback": feedback_score.round() as u64,
-        "change": change.round() as u64,
-        "uncertainty": uncertainty.round() as u64,
-        "workflow": workflow.round() as u64,
-        "overall": overall.round() as u64,
-    });
-
-    let ledger_density = total_ledger_entries as f64 / total;
-    let sparse_db = ledger_density < 0.5;
-    let with_ledger = scored_syms
-        .iter()
-        .filter(|s| ledger_by_sym.contains_key(&s.symbol_id))
-        .count();
-
-    const TOKENS_PER_LINE: usize = 9;
-    let source_read_tokens: usize = file_max_line
-        .values()
-        .map(|&l| l as usize * TOKENS_PER_LINE)
-        .sum();
-    let reduction_pct = if source_read_tokens > 0 {
-        (1.0 - structured_tokens as f64 / source_read_tokens as f64) * 100.0
-    } else {
-        0.0
-    };
-    let ratio_x = if structured_tokens > 0 {
-        source_read_tokens as f64 / structured_tokens as f64
-    } else {
-        0.0
-    };
-
-    let mut out = json!({
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-        "capability_scores": scores,
-        "scores": scores,
-        "data_quality": {
-            "ledger_density": ledger_density,
-            "symbols_scored": total_symbols,
-            "symbols_with_any_ledger": with_ledger,
-            "coverage_pct": (with_ledger as f64 / total * 100.0).round(),
-            "sparse_db": sparse_db,
-            "note": if sparse_db {
-                format!(
-                    "sparse ledger ({total_ledger_entries} entries across {total_symbols} symbols, \
-                     {ledger_density:.2} avg) — run 'asd sync' + 'asd hydrate' to populate; \
-                     scores reflect data density, not workflow quality"
-                )
-            } else {
-                "ledger density is adequate".to_string()
-            },
-            "scope": if scoped { json!(paths_filter) } else { Value::Null },
-        },
-        "details": {
-            "total_symbols": total_symbols,
-            "verified_effects": verified_count,
-            "owned_symbols": owned_count,
-            "invariant_symbols": has_invariant,
-            "validation_symbols": has_validation,
-            "feedback_entries": feedback_count,
-            "total_ledger_entries": total_ledger_entries,
-            "ctx_tagged_ledger_entries": ctx_tagged_entries,
-        },
-        "token_economy": {
-            "note": "Internal estimate — NOT a published benchmark and NOT measured per query. \
-                     Compares ASD's structured per-symbol index cost (qname + signature + first doc \
-                     line) against reading the source files those symbols live in (file length \
-                     estimated from symbol line spans).",
-            "structured_tokens": structured_tokens,
-            "source_read_tokens_est": source_read_tokens,
-            "reduction_pct": (reduction_pct * 10.0).round() / 10.0,
-            "ratio_x": (ratio_x * 10.0).round() / 10.0,
-        },
-    });
-
-    if need_drill {
-        let total_gaps = drill_rows.len();
-        let shown: Vec<_> = drill_rows.into_iter().take(drill_limit).collect();
-        let omitted = total_gaps.saturating_sub(shown.len());
-        out.as_object_mut().unwrap().insert(
-            "drill_down".into(),
-            json!({
-                "dimension": drill,
-                "total_gaps": total_gaps,
-                "shown": shown.len(),
-                "omitted": omitted,
-                "gap_symbols": shown,
+                "no symbols indexed — run `asd index` first"
             }),
         );
     }
-
-    out
+    Ok(Json(out))
 }

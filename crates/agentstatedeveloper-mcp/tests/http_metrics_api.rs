@@ -100,8 +100,9 @@ fn put_feedback(
         .expect("record feedback");
 }
 
-/// Build the fixture engine + router.
-async fn router() -> axum::Router {
+/// Build the fixture engine. Split out from [`router`] so a test can also
+/// score it directly and compare against what the HTTP handler returns.
+fn fixture_engine() -> Engine {
     let engine = Engine::open_in_memory().expect("open in-memory engine");
     let index_store = AsgIndexStore::new(&engine.repo);
 
@@ -234,8 +235,13 @@ async fn router() -> axum::Router {
         Some(-1),
     );
 
+    engine
+}
+
+/// Build the fixture engine + router.
+async fn router() -> axum::Router {
     build_router(
-        Arc::new(Mutex::new(engine)),
+        Arc::new(Mutex::new(fixture_engine())),
         PathBuf::from(":memory:"),
         None,
         None,
@@ -770,11 +776,21 @@ async fn scorecard_path_filter_that_matches_nothing_says_so() {
         body["note"]
             .as_str()
             .unwrap_or_default()
-            .contains("path filter"),
+            .contains("paths filter"),
         "body={}",
         body
     );
     assert_eq!(body["capability_scores"]["overall"], 0, "body={}", body);
+    // A filter that matched nothing still returns the full envelope, so a
+    // consumer needs one parser rather than two. Zero here means "nothing to
+    // score", which `note` says out loud — not "scored zero".
+    assert_eq!(body["details"]["total_symbols"], 0, "body={}", body);
+    assert_eq!(
+        body["data_quality"]["scope"],
+        serde_json::json!(["no/such/dir/**"]),
+        "the filter in force should be echoed back; body={}",
+        body
+    );
 }
 
 #[tokio::test]
@@ -782,4 +798,50 @@ async fn scorecard_path_filter_scopes_the_symbol_set() {
     let (_, body) = get_body(router().await, "/api/v1/scorecard?paths=pay.py").await;
     assert_eq!(body["details"]["total_symbols"], 1, "body={}", body);
     assert_eq!(body["details"]["owned_symbols"], 1, "body={}", body);
+}
+
+/// The reason `core::scorecard` exists: three surfaces used to carry their
+/// own copy of this arithmetic, each with tests that agreed with their own
+/// copy. This pins the HTTP handler to core's output so a future edit to one
+/// cannot silently diverge from the other two — the envelope may differ
+/// (timestamp, note), but every computed block must be identical.
+#[tokio::test]
+async fn scorecard_payload_matches_core_exactly() {
+    use agentstatedeveloper_core::scorecard::{ScorecardOptions, compute};
+
+    let engine = fixture_engine();
+    let expected = compute(
+        &engine,
+        std::path::Path::new(":memory:"),
+        &ScorecardOptions {
+            drill_limit: 50,
+            ..Default::default()
+        },
+    )
+    .to_json();
+
+    let app = build_router(
+        Arc::new(Mutex::new(engine)),
+        PathBuf::from(":memory:"),
+        None,
+        None,
+        true,
+    );
+    let (status, body) = get_body(app, "/api/v1/scorecard").await;
+    assert_eq!(status, StatusCode::OK, "body={}", body);
+
+    for block in [
+        "capability_scores",
+        "scores",
+        "data_quality",
+        "details",
+        "token_economy",
+    ] {
+        assert_eq!(
+            body[block], expected[block],
+            "{block} drifted from core::scorecard; body={body}"
+        );
+    }
+    // The handler's own additions, which core deliberately does not emit.
+    assert!(body["timestamp"].is_string(), "body={}", body);
 }
