@@ -10,6 +10,7 @@
 pub mod events;
 pub mod mcp_params;
 pub mod mcp_server;
+pub mod metrics;
 
 pub use mcp_server::AsdMcpServer;
 
@@ -67,6 +68,12 @@ pub struct AppState {
     /// callees_of)` used by the `/graph` BFS — one bulk read per head change
     /// instead of one git read per visited node.
     edge_maps_memo: Arc<std::sync::Mutex<EdgeMapsMemo>>,
+    /// Memoized `/gc/dry-run`, keyed the same way. Far and away the most
+    /// expensive read in the API — see [`gc_dry_run`].
+    gc_memo: Arc<std::sync::Mutex<GcMemo>>,
+    /// Admits one dry-run walk at a time so concurrent callers share a single
+    /// computation instead of queueing a full walk each.
+    gc_gate: Arc<Mutex<()>>,
 }
 
 type IdMapMemo = Option<(
@@ -81,6 +88,13 @@ type EdgeMaps = (
 );
 
 type EdgeMapsMemo = Option<(agentstategraph_core::ObjectId, Arc<EdgeMaps>)>;
+
+/// `(head, computed_at, adapted payload)` for the memoized GC dry run.
+type GcMemo = Option<(
+    agentstategraph_core::ObjectId,
+    chrono::DateTime<chrono::Utc>,
+    serde_json::Value,
+)>;
 
 /// Fetch the shared `symbol_id → Symbol` map, rebuilding only when the ref
 /// head has moved since the last build. Falls back to an unmemoized build
@@ -163,6 +177,8 @@ pub fn build_router(
         events,
         id_map_memo: Arc::new(std::sync::Mutex::new(None)),
         edge_maps_memo: Arc::new(std::sync::Mutex::new(None)),
+        gc_memo: Arc::new(std::sync::Mutex::new(None)),
+        gc_gate: Arc::new(Mutex::new(())),
     };
 
     let api = Router::new()
@@ -173,6 +189,14 @@ pub fn build_router(
         .route("/timeline", get(list_timeline))
         .route("/history", get(list_history))
         .route("/gc/dry-run", get(gc_dry_run))
+        // Searchable views over the same distilled record the charts
+        // summarize, plus the health surfaces — see [`metrics`].
+        .route("/history/milestones", get(metrics::list_milestones))
+        .route("/history/rollup", get(metrics::list_rollup))
+        .route("/commits", get(metrics::list_commits))
+        .route("/feedback", get(metrics::list_feedback))
+        .route("/index-health", get(metrics::index_health))
+        .route("/scorecard", get(metrics::scorecard))
         .route("/files", get(list_files))
         .route("/files/{*path}", get(read_file))
         .route("/symbols", get(list_symbols))
@@ -332,17 +356,103 @@ async fn list_history(
     Ok(Json(report))
 }
 
+#[derive(Deserialize)]
+struct GcQuery {
+    /// Serve the memo if it's warm, but never start a walk. Lets a page show
+    /// the panel instantly when the answer is known and offer a button when
+    /// it isn't, instead of hanging for half a minute on load.
+    cached_only: Option<String>,
+    /// Recompute even when the memo matches the current head.
+    refresh: Option<String>,
+}
+
 /// GET /api/v1/gc/dry-run — what a GC sweep would reclaim under the default
 /// retention policy, computed without mutating anything.
 ///
 /// Adapts the ASG engine's nested `gc_dry_run` JSON (`objects`/`bytes`/`safety`
 /// sub-objects) to the lens-core `GcDryRun` contract's flat fields.
-async fn gc_dry_run(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
-    let engine = state.engine.lock().await;
-    let raw = engine
-        .repo
-        .gc_dry_run()
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+///
+/// **This is the expensive endpoint.** ASG's reachability marker walks the
+/// entire object DAG — measured at 27s over an 866k-object store — and it
+/// needs the engine, which every other handler also needs. Three things keep
+/// that from wedging the server:
+///
+/// 1. **Memoized on the ref head**, the same cheap cursor [`shared_id_map`]
+///    and the events poller use. The walk is paid once per write, not once
+///    per request.
+/// 2. **Single-flight** behind `gc_gate`: N concurrent callers cost one walk,
+///    not N. A page that fires two of these on mount used to queue 54s of
+///    work.
+/// 3. **`spawn_blocking`**, so a half-minute of synchronous CPU doesn't sit
+///    on an async worker thread starving unrelated connections.
+///
+/// The response carries `cached` / `computed_at` so a caller can tell a fresh
+/// answer from a remembered one, and `?cached_only=1` returns
+/// `{"status": "uncomputed"}` rather than starting a walk.
+async fn gc_dry_run(
+    State(state): State<AppState>,
+    Query(q): Query<GcQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let head = {
+        let engine = state.engine.lock().await;
+        engine.repo.head(&engine.ref_name).ok()
+    };
+    let force = truthy(q.refresh.as_deref());
+
+    if !force {
+        if let Some(hit) = gc_memo_hit(&state, head.as_ref()) {
+            return Ok(Json(hit));
+        }
+    }
+    if truthy(q.cached_only.as_deref()) {
+        return Ok(Json(json!({
+            "status": "uncomputed",
+            "reason": "no cached estimate for the current head; \
+                       re-request without cached_only to compute one",
+        })));
+    }
+
+    // One walk at a time. Whoever gets here second finds the memo filled by
+    // whoever got here first.
+    let _gate = state.gc_gate.lock().await;
+    if !force {
+        if let Some(hit) = gc_memo_hit(&state, head.as_ref()) {
+            return Ok(Json(hit));
+        }
+    }
+
+    let db_path = state.db_path.clone();
+    let shared = Arc::clone(&state.engine);
+    let raw = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        // The walk is read-only and takes half a minute, so give it its own
+        // SQLite connection rather than the shared engine's. Holding that
+        // mutex for 30s stalls every other handler — measured: an unrelated
+        // `/history/milestones` issued one second into a dry run waited 25s
+        // for it. A private reader drops that to milliseconds, and it is the
+        // same concurrency the `asd` CLI already relies on when it runs
+        // against a database `asd-serve` has open.
+        if db_path.is_file() {
+            match Engine::open_sqlite(&db_path) {
+                Ok(engine) => return engine.repo.gc_dry_run().map_err(|e| e.to_string()),
+                // Fall through to the shared engine — a private connection is
+                // an optimization, not a requirement.
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "gc dry-run could not open a private connection; \
+                     falling back to the shared engine"
+                ),
+            }
+        }
+        // In-memory engines (tests, `:memory:`) have no file to reopen: a
+        // second connection would be a different, empty database.
+        // `blocking_lock` is correct here and only here — we are on a
+        // blocking-pool thread and the async guard was dropped above.
+        let engine = shared.blocking_lock();
+        engine.repo.gc_dry_run().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| ApiError::Internal(format!("gc dry-run task failed: {e}")))?
+    .map_err(ApiError::Internal)?;
 
     // Deep-get a nested field by path, returning Null if any hop is missing.
     let at = |path: &[&str]| -> serde_json::Value {
@@ -369,7 +479,49 @@ async fn gc_dry_run(State(state): State<AppState>) -> Result<Json<serde_json::Va
         "undistilled_commits": at(&["safety", "undistilled_commits"]),
         "policy": {},
     });
-    Ok(Json(out))
+
+    let computed_at = chrono::Utc::now();
+    if let Some(h) = head {
+        *state.gc_memo.lock().expect("gc_memo poisoned") = Some((h, computed_at, out.clone()));
+    }
+
+    let mut fresh = out;
+    if let Some(obj) = fresh.as_object_mut() {
+        obj.insert("cached".into(), json!(false));
+        obj.insert("computed_at".into(), json!(computed_at.to_rfc3339()));
+    }
+    Ok(Json(fresh))
+}
+
+/// Return the memoized dry-run when it was computed at `head`, stamped
+/// `cached: true` plus the age a caller needs to judge it. A `None` head
+/// (unresolvable ref) never hits — better to recompute than to serve an
+/// estimate we can't tie to a revision.
+fn gc_memo_hit(
+    state: &AppState,
+    head: Option<&agentstategraph_core::ObjectId>,
+) -> Option<serde_json::Value> {
+    let head = head?;
+    let guard = state.gc_memo.lock().expect("gc_memo poisoned");
+    let (cached_head, computed_at, value) = guard.as_ref()?;
+    if cached_head != head {
+        return None;
+    }
+    let mut out = value.clone();
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("cached".into(), json!(true));
+        obj.insert("computed_at".into(), json!(computed_at.to_rfc3339()));
+        obj.insert(
+            "age_secs".into(),
+            json!(
+                chrono::Utc::now()
+                    .signed_duration_since(*computed_at)
+                    .num_seconds()
+                    .max(0)
+            ),
+        );
+    }
+    Some(out)
 }
 
 // -----------------------------------------------------------------------------
