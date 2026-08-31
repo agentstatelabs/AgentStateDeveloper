@@ -697,8 +697,55 @@ pub const REGISTRY: &[HelpDoc] = &[
             ),
         ],
         examples: &["asd feedback mark \"rate limiter\" myapp::mw::limit useful"],
-        gotchas: &["Verdicts persist as score adjustments applied to future searches."],
-        related: &["feedback_list", "feedback_promote", "search"],
+        gotchas: &[
+            "Verdicts persist as score adjustments applied to future searches.",
+            "Got one wrong? `asd feedback expire` lapses it so ranking stops seeing it.",
+        ],
+        related: &[
+            "feedback_list",
+            "feedback_expire",
+            "feedback_promote",
+            "search",
+        ],
+    },
+    HelpDoc {
+        feature: "feedback_expire",
+        group: "feedback",
+        synopsis: "Lapse a recorded verdict so it stops influencing search ranking.",
+        syntax: "asd feedback expire <entry-id> | --symbol <qname> | --query <text>",
+        params: &[
+            p!(
+                "entry_id",
+                false,
+                "Entry to expire, from `asd feedback list`. Or use --symbol / --query."
+            ),
+            p!(
+                "symbol",
+                false,
+                "Expire every verdict recorded against this qname."
+            ),
+            p!(
+                "query",
+                false,
+                "Expire every verdict for this query (matched against the stored lowercased form)."
+            ),
+            p!(
+                "dry_run",
+                false,
+                "Show what would be expired without writing."
+            ),
+        ],
+        examples: &[
+            "asd feedback list",
+            "asd feedback expire fb_58958221c119429798e16d6b070ed5d6",
+            "asd feedback expire --symbol myapp::mw::limit --dry-run",
+        ],
+        gotchas: &[
+            "Sets expires_at=now rather than deleting: the entry stays in `feedback list` marked expired, because it still explains why a past search ranked as it did.",
+            "One selector at a time — an entry id, --symbol or --query. Expiring everything because a flag was forgotten is not recoverable.",
+            "Re-expiring an already-lapsed entry is a no-op, not a timestamp rewrite.",
+        ],
+        related: &["feedback_mark", "feedback_list", "search"],
     },
     HelpDoc {
         feature: "feedback_promote",

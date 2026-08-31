@@ -107,6 +107,14 @@ pub trait FeedbackStore {
         Ok(self
             .list_all(ref_name)?
             .into_iter()
+            // Plan J t-014 added `expires_at`, `is_expired()` and the
+            // `--ttl-days` flag, and documented both here and on the schema
+            // field that lapsed verdicts stop influencing ranking — but never
+            // wired the filter, so they never did. `list_all` deliberately
+            // keeps expired entries (they still explain a past ranking); the
+            // flat_* views feed `apply_feedback_adjustments`, so the cut
+            // belongs here.
+            .filter(|e| !e.is_expired())
             .filter(|e| e.file_scope.is_none())
             .map(|e| (e.symbol_id, e.query, e.verdict, e.created_at))
             .collect())
@@ -122,6 +130,8 @@ pub trait FeedbackStore {
         Ok(self
             .list_all(ref_name)?
             .into_iter()
+            // Same omission as `flat_verdicts` — see the note there.
+            .filter(|e| !e.is_expired())
             .filter_map(|e| {
                 e.file_scope
                     .map(|glob| (glob, e.verdict, e.query, e.created_at))

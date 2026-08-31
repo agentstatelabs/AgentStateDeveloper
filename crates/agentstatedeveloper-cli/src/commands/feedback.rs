@@ -1,8 +1,9 @@
 //! `asd feedback` — record and list search-quality verdicts.
 //!
 //! Subcommands:
-//!   mark  — attach a verdict (useful/noisy/missing/wrong_layer) to a (query, symbol) pair
-//!   list  — display all recorded verdicts, optionally filtered to one symbol
+//!   mark    — attach a verdict (useful/noisy/missing/wrong_layer) to a (query, symbol) pair
+//!   list    — display all recorded verdicts, optionally filtered to one symbol
+//!   expire  — lapse a verdict so it stops influencing search ranking
 
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
@@ -21,6 +22,8 @@ pub enum FeedbackCmd {
     Mark(MarkArgs),
     /// List recorded feedback verdicts.
     List(ListArgs),
+    /// Lapse a verdict so it stops influencing search ranking.
+    Expire(ExpireArgs),
     /// Designate a symbol as the canonical source-of-truth for a domain concept.
     PromoteAsTruth(PromoteAsTruthArgs),
     /// Export all feedback entries to a JSON file (or stdout).
@@ -72,6 +75,31 @@ pub struct ListArgs {
     pub json: bool,
 }
 
+/// Selectors are mutually exclusive and one is required — expiring
+/// everything because a flag was forgotten is not a recoverable mistake.
+#[derive(Debug, Args)]
+pub struct ExpireArgs {
+    /// Entry id to expire (from `asd feedback list`).
+    pub entry_id: Option<String>,
+
+    /// Expire every verdict recorded against this symbol qname.
+    #[arg(long, conflicts_with = "entry_id")]
+    pub symbol: Option<String>,
+
+    /// Expire every verdict recorded for this query (matched as the stored
+    /// normalized form: lowercased and trimmed).
+    #[arg(long, conflicts_with_all = ["entry_id", "symbol"])]
+    pub query: Option<String>,
+
+    /// Show what would be expired without writing.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
 #[derive(Debug, Args)]
 pub struct PromoteAsTruthArgs {
     /// Fully-qualified symbol name to promote.
@@ -114,6 +142,7 @@ pub fn run(cfg: &Config, cmd: FeedbackCmd) -> Result<()> {
     match cmd {
         FeedbackCmd::Mark(args) => run_mark(cfg, args),
         FeedbackCmd::List(args) => run_list(cfg, args),
+        FeedbackCmd::Expire(args) => run_expire(cfg, args),
         FeedbackCmd::PromoteAsTruth(args) => run_promote_as_truth(cfg, args),
         FeedbackCmd::Export(args) => run_export(cfg, args),
         FeedbackCmd::Import(args) => run_import(cfg, args),
@@ -444,4 +473,117 @@ fn run_import(cfg: &Config, args: ImportArgs) -> Result<()> {
         wl
     );
     Ok(())
+}
+
+/// `asd feedback expire` — lapse a verdict so search ranking stops seeing it.
+///
+/// Feedback is not inert metadata: `apply_feedback_adjustments` folds these
+/// verdicts into ranking, so a mistaken `noisy` suppresses a good symbol on
+/// every future query. Until this existed there was no way to take one back —
+/// feedback was the only write-only surface in ASD, while ledger has
+/// withdraw/supersede and scratch has discard.
+///
+/// Implemented as a re-record with `expires_at = now` rather than a delete.
+/// That reuses the expiry field and the lapsed-entry filtering Plan J t-014
+/// already added, and — the part that matters — it goes through
+/// `FeedbackStore::record`, which writes the authoritative ASG tree AND the
+/// `asd_feedback` SQLite cache that `list_all` reads first. A bespoke delete
+/// touching only one of those leaves the entry live in the other; that trap
+/// is what motivated this command.
+///
+/// The entry stays listed, marked expired. A retracted verdict still explains
+/// why a past search ranked the way it did, so hiding it would make old
+/// results inexplicable.
+fn run_expire(cfg: &Config, args: ExpireArgs) -> Result<()> {
+    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let feedback_store = AsgFeedbackStore::from_engine(&engine);
+    let now = chrono::Utc::now();
+
+    let all = feedback_store.list_all(&engine.ref_name)?;
+
+    // Match the stored normalization so `--query "Drift Playhead"` finds the
+    // entry recorded as `drift playhead`.
+    let wanted_query = args
+        .query
+        .as_ref()
+        .map(|q| q.to_lowercase().trim().to_string());
+
+    let selected: Vec<&FeedbackEntry> = match (&args.entry_id, &args.symbol, &wanted_query) {
+        (Some(id), _, _) => all.iter().filter(|e| &e.entry_id == id).collect(),
+        (_, Some(qname), _) => all.iter().filter(|e| &e.symbol_qname == qname).collect(),
+        (_, _, Some(q)) => all.iter().filter(|e| &e.query == q).collect(),
+        _ => bail!("give an entry id, or one of --symbol <qname> / --query <text>"),
+    };
+
+    if selected.is_empty() {
+        bail!(
+            "no feedback matched; `asd feedback list` shows {} recorded entr{}",
+            all.len(),
+            if all.len() == 1 { "y" } else { "ies" }
+        );
+    }
+
+    // Idempotent: re-expiring an already-lapsed entry would rewrite its
+    // expires_at to a later timestamp, which is the opposite of what the
+    // caller wants.
+    let (already, to_expire): (Vec<_>, Vec<_>) = selected
+        .into_iter()
+        .partition(|e| e.expires_at.is_some_and(|t| t <= now));
+
+    if args.dry_run {
+        let out = serde_json::json!({
+            "dry_run": true,
+            "would_expire": to_expire.iter().map(|e| summarize(e)).collect::<Vec<_>>(),
+            "already_expired": already.iter().map(|e| summarize(e)).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    let mut expired = Vec::new();
+    for entry in &to_expire {
+        let mut lapsed = (*entry).clone();
+        lapsed.expires_at = Some(now);
+        feedback_store.record(&engine.ref_name, &lapsed, &lapsed.author)?;
+        expired.push(summarize(&lapsed));
+    }
+
+    if args.json {
+        let out = serde_json::json!({
+            "expired": expired,
+            "already_expired": already.iter().map(|e| summarize(e)).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    for e in &to_expire {
+        println!(
+            "expired {}  {:?}  {}  query={:?}",
+            e.entry_id, e.verdict, e.symbol_qname, e.query
+        );
+    }
+    for e in &already {
+        println!("already expired {}  ({})", e.entry_id, e.symbol_qname);
+    }
+    if !expired.is_empty() {
+        println!(
+            "\n{} verdict{} will no longer influence ranking. They remain in \
+             `asd feedback list`, marked expired.",
+            expired.len(),
+            if expired.len() == 1 { "" } else { "s" }
+        );
+    }
+    Ok(())
+}
+
+/// Compact identity for an entry in command output.
+fn summarize(e: &FeedbackEntry) -> serde_json::Value {
+    serde_json::json!({
+        "entry_id": e.entry_id,
+        "symbol_qname": e.symbol_qname,
+        "query": e.query,
+        "verdict": format!("{:?}", e.verdict),
+        "expires_at": e.expires_at,
+    })
 }
