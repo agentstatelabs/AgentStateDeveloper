@@ -814,9 +814,41 @@ pub struct FeedbackEntry {
     /// (current default behavior for backward compat).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
+    /// When this verdict was retracted, and by whom. Set by
+    /// `asd feedback withdraw`.
+    ///
+    /// Distinct from `expires_at` on purpose — see DESIGN.md, "Feedback
+    /// withdrawal — tombstone shape". Expiry says *this was right, it is no
+    /// longer relevant*; withdrawal says *this was wrong, it should not have
+    /// been recorded*. Collapsing them would also make a withdrawal revivable
+    /// by future-dating an expiry, which it must not be.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdrawn_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdrawn_by: Option<String>,
+    /// Optional free-text reason recorded with the withdrawal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdrawn_reason: Option<String>,
 }
 
 impl FeedbackEntry {
+    /// True once this verdict has been retracted.
+    ///
+    /// Consumed by the same two ranking views as [`Self::is_expired`], and
+    /// deliberately NOT by `list_all` — a withdrawn verdict still explains
+    /// why a past search ranked as it did.
+    pub fn is_withdrawn(&self) -> bool {
+        self.withdrawn_at.is_some()
+    }
+
+    /// True when this verdict should no longer influence ranking, for any
+    /// reason. The single predicate the `flat_*` views consult, so a third
+    /// lifecycle state added later has exactly one place to register itself
+    /// rather than two call sites to remember.
+    pub fn is_inert(&self) -> bool {
+        self.is_expired() || self.is_withdrawn()
+    }
+
     /// Plan J t-014: true when `expires_at` is set and is in the past.
     ///
     /// Consumed by `FeedbackStore::flat_verdicts` and
@@ -853,6 +885,9 @@ mod plan_b_schema_tests {
             note: None,
             file_scope: None,
             expires_at: None,
+            withdrawn_at: None,
+            withdrawn_by: None,
+            withdrawn_reason: None,
         };
         assert!(!e.is_expired());
     }
@@ -870,6 +905,9 @@ mod plan_b_schema_tests {
             note: None,
             file_scope: None,
             expires_at: None,
+            withdrawn_at: None,
+            withdrawn_by: None,
+            withdrawn_reason: None,
         };
         e.expires_at = Some(Utc::now() - chrono::Duration::days(1));
         assert!(e.is_expired(), "expired 1 day ago must report expired");
@@ -888,6 +926,9 @@ mod plan_b_schema_tests {
             note: None,
             file_scope: None,
             expires_at: None,
+            withdrawn_at: None,
+            withdrawn_by: None,
+            withdrawn_reason: None,
         };
         e.expires_at = Some(Utc::now() + chrono::Duration::days(30));
         assert!(!e.is_expired(), "future expiry must NOT report expired");

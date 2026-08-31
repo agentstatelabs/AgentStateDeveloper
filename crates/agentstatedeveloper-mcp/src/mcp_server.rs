@@ -4236,6 +4236,10 @@ impl AsdMcpServer {
             created_at: now,
             file_scope: None,
             expires_at,
+            // A freshly recorded verdict is never withdrawn.
+            withdrawn_at: None,
+            withdrawn_by: None,
+            withdrawn_reason: None,
         };
         let feedback_store = AsgFeedbackStore::from_engine(&engine);
         if let Err(e) = feedback_store.record(&ref_name, &entry, &p.author_id) {
@@ -4337,6 +4341,33 @@ impl AsdMcpServer {
                 "kind": "ownership",
             }))
             .unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Retract a recorded verdict so it stops influencing search ranking. Use when a verdict was WRONG. For one that was right but is no longer relevant, use its ttl/expiry instead. The entry stays listed, marked withdrawn."
+    )]
+    async fn feedback_withdraw(&self, params: Parameters<FeedbackWithdrawParams>) -> String {
+        let p = params.0;
+        let engine = self.engine.lock().await;
+        let ref_name = engine.ref_name.clone();
+        let store = AsgFeedbackStore::from_engine(&engine);
+        let by = p.by.as_deref().unwrap_or("asd-mcp");
+        match store.withdraw(&ref_name, &p.entry_id, by, p.reason.as_deref()) {
+            Ok(Some(e)) => serde_json::to_string(&serde_json::json!({
+                "withdrawn": true,
+                "entry_id": e.entry_id,
+                "symbol_qname": e.symbol_qname,
+                "query": e.query,
+                "verdict": format!("{:?}", e.verdict),
+                "withdrawn_at": e.withdrawn_at,
+                "withdrawn_by": e.withdrawn_by,
+                "withdrawn_reason": e.withdrawn_reason,
+                "note": "no longer influences ranking; still listed so it explains past rankings",
+            }))
+            .unwrap_or_else(|_| "{}".to_string()),
+            Ok(None) => err_json(&format!("no feedback entry {}", p.entry_id)),
             Err(e) => err_json(&e.to_string()),
         }
     }

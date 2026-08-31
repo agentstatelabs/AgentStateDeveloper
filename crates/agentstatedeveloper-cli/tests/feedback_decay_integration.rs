@@ -49,6 +49,9 @@ fn mk_entry(entry_id: &str, sym_id: &str, qname: &str, age_days: i64) -> Feedbac
         note: None,
         file_scope: None,
         expires_at: None,
+        withdrawn_at: None,
+        withdrawn_by: None,
+        withdrawn_reason: None,
     }
 }
 

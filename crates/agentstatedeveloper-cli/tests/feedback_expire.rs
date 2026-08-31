@@ -25,6 +25,9 @@ fn entry(id: &str, qname: &str, query: &str, verdict: FeedbackVerdict) -> Feedba
         note: None,
         file_scope: None,
         expires_at: None,
+        withdrawn_at: None,
+        withdrawn_by: None,
+        withdrawn_reason: None,
     }
 }
 

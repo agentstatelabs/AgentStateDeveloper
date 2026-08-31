@@ -378,6 +378,16 @@ pub struct FeedbackListParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct FeedbackWithdrawParams {
+    /// Entry id to retract, from `feedback_list`.
+    pub entry_id: String,
+    /// Who is retracting it. Recorded on the entry.
+    pub by: Option<String>,
+    /// Why. Free text, stored with the withdrawal.
+    pub reason: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct FeedbackPromoteParams {
     /// Fully-qualified symbol name to promote.
     pub qname: String,

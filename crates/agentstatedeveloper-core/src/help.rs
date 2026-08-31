@@ -745,7 +745,38 @@ pub const REGISTRY: &[HelpDoc] = &[
             "One selector at a time — an entry id, --symbol or --query. Expiring everything because a flag was forgotten is not recoverable.",
             "Re-expiring an already-lapsed entry is a no-op, not a timestamp rewrite.",
         ],
-        related: &["feedback_mark", "feedback_list", "search"],
+        related: &[
+            "feedback_mark",
+            "feedback_list",
+            "feedback_withdraw",
+            "search",
+        ],
+    },
+    HelpDoc {
+        feature: "feedback_withdraw",
+        group: "feedback",
+        synopsis: "Retract a verdict that should never have been recorded.",
+        syntax: "asd feedback withdraw <entry-id> [--by <who>] [--reason <text>]",
+        params: &[
+            p!(
+                "entry_id",
+                true,
+                "Entry to retract, from `asd feedback list`."
+            ),
+            p!("by", false, "Who is retracting it (default: asd-cli)."),
+            p!("reason", false, "Why. Stored with the withdrawal."),
+        ],
+        examples: &[
+            "asd feedback list",
+            "asd feedback withdraw fb_58958221c119429798e16d6b070ed5d6 --reason \"wrong symbol\"",
+        ],
+        gotchas: &[
+            "Different from `expire`: expire means the verdict was right but is no longer relevant; withdraw means it was wrong. Only withdraw records who retracted it and why.",
+            "A withdrawal cannot be undone by future-dating an expiry — the two states are independent.",
+            "The entry stays in `feedback list`, marked withdrawn, because it still explains why a past search ranked as it did.",
+            "Withdrawing twice keeps the original timestamp rather than moving it.",
+        ],
+        related: &["feedback_expire", "feedback_mark", "feedback_list"],
     },
     HelpDoc {
         feature: "feedback_promote",
