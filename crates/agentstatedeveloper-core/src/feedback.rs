@@ -95,6 +95,42 @@ pub trait FeedbackStore {
     /// Every feedback entry in the store.
     fn list_all(&self, ref_name: &str) -> Result<Vec<FeedbackEntry>>;
 
+    /// Retract a verdict so it stops influencing ranking, keeping the record.
+    ///
+    /// Default implementation re-records the entry with the withdrawal stamped
+    /// on it. That deliberately reuses [`FeedbackStore::record`], which is the
+    /// only write path that updates BOTH the authoritative store and the
+    /// SQLite write-through cache — a bespoke write touching one would leave
+    /// the other serving the verdict as live. See DESIGN.md, "Feedback
+    /// withdrawal — tombstone shape".
+    ///
+    /// Idempotent: withdrawing an already-withdrawn entry keeps the original
+    /// timestamp rather than moving it.
+    fn withdraw(
+        &self,
+        ref_name: &str,
+        entry_id: &str,
+        by: &str,
+        reason: Option<&str>,
+    ) -> Result<Option<FeedbackEntry>> {
+        let Some(existing) = self
+            .list_all(ref_name)?
+            .into_iter()
+            .find(|e| e.entry_id == entry_id)
+        else {
+            return Ok(None);
+        };
+        if existing.is_withdrawn() {
+            return Ok(Some(existing));
+        }
+        let mut withdrawn = existing;
+        withdrawn.withdrawn_at = Some(Utc::now());
+        withdrawn.withdrawn_by = Some(by.to_string());
+        withdrawn.withdrawn_reason = reason.map(str::to_string);
+        self.record(ref_name, &withdrawn, by)?;
+        Ok(Some(withdrawn))
+    }
+
     /// Flatten all feedback into (symbol_id, query, verdict, created_at)
     /// tuples for use in `apply_feedback_adjustments`. Plan J t-016 added
     /// `created_at` so the boost arithmetic can decay Useful verdicts by
@@ -107,14 +143,17 @@ pub trait FeedbackStore {
         Ok(self
             .list_all(ref_name)?
             .into_iter()
-            // Plan J t-014 added `expires_at`, `is_expired()` and the
-            // `--ttl-days` flag, and documented both here and on the schema
-            // field that lapsed verdicts stop influencing ranking — but never
-            // wired the filter, so they never did. `list_all` deliberately
-            // keeps expired entries (they still explain a past ranking); the
-            // flat_* views feed `apply_feedback_adjustments`, so the cut
-            // belongs here.
-            .filter(|e| !e.is_expired())
+            // The one place a verdict stops influencing ranking. `is_inert`
+            // covers both lifecycle states (expired, withdrawn) so a third
+            // has one place to register rather than two call sites to
+            // remember. `list_all` deliberately keeps them — they still
+            // explain a past ranking.
+            //
+            // Plan J t-014 added `expires_at`, `is_expired()` and
+            // `--ttl-days`, and documented on both the field and the helper
+            // that lapsed verdicts were ignored here — but never wired the
+            // filter, so they never were until t-001.
+            .filter(|e| !e.is_inert())
             .filter(|e| e.file_scope.is_none())
             .map(|e| (e.symbol_id, e.query, e.verdict, e.created_at))
             .collect())
@@ -130,8 +169,8 @@ pub trait FeedbackStore {
         Ok(self
             .list_all(ref_name)?
             .into_iter()
-            // Same omission as `flat_verdicts` — see the note there.
-            .filter(|e| !e.is_expired())
+            // Same predicate as `flat_verdicts` — see the note there.
+            .filter(|e| !e.is_inert())
             .filter_map(|e| {
                 e.file_scope
                     .map(|glob| (glob, e.verdict, e.query, e.created_at))

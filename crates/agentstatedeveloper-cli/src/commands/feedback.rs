@@ -3,7 +3,8 @@
 //! Subcommands:
 //!   mark    — attach a verdict (useful/noisy/missing/wrong_layer) to a (query, symbol) pair
 //!   list    — display all recorded verdicts, optionally filtered to one symbol
-//!   expire  — lapse a verdict so it stops influencing search ranking
+//!   expire   — lapse a verdict so it stops influencing search ranking
+//!   withdraw — retract a verdict that should not have been recorded
 
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
@@ -24,6 +25,8 @@ pub enum FeedbackCmd {
     List(ListArgs),
     /// Lapse a verdict so it stops influencing search ranking.
     Expire(ExpireArgs),
+    /// Retract a verdict that should never have been recorded.
+    Withdraw(WithdrawArgs),
     /// Designate a symbol as the canonical source-of-truth for a domain concept.
     PromoteAsTruth(PromoteAsTruthArgs),
     /// Export all feedback entries to a JSON file (or stdout).
@@ -101,6 +104,24 @@ pub struct ExpireArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct WithdrawArgs {
+    /// Entry id to withdraw (from `asd feedback list`).
+    pub entry_id: String,
+
+    /// Who is retracting it. Recorded on the entry.
+    #[arg(long, default_value = "asd-cli")]
+    pub by: String,
+
+    /// Why. Free text, stored with the withdrawal.
+    #[arg(long)]
+    pub reason: Option<String>,
+
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct PromoteAsTruthArgs {
     /// Fully-qualified symbol name to promote.
     pub qname: String,
@@ -143,6 +164,7 @@ pub fn run(cfg: &Config, cmd: FeedbackCmd) -> Result<()> {
         FeedbackCmd::Mark(args) => run_mark(cfg, args),
         FeedbackCmd::List(args) => run_list(cfg, args),
         FeedbackCmd::Expire(args) => run_expire(cfg, args),
+        FeedbackCmd::Withdraw(args) => run_withdraw(cfg, args),
         FeedbackCmd::PromoteAsTruth(args) => run_promote_as_truth(cfg, args),
         FeedbackCmd::Export(args) => run_export(cfg, args),
         FeedbackCmd::Import(args) => run_import(cfg, args),
@@ -191,6 +213,10 @@ fn run_mark(cfg: &Config, args: MarkArgs) -> Result<()> {
         created_at: now,
         file_scope: args.file_scope.clone(),
         expires_at,
+        // A freshly recorded verdict is never withdrawn.
+        withdrawn_at: None,
+        withdrawn_by: None,
+        withdrawn_reason: None,
     };
     let feedback_store = AsgFeedbackStore::from_engine(&engine);
     feedback_store.record(&engine.ref_name, &entry, &args.author)?;
@@ -586,4 +612,53 @@ fn summarize(e: &FeedbackEntry) -> serde_json::Value {
         "verdict": format!("{:?}", e.verdict),
         "expires_at": e.expires_at,
     })
+}
+
+/// `asd feedback withdraw` — retract a verdict that should not have been
+/// recorded.
+///
+/// Distinct from `expire` on purpose. Expiry says *this was right, it is no
+/// longer relevant*; withdrawal says *this was wrong*. Both stop the verdict
+/// influencing ranking, but only withdrawal records who retracted it and why,
+/// and only withdrawal is not revivable by future-dating an expiry. See
+/// DESIGN.md, "Feedback withdrawal — tombstone shape".
+///
+/// The entry stays in `asd feedback list`, marked withdrawn — it still
+/// explains why a past search ranked as it did.
+fn run_withdraw(cfg: &Config, args: WithdrawArgs) -> Result<()> {
+    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let store = AsgFeedbackStore::from_engine(&engine);
+
+    let Some(entry) = store.withdraw(
+        &engine.ref_name,
+        &args.entry_id,
+        &args.by,
+        args.reason.as_deref(),
+    )?
+    else {
+        let n = store.list_all(&engine.ref_name)?.len();
+        bail!(
+            "no feedback entry {}; `asd feedback list` shows {} recorded entr{}",
+            args.entry_id,
+            n,
+            if n == 1 { "y" } else { "ies" }
+        );
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&entry)?);
+        return Ok(());
+    }
+    println!(
+        "withdrawn {}  {:?}  {}  query={:?}",
+        entry.entry_id, entry.verdict, entry.symbol_qname, entry.query
+    );
+    if let Some(ref r) = entry.withdrawn_reason {
+        println!("    reason: {r}");
+    }
+    println!(
+        "\nIt no longer influences ranking. It remains in `asd feedback list`, \
+         marked withdrawn — it still explains a past ranking."
+    );
+    Ok(())
 }

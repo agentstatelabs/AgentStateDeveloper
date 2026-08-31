@@ -359,6 +359,14 @@ impl SearchFtsDb {
         let _ = self
             .conn
             .execute("ALTER TABLE asd_feedback ADD COLUMN expires_at TEXT", []);
+        // feedback-lifecycle t-003: withdrawal columns, same migration
+        // pattern — ALTER errors if the column exists, which we swallow.
+        for col in ["withdrawn_at", "withdrawn_by", "withdrawn_reason"] {
+            let _ = self.conn.execute(
+                &format!("ALTER TABLE asd_feedback ADD COLUMN {col} TEXT"),
+                [],
+            );
+        }
 
         // asd_symbols_cache: full Symbol JSON for every indexed symbol.
         // Populated at asd index time; eliminates the by-qname git tree walk
@@ -1492,8 +1500,9 @@ impl SearchFtsDb {
     pub fn upsert_feedback(&self, e: &FeedbackEntry) -> rusqlite::Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO asd_feedback
-             (entry_id, symbol_id, symbol_qname, query, verdict, author, created_at, note, file_scope, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             (entry_id, symbol_id, symbol_qname, query, verdict, author, created_at, note, file_scope, expires_at,
+              withdrawn_at, withdrawn_by, withdrawn_reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
                 e.entry_id,
                 e.symbol_id,
@@ -1507,6 +1516,13 @@ impl SearchFtsDb {
                 // Plan J t-014: persist expires_at so the FTS cache
                 // round-trips it (was always None pre-1.0.48).
                 e.expires_at.map(|t| t.to_rfc3339()),
+                // feedback-lifecycle t-003: withdrawal must round-trip too.
+                // If it lived only in the git tree, `list_all`'s SQLite fast
+                // path would keep serving the verdict as live — the exact
+                // tree/cache divergence this plan exists to prevent.
+                e.withdrawn_at.map(|t| t.to_rfc3339()),
+                e.withdrawn_by,
+                e.withdrawn_reason,
             ],
         )?;
         Ok(())
@@ -1515,7 +1531,8 @@ impl SearchFtsDb {
     /// Return all feedback entries from the SQLite cache, newest first.
     pub fn list_all_feedback(&self) -> rusqlite::Result<Vec<FeedbackEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT entry_id, symbol_id, symbol_qname, query, verdict, author, created_at, note, file_scope, expires_at
+            "SELECT entry_id, symbol_id, symbol_qname, query, verdict, author, created_at, note, file_scope, expires_at,
+                    withdrawn_at, withdrawn_by, withdrawn_reason
              FROM asd_feedback
              ORDER BY created_at DESC",
         )?;
@@ -1535,6 +1552,10 @@ impl SearchFtsDb {
                     .get::<_, Option<String>>(9)?
                     .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
                     .map(|d| d.with_timezone(&Utc));
+                let withdrawn_at: Option<DateTime<Utc>> = row
+                    .get::<_, Option<String>>(10)?
+                    .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                    .map(|d| d.with_timezone(&Utc));
                 Ok(FeedbackEntry {
                     entry_id: row.get(0)?,
                     symbol_id: row.get(1)?,
@@ -1546,6 +1567,9 @@ impl SearchFtsDb {
                     note: row.get(7)?,
                     file_scope: row.get(8)?,
                     expires_at,
+                    withdrawn_at,
+                    withdrawn_by: row.get(11)?,
+                    withdrawn_reason: row.get(12)?,
                 })
             })?
             .filter_map(|r| r.ok())

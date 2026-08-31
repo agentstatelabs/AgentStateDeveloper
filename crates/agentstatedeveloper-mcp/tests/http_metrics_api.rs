@@ -94,6 +94,9 @@ fn put_feedback(
         // Relative to *now*, not to `created_at`, so "expired" is
         // deterministic regardless of when the suite runs.
         expires_at: expires_in_days.map(|d| Utc::now() + Duration::days(d)),
+        withdrawn_at: None,
+        withdrawn_by: None,
+        withdrawn_reason: None,
     };
     store
         .record(&engine.ref_name, &entry, "metrics-test")
