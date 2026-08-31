@@ -1,10 +1,12 @@
 <script lang="ts">
 	import { ProjectHistory, StoreHealth } from '@agentstate/lens-core';
-	import type { HistoryReport, GcDryRun } from '@agentstate/lens-core';
+	import type { HistoryReport } from '@agentstate/lens-core';
 	import { asdClient } from '$lib/api';
+	import { getGcDryRun, isGcUncomputed, type GcEstimate } from '$lib/metrics';
 
 	let report = $state<HistoryReport | null>(null);
-	let gc = $state<GcDryRun | null>(null);
+	let gc = $state<GcEstimate | null>(null);
+	let gcState = $state<'loading' | 'computing' | 'ready' | 'unavailable'>('loading');
 	let err = $state<string | null>(null);
 	let unavailable = $state(false);
 	let loading = $state(true);
@@ -15,21 +17,15 @@
 		loading = true;
 		err = null;
 		unavailable = false;
-		// Store shape rides along on the history call; the GC dry run is a
-		// separate estimate. Both live behind the same ASG release gate, so a
-		// 404 on either means "this build's engine predates Plan A".
-		Promise.all([
-			asdClient.history({ store: true, granularity: 'day' }),
-			asdClient.gcDryRun().catch((e) => {
-				// A missing GC endpoint shouldn't blank the history page — keep the
-				// report, drop the reclaim panel.
-				if (is404(e)) return null;
-				throw e;
-			})
-		])
-			.then(([h, g]) => {
+		// Store shape rides along on the history call. The GC dry run does NOT:
+		// computing one walks the whole object DAG (~26s on a large store), and
+		// awaiting it alongside the report held this entire page blank for that
+		// long. Fetch the report on its own; let the reclaim panel fill in
+		// behind it.
+		asdClient
+			.history({ store: true, granularity: 'day' })
+			.then((h) => {
 				report = h;
-				gc = g;
 				loading = false;
 			})
 			.catch((e) => {
@@ -37,7 +33,40 @@
 				else err = e instanceof Error ? e.message : String(e);
 				loading = false;
 			});
+		loadGc();
 	});
+
+	/**
+	 * Reclaim estimate, fetched independently of the report.
+	 *
+	 * Ask for the server's memo first — that answers in milliseconds whether
+	 * warm or cold. Only a cold cache starts the real walk, and by then the
+	 * page has already rendered. The rest of the API stays responsive
+	 * throughout because the server runs the walk on a private connection
+	 * rather than the shared engine.
+	 */
+	function loadGc() {
+		gcState = 'loading';
+		getGcDryRun({ cachedOnly: true })
+			.then((g) => {
+				if (!isGcUncomputed(g)) {
+					gc = g;
+					gcState = 'ready';
+					return;
+				}
+				gcState = 'computing';
+				return getGcDryRun().then((fresh) => {
+					if (!isGcUncomputed(fresh)) gc = fresh;
+					gcState = 'ready';
+				});
+			})
+			.catch(() => {
+				// A missing GC endpoint shouldn't blank the history page — keep the
+				// report, drop the reclaim panel.
+				gc = null;
+				gcState = 'unavailable';
+			});
+	}
 
 	function is404(e: unknown): boolean {
 		const m = e instanceof Error ? e.message : String(e);
@@ -98,6 +127,17 @@
 	{#if view === 'history'}
 		<ProjectHistory {report} heading="" />
 	{:else if report.store_shape}
+		{#if gcState === 'computing'}
+			<p class="gc-note">
+				Computing the reclaim estimate — it walks the whole object graph, so it can take tens of
+				seconds on a large store. The rest of this page (and the rest of the API) stays usable while
+				it runs; the panel fills in when it lands.
+			</p>
+		{:else if gcState === 'unavailable'}
+			<p class="gc-note">
+				No reclaim estimate — this server's engine predates the GC surface.
+			</p>
+		{/if}
 		<StoreHealth shape={report.store_shape} gc={gc ?? undefined} heading="" />
 	{/if}
 {/if}
@@ -186,5 +226,16 @@
 	.state-empty p {
 		margin: 0;
 		max-width: 72ch;
+	}
+	.gc-note {
+		margin: 0 0 var(--lens-space-3);
+		max-width: 80ch;
+		padding: var(--lens-space-2) var(--lens-space-3);
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-md);
+		background: var(--lens-surface);
+		color: var(--lens-muted);
+		font-size: var(--lens-font-size-2xs);
+		line-height: 1.55;
 	}
 </style>

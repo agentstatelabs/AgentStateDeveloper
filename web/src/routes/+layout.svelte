@@ -38,6 +38,8 @@
 	const NAV = [
 		{ href: '/activity', label: 'Activity' },
 		{ href: '/history', label: 'History' },
+		{ href: '/records', label: 'Records' },
+		{ href: '/health', label: 'Health' },
 		{ href: '/territory', label: 'Territory' },
 		{ href: '/graph', label: 'Graph' },
 		{ href: '/effects', label: 'Effects' },

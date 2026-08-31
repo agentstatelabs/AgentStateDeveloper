@@ -10,7 +10,6 @@
 //! Per-dimension drill-down: `--drill-down <dim>`
 //! Trend vs previous run:    `--trend`
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -19,9 +18,8 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use agentstatedeveloper_core::{
-    AsgEffectStore, AsgFeedbackStore, EffectStore, Engine, FeedbackStore, estimate_tokens,
-    glob_match, resolve_scope,
-    schema::{LedgerEntry, LedgerKind, Symbol, VerificationStatus},
+    Engine,
+    scorecard::{ScorecardOptions, compute},
 };
 
 use crate::config::Config;
@@ -60,72 +58,6 @@ pub struct ScorecardArgs {
     /// Comma-separated glob patterns — restrict scoring to matching file paths.
     #[arg(long)]
     pub paths: Option<String>,
-}
-
-struct Metrics {
-    total_symbols: usize,
-    verified_count: usize,
-    owned_count: usize,
-    has_invariant: usize,
-    has_validation: usize,
-    total_ledger_entries: usize,
-    ctx_tagged_entries: usize,
-    feedback_count: usize,
-}
-
-struct Scores {
-    truth: u64,
-    feedback: u64,
-    change: u64,
-    uncertainty: u64,
-    workflow: u64,
-    overall: u64,
-}
-
-fn compute_scores(m: &Metrics) -> Scores {
-    let total = m.total_symbols;
-    let truth = if total == 0 {
-        0.0
-    } else {
-        let verified_pct = m.verified_count as f64 / total as f64;
-        let owned_pct = m.owned_count as f64 / total as f64;
-        ((verified_pct + owned_pct) / 2.0 * 100.0).min(100.0)
-    };
-    let feedback = (m.feedback_count as f64 / 50.0 * 100.0).min(100.0);
-    let change = if total == 0 {
-        0.0
-    } else {
-        let inv_pct = m.has_invariant as f64 / total as f64;
-        let vs_pct = m.has_validation as f64 / total as f64;
-        ((inv_pct + vs_pct) / 2.0 * 100.0).min(100.0)
-    };
-    let uncertainty = {
-        let effect_rate = if total == 0 {
-            0.0
-        } else {
-            m.verified_count as f64 / total as f64
-        };
-        let volume_score = (total as f64 / 500.0).min(1.0);
-        ((effect_rate + volume_score) / 2.0 * 100.0).min(100.0)
-    };
-    let workflow = {
-        let density = (m.total_ledger_entries as f64 / total.max(1) as f64 / 2.0).min(1.0);
-        let ctx_adoption = if m.total_ledger_entries == 0 {
-            0.0
-        } else {
-            (m.ctx_tagged_entries as f64 / m.total_ledger_entries as f64).min(1.0)
-        };
-        ((density * 0.6 + ctx_adoption * 0.4) * 100.0).min(100.0)
-    };
-    let overall = (truth + feedback + change + uncertainty + workflow) / 5.0;
-    Scores {
-        truth: truth.round() as u64,
-        feedback: feedback.round() as u64,
-        change: change.round() as u64,
-        uncertainty: uncertainty.round() as u64,
-        workflow: workflow.round() as u64,
-        overall: overall.round() as u64,
-    }
 }
 
 fn history_path(cfg: &Config, override_path: Option<&PathBuf>) -> PathBuf {
@@ -171,52 +103,24 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
         }
     }
 
-    // Build path filter from --scope / --paths.
-    let mut paths_filter: Vec<String> = Vec::new();
-    if let Some(ref s) = args.scope {
-        paths_filter.extend(resolve_scope(s, &cfg.db_path));
-    }
-    if let Some(ref p) = args.paths {
-        paths_filter.extend(
-            p.split(',')
-                .map(|x| x.trim().to_string())
-                .filter(|x| !x.is_empty()),
-        );
-    }
-    let scoped = !paths_filter.is_empty();
-
+    // All gathering and arithmetic lives in core::scorecard — this command
+    // owns presentation (the table, the trend snapshot) and nothing else.
     let engine = Engine::open_sqlite(&cfg.db_path)?;
-    let effect_store = AsgEffectStore::from_engine(&engine);
-    let feedback_store = AsgFeedbackStore::from_engine(&engine);
+    let card = compute(
+        &engine,
+        &cfg.db_path,
+        &ScorecardOptions {
+            scope: args.scope.as_deref(),
+            paths: args.paths.as_deref(),
+            drill_down: args.drill_down.as_deref(),
+            drill_limit: args.limit,
+        },
+    );
 
-    // Bulk load index — one git read instead of N.
-    let all_syms: Vec<Symbol> = {
-        let tree = engine
-            .repo
-            .get_tree(&engine.ref_name, "/asd/v1/index/by-qname")
-            .unwrap_or(serde_json::Value::Object(Default::default()));
-        tree.as_object()
-            .map(|m| {
-                m.values()
-                    .filter_map(|v| serde_json::from_value::<Symbol>(v.clone()).ok())
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-
-    // Apply path filter upfront.
-    let scored_syms: Vec<&Symbol> = if scoped {
-        all_syms
-            .iter()
-            .filter(|s| paths_filter.iter().any(|p| glob_match(p, &s.file)))
-            .collect()
-    } else {
-        all_syms.iter().collect()
-    };
-    let total_symbols = scored_syms.len();
-
-    if total_symbols == 0 {
-        let note = if scoped {
+    if card.matched_nothing {
+        // Terminal-flavoured advice, which is why the phrasing stays here
+        // rather than in core: over HTTP "--scope/--paths" means nothing.
+        let note = if card.scoped {
             "no symbols matched the path filter — try broadening --scope/--paths"
         } else {
             "no symbols indexed — run `asd index` first"
@@ -229,170 +133,20 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
         return Ok(());
     }
 
-    // Bulk load ledger — one git read instead of N per-symbol reads.
-    let ledger_by_sym: HashMap<String, Vec<LedgerEntry>> = {
-        let tree = engine
-            .repo
-            .get_tree(&engine.ref_name, "/asd/v1/ledger")
-            .unwrap_or(serde_json::Value::Object(Default::default()));
-        let mut map: HashMap<String, Vec<LedgerEntry>> = HashMap::new();
-        if let serde_json::Value::Object(by_symbol) = tree {
-            for (sym_id, per_symbol) in by_symbol {
-                if let serde_json::Value::Object(entries_map) = per_symbol {
-                    let mut entries: Vec<LedgerEntry> = entries_map
-                        .values()
-                        .filter_map(|v| serde_json::from_value::<LedgerEntry>(v.clone()).ok())
-                        .collect();
-                    entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-                    let superseded: std::collections::HashSet<String> = entries
-                        .iter()
-                        .flat_map(|e| e.supersedes.iter().cloned())
-                        .collect();
-                    entries.retain(|e| !superseded.contains(&e.entry_id));
-                    map.insert(sym_id, entries);
-                }
-            }
-        }
-        map
-    };
-
-    // Per-symbol tracking for drill-down.
-    let drill = args.drill_down.as_deref().unwrap_or("").to_lowercase();
-    let need_drill = !drill.is_empty();
-
-    let mut drill_rows: Vec<Value> = Vec::new();
-
-    let mut verified_count = 0usize;
-    let mut owned_count = 0usize;
-    let mut has_invariant = 0usize;
-    let mut has_validation = 0usize;
-    let mut total_ledger_entries = 0usize;
-    let mut ctx_tagged_entries = 0usize;
-
-    // t-006: estimated token economy (internal metric). Sum ASD's structured
-    // per-symbol cost; track per-file length (max symbol end-line) for the
-    // source-read baseline. Cheap — derived from the index, no file reads.
-    let mut structured_tokens = 0usize;
-    let mut file_max_line: HashMap<&str, u32> = HashMap::new();
-
-    for sym in &scored_syms {
-        let has_verified =
-            if let Ok(Some(decl)) = effect_store.get_effects(&engine.ref_name, &sym.symbol_id) {
-                decl.verification
-                    .as_ref()
-                    .map(|v| matches!(v.status, VerificationStatus::Ok))
-                    .unwrap_or(false)
-            } else {
-                false
-            };
-        if has_verified {
-            verified_count += 1;
-        }
-
-        // Token economy: structured cost = what ASD surfaces for this symbol
-        // (qname + signature + first doc line) vs reading its source file.
-        let record = format!(
-            "{} {} {}",
-            sym.qname,
-            sym.signature.as_deref().unwrap_or(""),
-            sym.doc
-                .as_deref()
-                .unwrap_or("")
-                .lines()
-                .next()
-                .unwrap_or("")
-        );
-        structured_tokens += estimate_tokens(&record);
-        let f = file_max_line.entry(sym.file.as_str()).or_insert(0);
-        *f = (*f).max(sym.end.line);
-
-        let entries = ledger_by_sym
-            .get(&sym.symbol_id)
-            .cloned()
-            .unwrap_or_default();
-        total_ledger_entries += entries.len();
-
-        let qname = &sym.qname;
-
-        let mut sym_owned = false;
-        let mut sym_inv = false;
-        let mut sym_vs = false;
-        let mut sym_ctx = false;
-        for entry in &entries {
-            match entry.kind {
-                LedgerKind::Invariant => sym_inv = true,
-                LedgerKind::ValidationScenario => sym_vs = true,
-                LedgerKind::Ownership => sym_owned = true,
-                _ => {}
-            }
-            if entry.tags.iter().any(|t| t.starts_with("ctx:")) {
-                sym_ctx = true;
-                ctx_tagged_entries += 1;
-            }
-        }
-        if sym_owned {
-            owned_count += 1;
-        }
-        if sym_inv {
-            has_invariant += 1;
-        }
-        if sym_vs {
-            has_validation += 1;
-        }
-
-        if need_drill {
-            let include = match drill.as_str() {
-                "truth" => !has_verified || !sym_owned,
-                "change" => !sym_inv || !sym_vs,
-                "workflow" => entries.is_empty() || !sym_ctx,
-                "uncertainty" => !has_verified,
-                _ => false,
-            };
-            if include {
-                drill_rows.push(json!({
-                    "qname": qname,
-                    "file": sym.file,
-                    "has_verified_effects": has_verified,
-                    "has_ownership": sym_owned,
-                    "has_invariant": sym_inv,
-                    "has_validation_scenario": sym_vs,
-                    "ledger_entries": entries.len(),
-                    "ctx_tagged": sym_ctx,
-                }));
-            }
-        }
-    }
-
-    let feedback_count = feedback_store
-        .list_all(&engine.ref_name)
-        .map(|v| v.len())
-        .unwrap_or(0);
-
-    let metrics = Metrics {
-        total_symbols,
-        verified_count,
-        owned_count,
-        has_invariant,
-        has_validation,
-        total_ledger_entries,
-        ctx_tagged_entries,
-        feedback_count,
-    };
-    let scores = compute_scores(&metrics);
-
-    // Sparse-DB detection: warn when ledger density is too low to be meaningful.
-    let ledger_density = total_ledger_entries as f64 / total_symbols.max(1) as f64;
-    let sparse_db = ledger_density < 0.5 && total_symbols > 0;
-    let sparse_note = if sparse_db {
-        Some(format!(
-            "sparse ledger ({total_ledger_entries} entries across {total_symbols} symbols, \
-             {:.2} avg) — run 'asd sync' + 'asd hydrate' to populate; \
-             scores reflect data density, not workflow quality",
-            ledger_density
-        ))
-    } else {
-        None
-    };
+    let scores = card.scores;
+    let scoped = card.scoped;
+    let paths_filter = card.data_quality.scope.clone().unwrap_or_default();
+    let total_symbols = card.details.total_symbols;
+    let feedback_count = card.details.feedback_entries;
+    let total_ledger_entries = card.details.total_ledger_entries;
+    let ctx_tagged_entries = card.details.ctx_tagged_ledger_entries;
+    let structured_tokens = card.token_economy.structured_tokens;
+    let source_read_tokens = card.token_economy.source_read_tokens_est;
+    let ratio_x = card.token_economy.ratio_x;
+    let sparse_note: Option<&str> = card
+        .data_quality
+        .sparse_db
+        .then_some(card.data_quality.note.as_str());
 
     let now = Utc::now().to_rfc3339();
     let hist_path = history_path(cfg, args.history_path.as_ref());
@@ -412,14 +166,9 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
             ];
             let mut deltas = serde_json::Map::new();
             for dim in dims {
-                let current = match dim {
-                    "truth" => scores.truth as i64,
-                    "feedback" => scores.feedback as i64,
-                    "change" => scores.change as i64,
-                    "uncertainty" => scores.uncertainty as i64,
-                    "workflow" => scores.workflow as i64,
-                    _ => scores.overall as i64,
-                };
+                // `Scores::get` keeps this list and the struct in step — a
+                // new dimension added to one shows up in the other.
+                let current = scores.get(dim).unwrap_or(scores.overall) as i64;
                 let prev_val = prev_scores.get(dim).and_then(Value::as_i64).unwrap_or(0);
                 let delta = current - prev_val;
                 deltas.insert(
@@ -455,83 +204,21 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
     });
     save_snapshot(&hist_path, &snapshot);
 
-    let data_quality = json!({
-        "ledger_density": ledger_density,
-        "symbols_scored": total_symbols,
-        "symbols_with_any_ledger": scored_syms.iter()
-            .filter(|s| ledger_by_sym.contains_key(&s.symbol_id))
-            .count(),
-        "coverage_pct": if total_symbols > 0 {
-            (scored_syms.iter().filter(|s| ledger_by_sym.contains_key(&s.symbol_id)).count() as f64
-             / total_symbols as f64 * 100.0).round()
-        } else { 0.0 },
-        "sparse_db": sparse_db,
-        "note": sparse_note.as_deref().unwrap_or("ledger density is adequate"),
-        "scope": if scoped { json!(paths_filter) } else { json!(null) },
-    });
-
-    // t-006: estimated token economy. Source-read baseline = file length
-    // (max symbol end-line) × a rough source density. Internal estimate only.
-    const TOKENS_PER_LINE: usize = 9;
-    let source_read_tokens: usize = file_max_line
-        .values()
-        .map(|&l| l as usize * TOKENS_PER_LINE)
-        .sum();
-    let reduction_pct = if source_read_tokens > 0 {
-        (1.0 - structured_tokens as f64 / source_read_tokens as f64) * 100.0
-    } else {
-        0.0
-    };
-    let ratio_x = if structured_tokens > 0 {
-        source_read_tokens as f64 / structured_tokens as f64
-    } else {
-        0.0
-    };
-    let token_economy = json!({
-        "note": "Internal estimate — NOT a published benchmark and NOT measured per query. \
-                 Compares ASD's structured per-symbol index cost (qname + signature + first doc \
-                 line) against reading the source files those symbols live in (file length \
-                 estimated from symbol line spans).",
-        "structured_tokens": structured_tokens,
-        "source_read_tokens_est": source_read_tokens,
-        "reduction_pct": (reduction_pct * 10.0).round() / 10.0,
-        "ratio_x": (ratio_x * 10.0).round() / 10.0,
-    });
-
-    let details = json!({
-        "total_symbols": total_symbols,
-        "verified_effects": verified_count,
-        "owned_symbols": owned_count,
-        "invariant_symbols": has_invariant,
-        "validation_symbols": has_validation,
-        "feedback_entries": feedback_count,
-        "total_ledger_entries": total_ledger_entries,
-        "ctx_tagged_ledger_entries": ctx_tagged_entries,
-    });
+    // data_quality / details / token_economy all come from the shared
+    // envelope now — see core::scorecard::Scorecard::to_json.
 
     if args.json {
-        let mut out = json!({
-            "timestamp": now,
-            "capability_scores": snapshot["scores"].clone(),
-            "scores": snapshot["scores"].clone(),  // kept for history compat
-            "data_quality": data_quality,
-            "details": details,
-            "token_economy": token_economy,
-        });
-        if need_drill {
-            let total_gaps = drill_rows.len();
-            let shown: Vec<_> = drill_rows.into_iter().take(args.limit).collect();
-            let omitted = total_gaps.saturating_sub(shown.len());
-            out.as_object_mut().unwrap().insert(
-                "drill_down".into(),
-                json!({
-                    "dimension": drill,
-                    "total_gaps": total_gaps,
-                    "shown": shown.len(),
-                    "omitted": omitted,
-                    "gap_symbols": shown,
-                }),
-            );
+        // Shared envelope, then the two things only this command adds: when
+        // it ran, and how it compares to the last run.
+        let mut out = json!({ "timestamp": now });
+        let obj = out.as_object_mut().expect("json! built an object");
+        for (k, v) in card
+            .to_json()
+            .as_object()
+            .expect("to_json built an object")
+            .clone()
+        {
+            obj.insert(k, v);
         }
         if let Some(ref t) = trend_obj {
             out.as_object_mut()
@@ -615,20 +302,16 @@ pub fn run(cfg: &Config, args: ScorecardArgs) -> Result<()> {
         println!("\nNote: {note}");
     }
 
-    if need_drill && !drill_rows.is_empty() {
-        let total_gaps = drill_rows.len();
-        let limit = args.limit;
-        println!("\n## Drill-down: {drill} gaps ({total_gaps} symbols)");
-        for row in drill_rows.iter().take(limit) {
-            let qname = row.get("qname").and_then(Value::as_str).unwrap_or("");
-            let file = row.get("file").and_then(Value::as_str).unwrap_or("");
-            println!("  {qname}  ({file})");
+    if let Some(drill) = card.drill_down.as_ref().filter(|d| d.total_gaps > 0) {
+        let (dimension, total_gaps) = (&drill.dimension, drill.total_gaps);
+        println!("\n## Drill-down: {dimension} gaps ({total_gaps} symbols)");
+        for row in &drill.gap_symbols {
+            println!("  {}  ({})", row.qname, row.file);
         }
-        if total_gaps > limit {
-            println!(
-                "  … and {} more (use --limit to show more)",
-                total_gaps - limit
-            );
+        // `omitted` is what core actually withheld, which is not always
+        // `total - limit`: a run with fewer gaps than the limit omits none.
+        if drill.omitted > 0 {
+            println!("  … and {} more (use --limit to show more)", drill.omitted);
         }
     }
 
