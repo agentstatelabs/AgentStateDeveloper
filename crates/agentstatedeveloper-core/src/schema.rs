@@ -818,8 +818,12 @@ pub struct FeedbackEntry {
 
 impl FeedbackEntry {
     /// Plan J t-014: true when `expires_at` is set and is in the past.
-    /// Filtering helper used by `apply_feedback_adjustments` so old
-    /// verdicts naturally lose their ranking influence.
+    ///
+    /// Consumed by `FeedbackStore::flat_verdicts` and
+    /// `flat_file_scope_verdicts`, the two views that feed
+    /// `apply_feedback_adjustments` — so a lapsed verdict loses its ranking
+    /// influence. `list_all` deliberately does NOT filter on this: an expired
+    /// verdict still explains why a past search ranked the way it did.
     pub fn is_expired(&self) -> bool {
         self.expires_at.map_or(false, |t| Utc::now() > t)
     }
