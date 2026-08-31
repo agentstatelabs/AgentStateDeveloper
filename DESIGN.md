@@ -2713,3 +2713,100 @@ tracer — no QA instance, no added print statements, no code changes.
 stored data in seconds, and the answer's provenance (which test, when)
 is attached.
 
+
+## Feedback withdrawal — tombstone shape (plan `feedback-lifecycle` t-002)
+
+**Decision: a `withdrawn_at` / `withdrawn_by` pair on `FeedbackEntry`, written
+through `FeedbackStore::record` and filtered in the `flat_*` views. Not a
+separate tombstone object, and not the ledger's `supersedes`.**
+
+Recorded here because it is expensive to reverse once entries exist in the
+wild, and because two of the three options look cleaner than the one chosen —
+which is exactly how they get re-litigated.
+
+### The constraint that decides it
+
+`AsgFeedbackStore::list_all` has a SQLite fast path:
+
+```rust
+if let Some(fts) = self.fts {
+    if fts.feedback_count() > 0 {
+        if let Ok(entries) = fts.list_all_feedback() { return Ok(entries); }
+    }
+}
+// …authoritative git tree walk only when the cache is cold
+```
+
+So feedback has **two** read paths, and whichever shape withdrawal takes has to
+be visible on both. Anything that is not a column on `asd_feedback` is invisible
+on the fast path — which is the tree-and-cache divergence this whole plan exists
+to eliminate. That single fact settles the choice; the rest is corroboration.
+
+### Options considered
+
+| | Shape | Verdict |
+|---|---|---|
+| **(a)** | `withdrawn_at`/`withdrawn_by` on the entry | **Chosen** |
+| (b) | Separate tombstone object under a sibling path | Rejected — invisible to the SQLite fast path unless the cache also models tombstones, which means two concepts to keep in sync and a second way for the stores to disagree |
+| (c) | Reuse the ledger's `supersedes` | Rejected — puts feedback state in a different store, so the feedback cache can never reflect it and ranking would have to read the ledger tree. Also semantically wrong: supersede is entry-replaces-entry; a withdrawal has no successor |
+
+Note (b) and (c) are *not* rejected for costing a second read. Ledger
+supersede resolves in one read — `list_entries_with_superseded` fetches
+everything, then filters using a field on the entries it already has
+(`ledger.rs:75-85`). That pattern is fine. It is the **cache** that rules them
+out, not the read count.
+
+### Why mutating the entry is acceptable here
+
+The obvious objection to (a) is that it edits a record which reads as a
+historical opinion. It doesn't, in the way that matters: every `record()` is a
+`set_json` with `CommitOptions`, so each write lands as a commit in the ASG DAG
+and the prior version stays reachable. The store preserves the before-state by
+construction — that is the point of the store. Only the *current view* changes.
+
+Precedent already exists: `asd feedback expire` (t-001) mutates `expires_at` on
+the entry via the same re-record path. A second lifecycle verb with a different
+storage shape would be gratuitous divergence.
+
+### Why `withdrawn_at` is separate from `expires_at`
+
+They are different claims and must stay distinguishable:
+
+- `expires_at` — *this was right, it is no longer relevant.* Time-based, may be
+  set in the future, models decay.
+- `withdrawn_at` — *this was wrong, it should not have been recorded.* Carries
+  `withdrawn_by`, and a reason expiry cannot express.
+
+Collapsing withdrawal into "expire it now" would also make a withdrawn verdict
+revivable by setting a future expiry, which it must not be.
+
+### Implementation contract (for t-003)
+
+1. Add `withdrawn_at: Option<DateTime<Utc>>` and `withdrawn_by: Option<String>`
+   to `FeedbackEntry`, both `#[serde(skip_serializing_if = "Option::is_none")]`
+   so existing stored entries deserialize unchanged.
+2. Add the matching nullable columns to `asd_feedback` using the established
+   migration pattern — `ALTER TABLE … ADD COLUMN`, swallowing the
+   already-exists error (`search_fts.rs`, as done for `expires_at`).
+3. Filter in `flat_verdicts` and `flat_file_scope_verdicts`, alongside the
+   `!e.is_expired()` predicate t-001 added. **Not** in `list_all`.
+   (t-001 ships on `feat/feedback-expire`; if that predicate is absent from
+   `flat_verdicts`, that branch has not merged yet and t-003 should wait for
+   it rather than land a second, conflicting filter.)
+4. `list_all` keeps returning withdrawn entries, marked. A retracted verdict
+   still explains why a past search ranked as it did; hiding it makes old
+   results inexplicable. Same asymmetry as expiry, same as the Lens Feedback
+   tab already applies.
+
+### The trap to avoid
+
+`expires_at` shipped in Plan J t-014 with the field, a helper, a CLI flag,
+SQLite persistence, and doc comments on both the field and the helper asserting
+that lapsed verdicts stop influencing ranking — and no filter wired into
+`flat_verdicts`. Every TTL ever set was decorative until t-001 fixed it, and
+every unit test passed throughout, because they all tested `is_expired()` in
+isolation and none asked whether anything called it.
+
+Withdrawal has the identical failure mode available to it. Test what
+`flat_verdicts` *returns*, not what the predicate computes, and mutation-check
+it: remove the filter and confirm the test actually fails.
