@@ -14,6 +14,70 @@ Versions use semantic versioning.
 
 ## [Unreleased]
 
+### Added
+- **ASD Lens gains two pages: `/records` and `/health`.** `/records` makes the
+  distilled history searchable — the milestone spine, the commit rollup, the
+  raw commit chain and recorded search feedback, with free-text search, facet
+  filters and date ranges. All filter state lives in the URL, so any view is a
+  shareable link. `/health` answers whether that record is worth trusting: the
+  five capability scores, the ledger-density caveat, the token-economy
+  estimate and index freshness, with a filterable per-dimension gap list.
+- **Six read-only endpoints** behind those pages, sharing one envelope
+  (`total` / `offset` / `limit` / `items` / `facets`):
+  `/api/v1/history/milestones`, `/history/rollup`, `/commits`, `/feedback`,
+  `/index-health` and `/scorecard`.
+- **A lifecycle for search feedback.** Until now a recorded verdict could not
+  be taken back, so a mistyped `noisy` suppressed a good symbol on every
+  future query:
+  - `asd feedback expire` — the verdict was right but is no longer relevant.
+  - `asd feedback withdraw` — it was wrong. Records who retracted it and why,
+    and cannot be revived by re-dating an expiry.
+  - `asd feedback purge --yes` — the escape hatch for data that must not
+    persist at all (test entries, a secret pasted into a `--note`). Prints the
+    entry, including its note, before it will act.
+
+  Retired verdicts stop influencing ranking but stay listed, marked: they
+  still explain why a past search ranked as it did. `withdraw` and `expire`
+  are also available from the Lens Feedback tab, and `withdraw` as the
+  `feedback_withdraw` MCP tool. `purge` is deliberately CLI-only — a hard
+  delete from an otherwise append-only store should not be one click away.
+
+### Fixed
+- **`asd feedback mark --ttl-days` never actually did anything.** The field,
+  the `is_expired()` helper, the SQLite persistence and doc comments on both
+  the field and the helper all claimed lapsed verdicts stopped influencing
+  ranking — but the filter was never wired into `flat_verdicts`, so every TTL
+  ever set was decorative. Now enforced.
+
+  **This changes search results on upgrade** for any repo with TTL'd
+  verdicts: entries whose expiry has passed stop affecting ranking, which is
+  what they were always meant to do. `asd feedback list` still shows them.
+- **`GET /api/v1/gc/dry-run` no longer stalls the whole API.** Its
+  reachability marker walks the entire object DAG — 27s on an 866k-object
+  store — and held the engine lock throughout, so an unrelated request issued
+  one second into a run waited 25s behind it. It is now memoized on the ref
+  head, single-flight so concurrent callers share one walk, and run on its own
+  read-only SQLite connection. Repeat calls 27s → 16ms; the stall on unrelated
+  requests 25.2s → none. `?cached_only=1` returns the memo or a cheap
+  `uncomputed` marker without starting a walk, and the Lens History page no
+  longer blocks its own render on it.
+- Wide tables in Lens scroll instead of clipping. Long symbol names — Swift
+  qnames reach ~200 characters — pushed the Health drill-down past the
+  viewport with no scroll container, putting its last five columns out of
+  reach entirely.
+
+### Changed
+- The five-dimension scorecard has **one implementation** instead of three.
+  `asd scorecard`, the `scorecard` MCP tool and `GET /api/v1/scorecard` each
+  carried their own copy of the same formulas, and the MCP copy had already
+  drifted. Output is byte-identical for the CLI and HTTP; the MCP tool gains
+  the `token_economy`, `coverage_pct` and sparse-ledger blocks it was missing.
+- `/api/v1/commits` walks the full parent DAG rather than first parents only.
+  On this repo that is the difference between seeing 4,268 commits and 5,896,
+  and the ones a first-parent walk skips are the population most likely to be
+  reclaimed by a sweep. The endpoint also reports how many commits the
+  distilled rollup knows about that the ref head no longer reaches.
+
 ## [v1.0.0] — 2026-08-24
 
 First stable release. No functional change from `v0.9.41` — the version marks
