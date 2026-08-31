@@ -265,8 +265,95 @@ fn file_scope_verdicts_are_coherent_too() {
     );
 }
 
-// NOTE: purge coverage — that a hard delete clears BOTH stores, and that
-// purging the last entry for a symbol leaves no orphaned parent node in the
-// tree — belongs here too, but `--purge` is t-004 and does not exist yet.
-// Add it to this file when it lands; the Fixture above already provides the
-// two-path readers it needs.
+// ---------------------------------------------------------------------------
+// purge (t-004)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn purge_clears_both_stores() {
+    let f = Fixture::new(vec![
+        entry("fb-gone", "util.log", FeedbackVerdict::Noisy),
+        entry("fb-stays", "pay.charge", FeedbackVerdict::Useful),
+    ]);
+    let store = f.store();
+
+    let purged = store
+        .purge(&f.engine.ref_name, "fb-gone")
+        .expect("purge")
+        .expect("entry existed");
+    assert_eq!(purged.entry_id, "fb-gone");
+
+    // Gone from the cache…
+    assert!(
+        !f.via_cache().iter().any(|e| e.entry_id == "fb-gone"),
+        "purged entry still in the SQLite cache — list_all would serve it"
+    );
+    // …and from the authoritative tree.
+    assert!(
+        !f.via_tree("id::util.log")
+            .iter()
+            .any(|e| e.entry_id == "fb-gone"),
+        "purged entry still in the ASG tree"
+    );
+    // The unrelated entry is untouched.
+    assert!(f.via_cache().iter().any(|e| e.entry_id == "fb-stays"));
+}
+
+#[test]
+fn purging_the_last_entry_for_a_symbol_leaves_nothing_behind() {
+    // t-005 asks specifically about an orphaned parent node: removing the only
+    // entry under a symbol must not leave an empty `/asd/v1/feedback/<sym>`
+    // that later reads trip over or that makes the symbol look like it still
+    // carries feedback.
+    let f = Fixture::new(vec![entry("fb-only", "util.log", FeedbackVerdict::Noisy)]);
+    let store = f.store();
+    store.purge(&f.engine.ref_name, "fb-only").unwrap();
+
+    assert!(
+        f.via_tree("id::util.log").is_empty(),
+        "symbol still reports feedback after its last entry was purged"
+    );
+    assert!(store.list_all(&f.engine.ref_name).unwrap().is_empty());
+    assert!(store.flat_verdicts(&f.engine.ref_name).unwrap().is_empty());
+
+    // And a cold cache must agree — the fallback tree walk must not resurrect
+    // the entry from an orphaned node.
+    rusqlite::Connection::open(&f.db)
+        .expect("open db")
+        .execute("DELETE FROM asd_feedback", [])
+        .expect("clear cache");
+    assert!(
+        store.list_all(&f.engine.ref_name).unwrap().is_empty(),
+        "cold-cache read resurrected a purged entry"
+    );
+}
+
+#[test]
+fn purging_an_unknown_entry_reports_rather_than_half_succeeding() {
+    let f = Fixture::new(vec![entry("fb-real", "util.log", FeedbackVerdict::Noisy)]);
+    let store = f.store();
+    assert!(
+        store
+            .purge(&f.engine.ref_name, "fb-nope")
+            .unwrap()
+            .is_none(),
+        "purge invented a deletion"
+    );
+    assert_eq!(store.list_all(&f.engine.ref_name).unwrap().len(), 1);
+    assert_eq!(f.via_cache().len(), 1);
+}
+
+#[test]
+fn purge_removes_a_withdrawn_entry_too() {
+    // The realistic sequence: retract first, then discover the note held
+    // something that must not persist.
+    let f = Fixture::new(vec![entry("fb-1", "util.log", FeedbackVerdict::Noisy)]);
+    let store = f.store();
+    store
+        .withdraw(&f.engine.ref_name, "fb-1", "craig", Some("oops"))
+        .unwrap();
+    store.purge(&f.engine.ref_name, "fb-1").unwrap();
+
+    assert!(f.via_cache().is_empty(), "cache retained a purged entry");
+    assert!(f.via_tree("id::util.log").is_empty(), "tree retained it");
+}

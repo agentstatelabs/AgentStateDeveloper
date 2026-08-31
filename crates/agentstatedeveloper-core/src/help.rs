@@ -776,7 +776,33 @@ pub const REGISTRY: &[HelpDoc] = &[
             "The entry stays in `feedback list`, marked withdrawn, because it still explains why a past search ranked as it did.",
             "Withdrawing twice keeps the original timestamp rather than moving it.",
         ],
-        related: &["feedback_expire", "feedback_mark", "feedback_list"],
+        related: &[
+            "feedback_expire",
+            "feedback_mark",
+            "feedback_list",
+            "feedback_purge",
+        ],
+    },
+    HelpDoc {
+        feature: "feedback_purge",
+        group: "feedback",
+        synopsis: "Permanently delete a verdict from both stores. Escape hatch — prefer `withdraw`.",
+        syntax: "asd feedback purge <entry-id> --yes",
+        params: &[
+            p!("entry_id", true, "Entry to delete permanently."),
+            p!(
+                "yes",
+                true,
+                "Required. Without it the command explains and refuses."
+            ),
+        ],
+        examples: &["asd feedback purge fb_58958221c119429798e16d6b070ed5d6 --yes"],
+        gotchas: &[
+            "This REWRITES HISTORY in a store that is otherwise append-only. `asd feedback withdraw` is almost always the right verb: it retracts the verdict while keeping the record, which still explains why a past search ranked as it did.",
+            "Purge is for data that must not exist at all — test entries, or a secret pasted into a --note.",
+            "Removes from the ASG store first, then the SQLite search cache. If the cache step fails it errors loudly and names the fix (`asd index`), because a half-purge leaves `feedback list` still showing the entry.",
+        ],
+        related: &["feedback_withdraw", "feedback_expire", "feedback_list"],
     },
     HelpDoc {
         feature: "feedback_promote",
