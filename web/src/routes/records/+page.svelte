@@ -22,6 +22,9 @@
 		getGcDryRun,
 		isGcUncomputed,
 		type GcEstimate,
+		withdrawFeedback,
+		expireFeedback,
+		type FeedbackRecord,
 		getMilestones,
 		getRollup,
 		getCommits,
@@ -239,6 +242,36 @@
 					? commits
 					: feedback
 	);
+
+	// -- Feedback lifecycle actions ----------------------------------------
+	// Patch the one row from the action's response rather than refetching:
+	// the list is paginated and filtered, so a refetch could reorder or drop
+	// the row the user just acted on, out from under them.
+
+	let acting = $state<string | null>(null);
+	let actionErr = $state<string | null>(null);
+
+	function patchRow(updated: FeedbackRecord) {
+		if (!feedback) return;
+		feedback = {
+			...feedback,
+			items: feedback.items.map((e) => (e.entry_id === updated.entry_id ? updated : e))
+		};
+	}
+
+	function retire(entry: FeedbackRecord, how: 'withdraw' | 'expire') {
+		if (acting) return;
+		acting = entry.entry_id;
+		actionErr = null;
+		const call =
+			how === 'withdraw'
+				? withdrawFeedback(entry.entry_id, { by: 'asd-lens' })
+				: expireFeedback(entry.entry_id);
+		call
+			.then(patchRow)
+			.catch((e) => (actionErr = e instanceof Error ? e.message : String(e)))
+			.finally(() => (acting = null));
+	}
 
 	function facetsOf(name: string): FacetValue[] {
 		return current?.facets?.[name] ?? [];
@@ -627,6 +660,9 @@
 		</table>
 		</div>
 	{:else if tab === 'feedback' && feedback}
+		{#if actionErr}
+			<div class="banner" data-tone="warn">{actionErr}</div>
+		{/if}
 		<div class="table-scroll">
 		<table>
 			<thead>
@@ -637,11 +673,12 @@
 					<th>symbol</th>
 					<th>author</th>
 					<th>note</th>
+					<th>state</th>
 				</tr>
 			</thead>
 			<tbody>
 				{#each feedback.items as f (f.entry_id)}
-					<tr class:expired={f.expired}>
+					<tr class:retired={f.inert}>
 						<td class="mono nowrap">{fmtTime(f.created_at)}</td>
 						<td><span class="tag">{f.verdict}</span></td>
 						<td class="desc mono">{f.query}</td>
@@ -650,9 +687,38 @@
 							{#if f.file_scope}<span class="faint"> · {f.file_scope}</span>{/if}
 						</td>
 						<td class="nowrap">{f.author}</td>
-						<td class="desc faint">
-							{f.note ?? ''}
-							{#if f.expired}<span class="tag expired-tag">expired</span>{/if}
+						<td class="desc faint">{f.note ?? ''}</td>
+						<td class="state nowrap">
+							{#if f.withdrawn}
+								<span class="tag retired-tag" title={f.withdrawn_reason ?? undefined}>
+									withdrawn{f.withdrawn_by ? ` · ${f.withdrawn_by}` : ''}
+								</span>
+							{:else if f.expired}
+								<span class="tag retired-tag">expired</span>
+							{:else}
+								<!-- Live: offer both retirements. Withdraw first — a verdict
+								     you are looking at because it is wrong is the common case;
+								     expiry is for one that has merely aged out. No purge here:
+								     it hard-deletes from an append-only store and belongs
+								     behind a CLI --yes, not one click. -->
+								<button
+									type="button"
+									disabled={acting === f.entry_id}
+									onclick={() => retire(f, 'withdraw')}
+									title="This verdict was wrong — retract it. It stays listed, marked."
+								>
+									withdraw
+								</button>
+								<button
+									type="button"
+									class="subtle"
+									disabled={acting === f.entry_id}
+									onclick={() => retire(f, 'expire')}
+									title="This verdict was right but has aged out — lapse it."
+								>
+									expire
+								</button>
+							{/if}
 						</td>
 					</tr>
 				{/each}
@@ -963,8 +1029,45 @@
 	tbody tr.pinned td:first-child {
 		box-shadow: inset 2px 0 0 var(--lens-accent);
 	}
-	tbody tr.expired td {
-		opacity: 0.6;
+	/* Retired — expired or withdrawn. Dimmed, not hidden: it still explains
+	   why a past search ranked as it did. */
+	tbody tr.retired td {
+		opacity: 0.55;
+	}
+	td.state button {
+		appearance: none;
+		cursor: pointer;
+		border: 1px solid var(--lens-border);
+		background: var(--lens-surface-raised);
+		color: var(--lens-text-secondary);
+		font-family: inherit;
+		font-size: var(--lens-font-size-2xs);
+		padding: 2px 8px;
+		border-radius: var(--lens-radius-sm);
+	}
+	td.state button + button {
+		margin-left: 4px;
+	}
+	td.state button.subtle {
+		border-color: transparent;
+		background: none;
+		color: var(--lens-text-faint);
+	}
+	td.state button:hover:not(:disabled) {
+		color: var(--lens-text-strong);
+		border-color: var(--lens-border-strong);
+	}
+	td.state button:disabled {
+		opacity: 0.5;
+		cursor: progress;
+	}
+	td.state button:focus-visible {
+		outline: 2px solid var(--lens-focus);
+		outline-offset: 2px;
+	}
+	.retired-tag {
+		border-color: var(--lens-warn-border);
+		color: var(--lens-warn);
 	}
 	td a {
 		color: var(--lens-accent);
@@ -996,11 +1099,7 @@
 		color: var(--lens-text-secondary);
 		white-space: nowrap;
 	}
-	.expired-tag {
-		margin-left: 6px;
-		border-color: var(--lens-warn-border);
-		color: var(--lens-warn);
-	}
+
 	.pin {
 		font-family: var(--lens-font-mono);
 		font-size: var(--lens-font-size-2xs);

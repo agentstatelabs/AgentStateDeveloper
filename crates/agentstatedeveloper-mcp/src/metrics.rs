@@ -697,6 +697,14 @@ pub async fn list_feedback(
                 "file_scope": e.file_scope,
                 "expires_at": e.expires_at,
                 "expired": e.expires_at.is_some_and(|t| t < now),
+                "withdrawn_at": e.withdrawn_at,
+                "withdrawn_by": e.withdrawn_by,
+                "withdrawn_reason": e.withdrawn_reason,
+                "withdrawn": e.is_withdrawn(),
+                // The single question a caller actually has: is this still
+                // shaping search results? Derived here so the UI does not
+                // reimplement the predicate and drift from `flat_verdicts`.
+                "inert": e.is_inert(),
             })
         })
         .collect();
@@ -836,4 +844,104 @@ pub async fn scorecard(
         );
     }
     Ok(Json(out))
+}
+
+// -----------------------------------------------------------------------------
+// Feedback lifecycle actions (plan feedback-lifecycle t-006)
+// -----------------------------------------------------------------------------
+
+/// Body for the two lifecycle POSTs. Both fields optional so a caller can
+/// `POST` an empty object and get sensible defaults.
+#[derive(Deserialize, Default)]
+pub struct FeedbackActionBody {
+    /// Who performed it. Recorded on the entry for withdrawal.
+    #[serde(default)]
+    pub by: Option<String>,
+    /// Why. Stored with a withdrawal; ignored for expiry, which has no
+    /// judgement attached to it.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// POST /api/v1/feedback/{entry_id}/withdraw — retract a wrong verdict.
+///
+/// Returns the updated entry, matching the approvals endpoints' shape, so the
+/// UI can patch one row rather than refetching the list.
+///
+/// Deliberately NOT paired with a purge endpoint. Purge hard-deletes from an
+/// otherwise append-only store and exists for data that must not persist
+/// (a secret pasted into a note); that belongs behind a CLI `--yes`, not one
+/// click in a browser. Withdrawal is the reversible-in-spirit action and the
+/// one worth having where you notice the problem.
+pub async fn withdraw_feedback(
+    State(state): State<AppState>,
+    axum::extract::Path(entry_id): axum::extract::Path<String>,
+    body: Option<Json<FeedbackActionBody>>,
+) -> Result<Json<Value>, ApiError> {
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let engine = state.engine.lock().await;
+    let store = AsgFeedbackStore::from_engine(&engine);
+    let by = body.by.as_deref().unwrap_or("asd-lens");
+
+    match store.withdraw(&engine.ref_name, &entry_id, by, body.reason.as_deref()) {
+        Ok(Some(e)) => Ok(Json(feedback_json(&e))),
+        Ok(None) => Err(ApiError::NotFound(format!("no feedback entry {entry_id}"))),
+        Err(e) => Err(ApiError::Internal(e.to_string())),
+    }
+}
+
+/// POST /api/v1/feedback/{entry_id}/expire — lapse a verdict that was right
+/// but is no longer relevant.
+///
+/// Sets `expires_at` to now via the same re-record path the CLI uses, so both
+/// the store and the SQLite cache update together.
+pub async fn expire_feedback(
+    State(state): State<AppState>,
+    axum::extract::Path(entry_id): axum::extract::Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let engine = state.engine.lock().await;
+    let store = AsgFeedbackStore::from_engine(&engine);
+
+    let Some(existing) = store
+        .list_all(&engine.ref_name)
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .into_iter()
+        .find(|e| e.entry_id == entry_id)
+    else {
+        return Err(ApiError::NotFound(format!("no feedback entry {entry_id}")));
+    };
+    // Idempotent, same as the CLI: re-expiring must not push the timestamp
+    // forward.
+    if existing.is_expired() {
+        return Ok(Json(feedback_json(&existing)));
+    }
+    let mut lapsed = existing;
+    lapsed.expires_at = Some(chrono::Utc::now());
+    store
+        .record(&engine.ref_name, &lapsed, &lapsed.author.clone())
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(feedback_json(&lapsed)))
+}
+
+/// One entry in the shape the Feedback tab consumes. Shared by the list and
+/// both actions so a patched row cannot drift from a listed one.
+fn feedback_json(e: &agentstatedeveloper_core::FeedbackEntry) -> Value {
+    json!({
+        "entry_id": e.entry_id,
+        "symbol_id": e.symbol_id,
+        "symbol_qname": e.symbol_qname,
+        "query": e.query,
+        "verdict": format!("{:?}", e.verdict),
+        "author": e.author,
+        "created_at": e.created_at,
+        "note": e.note,
+        "file_scope": e.file_scope,
+        "expires_at": e.expires_at,
+        "expired": e.is_expired(),
+        "withdrawn_at": e.withdrawn_at,
+        "withdrawn_by": e.withdrawn_by,
+        "withdrawn_reason": e.withdrawn_reason,
+        "withdrawn": e.is_withdrawn(),
+        "inert": e.is_inert(),
+    })
 }

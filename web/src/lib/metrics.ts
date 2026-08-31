@@ -114,6 +114,16 @@ export interface FeedbackRecord {
 	file_scope: string | null;
 	expires_at: string | null;
 	expired: boolean;
+	withdrawn_at: string | null;
+	withdrawn_by: string | null;
+	withdrawn_reason: string | null;
+	withdrawn: boolean;
+	/**
+	 * Whether this verdict still shapes search results — expired OR
+	 * withdrawn. Server-derived from the same predicate `flat_verdicts`
+	 * uses, so the UI cannot drift from what ranking actually does.
+	 */
+	inert: boolean;
 }
 
 export type FeedbackPage = Paged<FeedbackRecord>;
@@ -308,6 +318,50 @@ export function getFeedback(f: RecordFilters = {}): Promise<FeedbackPage> {
 			offset: f.offset
 		})}`
 	);
+}
+
+/**
+ * Retract a verdict that was wrong. Returns the updated entry so a caller can
+ * patch one row rather than refetching the list.
+ *
+ * There is deliberately no purge counterpart here: purge hard-deletes from an
+ * otherwise append-only store and belongs behind a CLI `--yes`, not one click.
+ */
+export function withdrawFeedback(
+	entryId: string,
+	opts: { by?: string; reason?: string } = {}
+): Promise<FeedbackRecord> {
+	return postJson<FeedbackRecord>(
+		`/api/v1/feedback/${encodeURIComponent(entryId)}/withdraw`,
+		opts
+	);
+}
+
+/** Lapse a verdict that was right but is no longer relevant. */
+export function expireFeedback(entryId: string): Promise<FeedbackRecord> {
+	return postJson<FeedbackRecord>(
+		`/api/v1/feedback/${encodeURIComponent(entryId)}/expire`,
+		{}
+	);
+}
+
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+	const res = await fetch(`${API_BASE}${path}`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body)
+	});
+	if (!res.ok) {
+		let detail = `${res.status} ${res.statusText}`;
+		try {
+			const parsed = (await res.json()) as { error?: string };
+			if (parsed?.error) detail = `${detail} — ${parsed.error}`;
+		} catch {
+			/* non-JSON body; the status line is all we have */
+		}
+		throw new Error(`${detail} — ${path}`);
+	}
+	return (await res.json()) as T;
 }
 
 export function getIndexHealth(): Promise<IndexHealth> {
