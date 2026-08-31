@@ -501,6 +501,7 @@
 				description, but GC has nothing to hold reachable for them.
 			</div>
 		{/if}
+		<div class="table-scroll">
 		<table>
 			<thead>
 				<tr>
@@ -531,6 +532,7 @@
 				{/each}
 			</tbody>
 		</table>
+		</div>
 	{:else if tab === 'rollup' && rollup}
 		<div class="summary">
 			<strong>{fmtNum(rollup.totals.commits)}</strong> commits across
@@ -539,6 +541,7 @@
 				· {rollup.totals.days.first} → {rollup.totals.days.last}
 			{/if}
 		</div>
+		<div class="table-scroll">
 		<table>
 			<thead>
 				<tr>
@@ -565,6 +568,7 @@
 				{/each}
 			</tbody>
 		</table>
+		</div>
 	{:else if tab === 'commits' && commits}
 		<div class="summary">
 			<strong>{fmtNum(commits.on_spine)}</strong> of {fmtNum(commits.total)} matching commits are
@@ -582,6 +586,7 @@
 				</span>
 			{/if}
 		</div>
+		<div class="table-scroll">
 		<table>
 			<thead>
 				<tr>
@@ -620,7 +625,9 @@
 				{/each}
 			</tbody>
 		</table>
+		</div>
 	{:else if tab === 'feedback' && feedback}
+		<div class="table-scroll">
 		<table>
 			<thead>
 				<tr>
@@ -638,7 +645,7 @@
 						<td class="mono nowrap">{fmtTime(f.created_at)}</td>
 						<td><span class="tag">{f.verdict}</span></td>
 						<td class="desc mono">{f.query}</td>
-						<td class="nowrap">
+						<td class="qname">
 							<a href="/symbols/{encodeURIComponent(f.symbol_qname)}">{f.symbol_qname}</a>
 							{#if f.file_scope}<span class="faint"> · {f.file_scope}</span>{/if}
 						</td>
@@ -651,6 +658,7 @@
 				{/each}
 			</tbody>
 		</table>
+		</div>
 	{/if}
 
 	<Pager
@@ -918,10 +926,20 @@
 		color: var(--lens-warn);
 	}
 
+	.table-scroll {
+		overflow-x: auto;
+		max-width: 100%;
+	}
 	table {
 		width: 100%;
 		border-collapse: collapse;
 		font-size: var(--lens-font-size-2xs);
+	}
+	/* Unbounded in the data: a qname can run to ~200 chars. Cap it so the
+	   table still fits, and let the container scroll past that. */
+	td.qname {
+		max-width: 44ch;
+		overflow-wrap: anywhere;
 	}
 	thead th {
 		text-align: left;

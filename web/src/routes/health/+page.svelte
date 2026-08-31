@@ -278,6 +278,11 @@
 			{#if filteredGaps.length === 0}
 				<div class="state-empty">No symbols match that filter.</div>
 			{:else}
+				<!-- Scroll container: SessionDrift qnames reach 199 chars, which
+				     pushed this table to 1875px inside a 1280px viewport and put
+				     the last three columns out of reach entirely. Wide tables must
+				     scroll, not clip. -->
+				<div class="table-scroll">
 				<table>
 					<thead>
 						<tr>
@@ -293,8 +298,8 @@
 					<tbody>
 						{#each filteredGaps.slice(0, 500) as g (g.qname)}
 							<tr>
-								<td><a href="/symbols/{encodeURIComponent(g.qname)}">{g.qname}</a></td>
-								<td class="mono faint">{g.file}</td>
+								<td class="qname"><a href="/symbols/{encodeURIComponent(g.qname)}">{g.qname}</a></td>
+								<td class="mono faint path">{g.file}</td>
 								<td>{g.has_verified_effects ? '✓' : '—'}</td>
 								<td>{g.has_ownership ? '✓' : '—'}</td>
 								<td>{g.has_invariant ? '✓' : '—'}</td>
@@ -304,6 +309,7 @@
 						{/each}
 					</tbody>
 				</table>
+				</div>
 				{#if filteredGaps.length > 500}
 					<p class="footnote">
 						Showing the first 500 of {fmtNum(filteredGaps.length)} matching rows — narrow the filter
@@ -575,10 +581,21 @@
 		white-space: nowrap;
 	}
 
+	.table-scroll {
+		overflow-x: auto;
+		max-width: 100%;
+	}
 	table {
 		width: 100%;
 		border-collapse: collapse;
 		font-size: var(--lens-font-size-2xs);
+	}
+	/* Cap the two unbounded columns so the common case still fits the
+	   viewport; the scroll container handles whatever exceeds it. */
+	td.qname,
+	td.path {
+		max-width: 44ch;
+		overflow-wrap: anywhere;
 	}
 	thead th {
 		text-align: left;
