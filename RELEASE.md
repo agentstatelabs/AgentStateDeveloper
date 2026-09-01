@@ -1,7 +1,14 @@
 # Cutting an `asd` release
 
-Releases are built locally (no CI minutes burned). The one-command flow is
-`scripts/release.sh vMAJOR.MINOR.PATCH`.
+Releases are built **by CI**, not locally. The one-command flow is
+`scripts/release.sh vMAJOR.MINOR.PATCH`, and pushing the tag is the entire
+trigger — the script itself builds nothing.
+
+> Local building was retired in v0.9.38. Before that this script
+> cross-compiled and published the tarballs itself, duplicating CI; on the
+> v0.9.38 release both publishers ran and clobbered four of five assets,
+> leaving one release with two build provenances. There is now exactly one
+> publisher.
 
 ## What ships where
 
@@ -14,15 +21,14 @@ Releases are built locally (no CI minutes burned). The one-command flow is
   End-user command:
   `brew tap agentstatelabs/agentstatedeveloper && brew install asd`.
 
-## Coordination with the other agent
+## The version must already be committed
 
-A second agent works the asd repo in parallel and pushes per-commit
-workspace-version bumps (`feat(1.0.NN): ...`). That means **`Cargo.toml`
-moves constantly**.
+The release script **does not** touch `Cargo.toml`; the workspace version is
+owned by the normal commit flow. But it does **verify** that the version in
+`Cargo.toml` matches the tag, and refuses otherwise (`ALLOW_VERSION_SKEW=1`
+overrides, not recommended).
 
-The release script deliberately **does not** touch `Cargo.toml`. You pick
-the commit you want to ship, tag it, and the script ships that commit's
-binaries — whatever version they happen to embed.
+So bump the workspace version and land it on `main` *before* tagging.
 
 The cleanest pattern is to do release work in a fresh worktree off
 `origin/main`:
@@ -38,37 +44,34 @@ That keeps you out of the other agent's uncommitted working tree.
 ## One-time prereqs
 
 ```sh
-rustup target add x86_64-apple-darwin
-cargo install cross --git https://github.com/cross-rs/cross
-# Docker Desktop installed; must be running when building Linux targets
-gh auth status   # agentstatelabs needs Contents:write on the releases repo
-
-# Tap clone must exist as a sibling of AgentStateDeveloper:
-git clone https://github.com/agentstatelabs/homebrew-agentstatedeveloper.git \
-  ../homebrew-agentstatedeveloper
+glab auth status   # push rights on the GitLab origin — that is the whole trigger
 ```
+
+No Rust cross-targets, no `cross`, no Docker and no tap clone: those were
+prerequisites of the retired local-build path.
 
 ## Cutting a release
 
 ```sh
-scripts/release.sh v1.0.94
+scripts/release.sh v1.1.0
 ```
 
 The script:
 
-1. Refuses if the working tree is dirty.
-2. Tags `vX.Y.Z` on HEAD if not already present, pushes the tag to GitLab.
-3. Builds `asd`, `asd-mcp`, `asd-serve` for four targets:
-   - `aarch64-apple-darwin`
-   - `x86_64-apple-darwin`
-   - `x86_64-unknown-linux-gnu`
-   - `aarch64-unknown-linux-gnu`
-4. Tarballs each as `asd-<ver>-<target>.tar.gz`.
-5. Creates the GitHub release and uploads all four tarballs.
-6. Patches `Formula/asd.rb` in the sibling tap clone, commits, pushes to
-   GitLab. GitLab → GitHub mirror replicates within seconds.
+1. Refuses if the working tree is dirty or the branch is behind origin.
+2. Verifies the workspace version in `Cargo.toml` matches the tag.
+3. Tags `vX.Y.Z` on HEAD (annotated) if not already present.
+4. Pushes the tag to GitLab. GitLab CI mirrors it to GitHub through the
+   leak-scan gate, which fires `.github/workflows/release.yml`.
+5. Prints the Actions run to watch.
 
-About ~7 minutes wall-clock; less on incremental rebuilds.
+Everything after that is CI: the five platform builds, the GitHub release,
+and the Homebrew formula. The formula is rendered **GitLab-side** by the
+`homebrew` job in `.gitlab-ci.yml` (see `scripts/publish-homebrew.sh`), which
+commits it to the tap on GitLab; the tap's own publish job mirrors it to the
+GitHub tap that `brew tap` reads. Never write the GitHub tap directly.
+
+No sibling tap clone is needed any more.
 
 ## After the release: bump the site footer
 
@@ -94,20 +97,13 @@ home in a checklist.
 
 | env var | effect |
 |---------|--------|
-| `SKIP_TAG=1` | use HEAD as-is; don't tag |
-| `SKIP_LINUX=1` | only macOS targets |
-| `SKIP_FORMULA=1` | leave the brew tap alone |
-| `ONLY_TARGETS=a,b` | comma-separated subset |
+| `SKIP_SYNC_CHECK=1` | don't require being level with `origin/main` |
+| `ALLOW_VERSION_SKEW=1` | permit `Cargo.toml` != tag (not recommended) |
 
-Example — re-upload just the linux x86 tarball without touching anything
-else:
-
-```sh
-SKIP_TAG=1 SKIP_FORMULA=1 ONLY_TARGETS=x86_64-unknown-linux-gnu \
-  scripts/release.sh v1.0.93
-```
-
-`gh release upload --clobber` makes uploads idempotent.
+These are the only two the script reads. `SKIP_TAG`, `SKIP_LINUX`,
+`SKIP_FORMULA` and `ONLY_TARGETS` were documented here long after they stopped
+existing — they belonged to the retired local-build path. Re-running a build
+now means re-running the CI workflow, not passing flags to this script.
 
 ## Rolling back
 
