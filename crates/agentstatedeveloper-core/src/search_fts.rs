@@ -1529,6 +1529,19 @@ impl SearchFtsDb {
     }
 
     /// Return all feedback entries from the SQLite cache, newest first.
+    /// Hard-delete one feedback row from the cache. Returns rows removed, so
+    /// a caller can tell "gone" from "was never here" — a purge that reports
+    /// success without touching anything is how the two stores drift apart.
+    ///
+    /// Only for `asd feedback purge`. Retiring a verdict normally goes through
+    /// `upsert_feedback` via `record`, which keeps the row and marks it.
+    pub fn delete_feedback(&self, entry_id: &str) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "DELETE FROM asd_feedback WHERE entry_id = ?1",
+            rusqlite::params![entry_id],
+        )
+    }
+
     pub fn list_all_feedback(&self) -> rusqlite::Result<Vec<FeedbackEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT entry_id, symbol_id, symbol_qname, query, verdict, author, created_at, note, file_scope, expires_at,

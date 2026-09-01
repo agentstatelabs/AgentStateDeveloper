@@ -5,6 +5,7 @@
 //!   list    — display all recorded verdicts, optionally filtered to one symbol
 //!   expire   — lapse a verdict so it stops influencing search ranking
 //!   withdraw — retract a verdict that should not have been recorded
+//!   purge    — hard-delete a verdict from both stores (escape hatch)
 
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
@@ -27,6 +28,8 @@ pub enum FeedbackCmd {
     Expire(ExpireArgs),
     /// Retract a verdict that should never have been recorded.
     Withdraw(WithdrawArgs),
+    /// Hard-delete a verdict from both stores. Prefer `withdraw`.
+    Purge(PurgeArgs),
     /// Designate a symbol as the canonical source-of-truth for a domain concept.
     PromoteAsTruth(PromoteAsTruthArgs),
     /// Export all feedback entries to a JSON file (or stdout).
@@ -122,6 +125,20 @@ pub struct WithdrawArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct PurgeArgs {
+    /// Entry id to delete permanently (from `asd feedback list`).
+    pub entry_id: String,
+
+    /// Required. Without it the command explains and refuses.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct PromoteAsTruthArgs {
     /// Fully-qualified symbol name to promote.
     pub qname: String,
@@ -165,6 +182,7 @@ pub fn run(cfg: &Config, cmd: FeedbackCmd) -> Result<()> {
         FeedbackCmd::List(args) => run_list(cfg, args),
         FeedbackCmd::Expire(args) => run_expire(cfg, args),
         FeedbackCmd::Withdraw(args) => run_withdraw(cfg, args),
+        FeedbackCmd::Purge(args) => run_purge(cfg, args),
         FeedbackCmd::PromoteAsTruth(args) => run_promote_as_truth(cfg, args),
         FeedbackCmd::Export(args) => run_export(cfg, args),
         FeedbackCmd::Import(args) => run_import(cfg, args),
@@ -660,5 +678,63 @@ fn run_withdraw(cfg: &Config, args: WithdrawArgs) -> Result<()> {
         "\nIt no longer influences ranking. It remains in `asd feedback list`, \
          marked withdrawn — it still explains a past ranking."
     );
+    Ok(())
+}
+
+/// `asd feedback purge` — permanently delete a verdict from both stores.
+///
+/// The escape hatch a tombstone cannot serve: test data written by mistake, or
+/// a secret pasted into a `--note`. For anything else `withdraw` is correct —
+/// it retracts the verdict while keeping the record, which still explains why
+/// a past search ranked as it did.
+///
+/// This rewrites history in a store that is otherwise append-only, so it is
+/// gated behind `--yes` and says what it is about to destroy first.
+fn run_purge(cfg: &Config, args: PurgeArgs) -> Result<()> {
+    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let store = AsgFeedbackStore::from_engine(&engine);
+
+    // Show the entry before destroying it — an id alone is not enough for
+    // someone to confirm they are deleting what they think they are.
+    let Some(target) = store
+        .list_all(&engine.ref_name)?
+        .into_iter()
+        .find(|e| e.entry_id == args.entry_id)
+    else {
+        bail!("no feedback entry {}", args.entry_id);
+    };
+
+    if !args.yes {
+        eprintln!(
+            "about to PERMANENTLY delete:\n  \
+             {}  {:?}  {}  query={:?}",
+            target.entry_id, target.verdict, target.symbol_qname, target.query
+        );
+        if let Some(ref n) = target.note {
+            eprintln!("  note: {n}");
+        }
+        bail!(
+            "refusing without --yes.\n\
+             This rewrites history in an append-only store. If the verdict was \
+             merely wrong, `asd feedback withdraw {}` retracts it while keeping \
+             the record — almost always what you want. Purge is for data that \
+             must not exist: test entries, or a secret pasted into a note.",
+            args.entry_id
+        );
+    }
+
+    let purged = store
+        .purge(&engine.ref_name, &args.entry_id)?
+        .ok_or_else(|| anyhow::anyhow!("no feedback entry {}", args.entry_id))?;
+
+    if args.json {
+        println!("{}", serde_json::json!({ "purged": true, "entry": purged }));
+        return Ok(());
+    }
+    println!(
+        "purged {}  {:?}  {}  query={:?}",
+        purged.entry_id, purged.verdict, purged.symbol_qname, purged.query
+    );
+    println!("Gone from both the store and the search cache.");
     Ok(())
 }

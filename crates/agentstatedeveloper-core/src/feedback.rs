@@ -14,6 +14,7 @@
 //! cache as a side effect.  Running `asd index` / `asd reindex` calls
 //! `sync_feedback_entries` for a full reconciliation.
 
+use crate::AsdError;
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
 use chrono::{DateTime, Utc};
@@ -94,6 +95,20 @@ pub trait FeedbackStore {
 
     /// Every feedback entry in the store.
     fn list_all(&self, ref_name: &str) -> Result<Vec<FeedbackEntry>>;
+
+    /// Hard-delete a verdict from both stores. Returns the entry as it was,
+    /// or `None` if no such entry existed.
+    ///
+    /// The escape hatch a tombstone cannot serve: test data written by
+    /// mistake, or a secret pasted into a `--note`. For anything else
+    /// `withdraw` is the right verb — it retracts the verdict while keeping
+    /// the record, which still explains a past ranking.
+    ///
+    /// Deletes the authoritative store first, then the SQLite cache, and
+    /// fails loudly if the second step does not happen: a purge that clears
+    /// only the tree leaves `list_all`'s cache fast path still serving the
+    /// verdict.
+    fn purge(&self, ref_name: &str, entry_id: &str) -> Result<Option<FeedbackEntry>>;
 
     /// Retract a verdict so it stops influencing ranking, keeping the record.
     ///
@@ -225,6 +240,44 @@ impl<'a> FeedbackStore for AsgFeedbackStore<'a> {
             let _ = fts.upsert_feedback(entry);
         }
         Ok(())
+    }
+
+    /// Hard-delete a verdict from BOTH stores. See the trait method.
+    fn purge(&self, ref_name: &str, entry_id: &str) -> Result<Option<FeedbackEntry>> {
+        let Some(existing) = self
+            .list_all(ref_name)?
+            .into_iter()
+            .find(|e| e.entry_id == entry_id)
+        else {
+            return Ok(None);
+        };
+
+        // Authoritative store first. If this fails nothing has changed, which
+        // is the safe direction to fail in.
+        let path = paths::feedback_entry_path(&existing.symbol_id, entry_id);
+        let opts = CommitOptions::new(
+            "asd-purge",
+            IntentCategory::Rollback,
+            format!("purge feedback entry {entry_id}"),
+        );
+        self.repo
+            .delete(ref_name, &path, opts)
+            .map_err(|e| AsdError::Other(format!("purge: git delete failed: {e}")))?;
+
+        // Then the cache. A failure here is NOT best-effort: the tree no
+        // longer has the entry but `list_all`'s fast path would still serve
+        // it, which is the exact divergence this plan exists to prevent. Say
+        // so loudly and name the recovery, rather than returning Ok.
+        if let Some(fts) = self.fts {
+            fts.delete_feedback(entry_id).map_err(|e| {
+                AsdError::Other(format!(
+                    "purge: removed {entry_id} from the store but FAILED to clear the \
+                     SQLite cache ({e}); `asd feedback list` will still show it. \
+                     Run `asd index` to resync the cache."
+                ))
+            })?;
+        }
+        Ok(Some(existing))
     }
 
     fn list_for_symbol(&self, ref_name: &str, symbol_id: &str) -> Result<Vec<FeedbackEntry>> {
