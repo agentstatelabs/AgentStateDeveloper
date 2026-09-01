@@ -2810,3 +2810,95 @@ isolation and none asked whether anything called it.
 Withdrawal has the identical failure mode available to it. Test what
 `flat_verdicts` *returns*, not what the predicate computes, and mutation-check
 it: remove the filter and confirm the test actually fails.
+
+## The conclusions sidecar is regenerated, not appended — and its merge driver is local-only
+
+Two facts about `.asd/conclusions/*.jsonl` that are individually documented
+elsewhere and, together, cost records. Written down here because neither is
+obvious from the code and the combination is what bites.
+
+### 1. The file is regenerated wholesale from the local database
+
+The pre-commit hook runs `asd conclusions export`, which writes the sidecar
+from whatever is in **this clone's** `.asd-state.db` at that moment. It is not
+an append. So a branch cut before someone else's MR merged carries a snapshot
+that predates it, and merging that branch **deletes** the records that landed
+in between — with no conflict, because from git's point of view the branch
+simply has a different file.
+
+A rebase usually fixes it, but not always: if your local database never held
+those records (they were annotated on symbols your working tree has since
+renamed), the post-rebase export drops them again.
+
+### 2. The reconciling merge driver cannot run server-side
+
+`.gitattributes` binds these files to `merge=asdconclusions`, and
+`merge_jsonl` does the right thing — union by record id, deterministic
+tie-break, re-sort. But it is a **custom** driver, and custom drivers live in
+per-clone git config, registered by `asd init` (`init.rs` says this; what it
+does not say is what follows).
+
+GitLab's server-side merge has no ASD binary and never runs `asd init`.
+Neither does a merge train, nor any CI-side merge. **Every merge performed
+outside a developer's clone silently falls back to a plain text merge.** The
+union driver protects local merges only.
+
+### What actually happened
+
+- **MR !25** would have reverted 20 records added by !24. Caught by hand.
+- **MR !28** left 2 behind *after a clean rebase* — the local DB did not hold
+  them. Also caught by hand.
+- **One real loss** exists in main's history: `led_9a6e25e92e8b…`, a decision
+  on `agentstatedeveloper_mcp.lib.ApiError:237`, dropped by `4fc35cd` and
+  restored two merges later by `9ac59a9`, whose branch predated the drop and
+  carried it back. Net loss zero — by luck.
+
+One loss in 363 commits: rare enough that nobody noticed, real enough that it
+happened.
+
+### What to do about it
+
+`scripts/check-conclusions-drop.sh` runs as the `conclusions-guard` CI job on
+every non-main branch and fails the pipeline when a branch would drop records.
+`scripts/audit-conclusions-losses.py` answers the historical question.
+
+When the guard fires:
+
+```sh
+git fetch origin && git rebase origin/main          # usually enough
+```
+
+and if it still fires, union the target's sidecar in explicitly — locally,
+where the driver exists:
+
+```sh
+git show origin/main:.asd/conclusions/decisions.jsonl > /tmp/theirs.jsonl
+cp .asd/conclusions/decisions.jsonl /tmp/base.jsonl
+asd conclusions merge /tmp/base.jsonl .asd/conclusions/decisions.jsonl /tmp/theirs.jsonl
+git commit --amend --no-edit .asd/conclusions/decisions.jsonl
+```
+
+**Never hand-edit the JSONL to silence the guard.** The file is machine-owned;
+an edit that makes the check pass without restoring the records is exactly the
+silent loss the check exists to prevent.
+
+### Two things that look like the fix and are not
+
+- **Switching to git's built-in `union` driver.** It would resolve
+  server-side, but `union` concatenates conflicting hunks: duplicate ids, and
+  the id-sort that `gather_buckets` and `merge_jsonl` both maintain is broken.
+- **Concluding that JSONL is unmergeable.** It is not. Records are keyed by
+  random hex id and the file is kept id-sorted, so concurrent additions
+  scatter and git's ordinary 3-way merge handles them cleanly. The exposure is
+  a stale branch, not a merge algorithm.
+
+### A related trap in merge automation
+
+Anything that force-pushes and then polls CI must query
+`projects/:id/pipelines?sha=<sha>`, not `ci status --branch`. The branch-scoped
+query answers "the latest pipeline on this ref", and immediately after a push
+that is still the **previous** commit's — so automation can read a stale
+success and merge a SHA whose pipeline never ran. Observed here: a watcher
+reported success for `abe2d3d` while the real pipeline for `e29581c` was still
+pending. This matters in this repo specifically because reconciling the
+sidecar is *why* branches get force-pushed.
