@@ -195,6 +195,14 @@ pub fn build_router(
         .route("/history/rollup", get(metrics::list_rollup))
         .route("/commits", get(metrics::list_commits))
         .route("/feedback", get(metrics::list_feedback))
+        .route(
+            "/feedback/{entry_id}/withdraw",
+            axum::routing::post(metrics::withdraw_feedback),
+        )
+        .route(
+            "/feedback/{entry_id}/expire",
+            axum::routing::post(metrics::expire_feedback),
+        )
         .route("/index-health", get(metrics::index_health))
         .route("/scorecard", get(metrics::scorecard))
         .route("/files", get(list_files))
