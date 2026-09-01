@@ -12,7 +12,7 @@ Versions use semantic versioning.
 
 ---
 
-## [Unreleased]
+## [v1.1.0] — 2026-09-01
 
 ### Added
 - **ASD Lens gains two pages: `/records` and `/health`.** `/records` makes the
@@ -42,7 +42,39 @@ Versions use semantic versioning.
   `feedback_withdraw` MCP tool. `purge` is deliberately CLI-only — a hard
   delete from an otherwise append-only store should not be one click away.
 
+- **A CI guard against conclusion-record loss.** `conclusions-guard` fails any
+  branch whose sidecar would drop a record present on the target, naming each
+  id and the exact recovery command. Deliberate removals pass with
+  `ALLOW_CONCLUSIONS_DROP=1` or `[conclusions-drop-ok]` in the commit message.
+  It earned its place immediately: it caught a real three-record loss on a
+  branch of its own release series, caused by a stale installed binary.
+- **`scripts/wait-pipeline.sh`** — waits on the pipeline for a specific commit.
+  `glab ci status --branch` answers "the latest pipeline on this ref", not
+  "the pipeline for this commit", so automation that pushes and polls in one
+  breath can read the previous commit's result and merge a SHA whose pipeline
+  never ran. Queries `?sha=` and treats "no pipeline yet" as keep-waiting
+  rather than as a verdict.
+
 ### Fixed
+- **The conclusions sidecar could silently delete records a clone could not
+  reproduce.** `asd conclusions export` regenerates `.asd/conclusions/*.jsonl`
+  wholesale from the local database, so any record the local database could
+  not produce was dropped on the next commit. The export is now **additive**:
+  `gather()` reports the ids it retired *deliberately* (superseded entries, and
+  `Hypothesis` records below the confidence floor) and the merge keeps every
+  committed record that is not one of them. Deliberate withdrawals still stick;
+  everything else survives.
+
+  The audit that found this walked 363 commits of `main` and turned up exactly
+  one real loss, restored two merges later by luck. The cause was not the stale
+  branch everyone assumed: it was `:line`-disambiguated qname churn. A decision
+  anchored to `ApiError:237` stopped resolving when the symbol moved, so the
+  export skipped it — **which happens on a perfectly up-to-date branch**, not
+  just a stale one.
+
+  Note the limit: this protects against a local database that cannot produce a
+  record. It cannot resurrect one that a previous bad export already removed
+  from the file — restore that from the target branch first, then re-export.
 - **`asd feedback mark --ttl-days` never actually did anything.** The field,
   the `is_expired()` helper, the SQLite persistence and doc comments on both
   the field and the helper all claimed lapsed verdicts stopped influencing
