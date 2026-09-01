@@ -848,3 +848,111 @@ async fn scorecard_payload_matches_core_exactly() {
     // The handler's own additions, which core deliberately does not emit.
     assert!(body["timestamp"].is_string(), "body={}", body);
 }
+
+// ---------------------------------------------------------------------------
+// Feedback lifecycle actions (plan feedback-lifecycle t-006)
+// ---------------------------------------------------------------------------
+
+async fn post_body(app: axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_else(
+        |_| serde_json::json!({"_raw": String::from_utf8_lossy(&bytes).to_string()}),
+    );
+    (status, value)
+}
+
+#[tokio::test]
+async fn feedback_listing_exposes_lifecycle_state() {
+    // The tab renders from these fields; if they are absent it silently shows
+    // retired verdicts as live.
+    let (status, body) = get_body(router().await, "/api/v1/feedback").await;
+    assert_eq!(status, StatusCode::OK, "body={}", body);
+    let item = &body["items"][0];
+    for field in ["expired", "withdrawn", "inert"] {
+        assert!(
+            item.get(field).is_some_and(|v| v.is_boolean()),
+            "{field} missing from the listing; body={body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn withdrawing_returns_the_updated_entry() {
+    // Matching the approvals endpoints so the UI can patch one row rather
+    // than refetching the whole list.
+    let (status, body) = post_body(router().await, "/api/v1/feedback/fb-1/withdraw").await;
+    assert_eq!(status, StatusCode::OK, "body={}", body);
+    assert_eq!(body["entry_id"], "fb-1", "body={}", body);
+    assert_eq!(body["withdrawn"], true, "body={}", body);
+    assert_eq!(body["inert"], true, "body={}", body);
+    assert!(body["withdrawn_at"].is_string(), "body={}", body);
+    // Defaulted attribution when the body carries none.
+    assert_eq!(body["withdrawn_by"], "asd-lens", "body={}", body);
+}
+
+#[tokio::test]
+async fn expiring_returns_the_updated_entry() {
+    let (status, body) = post_body(router().await, "/api/v1/feedback/fb-1/expire").await;
+    assert_eq!(status, StatusCode::OK, "body={}", body);
+    assert_eq!(body["expired"], true, "body={}", body);
+    assert_eq!(body["inert"], true, "body={}", body);
+    assert_eq!(
+        body["withdrawn"], false,
+        "expire must not withdraw; body={}",
+        body
+    );
+}
+
+#[tokio::test]
+async fn acting_on_an_unknown_entry_is_a_404_not_a_500() {
+    for action in ["withdraw", "expire"] {
+        let (status, body) = post_body(
+            router().await,
+            &format!("/api/v1/feedback/fb-nope/{action}"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{action} on a missing entry; body={body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_withdrawn_entry_stays_in_the_listing() {
+    // The asymmetry the tab depends on: retired verdicts remain visible,
+    // marked, because they still explain a past ranking.
+    let app = router().await;
+    let (_, before) = get_body(app.clone(), "/api/v1/feedback").await;
+    let n = before["total"].as_u64().unwrap();
+
+    let (status, _) = post_body(app.clone(), "/api/v1/feedback/fb-1/withdraw").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, after) = get_body(app, "/api/v1/feedback").await;
+    assert_eq!(
+        after["total"].as_u64().unwrap(),
+        n,
+        "entry vanished from the list"
+    );
+    let row = after["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["entry_id"] == "fb-1")
+        .expect("fb-1 still listed");
+    assert_eq!(row["withdrawn"], true);
+}
