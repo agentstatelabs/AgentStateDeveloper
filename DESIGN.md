@@ -2826,9 +2826,22 @@ that predates it, and merging that branch **deletes** the records that landed
 in between — with no conflict, because from git's point of view the branch
 simply has a different file.
 
-A rebase usually fixes it, but not always: if your local database never held
+A rebase usually fixed it, but not always: if your local database never held
 those records (they were annotated on symbols your working tree has since
-renamed), the post-rebase export drops them again.
+renamed), the post-rebase export dropped them again.
+
+The export is now **additive** against the committed file, which closes that
+second case: `gather()` reports the ids it retired *deliberately* (superseded,
+and `Hypothesis` below the confidence floor) and `merge_preserving` keeps every
+committed record that is not in that set. A record this clone cannot produce
+survives; a record it deliberately withdrew stays withdrawn.
+
+That also fixed a loss mechanism nobody was looking for. The real historical
+loss below was not caused by a stale branch at all — it was `:line`-
+disambiguated qname churn. `ApiError:237` no longer resolves (it is `:269` /
+`:275` / `:286` today), so `gather_buckets` hit `None => continue` and skipped
+the entry. **That fires even on a perfectly current branch**, which is why the
+CI guard alone was not sufficient.
 
 ### 2. The reconciling merge driver cannot run server-side
 
@@ -2877,6 +2890,27 @@ cp .asd/conclusions/decisions.jsonl /tmp/base.jsonl
 asd conclusions merge /tmp/base.jsonl .asd/conclusions/decisions.jsonl /tmp/theirs.jsonl
 git commit --amend --no-edit .asd/conclusions/decisions.jsonl
 ```
+
+### Merge automation must pin CI status to the SHA
+
+This lands here rather than in a CI doc because the sidecar is what forces the
+rebase, and the rebase is what exposes it. `glab ci status --branch <b>`
+answers *"the latest pipeline on this ref"*, **not** *"the pipeline for this
+commit"*. Right after a push those differ — GitLab has not created the new
+pipeline yet — so the branch query returns the **previous** commit's terminal
+state, and automation that pushes and then polls in the same breath can merge a
+SHA whose pipeline never ran. Observed on !29: a watcher reported success for
+pipeline #1250 on the pre-rebase `abe2d3d` while #1256 for `e29581c` was still
+pending.
+
+Use `scripts/wait-pipeline.sh <sha>` (or `--mr <iid>`), which queries
+`projects/:id/pipelines?sha=` and treats an empty result as *not created yet,
+keep waiting* rather than as terminal. Re-resolve the head every poll too: a
+SHA captured once goes stale the moment the branch is pushed again, which is
+exactly how a later watcher reported !31 green for a head it no longer had.
+
+Because branches here get pushed repeatedly to reconcile the sidecar,
+push-then-poll is the normal path through this document, not an edge case.
 
 **Never hand-edit the JSONL to silence the guard.** The file is machine-owned;
 an edit that makes the check pass without restoring the records is exactly the
