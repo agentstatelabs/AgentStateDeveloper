@@ -74,9 +74,23 @@ pub struct ExportRecord {
 /// Upgrade note: re-exporting an existing project at >=1.0.36 will
 /// produce a one-time mass reorder of every `.asd/conclusions/*.jsonl`
 /// file. Commit it once, then steady state.
+/// What a gather produced, plus what it deliberately withheld.
+pub struct Gathered {
+    pub buckets: BTreeMap<&'static str, Vec<ExportRecord>>,
+    /// Entry ids excluded on purpose — superseded, or a hypothesis below the
+    /// confidence floor. Everything else missing from `buckets` is missing
+    /// because this clone could not produce it, not because it decided not to.
+    pub retired: std::collections::HashSet<String>,
+}
+
+/// Back-compat wrapper: the buckets alone.
 pub fn gather_buckets(
     engine: &Engine,
 ) -> std::io::Result<BTreeMap<&'static str, Vec<ExportRecord>>> {
+    Ok(gather(engine)?.buckets)
+}
+
+pub fn gather(engine: &Engine) -> std::io::Result<Gathered> {
     let index = AsgIndexStore::from_engine(engine);
     let ref_name = engine.ref_name.clone();
 
@@ -84,6 +98,10 @@ pub fn gather_buckets(
     for class in ConclusionClass::all() {
         buckets.insert(class.filename_stem(), Vec::new());
     }
+    // Ids this clone excluded ON PURPOSE. Distinct from ids it simply could
+    // not produce (an orphaned symbol, or a record another branch owns) —
+    // see `merge_preserving`.
+    let mut retired: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Drive the walk from the LEDGER tree, not the symbol index. Nearly
     // every symbol in a large repo carries zero conclusions, and the
@@ -134,6 +152,11 @@ pub fn gather_buckets(
             .iter()
             .flat_map(|e| e.supersedes.iter().cloned())
             .collect();
+        // A superseded entry is RETIRED ON PURPOSE — record that, so the
+        // additive merge below does not resurrect it from the committed file.
+        for e in entries.iter().filter(|e| superseded.contains(&e.entry_id)) {
+            retired.insert(e.entry_id.clone());
+        }
         entries.retain(|e| !superseded.contains(&e.entry_id));
         for entry in entries {
             // Plan K t-003: confidence-floor filter at sync time.
@@ -150,6 +173,9 @@ pub fn gather_buckets(
             if entry.kind == LedgerKind::Hypothesis
                 && entry.confidence.unwrap_or(0.0) < DEFAULT_CONFIDENCE_FLOOR
             {
+                // Also deliberate: a hypothesis that fell below the floor is
+                // meant to stop shipping, so it must not be resurrected.
+                retired.insert(entry.entry_id.clone());
                 continue;
             }
             let class = entry.kind.conclusion_class();
@@ -185,7 +211,49 @@ pub fn gather_buckets(
     for bucket in buckets.values_mut() {
         bucket.sort_by(|a, b| a.id.cmp(&b.id));
     }
-    Ok(buckets)
+    Ok(Gathered { buckets, retired })
+}
+
+/// Fold the records already committed at `path` back into a freshly gathered
+/// bucket, so the sidecar is additive rather than a snapshot of one clone.
+///
+/// Why this exists
+/// ---------------
+/// The export writes from THIS clone's database. Two things routinely make
+/// that a subset of what the committed file holds, and in both cases writing
+/// the bare export deletes records nobody meant to delete:
+///
+/// * **Orphaned symbols.** A ledger entry anchored to a `:line`-disambiguated
+///   qname (`Foo:237`) stops resolving the moment the code shifts, and
+///   `gather` skips it. That is how `led_9a6e25e92e8b…` vanished from main —
+///   the symbol became `ApiError:269` and the conclusion had nowhere to hang.
+/// * **A branch that predates someone else's merge.** Records another branch
+///   contributed were never in this clone's database at all.
+///
+/// What it must NOT do is resurrect a record this clone retired ON PURPOSE —
+/// superseded by a later entry, or a hypothesis that fell below the
+/// confidence floor. Hence `retired`: a committed record is preserved only
+/// when the local store expressed no such intent about it.
+pub fn merge_preserving(
+    fresh: &[ExportRecord],
+    path: &Path,
+    retired: &std::collections::HashSet<String>,
+) -> std::io::Result<Vec<ExportRecord>> {
+    let mut by_id: BTreeMap<String, ExportRecord> = BTreeMap::new();
+    for rec in read_jsonl(path).unwrap_or_default() {
+        if retired.contains(&rec.id) {
+            continue; // deliberately withdrawn — let it go
+        }
+        by_id.insert(rec.id.clone(), rec);
+    }
+    // Fresh wins on conflict: this clone's view of a record it CAN see is
+    // authoritative over whatever was committed earlier.
+    for rec in fresh {
+        by_id.insert(rec.id.clone(), rec.clone());
+    }
+    let mut out: Vec<ExportRecord> = by_id.into_values().collect();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(out)
 }
 
 /// Write one JSONL file. Returns the byte count written.
@@ -310,12 +378,15 @@ fn export_class_layout(
     engine: &Engine,
     out_dir: &Path,
 ) -> std::io::Result<Vec<(&'static str, usize, u64)>> {
-    let buckets = gather_buckets(engine)?;
+    let Gathered { buckets, retired } = gather(engine)?;
     let mut out = Vec::with_capacity(6);
     for class in ConclusionClass::all() {
         let stem = class.filename_stem();
         let path = out_dir.join(format!("{stem}.jsonl"));
-        let entries = buckets.get(stem).cloned().unwrap_or_default();
+        let fresh = buckets.get(stem).cloned().unwrap_or_default();
+        // Additive: keep what is already committed unless this clone
+        // deliberately retired it. See `merge_preserving`.
+        let entries = merge_preserving(&fresh, &path, &retired)?;
         let bytes = write_jsonl(&path, &entries)?;
         out.push((stem, entries.len(), bytes));
     }
@@ -329,7 +400,7 @@ fn export_package_layout(
     engine: &Engine,
     out_dir: &Path,
 ) -> std::io::Result<Vec<(&'static str, usize, u64)>> {
-    let buckets = gather_buckets(engine)?;
+    let Gathered { buckets, retired } = gather(engine)?;
     let mut out = Vec::new();
     for class in ConclusionClass::all() {
         let stem = class.filename_stem();
@@ -350,8 +421,11 @@ fn export_package_layout(
         for (pkg, recs) in by_pkg {
             let fname = format!("{}.jsonl", package_key_for_filename(&pkg));
             let path = class_dir.join(fname);
-            let bytes = write_jsonl(&path, &recs)?;
-            out.push((stem, recs.len(), bytes));
+            // Same additive rule, per shard — the shard file is the unit on
+            // disk, so that is the unit to preserve against.
+            let merged = merge_preserving(&recs, &path, &retired)?;
+            let bytes = write_jsonl(&path, &merged)?;
+            out.push((stem, merged.len(), bytes));
         }
     }
     Ok(out)
@@ -1799,5 +1873,114 @@ mod tests {
             std::fs::read(&ours).unwrap(),
             std::fs::read(&expected).unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod additive_export_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn rec(id: &str, summary: &str) -> ExportRecord {
+        ExportRecord {
+            id: id.to_string(),
+            kind: "decision".to_string(),
+            qname: "pkg.thing".to_string(),
+            file: "src/lib.rs".to_string(),
+            summary: summary.to_string(),
+            body: None,
+            confidence: None,
+            role: None,
+            command: None,
+            tags: Vec::new(),
+            evidence: Vec::new(),
+            supersedes: Vec::new(),
+            author: "test".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    fn committed(dir: &std::path::Path, recs: &[ExportRecord]) -> std::path::PathBuf {
+        let p = dir.join("decisions.jsonl");
+        write_jsonl(&p, recs).expect("seed committed file");
+        p
+    }
+
+    #[test]
+    fn preserves_a_record_this_clone_cannot_produce() {
+        // The orphaned-symbol case: `led_…ApiError:237` existed in the ledger
+        // but its `:line` qname stopped resolving, so `gather` skipped it and
+        // the bare export deleted it from main. This is that regression.
+        let d = tempfile::tempdir().unwrap();
+        let path = committed(
+            d.path(),
+            &[rec("led_orphan", "from another era"), rec("led_a", "old")],
+        );
+        let fresh = vec![rec("led_a", "current")];
+
+        let out = merge_preserving(&fresh, &path, &HashSet::new()).unwrap();
+        let ids: Vec<&str> = out.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["led_a", "led_orphan"], "orphan was dropped");
+        // Fresh wins for a record this clone CAN see.
+        assert_eq!(out[0].summary, "current");
+    }
+
+    #[test]
+    fn does_not_resurrect_a_superseded_record() {
+        // The trap an unconditional union would fall into.
+        let d = tempfile::tempdir().unwrap();
+        let path = committed(
+            d.path(),
+            &[rec("led_old", "superseded"), rec("led_new", "current")],
+        );
+        let fresh = vec![rec("led_new", "current")];
+        let retired: HashSet<String> = ["led_old".to_string()].into_iter().collect();
+
+        let out = merge_preserving(&fresh, &path, &retired).unwrap();
+        let ids: Vec<&str> = out.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["led_new"],
+            "a deliberately retired record came back"
+        );
+    }
+
+    #[test]
+    fn does_not_resurrect_a_below_floor_hypothesis() {
+        // Same rule, other deliberate exclusion: a hypothesis whose confidence
+        // dropped under DEFAULT_CONFIDENCE_FLOOR must stop shipping.
+        let d = tempfile::tempdir().unwrap();
+        let path = committed(d.path(), &[rec("led_weak", "speculative")]);
+        let retired: HashSet<String> = ["led_weak".to_string()].into_iter().collect();
+
+        let out = merge_preserving(&[], &path, &retired).unwrap();
+        assert!(
+            out.is_empty(),
+            "below-floor hypothesis resurrected: {out:?}"
+        );
+    }
+
+    #[test]
+    fn output_stays_id_sorted_and_deduped() {
+        // gather_buckets and merge_jsonl both maintain an id-sort; a merge that
+        // broke it would make every subsequent export a huge spurious diff.
+        let d = tempfile::tempdir().unwrap();
+        let path = committed(d.path(), &[rec("led_c", "c"), rec("led_a", "a")]);
+        let fresh = vec![rec("led_b", "b"), rec("led_a", "a2")];
+
+        let out = merge_preserving(&fresh, &path, &HashSet::new()).unwrap();
+        let ids: Vec<&str> = out.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["led_a", "led_b", "led_c"]);
+        assert_eq!(out.len(), 3, "duplicate ids survived");
+        assert_eq!(out[0].summary, "a2", "fresh should win on conflict");
+    }
+
+    #[test]
+    fn a_missing_committed_file_is_not_an_error() {
+        // First export in a fresh clone: nothing to preserve, and that is fine.
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("decisions.jsonl");
+        let out = merge_preserving(&[rec("led_a", "a")], &path, &HashSet::new()).unwrap();
+        assert_eq!(out.len(), 1);
     }
 }
