@@ -1,1 +1,5 @@
+# The `asdconclusions` driver is CUSTOM, so it lives in per-clone git config
+# (registered by `asd init`). GitLab's server-side merge has no ASD binary and
+# cannot apply it — merges through the UI/API fall back to a plain text merge.
+# See DESIGN.md, "The conclusions sidecar is regenerated, not appended".
 .asd/conclusions/*.jsonl merge=asdconclusions
