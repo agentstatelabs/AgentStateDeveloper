@@ -85,6 +85,34 @@ GitHub tap that `brew tap` reads. Never write the GitHub tap directly.
 
 No sibling tap clone is needed any more.
 
+## After the release: verify it is installable
+
+CI runs `scripts/verify-release.sh` automatically on every tag (the
+`verify-install` job, after `homebrew`). It checks the shell installer end to
+end in a clean container, the tap formula against the published assets, and
+that the documented commands are current.
+
+Two limits worth knowing:
+
+- It runs in `.post`, **after** publish. A failure alarms; it does not stop the
+  release shipping. Verifying that a *published* artifact installs cannot
+  happen before publishing it.
+- It cannot exercise real Homebrew (the container has none), so the
+  client-side gate that broke v1.1.0 — Homebrew 6.0 refusing untrusted taps —
+  is only caught indirectly, by asserting the docs carry the `brew trust` step.
+
+So on a Mac, once per release, run the destructive check that a container
+cannot:
+
+```sh
+scripts/verify-release.sh vX.Y.Z --brew-clean
+```
+
+It untrusts the tap, uninstalls asd, runs the documented command exactly as a
+new user would, and reinstalls. **Verify with an uninstall/reinstall, never an
+upgrade** — an upgrade bypasses the trust gate and every other first-contact
+failure, which is precisely how the v1.1.0 break reached users.
+
 ## After the release: bump the site footer
 
 The marketing site carries a hardcoded version string that nothing derives

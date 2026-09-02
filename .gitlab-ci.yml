@@ -190,3 +190,29 @@ homebrew:
     - apt-get update -qq && apt-get install -y -qq --no-install-recommends git curl ca-certificates python3
     - chmod +x scripts/publish-homebrew.sh
     - ./scripts/publish-homebrew.sh
+
+# Prove the release a user can actually reach is installable. Everything this
+# catches was found by hand on v1.1.0 — a Homebrew trust gate that broke the
+# documented command for every NEW user, and installers that verified no
+# checksums — and none of it was visible to anyone who already had asd
+# installed. That is the point: this runs in a clean container, so there is no
+# pre-existing install to mask a break.
+#
+# Ordered after `homebrew` rather than after `publish-github`, because the
+# formula does not exist until that job renders it. ASD_VERIFY_WAIT covers the
+# GitLab -> GitHub tap mirror, which lands seconds later.
+verify-install:
+  stage: .post
+  image: debian:bookworm-slim
+  before_script: []   # no cargo needed; the default before_script is rust setup
+  needs:
+    - job: homebrew
+      artifacts: false
+  rules:
+    - if: $CI_COMMIT_TAG
+  variables:
+    ASD_VERIFY_WAIT: "300"
+  script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates ruby >/dev/null
+    - chmod +x scripts/verify-release.sh install.sh
+    - ./scripts/verify-release.sh "$CI_COMMIT_TAG"
