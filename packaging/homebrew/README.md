@@ -8,10 +8,16 @@ renders `Formula/asd.rb` into `agentstatelabs/homebrew-agentstatedeveloper`.
 
 ```bash
 brew tap agentstatelabs/agentstatedeveloper
+brew trust agentstatelabs/agentstatedeveloper   # Homebrew 6.0+ only
 brew install asd
 ```
 
-Or in one step:
+Homebrew 6.0 refuses to load formulae from untrusted third-party taps, so the
+`brew trust` step is required — without it the install fails with *"Refusing
+to load formula ... from untrusted tap"*. Older Homebrew has no `trust`
+subcommand and does not need one.
+
+Or in one step (after trusting):
 
 ```bash
 brew install agentstatelabs/agentstatedeveloper/asd

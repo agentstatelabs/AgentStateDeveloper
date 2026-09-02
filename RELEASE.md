@@ -19,7 +19,19 @@ trigger — the script itself builds nothing.
 - **Homebrew tap:**
   `github.com/agentstatelabs/homebrew-agentstatedeveloper`.
   End-user command:
-  `brew tap agentstatelabs/agentstatedeveloper && brew install asd`.
+
+  ```sh
+  brew tap agentstatelabs/agentstatedeveloper
+  brew trust agentstatelabs/agentstatedeveloper   # Homebrew 6.0+ only
+  brew install asd
+  ```
+
+  The `brew trust` step is **not optional on Homebrew 6.0+**: it refuses to
+  load a formula from an untrusted third-party tap, so without it `brew
+  install asd` fails with *"Refusing to load formula ... from untrusted
+  tap"*. An install that predates the gate keeps working, which is why this
+  only shows up for new users — verify with a real uninstall/reinstall, not
+  by upgrading an existing one.
 
 ## The version must already be committed
 
