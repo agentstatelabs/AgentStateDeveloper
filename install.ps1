@@ -87,6 +87,46 @@ try {
     exit 1
 }
 
+# ─── Verify the download ────────────────────────────────────────────────────
+# The Homebrew formula pins a sha256 per target and refuses on mismatch; this
+# path had no equivalent and trusted TLS alone. The release publishes
+# SHA256SUMS beside the tarballs, so verify against it.
+#
+# A release cut before SHA256SUMS existed has no such file: warn there so a
+# pinned older -Version still installs. A file that IS present and does NOT
+# match is a hard failure.
+$SumsUrl = "https://github.com/$ReleasesRepo/releases/download/$Tag/SHA256SUMS"
+$SumsPath = Join-Path $Tmp "SHA256SUMS"
+$HaveSums = $true
+try {
+    Invoke-WebRequest -Uri $SumsUrl -OutFile $SumsPath -UseBasicParsing
+} catch {
+    $HaveSums = $false
+    Write-Host "  ! No SHA256SUMS published for $Tag - cannot verify the download." -ForegroundColor Yellow
+}
+if ($HaveSums) {
+    $Expected = $null
+    foreach ($line in Get-Content $SumsPath) {
+        # "<64 hex>  <name>", optionally "*<name>" for binary mode.
+        if ($line -match "^([0-9a-fA-F]{64})\s+\*?(\./)?" + [regex]::Escape($Tarball) + "$") {
+            $Expected = $Matches[1]
+            break
+        }
+    }
+    if (-not $Expected) {
+        Write-Error "SHA256SUMS for $Tag does not list $Tarball. Refusing to install."
+        exit 1
+    }
+    $Actual = (Get-FileHash -Algorithm SHA256 -Path (Join-Path $Tmp $Tarball)).Hash
+    if ($Actual -ine $Expected) {
+        Write-Host "  expected $Expected"
+        Write-Host "  actual   $Actual"
+        Write-Error "Checksum mismatch for $Tarball. Refusing to install."
+        exit 1
+    }
+    Write-Host "  checksum verified" -ForegroundColor Green
+}
+
 # tar is available on Windows 10 1803+ / Windows 11 by default.
 Write-Host "  Extracting..."
 & tar -xzf (Join-Path $Tmp $Tarball) -C $Tmp --strip-components=1

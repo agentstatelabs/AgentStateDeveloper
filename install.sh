@@ -103,6 +103,45 @@ if ! curl -fsSL "$URL" -o "${TMP}/${TARBALL}"; then
     die "Download failed. Check that ${TARGET} is included in this release."
 fi
 
+# ─── Verify the download ────────────────────────────────────────────────────
+# The Homebrew formula pins a sha256 per target and brew refuses on mismatch.
+# This path had no equivalent: it trusted TLS and GitHub alone. The release now
+# publishes SHA256SUMS alongside the tarballs, so verify against it.
+#
+# A release cut before SHA256SUMS existed has no such file. Warn rather than
+# die there, so pinning an older ASD_VERSION still works — but a file that IS
+# present and does NOT match is a hard failure, never a warning.
+SUMS_URL="https://github.com/${RELEASES_REPO}/releases/download/${TAG}/SHA256SUMS"
+if curl -fsSL "$SUMS_URL" -o "${TMP}/SHA256SUMS" 2>/dev/null; then
+    EXPECTED=$(sed -n "s|^\([0-9a-fA-F]\{64\}\)[[:space:]][[:space:]]*[*]\{0,1\}\(\./\)\{0,1\}${TARBALL}\$|\1|p" \
+        "${TMP}/SHA256SUMS" | head -1)
+    if [ -z "$EXPECTED" ]; then
+        die "SHA256SUMS for ${TAG} does not list ${TARBALL}. Refusing to install."
+    fi
+    # macOS ships `shasum -a 256`; most Linux ships `sha256sum`.
+    if command -v sha256sum >/dev/null 2>&1; then
+        ACTUAL=$(sha256sum "${TMP}/${TARBALL}" | awk '{print $1}')
+    elif command -v shasum >/dev/null 2>&1; then
+        ACTUAL=$(shasum -a 256 "${TMP}/${TARBALL}" | awk '{print $1}')
+    else
+        ACTUAL=""
+        warn "No sha256 tool found — cannot verify the download."
+    fi
+    if [ -n "$ACTUAL" ]; then
+        # Compare case-insensitively; sums are hex either way.
+        if [ "$(printf '%s' "$ACTUAL" | tr 'A-F' 'a-f')" \
+           != "$(printf '%s' "$EXPECTED" | tr 'A-F' 'a-f')" ]; then
+            say ""
+            say "  expected ${EXPECTED}"
+            say "  actual   ${ACTUAL}"
+            die "Checksum mismatch for ${TARBALL}. Refusing to install."
+        fi
+        ok "checksum verified"
+    fi
+else
+    warn "No SHA256SUMS published for ${TAG} — cannot verify the download."
+fi
+
 info "Extracting..."
 # Tarballs are structured as asd-<TAG>-<TARGET>/{asd,asd-mcp,asd-serve}
 # Use --strip-components=1 to flatten the top-level directory.
@@ -131,6 +170,47 @@ case ":$PATH:" in
         say "  ${DIM}export PATH=\"${INSTALL_DIR}:\$PATH\"${RESET}"
         ;;
 esac
+
+# ─── Shadow check ───────────────────────────────────────────────────────────
+# INSTALL_DIR defaults to ~/.local/bin, which on many systems sits AHEAD of a
+# package manager's bin (e.g. /opt/homebrew/bin). Installing here silently
+# overrides a brew-installed asd, and `brew upgrade asd` then appears to do
+# nothing at all — both binaries report the same version string, so there is
+# no obvious signal. Say which one wins, and how to undo it.
+OTHERS=""
+OLD_IFS="$IFS"
+IFS=":"
+for _dir in $PATH; do
+    [ -n "$_dir" ] || _dir="."
+    [ "$_dir" = "$INSTALL_DIR" ] && continue
+    if [ -x "${_dir}/asd" ]; then
+        OTHERS="${OTHERS}${_dir}
+"
+    fi
+done
+IFS="$OLD_IFS"
+
+if [ -n "$OTHERS" ]; then
+    WINNER=$(command -v asd 2>/dev/null || true)
+    say ""
+    warn "Another asd is already installed:"
+    printf '%s' "$OTHERS" | while IFS= read -r _d; do
+        [ -n "$_d" ] && say "  ${DIM}${_d}/asd${RESET}"
+    done
+    if [ "$WINNER" = "${INSTALL_DIR}/asd" ]; then
+        say ""
+        say "  ${INSTALL_DIR} comes first on your PATH, so the copy just installed"
+        say "  now shadows it. If that other copy came from a package manager, its"
+        say "  upgrades will no longer take effect. To undo:"
+        say ""
+        say "  ${DIM}rm ${INSTALL_DIR}/asd ${INSTALL_DIR}/asd-mcp ${INSTALL_DIR}/asd-serve${RESET}"
+    elif [ -n "$WINNER" ]; then
+        say ""
+        say "  ${WINNER} comes first on your PATH, so it — not the copy just"
+        say "  installed — is what \`asd\` runs. Reorder your PATH, or remove that"
+        say "  copy, if you meant to use this one."
+    fi
+fi
 
 # ─── Smoke check ────────────────────────────────────────────────────────────
 say ""

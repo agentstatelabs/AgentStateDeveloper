@@ -150,6 +150,17 @@ jobs:
       - name: list staged artifacts
         run: ls -la dist
 
+      # The per-target build already computed a sha256, but only into its own
+      # job log, where nothing can consume it. Publish the sums as a release
+      # asset so install.sh can verify what it downloaded — the Homebrew
+      # formula pins sha256 per target and refuses on mismatch, and the shell
+      # installer had no equivalent.
+      - name: generate SHA256SUMS
+        working-directory: dist
+        run: |
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
       - name: publish cross-repo release
         uses: softprops/action-gh-release@v2
         with:
@@ -158,5 +169,7 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: asd ${{ github.ref_name }}
           generate_release_notes: true
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
           fail_on_unmatched_files: true
