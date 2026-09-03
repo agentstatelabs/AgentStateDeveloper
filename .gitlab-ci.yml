@@ -211,7 +211,14 @@ verify-install:
   rules:
     - if: $CI_COMMIT_TAG
   variables:
-    ASD_VERIFY_WAIT: "300"
+    # Budget for the GitLab -> GitHub tap mirror, measured rather than guessed.
+    # On v1.2.0 the formula took 11m43s to appear after the `homebrew` job
+    # finished, and this job starts ~8s later — so the original 300s was less
+    # than half of what one real release needed, and the job failed on its own
+    # timeout while the release was fine. 1800s is ~2.5x the observed latency;
+    # the wait is a sleep loop, so headroom is nearly free and a false red is
+    # not.
+    ASD_VERIFY_WAIT: "1800"
   script:
     - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates ruby >/dev/null
     - chmod +x scripts/verify-release.sh install.sh
