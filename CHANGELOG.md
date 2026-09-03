@@ -12,6 +12,22 @@ Versions use semantic versioning.
 
 ---
 
+## [v1.2.0] — 2026-09-03
+
+### Fixed
+- **The documented Homebrew install failed for every new user.** Homebrew 6.0 refuses to load formulae from untrusted third-party taps, so `brew tap agentstatelabs/agentstatedeveloper && brew install asd` stopped with *"Refusing to load formula … from untrusted tap"*. An existing install and `brew upgrade` both bypass the gate, which is why it survived a release unnoticed. A `brew trust` step is now documented everywhere the command appears — including the website's copy button, which was handing out the broken command.
+- **`install.sh` and `install.ps1` installed downloaded tarballs without verifying them.** The Homebrew formula pins a sha256 per target and refuses on mismatch; the shell path trusted TLS alone. The sums already existed — `release.yml` computed one per target into its own job log, where nothing could consume it — and are now published as a `SHA256SUMS` release asset that both installers check. A missing sums file warns and continues, so pinning an older `ASD_VERSION` still works; a file that is present and does not match is a hard failure.
+- **The distilled history rollup stopped advancing.** ASG's extractor only ran when one of three asd-serve endpoints was hit, so a store whose Lens pages nobody browsed drifted arbitrarily far behind — on this repo the cursor sat at rowid 6,017 of 36,638, and `/records`, `/health` and `asg history` were all reporting May–July data as current. `asd index` now advances it, which keeps it current as a side effect of ordinary work: a 33,429-commit backlog folded in one call, and the steady state is the handful of commits indexing itself writes.
+
+### Added
+- **`scripts/verify-release.sh`** — proves a published release is actually installable: the published `install.sh` still matches the repo copy, a clean install yields all three binaries at the right version, checksum verification actually fires when sums exist, the tap formula parses and agrees with `SHA256SUMS` and names assets that resolve, and the documented commands still carry the `brew trust` step. Runs on every tag as the `verify-install` CI job, in a clean container so no pre-existing install can mask a break. `--brew-clean` adds the destructive uninstall/reinstall a container cannot do.
+- **`install.sh` warns when it shadows another `asd`.** Its default `INSTALL_DIR` (`~/.local/bin`) sits ahead of Homebrew on many PATHs, so installing there silently overrode a brew install and made `brew upgrade asd` appear to do nothing — both binaries report the same version, so there was no signal at all.
+
+### Changed
+- **`/api/v1/commits` uses the engine's DAG walk** rather than a hand-rolled one. AgentStateGraph v1.2.1 ships `Repository::log_dag`, so the workaround here is gone; `scanned` / `capped` / `distilled` reporting is unchanged, and the metrics API tests pass untouched.
+- **AgentStateGraph pin moves v0.9.22 → v1.2.1**, bringing `blame` that names the commit rather than the merge, `commit_graph` whose node set contains every node its edges name, `stats` that counts merged-in commits, a `detect_timestamp_anomalies` that sees clock rewinds inside a merged branch, and a history rollup that says `unattributed` instead of claiming `default`. Rollup rows distilled before this release keep their old value: clear `asg_history_meta.commit_cursor` and re-extract to normalise.
+- **A `distilled` larger than `scanned` no longer means "already-garbage".** That reading was wrong twice over — the walk starts at one ref head, and this store legitimately holds two namespaces whose histories are disjoint, so 1,628 commits it never reaches are another namespace's live history rather than garbage; and `distilled` is the extractor's cursor, not the store's size, so it can err in either direction. GC was always right to report ~5% reclaimable.
+
 ## [v1.1.0] — 2026-09-01
 
 ### Added
