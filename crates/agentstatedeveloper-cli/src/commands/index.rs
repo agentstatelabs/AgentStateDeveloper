@@ -64,8 +64,42 @@ impl IndexLog {
     }
 }
 
+/// Commits folded into the `asg_history_*` rollup per extractor batch.
+/// The extractor loops internally until it is caught up, so this bounds
+/// memory per round rather than the total work done.
+const HISTORY_EXTRACT_BATCH: usize = 5_000;
+
 pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
     let engine = Engine::open_sqlite(&cfg.db_path)?;
+
+    // Keep the distilled history current as a side effect of ordinary work.
+    //
+    // ASG's `asg_history_*` rollup only advances when something calls the
+    // extractor, and until now the only callers were three HTTP endpoints in
+    // asd-serve. A store whose Lens pages nobody browses therefore drifts
+    // arbitrarily far behind: on this repo the cursor sat at rowid 6,017 of
+    // 36,638, so `asd history` views and the Lens Commits tab were reporting
+    // on May-July data as though it were current.
+    //
+    // Indexing already runs on every commit via the hook, which makes it the
+    // natural place. It is cheap: a 31k-commit backlog folded in 1.34s, and a
+    // caught-up store returns immediately having processed nothing.
+    //
+    // Non-fatal by design — the rollup is derived and rebuildable, so a store
+    // whose engine predates Plan A must still index successfully. But unlike
+    // the HTTP callers, which discard the error entirely, a real failure is
+    // worth a word on stderr rather than silence.
+    match engine.repo.extract_history(HISTORY_EXTRACT_BATCH) {
+        Ok(report) if report.commits_processed > 0 => {
+            eprintln!(
+                "  distilled {} new commit(s) into the history rollup",
+                report.commits_processed
+            );
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("  note: history rollup not advanced ({e})"),
+    }
+
     let adapters = default_adapters();
 
     let mut log = IndexLog::open(args.verbose);
