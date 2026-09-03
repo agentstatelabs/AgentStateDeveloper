@@ -410,10 +410,24 @@ pub struct CommitQuery {
 /// cannot be the one that hides them.
 ///
 /// The response reports `scanned` against `distilled` (the rollup's own
-/// commit total). A `distilled` larger than `scanned` means the store holds
-/// commits no longer reachable from the ref head — already-garbage that a
-/// sweep would drop. `capped: true` means the walk hit `scan` first, so the
-/// counts describe a window rather than the whole store.
+/// commit total). Read that difference carefully — an earlier version of this
+/// comment called it "already-garbage that a sweep would drop", and on this
+/// very store that was wrong in both directions:
+///
+/// - The walk starts at ONE ref head. This store holds two namespaces
+///   (`default/main` and `AgentStateDeveloper/main`) whose histories are
+///   disjoint, so 1,628 commits the walk never reaches are the `default`
+///   namespace's own live history, not garbage. GC agrees: `gc_default_roots`
+///   roots every ref in every namespace, which is why it reports ~5%
+///   reclaimable rather than the ~28% a single-ref walk implies.
+/// - `distilled` is the extractor's cursor position, not the store's size. If
+///   the extractor is behind, `distilled` UNDER-reports and the difference
+///   inverts.
+///
+/// So the honest reading is "commits this ref does not reach, plus whatever
+/// the extractor has not yet folded in" — a prompt to look, not a garbage
+/// estimate. `capped: true` means the walk hit `scan` first, so the counts
+/// describe a window rather than the whole store.
 pub async fn list_commits(
     State(state): State<AppState>,
     Query(q): Query<CommitQuery>,
@@ -434,40 +448,17 @@ pub async fn list_commits(
         .unwrap_or(COMMIT_SCAN_DEFAULT)
         .clamp(1, COMMIT_SCAN_MAX);
 
-    // Breadth-first over every parent edge, deduped by id (a merge is
-    // reachable from both sides). `capped` is set only when the frontier was
-    // still non-empty at the cap.
-    let head = engine
+    // The full-parent-DAG walk now lives in the engine (ASG v1.2.0,
+    // `Repository::log_dag`). This used to be a hand-rolled BFS here because
+    // `log` follows first parents only; the engine does the same walk with
+    // the same semantics — deduped by id, a pruned parent ending that edge
+    // rather than erroring — so the workaround is gone.
+    let walk = engine
         .repo
-        .head(&ref_name)
+        .log_dag(&ref_name, scan)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let mut seen: HashSet<agentstategraph_core::ObjectId> = HashSet::new();
-    let mut frontier = std::collections::VecDeque::from([head]);
-    let mut walked = Vec::with_capacity(scan.min(4_096));
-    let mut capped = false;
-    while let Some(id) = frontier.pop_front() {
-        if walked.len() >= scan {
-            capped = true;
-            break;
-        }
-        if !seen.insert(id) {
-            continue;
-        }
-        match engine.repo.get_commit(&id) {
-            Ok(Some(c)) => {
-                for p in &c.parents {
-                    if !seen.contains(p) {
-                        frontier.push_back(*p);
-                    }
-                }
-                walked.push(c);
-            }
-            // A missing parent is a pruned commit, not an error — stop
-            // descending that edge and keep walking the rest.
-            _ => continue,
-        }
-    }
-    let commits = &walked[..];
+    let capped = walk.truncated;
+    let commits = &walk.commits[..];
     let scanned = commits.len();
 
     // The rollup's own total. Larger than `scanned` ⇒ commits exist in the
