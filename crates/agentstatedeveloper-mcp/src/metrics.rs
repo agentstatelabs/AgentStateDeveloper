@@ -410,10 +410,24 @@ pub struct CommitQuery {
 /// cannot be the one that hides them.
 ///
 /// The response reports `scanned` against `distilled` (the rollup's own
-/// commit total). A `distilled` larger than `scanned` means the store holds
-/// commits no longer reachable from the ref head — already-garbage that a
-/// sweep would drop. `capped: true` means the walk hit `scan` first, so the
-/// counts describe a window rather than the whole store.
+/// commit total). Read that difference carefully — an earlier version of this
+/// comment called it "already-garbage that a sweep would drop", and on this
+/// very store that was wrong in both directions:
+///
+/// - The walk starts at ONE ref head. This store holds two namespaces
+///   (`default/main` and `AgentStateDeveloper/main`) whose histories are
+///   disjoint, so 1,628 commits the walk never reaches are the `default`
+///   namespace's own live history, not garbage. GC agrees: `gc_default_roots`
+///   roots every ref in every namespace, which is why it reports ~5%
+///   reclaimable rather than the ~28% a single-ref walk implies.
+/// - `distilled` is the extractor's cursor position, not the store's size. If
+///   the extractor is behind, `distilled` UNDER-reports and the difference
+///   inverts.
+///
+/// So the honest reading is "commits this ref does not reach, plus whatever
+/// the extractor has not yet folded in" — a prompt to look, not a garbage
+/// estimate. `capped: true` means the walk hit `scan` first, so the counts
+/// describe a window rather than the whole store.
 pub async fn list_commits(
     State(state): State<AppState>,
     Query(q): Query<CommitQuery>,

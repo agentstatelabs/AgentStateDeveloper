@@ -2936,3 +2936,55 @@ success and merge a SHA whose pipeline never ran. Observed here: a watcher
 reported success for `abe2d3d` while the real pipeline for `e29581c` was still
 pending. This matters in this repo specifically because reconciling the
 sidecar is *why* branches get force-pushed.
+
+---
+
+## The 1,628 "unreachable" commits were never unreachable
+
+A full-DAG walk of this store reached 4,268 of 5,896 commits (measured
+2026-08-29), leaving 1,628 the ref head could not see. That was read as
+already-garbage, and it sat oddly beside GC reporting only ~5% of objects as
+reclaimable. Both numbers were right; the interpretation was not.
+
+**This store has two namespaces, and their histories are disjoint.**
+
+| ref | commits | span |
+|---|---|---|
+| `default/main` | **1,628** | 2026-05-09 → 2026-07-17 |
+| `AgentStateDeveloper/main` | 35,010 | 2026-07-27 → 2026-09-03 |
+
+Zero overlap, and the gap between 17 and 27 July is the namespace migration.
+`Engine::open_sqlite` derives the namespace from the DB file's parent directory
+name, so everything committed before the repo was laid out that way went to
+`default`, and nothing has been added there since.
+
+The 1,628 are that pre-migration history. They are fully reachable — from
+`default/main`. Nothing is unreachable in this store: walking from *every* ref
+reaches 36,638 of 36,638.
+
+**Nothing to reconcile with GC, because GC was never wrong.**
+`Repository::gc_default_roots` iterates every namespace and every ref, so both
+histories have always been roots. The ~5% reclaimable figure is the honest one.
+The ~28% came from walking a single ref head and calling the remainder garbage.
+
+### What this cost, and what it changes
+
+`/api/v1/commits` reported `scanned` against `distilled` and its doc comment
+called the difference "already-garbage that a sweep would drop". On this store
+that statement was false by 1,628 commits. Corrected in place.
+
+Two further things the measurement turned up, neither of which is about
+reachability:
+
+- **The history extractor is far behind.** Its cursor sits at rowid 6,017 of
+  36,638, so `distilled` under-reports by ~30k and the `distilled` vs `scanned`
+  comparison currently inverts. A number that can err in both directions is not
+  a garbage estimate.
+- **The rollup's `namespace` column is inert here.** It comes from
+  `COALESCE(s.scope_namespace, 'default')` over a LEFT JOIN to `sessions`, and
+  `sessions` holds zero rows — so every distilled commit is filed under
+  `default` regardless of which namespace it belongs to.
+
+The general lesson is the one the DAG-walk work kept running into: a walk is
+only as complete as its roots. Walking all parents fixed merge second-parents;
+it does nothing about a ref you never started from.
