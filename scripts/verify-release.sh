@@ -178,6 +178,15 @@ if [ "$DO_FORMULA" -eq 1 ]; then
     FVER=$(grep -m1 'version "' "$TMPDIR_F/asd.rb" | sed 's/.*"\(.*\)".*/\1/')
     if [ "$FVER" = "$VER" ]; then
       pass "formula version is $VER"
+    elif [ "$WAITED" -ge "$WAIT" ] && [ "$WAIT" -gt 0 ]; then
+      # Distinguish "the tap has not mirrored yet" from "the formula is wrong".
+      # They look identical in the version string, and conflating them is how a
+      # check starts crying wolf — which is worse than no check, since a red
+      # that is usually spurious gets ignored.
+      fail "formula still reads '$FVER' after waiting ${WAITED}s for the tap mirror"
+      note "the GitLab tap may have the right formula while GitHub has not caught up"
+      note "check https://raw.githubusercontent.com/agentstatelabs/homebrew-agentstatedeveloper/main/Formula/asd.rb"
+      note "if it now reads $VER this was a mirror delay, not a bad release — raise ASD_VERIFY_WAIT"
     else
       fail "formula version is '$FVER', expected $VER"
     fi
