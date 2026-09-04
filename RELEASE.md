@@ -113,6 +113,62 @@ new user would, and reinstalls. **Verify with an uninstall/reinstall, never an
 upgrade** — an upgrade bypasses the trust gate and every other first-contact
 failure, which is precisely how the v1.1.0 break reached users.
 
+## Windows
+
+Two different things cover Windows, and they prove different things.
+
+**Automatic, on every tag.** `release.yml`'s `verify-windows` job (`needs:
+publish`) installs the *real* published release on a Windows runner via
+`scripts/verify-release-windows.ps1`, on **both** PowerShell 7 and Windows
+PowerShell 5.1. It asserts a clean runner, that the tarball's sha256 matches
+the published `SHA256SUMS`, that the three `.exe` files land, and that
+`asd.exe --version` reports the tag. Like `verify-install`, it runs after
+publish, so it alarms rather than prevents.
+
+It is the only check on the Windows tarball's sum: the Homebrew formula pins a
+sha256 per target but has **no Windows bottle**, so `verify-release.sh`'s
+formula-vs-`SHA256SUMS` comparison skips that target entirely.
+
+**Automatic, on changes to the installer.** `windows-installer.yml` runs
+`scripts/test-install-ps1.ps1` against a local fixture release — 8 cases on
+both shells, covering the checksum policy (match / tampered / absent / not
+listed) and the encoding invariant. It proves `install.ps1`'s *logic*; it
+cannot prove a real release installs, because the fixture supplies its own
+tarball and sums.
+
+### Re-proving the check still bites
+
+A verification job that cannot fail is worse than none, because it is trusted.
+Once in a while — and after any change to
+`scripts/verify-release-windows.ps1` — run **Actions → verify-release-windows
+→ Run workflow** against these three tags and confirm each behaves as stated:
+
+| tag | expect | exercises |
+|---|---|---|
+| `v1.2.0` | **pass** | a good release; guards against a check that always fails |
+| `v1.1.0` | **fail** | tarball present, sums absent — genuinely predates `SHA256SUMS`, so it must be caught as *"ships no checksums"*, not as propagation lag |
+| `v9.9.9` | **fail** | neither asset — bad tag, the only case where raising the wait budget is the right advice |
+
+A green on `v1.2.0` alone is not evidence. The `v1.1.0` red is the one that
+shows the check can fail at all.
+
+Not exercised by any of these, and worth knowing: the *sums present, tarball
+absent* branch (no Windows target built) has no real tag to trigger it, and the
+script's own "installer took the soft no-sums path" assertion is unreachable
+while the asset gate stops first. `install.ps1`'s soft path itself is covered
+by the `nosums` fixture case.
+
+Two PowerShell rules that cost a round each, so they are written down rather
+than rediscovered:
+
+- **Keep every `.ps1` pure ASCII.** Windows PowerShell 5.1 reads a script in
+  the system ANSI codepage unless it has a UTF-8 BOM, and box-drawing
+  characters decode into smart quotes, which are *string delimiters*. This
+  once made `install.ps1` completely unparseable under 5.1 while PowerShell 7
+  read it fine. `test-install-ps1.ps1` now asserts the invariant.
+- **Always run both shells.** 7 passed every case on the commit where 5.1 could
+  not parse the file at all.
+
 ## After the release: bump the site footer
 
 The marketing site carries a hardcoded version string that nothing derives
