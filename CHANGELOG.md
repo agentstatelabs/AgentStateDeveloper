@@ -12,6 +12,19 @@ Versions use semantic versioning.
 
 ---
 
+## [v1.2.1] — 2026-09-04
+
+### Fixed
+- **`install.ps1` could not be parsed by Windows PowerShell 5.1 — the Windows installer was broken for anyone running the stock shell.** Windows PowerShell 5.1 reads a `.ps1` file in the system ANSI codepage unless the file carries a UTF-8 BOM. The installer was UTF-8 with no BOM and 235 box-drawing characters in its section headers; `U+2500` is the bytes `E2 94 80`, and `0x94` in CP1252 is a smart right-double-quote — which PowerShell treats as a **string delimiter**. 5.1 saw 235 stray quotes and died on a wall of unterminated strings before reaching a single line of logic. `iwr … | iex` was unaffected, because `Invoke-WebRequest` decodes the HTTP body by its charset and never reads a file through the codepage — so the *safer* habit, downloading the script to read it before running it, was the broken one. Both `.ps1` files are now pure ASCII, asserted as an invariant by the test suite. PowerShell 7 reads UTF-8 regardless and was never affected, which is why this survived unnoticed.
+
+### Added
+- **`install.ps1`'s checksum verification now runs on every change, on a real Windows runner.** It had never executed anywhere — there is no PowerShell on the development machine, so the code was reviewed rather than run, and it *fails closed*: a pattern that never matches means every Windows install dies rather than degrading. `scripts/test-install-ps1.ps1` exercises eight cases against a local fixture release — sums matching, a tampered tarball, sums absent (must stay soft), sums omitting the tarball, the documented `iwr | iex` path, and guards for uppercase sums, CRLF line endings and the binary-mode `*` marker — on **both** PowerShell 7 and Windows PowerShell 5.1.
+- **Every release now verifies that its Windows artifact actually installs.** `verify-release-windows.ps1` runs on `windows-latest` after publish, installing the real release and asserting a clean runner, a checksum verified against the published `SHA256SUMS`, all three binaries present, and the tag's version reported back. This is the only check on the Windows tarball's sum: the Homebrew formula pins a sha256 per target but has no Windows bottle, so the formula comparison skips that target entirely.
+- **`ASD_DOWNLOAD_BASE`** on both installers — points them at an alternate asset location so the installer can be exercised against a fixture without editing the file under test. `ASD_RELEASES_REPO` could already redirect the download, so this adds no new exposure.
+
+### Changed
+- **The tap-mirror wait is now based on a measurement rather than a guess.** `verify-install` allowed 300s for the GitLab→GitHub tap mirror; the real latency on v1.2.0 was **11m43s**, so a sound release reported *"formula version is 1.1.0, expected 1.2.0"* — indistinguishable from a bad one. The budget is now 1800s, and an exhausted budget is reported differently from a genuinely wrong formula. A check whose red is ambiguous gets ignored, and being ignored is how the breaks it exists to catch survive.
+
 ## [v1.2.0] — 2026-09-03
 
 ### Fixed
