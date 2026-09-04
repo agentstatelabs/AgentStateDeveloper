@@ -16,6 +16,11 @@
 # Environment:
 #   ASD_VERSION         — release tag to install (default: latest, e.g. "v1.1.14")
 #   INSTALL_DIR         — target directory (default: ~/.local/bin)
+#   ASD_DOWNLOAD_BASE   — directory URL holding the release assets (default:
+#                         the GitHub release for $TAG). Lets the installer be
+#                         exercised against a local fixture server without
+#                         editing this file; ASD_RELEASES_REPO can already
+#                         redirect the download, so this adds no new exposure.
 #   ASD_RELEASES_REPO   — GitHub repo hosting release artifacts
 #                         (default: agentstatelabs/agentstatedeveloper-releases)
 #
@@ -92,7 +97,9 @@ fi
 
 # ─── Download + extract the tarball ────────────────────────────────────────
 TARBALL="asd-${TAG}-${TARGET}.tar.gz"
-URL="https://github.com/${RELEASES_REPO}/releases/download/${TAG}/${TARBALL}"
+DOWNLOAD_BASE="${ASD_DOWNLOAD_BASE:-https://github.com/${RELEASES_REPO}/releases/download/${TAG}}"
+DOWNLOAD_BASE="${DOWNLOAD_BASE%/}"
+URL="${DOWNLOAD_BASE}/${TARBALL}"
 TMP=$(mktemp -d -t asd-install.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -111,7 +118,7 @@ fi
 # A release cut before SHA256SUMS existed has no such file. Warn rather than
 # die there, so pinning an older ASD_VERSION still works — but a file that IS
 # present and does NOT match is a hard failure, never a warning.
-SUMS_URL="https://github.com/${RELEASES_REPO}/releases/download/${TAG}/SHA256SUMS"
+SUMS_URL="${DOWNLOAD_BASE}/SHA256SUMS"
 if curl -fsSL "$SUMS_URL" -o "${TMP}/SHA256SUMS" 2>/dev/null; then
     EXPECTED=$(sed -n "s|^\([0-9a-fA-F]\{64\}\)[[:space:]][[:space:]]*[*]\{0,1\}\(\./\)\{0,1\}${TARBALL}\$|\1|p" \
         "${TMP}/SHA256SUMS" | head -1)

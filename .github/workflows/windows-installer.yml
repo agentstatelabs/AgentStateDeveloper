@@ -1,0 +1,74 @@
+# Exercise install.ps1's checksum verification on a real Windows runner.
+#
+# install.ps1 gained sha256 verification in MR !38, but until this workflow the
+# code had never EXECUTED anywhere — there is no PowerShell on the dev machine,
+# so it was reviewed rather than run. The shell installer's equivalent path is
+# covered by scripts/verify-release.sh; this is the Windows half of that, and it
+# matters more, because install.ps1 FAILS CLOSED. If the SHA256SUMS line never
+# matches, the installer refuses and every Windows install dies with
+# "does not list <tarball>. Refusing to install." — not a degraded install, no
+# install at all.
+#
+# The interesting cases cannot be produced by a real release (GitHub will not
+# serve a tampered tarball on request), so the test stands up a local fixture
+# release and points the SHIPPED install.ps1 at it via ASD_DOWNLOAD_BASE.
+#
+# Both shells run: users may invoke either, and the regex and string handling
+# that this test is really about differ between Windows PowerShell 5.1
+# (.NET Framework) and PowerShell 7 (.NET). A bug in only one of them is still
+# a bug for whoever runs that one.
+#
+# NOT covered here: installing the actual published release on Windows at tag
+# time — the GitLab `verify-install` job does that for the shell path only.
+# Tracked separately; see plan install-path-verification.
+
+name: windows-installer
+
+# NO pull_request trigger, and no feature-branch trigger, deliberately: this
+# GitHub repo is a MIRROR. The GitLab `publish-github` job only pushes on main
+# and on tags, so a branch here never exists and a PR here never opens. A
+# `pull_request:` trigger would look like pre-merge coverage while never once
+# firing. Development happens in GitLab merge requests, so the honest options
+# are main-push (below) and the manual button — run the workflow_dispatch build
+# against a branch mirrored by hand if you need an answer before merging, or
+# just run scripts/test-install-ps1.ps1 on any Windows box.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "install.ps1"
+      - "scripts/test-install-ps1.ps1"
+      - ".github/workflows/windows-installer.yml"
+  workflow_dispatch: {}
+
+jobs:
+  ps1-checksum:
+    name: install.ps1 checksum (${{ matrix.shell }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # PowerShell 7 — what `pwsh` resolves to, and what most current
+          # Windows dev setups have.
+          - shell: pwsh
+            exe: pwsh
+          # Windows PowerShell 5.1 — still the default `powershell` on a stock
+          # Windows box, so it is what an `iwr ... | iex` one-liner is most
+          # likely to actually run.
+          - shell: windows-powershell-5.1
+            exe: powershell
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: report shell version
+        shell: pwsh
+        run: |
+          & ${{ matrix.exe }} -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+
+      # Uses the repo's install.ps1 unmodified — ASD_DOWNLOAD_BASE exists so the
+      # file under test is the file that ships, not a copy with the URL edited.
+      - name: exercise the checksum paths
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File scripts/test-install-ps1.ps1 -Pwsh ${{ matrix.exe }}

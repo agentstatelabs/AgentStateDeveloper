@@ -11,6 +11,13 @@
 #   $env:ASD_VERSION         — release tag to install (default: latest, e.g. "v1.1.14")
 #   $env:ASD_RELEASES_REPO   — GitHub repo hosting release artifacts
 #                              (default: agentstatelabs/agentstatedeveloper-releases)
+#   $env:ASD_DOWNLOAD_BASE   — directory URL holding the release assets
+#                              (default: the GitHub release for $Tag). Exists so
+#                              the installer can be exercised against a local
+#                              fixture server without editing this file — see
+#                              scripts/test-install-ps1.ps1. Redirecting the
+#                              download is already possible via
+#                              ASD_RELEASES_REPO, so this adds no new exposure.
 #
 # Plan N t-001 (1.1.14): frictionless distribution. CTXone parity.
 
@@ -71,7 +78,12 @@ if ($env:ASD_VERSION) {
 
 # ─── Download + extract the tarball ────────────────────────────────────────
 $Tarball = "asd-$Tag-$Target.tar.gz"
-$Url = "https://github.com/$ReleasesRepo/releases/download/$Tag/$Tarball"
+$DownloadBase = if ($env:ASD_DOWNLOAD_BASE) {
+    $env:ASD_DOWNLOAD_BASE.TrimEnd('/')
+} else {
+    "https://github.com/$ReleasesRepo/releases/download/$Tag"
+}
+$Url = "$DownloadBase/$Tarball"
 $Tmp = Join-Path $env:TEMP "asd-install-$Tag"
 New-Item -ItemType Directory -Force -Path $Tmp | Out-Null
 
@@ -95,7 +107,7 @@ try {
 # A release cut before SHA256SUMS existed has no such file: warn there so a
 # pinned older -Version still installs. A file that IS present and does NOT
 # match is a hard failure.
-$SumsUrl = "https://github.com/$ReleasesRepo/releases/download/$Tag/SHA256SUMS"
+$SumsUrl = "$DownloadBase/SHA256SUMS"
 $SumsPath = Join-Path $Tmp "SHA256SUMS"
 $HaveSums = $true
 try {
