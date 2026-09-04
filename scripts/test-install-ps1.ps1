@@ -134,8 +134,31 @@ $py = Get-Command python -ErrorAction SilentlyContinue
 if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
 if (-not $py) { throw "python is required for the fixture server but was not found on PATH" }
 
+# Not `python -m http.server`: it serves an unknown extension as
+# application/octet-stream, and Invoke-WebRequest returns .Content as a String
+# only for a TEXT content type -- Byte[] otherwise, which Invoke-Expression
+# refuses. raw.githubusercontent.com serves .ps1 as text/plain; charset=utf-8,
+# so a stock http.server would fail the one-liner case for a reason no real
+# user could ever hit. Mirror the real header instead.
+$ServePy = Join-Path $Root "serve.py"
+@'
+import sys
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+
+class H(SimpleHTTPRequestHandler):
+    def guess_type(self, path):
+        if str(path).endswith(".ps1"):
+            return "text/plain; charset=utf-8"
+        return super().guess_type(path)
+
+    def log_message(self, *a):
+        pass
+
+ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+'@ | Set-Content -Path $ServePy -Encoding ascii
+
 $server = Start-Process -FilePath $py.Source `
-    -ArgumentList @("-m", "http.server", "$Port", "--bind", "127.0.0.1") `
+    -ArgumentList @($ServePy, "$Port") `
     -WorkingDirectory $Srv -PassThru -WindowStyle Hidden
 
 $ready = $false
@@ -236,6 +259,15 @@ try {
     Write-Host "The documented one-liner (iwr | iex), which reads no file:"
     if (Test-Path $BinDir) { Remove-Item -Recurse -Force $BinDir }
     $env:ASD_DOWNLOAD_BASE = "http://127.0.0.1:$Port/ok"
+    # Assert the fixture reproduces GitHub's content type before relying on it:
+    # if .Content is not a String, the case would fail on the fixture rather
+    # than on the installer, which is the mistake this line exists to catch.
+    $probe = (Invoke-WebRequest -Uri "http://127.0.0.1:$Port/install.ps1" -UseBasicParsing).Content
+    if ($probe -isnot [string]) {
+        Write-Host "  FAIL  oneliner  fixture served install.ps1 as $($probe.GetType().Name), not String" -ForegroundColor Red
+        Write-Host "        the real raw.githubusercontent.com sends text/plain; charset=utf-8" -ForegroundColor Red
+        $Failures.Add("oneliner-fixture")
+    }
     $oneLiner = "iex ((Invoke-WebRequest -Uri 'http://127.0.0.1:$Port/install.ps1' -UseBasicParsing).Content)"
     $savedEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
