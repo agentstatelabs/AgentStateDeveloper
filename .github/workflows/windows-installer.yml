@@ -13,10 +13,18 @@
 # serve a tampered tarball on request), so the test stands up a local fixture
 # release and points the SHIPPED install.ps1 at it via ASD_DOWNLOAD_BASE.
 #
-# Both shells run: users may invoke either, and the regex and string handling
-# that this test is really about differ between Windows PowerShell 5.1
-# (.NET Framework) and PowerShell 7 (.NET). A bug in only one of them is still
-# a bug for whoever runs that one.
+# Both shells run, and that is not belt-and-braces: the FIRST run of this
+# workflow passed on PowerShell 7 and failed on Windows PowerShell 5.1, where
+# install.ps1 could not be PARSED AT ALL. 5.1 reads a .ps1 in the system ANSI
+# codepage unless the file carries a UTF-8 BOM, and the file's 235 box-drawing
+# characters (U+2500 = E2 94 80) decode in CP1252 with 0x94 as a smart
+# right-double-quote -- a string delimiter to PowerShell. `powershell -File
+# install.ps1` died on a wall of unterminated strings. Fixed by keeping both
+# .ps1 files pure ASCII, now asserted as an invariant by the test itself.
+#
+# That failure was invisible to PowerShell 7, which reads UTF-8 regardless. A
+# single-shell matrix here would have shipped a totally broken installer for
+# whoever runs the stock `powershell`.
 #
 # NOT covered here: installing the actual published release on Windows at tag
 # time — the GitLab `verify-install` job does that for the shell path only.
