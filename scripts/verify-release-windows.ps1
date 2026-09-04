@@ -93,8 +93,6 @@ function Wait-Url {
         } catch {
             if ($waited -ge $WaitSeconds) {
                 Fail "$Label not reachable after ${waited}s: $Url"
-                Write-Host "        if it resolves later this was propagation, not a bad release -" -ForegroundColor Yellow
-                Write-Host "        raise -WaitSeconds rather than assuming the publish failed" -ForegroundColor Yellow
                 return $false
             }
             Start-Sleep -Seconds 15
@@ -106,6 +104,28 @@ $haveTarball = Wait-Url -Url "$Base/$Tarball"     -Label "$Tarball"
 $haveSums    = Wait-Url -Url "$Base/SHA256SUMS"   -Label "SHA256SUMS"
 
 if (-not ($haveTarball -and $haveSums)) {
+    # Which asset is missing changes what it MEANS, and a check that reports
+    # both the same way gets ignored -- the lesson of the shell-side false red
+    # (MR !44). The first real exercise of this script hit exactly that: v1.1.0
+    # failed with "if it resolves later this was propagation", when a present
+    # tarball beside an absent SHA256SUMS had already ruled propagation out.
+    Write-Host ""
+    if ($haveTarball -and -not $haveSums) {
+        Write-Host "DIAGNOSIS: the tarball is published but SHA256SUMS is not." -ForegroundColor Red
+        Write-Host "  Both are uploaded by the same publish step, so a present tarball" -ForegroundColor Red
+        Write-Host "  beside an absent sums file is NOT propagation lag." -ForegroundColor Red
+        Write-Host "  This release ships no checksums: the installer would take its" -ForegroundColor Red
+        Write-Host "  fail-open warn path and install UNVERIFIED. That is the failure." -ForegroundColor Red
+        Write-Host "  (Releases before v1.2.0 genuinely predate SHA256SUMS.)" -ForegroundColor Red
+    } elseif (-not $haveTarball -and $haveSums) {
+        Write-Host "DIAGNOSIS: SHA256SUMS is published but the Windows tarball is not." -ForegroundColor Red
+        Write-Host "  The build did not produce x86_64-pc-windows-msvc for this tag." -ForegroundColor Red
+    } else {
+        Write-Host "DIAGNOSIS: neither asset is reachable." -ForegroundColor Red
+        Write-Host "  Either the tag does not exist, or the release has not propagated." -ForegroundColor Red
+        Write-Host "  If both resolve later, raise -WaitSeconds (currently ${WaitSeconds}s)" -ForegroundColor Red
+        Write-Host "  rather than assuming the publish failed." -ForegroundColor Red
+    }
     Write-Host ""
     Write-Host "FAILED: release assets missing; not attempting the install." -ForegroundColor Red
     exit 1
