@@ -8,13 +8,13 @@
 # and drops them in %LOCALAPPDATA%\asd\bin (added to your user PATH).
 #
 # Environment:
-#   $env:ASD_VERSION         — release tag to install (default: latest, e.g. "v1.1.14")
-#   $env:ASD_RELEASES_REPO   — GitHub repo hosting release artifacts
+#   $env:ASD_VERSION         - release tag to install (default: latest, e.g. "v1.1.14")
+#   $env:ASD_RELEASES_REPO   - GitHub repo hosting release artifacts
 #                              (default: agentstatelabs/agentstatedeveloper-releases)
-#   $env:ASD_DOWNLOAD_BASE   — directory URL holding the release assets
+#   $env:ASD_DOWNLOAD_BASE   - directory URL holding the release assets
 #                              (default: the GitHub release for $Tag). Exists so
 #                              the installer can be exercised against a local
-#                              fixture server without editing this file — see
+#                              fixture server without editing this file - see
 #                              scripts/test-install-ps1.ps1. Redirecting the
 #                              download is already possible via
 #                              ASD_RELEASES_REPO, so this adds no new exposure.
@@ -31,7 +31,7 @@ Write-Host ""
 Write-Host "AgentStateDeveloper installer (Windows)" -ForegroundColor Cyan
 Write-Host ""
 
-# ─── Architecture detection ─────────────────────────────────────────────────
+# --- Architecture detection -------------------------------------------------
 $Arch = switch ($env:PROCESSOR_ARCHITECTURE) {
     "AMD64" { "x86_64" }
     "ARM64" {
@@ -52,7 +52,7 @@ Write-Host ""
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
-# ─── Resolve release tag ────────────────────────────────────────────────────
+# --- Resolve release tag ----------------------------------------------------
 if ($env:ASD_VERSION) {
     $Tag = $env:ASD_VERSION
     Write-Host "  Pinned: $Tag"
@@ -76,7 +76,7 @@ if ($env:ASD_VERSION) {
     Write-Host "  Latest: $Tag"
 }
 
-# ─── Download + extract the tarball ────────────────────────────────────────
+# --- Download + extract the tarball ----------------------------------------
 $Tarball = "asd-$Tag-$Target.tar.gz"
 $DownloadBase = if ($env:ASD_DOWNLOAD_BASE) {
     $env:ASD_DOWNLOAD_BASE.TrimEnd('/')
@@ -99,7 +99,7 @@ try {
     exit 1
 }
 
-# ─── Verify the download ────────────────────────────────────────────────────
+# --- Verify the download ----------------------------------------------------
 # The Homebrew formula pins a sha256 per target and refuses on mismatch; this
 # path had no equivalent and trusted TLS alone. The release publishes
 # SHA256SUMS beside the tarballs, so verify against it.
@@ -150,7 +150,7 @@ if ($LASTEXITCODE -ne 0) {
 foreach ($bin in @("asd.exe", "asd-mcp.exe", "asd-serve.exe")) {
     $src = Join-Path $Tmp $bin
     if (-not (Test-Path $src)) {
-        Write-Error "Tarball is missing $bin — release artifact is malformed."
+        Write-Error "Tarball is missing $bin - release artifact is malformed."
         exit 1
     }
     Copy-Item -Force $src (Join-Path $InstallDir $bin)
@@ -161,7 +161,7 @@ Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
 Write-Host ""
 Write-Host "Installed to $InstallDir" -ForegroundColor Green
 
-# ─── PATH update (user-level, no admin required) ───────────────────────────
+# --- PATH update (user-level, no admin required) ---------------------------
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if (-not $UserPath) { $UserPath = "" }
 $PathEntries = $UserPath -split ';' | Where-Object { $_ -ne "" }

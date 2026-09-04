@@ -3,13 +3,13 @@
 # WHY THIS EXISTS
 # ---------------
 # install.ps1 gained sha256 verification in MR !38 (4f24c591), written to match
-# install.sh's policy, but it had never been RUN — there is no PowerShell on the
+# install.sh's policy, but it had never been RUN - there is no PowerShell on the
 # dev Mac, so the code was reasoned about, not executed. That matters more here
 # than on the sh side because this path FAILS CLOSED: if the SHA256SUMS line
 # never matches, the installer refuses and every Windows install dies. A bug
 # here is not a degraded install, it is no install at all.
 #
-# A real release cannot exercise the interesting cases — you cannot ask GitHub
+# A real release cannot exercise the interesting cases - you cannot ask GitHub
 # for a tampered tarball or a truncated sums file. So this serves a fixture
 # release over HTTP and points the installer at it with ASD_DOWNLOAD_BASE,
 # which exists precisely so the script under test is the shipped file, byte for
@@ -17,14 +17,14 @@
 #
 # The last three cases target the three things most likely to be wrong, called
 # out when the task was filed:
-#   * UPPERCASE sums   — Get-FileHash returns uppercase, sha256sum writes
+#   * UPPERCASE sums   - Get-FileHash returns uppercase, sha256sum writes
 #                        lowercase. The compare uses -ine deliberately; -cne
 #                        would fail every install on letter case alone.
-#   * CRLF sums        — sums are produced by sha256sum on ubuntu-22.04 (LF).
+#   * CRLF sums        - sums are produced by sha256sum on ubuntu-22.04 (LF).
 #                        A stray CR would sit between the filename and the
 #                        regex's `$` anchor, which in .NET tolerates a trailing
 #                        \n but NOT a trailing \r.
-#   * binary-mode "*"  — sha256sum --binary writes "<hash> *<name>".
+#   * binary-mode "*"  - sha256sum --binary writes "<hash> *<name>".
 #
 # Usage:
 #   pwsh -File scripts/test-install-ps1.ps1
@@ -49,11 +49,33 @@ $Tarball = "asd-$Tag-$Target.tar.gz"
 if (-not (Test-Path $InstallScript)) { throw "install script not found: $InstallScript" }
 $InstallScript = (Resolve-Path $InstallScript).Path
 
+# --- Encoding invariant ----------------------------------------------------
+# Windows PowerShell 5.1 reads a .ps1 file in the system ANSI codepage unless
+# the file carries a UTF-8 BOM. A UTF-8 file without one is therefore MOJIBAKE
+# to 5.1 -- and the damage is not cosmetic: U+2500 (box drawing, "-") is the
+# bytes E2 94 80, and 0x94 in CP1252 is a smart right-double-quote, which
+# PowerShell treats as a STRING DELIMITER. install.ps1 once carried 235 of
+# them in its section headers, so 5.1 could not parse the file at all.
+#
+# Asserted here as a cheap invariant rather than left to the behavioural cases,
+# because a parse failure makes every case fail at once and buries the cause.
+$InstallBytes = [System.IO.File]::ReadAllBytes($InstallScript)
+$HasBom = ($InstallBytes.Length -ge 3) -and
+          ($InstallBytes[0] -eq 0xEF) -and ($InstallBytes[1] -eq 0xBB) -and ($InstallBytes[2] -eq 0xBF)
+$NonAscii = @($InstallBytes | Where-Object { $_ -gt 127 }).Count
+if (-not $HasBom -and $NonAscii -gt 0) {
+    Write-Host "  FAIL  encoding  install.ps1 has $NonAscii non-ASCII bytes and no UTF-8 BOM" -ForegroundColor Red
+    Write-Host "        Windows PowerShell 5.1 will read it in the ANSI codepage and fail to parse." -ForegroundColor Red
+    Write-Host "        Fix: keep the file pure ASCII, or write it with a UTF-8 BOM." -ForegroundColor Red
+    exit 1
+}
+Write-Host ("encoding       : {0}, {1} non-ASCII bytes" -f $(if ($HasBom) { "UTF-8 BOM" } else { "no BOM" }), $NonAscii)
+
 Write-Host "install script : $InstallScript"
 Write-Host "powershell     : $Pwsh"
 Write-Host ""
 
-# ─── Build the fixture release ─────────────────────────────────────────────
+# --- Build the fixture release ---------------------------------------------
 $Root = Join-Path ([System.IO.Path]::GetTempPath()) "asd-ps1-test-$(Get-Random)"
 $Srv  = Join-Path $Root "srv"
 New-Item -ItemType Directory -Force -Path $Srv | Out-Null
@@ -72,7 +94,7 @@ $GoodHash = (Get-FileHash -Algorithm SHA256 -Path (Join-Path $Root $Tarball)).Ha
 Write-Host "fixture sha256 : $GoodHash"
 
 # Write a sums file with explicit bytes so line endings are exactly as intended
-# — Set-Content would normalise them and quietly defeat the CRLF case.
+# - Set-Content would normalise them and quietly defeat the CRLF case.
 function Write-Sums {
     param([string]$Path, [string]$Body)
     [System.IO.File]::WriteAllText($Path, $Body, (New-Object System.Text.UTF8Encoding $false))
@@ -101,7 +123,13 @@ New-Case -Name "upper"     -Sums ("$($GoodHash.ToUpper())  $Tarball$lf")        
 New-Case -Name "crlf"      -Sums ("$GoodHash  $Tarball`r`n")                            | Out-Null
 New-Case -Name "binmode"   -Sums ("$GoodHash *$Tarball$lf")                             | Out-Null
 
-# ─── Serve it ──────────────────────────────────────────────────────────────
+# --- Serve it --------------------------------------------------------------
+# The documented install is `iwr <url> | iex`, which never touches the file
+# system -- Invoke-WebRequest decodes the HTTP body by its charset, so it can
+# succeed on a file that `powershell -File` cannot even parse. Serve the script
+# itself so that path gets asserted too rather than assumed.
+Copy-Item $InstallScript (Join-Path $Srv "install.ps1")
+
 $py = Get-Command python -ErrorAction SilentlyContinue
 if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
 if (-not $py) { throw "python is required for the fixture server but was not found on PATH" }
@@ -125,7 +153,7 @@ if (-not $ready) {
 Write-Host "fixture server : http://127.0.0.1:$Port"
 Write-Host ""
 
-# ─── Isolate the install so the runner's real profile is untouched ─────────
+# --- Isolate the install so the runner's real profile is untouched ---------
 $RealLocalAppData = $env:LOCALAPPDATA
 $SavedUserPath    = [Environment]::GetEnvironmentVariable("Path", "User")
 $env:LOCALAPPDATA = Join-Path $Root "localappdata"
@@ -145,7 +173,7 @@ function Invoke-Case {
     )
 
     # install.ps1 creates the bin dir before it downloads, so a bare directory
-    # is not evidence of an install — assert on the binaries themselves.
+    # is not evidence of an install - assert on the binaries themselves.
     if (Test-Path $BinDir) { Remove-Item -Recurse -Force $BinDir }
 
     $env:ASD_DOWNLOAD_BASE = "http://127.0.0.1:$Port/$Name"
@@ -205,6 +233,27 @@ try {
         -Because "sums omit this tarball -> refuses, nothing installed"
 
     Write-Host ""
+    Write-Host "The documented one-liner (iwr | iex), which reads no file:"
+    if (Test-Path $BinDir) { Remove-Item -Recurse -Force $BinDir }
+    $env:ASD_DOWNLOAD_BASE = "http://127.0.0.1:$Port/ok"
+    $oneLiner = "iex ((Invoke-WebRequest -Uri 'http://127.0.0.1:$Port/install.ps1' -UseBasicParsing).Content)"
+    $savedEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $out  = (& $Pwsh -NoProfile -Command $oneLiner 2>&1 | Out-String)
+        $code = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $savedEap }
+    $ok = @("asd.exe", "asd-mcp.exe", "asd-serve.exe") |
+        ForEach-Object { Test-Path (Join-Path $BinDir $_) }
+    if (($ok -notcontains $false) -and ($out -match "checksum verified")) {
+        Write-Host ("  PASS  {0,-9} {1}" -f "oneliner", "iwr | iex installs and verifies") -ForegroundColor Green
+    } else {
+        Write-Host ("  FAIL  {0,-9} {1}" -f "oneliner", "iwr | iex installs and verifies") -ForegroundColor Red
+        foreach ($l in ($out -split "`r?`n")) { Write-Host "        $l" -ForegroundColor DarkGray }
+        $Failures.Add("oneliner")
+    }
+
+    Write-Host ""
     Write-Host "Regression guards for the three most-likely-wrong details:"
     Invoke-Case -Name "upper"    -ExpectExit 0 -ExpectInstalled $true `
         -MustSay @("checksum verified") `
@@ -236,5 +285,5 @@ if ($Failures.Count -gt 0) {
     Write-Host "FAILED: $($Failures -join ', ')" -ForegroundColor Red
     exit 1
 }
-Write-Host "All 7 cases passed." -ForegroundColor Green
+Write-Host "All 8 cases passed." -ForegroundColor Green
 exit 0
