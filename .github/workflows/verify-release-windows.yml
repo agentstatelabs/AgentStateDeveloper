@@ -1,0 +1,84 @@
+# Verify that a PUBLISHED release actually installs on Windows.
+#
+# This is the Windows half of release verification. GitLab's `verify-install`
+# job runs scripts/verify-release.sh in a Linux container with no PowerShell,
+# so it covers the shell path only. Until this existed, nothing checked at tag
+# time that the Windows tarball downloads, that its sha256 matches the
+# published SHA256SUMS, that it extracts, or that asd.exe reports the tag.
+#
+# The Windows tarball is also the one artifact whose published sum nothing else
+# cross-checks -- the Homebrew formula pins a sha256 per target but has no
+# Windows bottle, so verify-release.sh's formula-vs-SHA256SUMS comparison skips
+# it entirely.
+#
+# TWO ENTRY POINTS, one implementation:
+#   * workflow_call  -- release.yml invokes it with `needs: publish`. The
+#     release assets do not exist until publish finishes, so a separate
+#     tag-triggered workflow would RACE it. That race is what produced the
+#     false red on v1.2.0's shell-side check (fixed in MR !44); no reason to
+#     rebuild the same trap on the Windows side.
+#   * workflow_dispatch -- run it by hand against any released tag. That is
+#     both a re-verify button and the way to exercise the FAILURE direction
+#     (point it at a tag that does not exist, or one published before
+#     SHA256SUMS) without cutting a release to do it.
+#
+# Like the shell-side job this ALARMS rather than PREVENTS: verifying that a
+# published artifact installs cannot happen before publishing it.
+
+name: verify-release-windows
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag to verify (e.g. v1.2.0)"
+        required: true
+        type: string
+      wait-seconds:
+        description: "How long to wait for release assets to become reachable"
+        required: false
+        default: 300
+        type: number
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to verify (e.g. v1.2.0)"
+        required: true
+        type: string
+      wait-seconds:
+        description: "How long to wait for release assets to become reachable"
+        required: false
+        default: 60
+        type: number
+
+jobs:
+  install:
+    name: install ${{ inputs.tag }} (${{ matrix.shell }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shell: pwsh
+            exe: pwsh
+          # Windows PowerShell 5.1 is not redundant here. install.ps1 once
+          # parsed cleanly under PowerShell 7 while being completely
+          # unparseable under 5.1 (ANSI codepage, no BOM -- see MR !46). A
+          # single-shell matrix called that green.
+          - shell: windows-powershell-5.1
+            exe: powershell
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: report shell version
+        shell: pwsh
+        run: '& ${{ matrix.exe }} -NoProfile -Command ''$PSVersionTable.PSVersion.ToString()'''
+
+      # Runs the repo's install.ps1 unmodified against the real release.
+      - name: install and verify the published release
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File scripts/verify-release-windows.ps1 `
+            -Tag '${{ inputs.tag }}' `
+            -Pwsh ${{ matrix.exe }} `
+            -WaitSeconds ${{ inputs.wait-seconds }}

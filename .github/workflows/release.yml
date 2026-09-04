@@ -173,3 +173,22 @@ jobs:
             dist/*.tar.gz
             dist/SHA256SUMS
           fail_on_unmatched_files: true
+
+  # Windows half of release verification. GitLab's `verify-install` runs
+  # verify-release.sh in a Linux container with no PowerShell, so it covers the
+  # shell path only -- nothing checked that the published Windows tarball
+  # actually installs. It is also the one artifact whose sum nothing else
+  # cross-checks: the Homebrew formula has no Windows bottle.
+  #
+  # `needs: publish` is load-bearing. The release assets do not exist until
+  # publish finishes, so a separately tag-triggered workflow would race it --
+  # the race that produced the false red on v1.2.0's shell-side check (MR !44).
+  #
+  # Alarms rather than prevents, necessarily: verifying that a published
+  # artifact installs cannot happen before publishing it.
+  verify-windows:
+    name: verify windows install
+    needs: publish
+    uses: ./.github/workflows/verify-release-windows.yml
+    with:
+      tag: ${{ github.ref_name }}
