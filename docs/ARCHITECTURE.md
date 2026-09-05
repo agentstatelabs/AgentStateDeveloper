@@ -169,7 +169,7 @@ window being the scarcest resource in the loop.
 ## Where the suite fits
 
 ASD is per-developer, single-repo, and local. Its cross-repo and team story
-is **[CTXone](https://github.com/ctxone/ctxone)** — same AgentStateGraph
+is **[CTXone](https://github.com/AgentStateLabs/CTXone)** — same AgentStateGraph
 substrate, but holding shared team memory and plans instead of one repo's
 code context. See [CTXONE_INTEGRATION.md](CTXONE_INTEGRATION.md).
 

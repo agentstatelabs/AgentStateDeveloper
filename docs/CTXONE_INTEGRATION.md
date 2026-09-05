@@ -1,9 +1,9 @@
 # ASD + CTXone — the suite
 
-ASD and **[CTXone](https://github.com/ctxone/ctxone)** are built as a suite:
+ASD and **[CTXone](https://github.com/AgentStateLabs/CTXone)** are built as a suite:
 usable separately, materially better together. This is the ASD-side view of
 the pairing; CTXone's mirror doc is
-[ASD_INTEGRATION.md](https://github.com/ctxone/ctxone/blob/main/docs/ASD_INTEGRATION.md).
+[ASD_INTEGRATION.md](https://github.com/AgentStateLabs/CTXone/blob/main/docs/ASD_INTEGRATION.md).
 
 ---
 
@@ -97,4 +97,4 @@ analysis (portfolio architecture, cross-repo impact); CTXone adds the shared
 
 - [WALKTHROUGH.md](WALKTHROUGH.md) — the daily loop, including the suite section
 - [ARCHITECTURE.md](ARCHITECTURE.md) — the shared AgentStateGraph substrate
-- CTXone's [ASD_INTEGRATION.md](https://github.com/ctxone/ctxone/blob/main/docs/ASD_INTEGRATION.md) — the mirror view
+- CTXone's [ASD_INTEGRATION.md](https://github.com/AgentStateLabs/CTXone/blob/main/docs/ASD_INTEGRATION.md) — the mirror view

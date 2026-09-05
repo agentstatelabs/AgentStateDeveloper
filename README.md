@@ -7,7 +7,7 @@ call graph — all queryable by the coding agents that write the code, and
 all checked into git so they travel with every clone.
 
 **Part of a suite:** ASD (per-developer code context) pairs with
-**[CTXone](https://github.com/ctxone/ctxone)** (shared team memory). Installing
+**[CTXone](https://github.com/AgentStateLabs/CTXone)** (shared team memory). Installing
 either offers the other — see [Pairs with CTXone](#pairs-with-ctxone).
 
 ![ASD Lens — the codebase rendered as territory: regions sized by symbol count, with structure, decisions, thinking, effects, and activity as toggleable layers](docs/img/asd-lens-territory.png)
@@ -96,7 +96,7 @@ The [Territory](docs/img/asd-lens-territory.png) view above renders the whole co
 
 ## Pairs with CTXone
 
-ASD and **[CTXone](https://github.com/ctxone/ctxone)** are built as a suite:
+ASD and **[CTXone](https://github.com/AgentStateLabs/CTXone)** are built as a suite:
 
 - **ASD** — per-developer **code context**: the decision ledger, effect
   declarations, call graph, and impact analysis for the code in front of you.

@@ -145,7 +145,7 @@ inside a context window.
 
 ## 6. Using ASD with CTXone (the suite)
 
-ASD is the **per-developer code-context** half. **[CTXone](https://github.com/ctxone/ctxone)**
+ASD is the **per-developer code-context** half. **[CTXone](https://github.com/AgentStateLabs/CTXone)**
 is the **shared team memory** half. They're built to pair:
 
 - **ASD** answers "what does *this code* do, and what will *this change*
