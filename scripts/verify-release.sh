@@ -43,7 +43,19 @@ fi
 VER="${TAG#v}"
 
 RELEASES_REPO="${ASD_RELEASES_REPO:-agentstatelabs/agentstatedeveloper-releases}"
-TAP_RAW="https://raw.githubusercontent.com/agentstatelabs/homebrew-agentstatedeveloper/main/Formula/asd.rb"
+TAP_REPO="agentstatelabs/homebrew-agentstatedeveloper"
+# Two ways to read the same file, and they disagree.
+#
+# raw.githubusercontent.com is a CDN and it LAGS - observed still serving 1.2.0
+# more than an hour after 1.2.1 was pushed, and a cache-busting query string
+# did not shift it. Polling it is cheap and unmetered, so it is fine for the
+# WAIT LOOP, but a verdict taken from it fails good releases.
+#
+# The contents API is authoritative and uncached, so it decides. It also
+# matches what actually matters: `brew` clones the tap over git and never
+# touches the CDN, so the API answer is the one a user's install reflects.
+TAP_RAW="https://raw.githubusercontent.com/${TAP_REPO}/main/Formula/asd.rb"
+TAP_API="https://api.github.com/repos/${TAP_REPO}/contents/Formula/asd.rb?ref=main"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 DO_SHELL=0; DO_FORMULA=0; DO_DOCS=0; DO_BREW=0
@@ -157,8 +169,34 @@ if [ "$DO_FORMULA" -eq 1 ]; then
   done
   [ "$WAITED" -gt 0 ] && note "waited ${WAITED}s for the tap mirror"
 
+  # The loop above polled the CDN. Take the VERDICT from the API instead, so a
+  # lagging CDN cannot fail a good release. One request, after the loop, so an
+  # unauthenticated 60/hour rate limit is never a concern; a token is used when
+  # one is around (CI has one) purely for headroom.
+  RAW_VER=""
+  [ -s "$TMPDIR_F/asd.rb" ] && RAW_VER=$(grep -m1 'version "' "$TMPDIR_F/asd.rb" | sed 's/.*"\(.*\)".*/\1/')
+  FORMULA_SRC="raw CDN"
+  API_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  if [ -n "$API_TOKEN" ]; then
+    curl -fsSL -H "Accept: application/vnd.github.raw" -H "Authorization: Bearer $API_TOKEN" \
+      -o "$TMPDIR_F/asd.api.rb" "$TAP_API" 2>/dev/null || true
+  else
+    curl -fsSL -H "Accept: application/vnd.github.raw" \
+      -o "$TMPDIR_F/asd.api.rb" "$TAP_API" 2>/dev/null || true
+  fi
+  if [ -s "$TMPDIR_F/asd.api.rb" ] && grep -q 'version "' "$TMPDIR_F/asd.api.rb"; then
+    API_VER=$(grep -m1 'version "' "$TMPDIR_F/asd.api.rb" | sed 's/.*"\(.*\)".*/\1/')
+    if [ -n "$RAW_VER" ] && [ "$RAW_VER" != "$API_VER" ]; then
+      note "CDN says '$RAW_VER', API says '$API_VER' - trusting the API (brew reads git, not the CDN)"
+    fi
+    mv "$TMPDIR_F/asd.api.rb" "$TMPDIR_F/asd.rb"
+    FORMULA_SRC="GitHub API"
+  elif [ -s "$TMPDIR_F/asd.rb" ]; then
+    note "contents API unreachable - falling back to the CDN, which can lag"
+  fi
+
   if [ -s "$TMPDIR_F/asd.rb" ]; then
-    pass "fetched the tap formula"
+    pass "fetched the tap formula ($FORMULA_SRC)"
 
     # A formula that does not parse installs for nobody. Cheap to catch here;
     # it was caught by accident once, on a corrupted local checkout.
@@ -184,9 +222,10 @@ if [ "$DO_FORMULA" -eq 1 ]; then
       # check starts crying wolf — which is worse than no check, since a red
       # that is usually spurious gets ignored.
       fail "formula still reads '$FVER' after waiting ${WAITED}s for the tap mirror"
-      note "the GitLab tap may have the right formula while GitHub has not caught up"
-      note "check https://raw.githubusercontent.com/agentstatelabs/homebrew-agentstatedeveloper/main/Formula/asd.rb"
-      note "if it now reads $VER this was a mirror delay, not a bad release — raise ASD_VERIFY_WAIT"
+      note "read from: $FORMULA_SRC"
+      note "the GitLab tap may have the right formula while the GitHub tap has not caught up"
+      note "check: gh api repos/${TAP_REPO}/contents/Formula/asd.rb --jq .content | base64 -d | head"
+      note "if that reads $VER this was a mirror delay, not a bad release — raise ASD_VERIFY_WAIT"
     else
       fail "formula version is '$FVER', expected $VER"
     fi
