@@ -481,7 +481,7 @@ not feature flags.
 ### License
 
 BSL-1.1, matching CTXone. Licensor: AgentStateLabs, LLC. Change License:
-Apache-2.0 after four years. Copy the CTXone LICENSE text verbatim,
+Apache-2.0 after 18 months. Copy the CTXone LICENSE text verbatim,
 swapping "CTXone" for "AgentStateDeveloper."
 
 ### Directory layout
