@@ -372,6 +372,6 @@ ASD is the full per-developer engine: index, ledger, effects, call graph,
 impact, invariants, in-repo cross-service edges, and agent onboarding.
 Self-hosted, no account.
 
-The code is licensed under **BSL-1.1** and converts to **Apache-2.0** four
-years after each release — internal use is free. Full plain-English summary:
+The code is licensed under **BSL-1.1** and converts to **Apache-2.0** 18
+months after each release — internal use is free. Full plain-English summary:
 **[LICENSING.md](LICENSING.md)**.

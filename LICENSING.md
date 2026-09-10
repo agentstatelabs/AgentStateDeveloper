@@ -2,7 +2,7 @@
 
 AgentStateDeveloper (ASD) is open source. The code in this repository is
 licensed under the **Business Source License 1.1 (BSL 1.1)** and converts to
-**Apache 2.0** four years after each release. [LICENSE](LICENSE) is the
+**Apache 2.0** 18 months after each release. [LICENSE](LICENSE) is the
 authoritative text; this document is the plain-English summary.
 
 ASD is one half of a suite. Its shared memory layer is **CTXone** — see the
@@ -35,9 +35,9 @@ use, which is permitted without any arrangement.
 
 ### Automatic conversion to Apache 2.0
 
-Every release of ASD converts to the **Apache License 2.0** four years
+Every release of ASD converts to the **Apache License 2.0** 18 months
 after its release date. After conversion, all BSL restrictions lift for
-that version — the four-year clock keeps the ecosystem protected while
+that version — the 18-month clock keeps the ecosystem protected while
 guaranteeing long-term openness.
 
 ## Questions
