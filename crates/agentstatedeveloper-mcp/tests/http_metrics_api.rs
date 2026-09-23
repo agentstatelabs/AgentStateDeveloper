@@ -22,7 +22,7 @@ use agentstatedeveloper_core::{
 };
 use agentstatedeveloper_mcp::build_router;
 use agentstategraph::CommitOptions;
-use agentstategraph_core::IntentCategory;
+use agentstategraph_core::{IntentCategory, TAG_GIT_REVISION, TAG_PIN_STATE};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{Duration, TimeZone, Utc};
@@ -55,7 +55,18 @@ fn make_symbol(qname: &str, file: &str, line: u32) -> Symbol {
 /// Write one commit with an explicit agent + intent so the distilled rollup
 /// has something to group by.
 fn commit(engine: &Engine, agent: &str, intent: IntentCategory, description: &str, n: u32) {
-    let opts = CommitOptions::new(agent, intent, description);
+    commit_tagged(engine, agent, intent, description, n, Vec::new())
+}
+
+fn commit_tagged(
+    engine: &Engine,
+    agent: &str,
+    intent: IntentCategory,
+    description: &str,
+    n: u32,
+    tags: Vec<String>,
+) {
+    let opts = CommitOptions::new(agent, intent, description).with_tags(tags);
     engine
         .repo
         .set_json(
@@ -191,19 +202,24 @@ fn fixture_engine() -> Engine {
         "rename the adapter",
         3,
     );
-    commit(
+    // A deliberate, human-named milestone: it opts into pinning its snapshot.
+    commit_tagged(
         &engine,
         "alice",
         IntentCategory::Checkpoint,
         "checkpoint: parser stable",
         4,
+        vec![TAG_PIN_STATE.to_string()],
     );
-    commit(
+    // A routine checkpoint — on the spine, but it pins no state and instead
+    // records the revision it was derived from.
+    commit_tagged(
         &engine,
         "bob",
         IntentCategory::Checkpoint,
         "checkpoint: adapter stable",
         5,
+        vec![format!("{TAG_GIT_REVISION}feed1234abcd5678")],
     );
 
     put_feedback(
@@ -318,13 +334,52 @@ async fn milestones_lists_checkpoint_commits_with_facets() {
 #[tokio::test]
 async fn milestones_report_whether_each_pins_a_state_root() {
     let (_, body) = get_body(router().await, "/api/v1/history/milestones").await;
+    // Pinning is opt-in, so the two states must be told apart rather than
+    // assumed: a tagged checkpoint names a snapshot, a routine one does not and
+    // carries the revision to rebuild from instead. `unpinned` must agree with
+    // the rows — it is what tells an operator how much a sweep can reclaim.
     for m in body["items"].as_array().unwrap() {
-        // Rows written by a current extractor always carry the retention
-        // hook; `unpinned` exists for legacy rows, and must agree.
-        assert_eq!(m["pins_state"], true, "body={}", body);
-        assert!(m["state_root"].is_string(), "body={}", body);
+        assert_eq!(
+            m["pins_state"],
+            m["state_root"].is_string(),
+            "pins_state must track state_root; body={}",
+            body
+        );
     }
-    assert_eq!(body["unpinned"], 0, "body={}", body);
+    let pinned: Vec<_> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["pins_state"] == true)
+        .collect();
+    let unpinned: Vec<_> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["pins_state"] == false)
+        .collect();
+
+    // Only the tagged one pins.
+    assert_eq!(pinned.len(), 1, "body={}", body);
+    assert_eq!(pinned[0]["description"], "checkpoint: parser stable");
+    assert!(pinned[0]["state_root"].is_string(), "body={}", body);
+
+    // Two rows pin nothing: bob's routine checkpoint and the engine's own
+    // "Initialize empty state", which is a checkpoint like any other and no
+    // longer retains a snapshot just for existing.
+    assert_eq!(unpinned.len(), 2, "body={}", body);
+    let routine = unpinned
+        .iter()
+        .find(|m| m["description"] == "checkpoint: adapter stable")
+        .expect("bob's routine checkpoint is on the spine");
+    assert!(routine["state_root"].is_null(), "body={}", body);
+    assert_eq!(
+        routine["git_sha"], "feed1234abcd5678",
+        "an unpinned milestone must still say what to rebuild from; body={}",
+        body
+    );
+
+    assert_eq!(body["unpinned"], 2, "body={}", body);
 }
 
 #[tokio::test]

@@ -138,11 +138,15 @@ pub struct MilestoneQuery {
 /// commit chain, filtered and paginated.
 ///
 /// A milestone is the unit that *names* a state a prune must preserve:
-/// `state_root` is the retention hook Plan B's GC keeps reachable. Rows
-/// written before Plan A t-005 have `state_root: null` and are reported as
-/// `pins_state: false` — they survive as a description but no longer name a
-/// snapshot, which is exactly the case an operator wants to see before
-/// running a sweep.
+/// `state_root` is the retention hook Plan B's GC keeps reachable. Pinning is
+/// opt-in — a checkpoint keeps its snapshot only when its intent carries
+/// `TAG_PIN_STATE` — so `pins_state: false` is the ordinary case for routine
+/// checkpoints such as a re-index, not a defect. (Rows written before Plan A
+/// t-005 also report `false`, for the older reason that the column did not
+/// exist.) An unpinned row survives as a description and a `git_sha`: the
+/// snapshot is reclaimable, but the revision that produced it is recorded, so
+/// the state can be rebuilt from source. That distinction is exactly what an
+/// operator wants to see before running a sweep.
 ///
 /// Facets are computed over the set matching `q` + the date range but *not*
 /// the categorical filters, so the chip counts stay meaningful while you
@@ -224,6 +228,7 @@ pub async fn list_milestones(
                 "description": m.description,
                 "state_root": m.state_root.as_ref().map(|s| s.short()),
                 "pins_state": m.state_root.is_some(),
+                "git_sha": m.git_sha,
             })
         })
         .collect();
