@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agentstategraph::CommitOptions;
-use agentstategraph_core::IntentCategory;
+use agentstategraph_core::{IntentCategory, TAG_GIT_REVISION};
 use chrono::Utc;
 use serde_json::Value;
 
@@ -453,6 +453,11 @@ pub fn run_index(
         repo.spec_set_json(spec1, "/asd/v1/code", &Value::Object(code_tree))
             .map_err(|e| AsdError::Other(e.to_string()))?;
     }
+    // A re-index is a routine checkpoint, so it deliberately does NOT carry
+    // `TAG_PIN_STATE`: pinning here would retain a full state tree on every
+    // run and leave the store with nothing reclaimable. What it records
+    // instead is the revision it indexed, which is enough to rebuild this
+    // state with `git checkout <sha> && asd index`.
     let opts1 = CommitOptions::new(
         agent_id,
         IntentCategory::Checkpoint,
@@ -461,6 +466,11 @@ pub fn run_index(
             unique_symbol_count,
             files.len()
         ),
+    )
+    .with_tags(
+        git_head_sha(&index_root)
+            .map(|sha| vec![format!("{TAG_GIT_REVISION}{sha}")])
+            .unwrap_or_default(),
     );
     repo.commit_speculation(spec1, opts1)
         .map_err(|e| AsdError::Other(e.to_string()))?;
@@ -1071,6 +1081,30 @@ fn same_module(caller: &str, callee: &str) -> bool {
 
 /// Collect source files under `root`, respecting built-in exclusions and an
 /// optional `.asdignore` file in `root` (one directory-name pattern per line).
+/// The git revision `root` is currently checked out at, if it is a git
+/// worktree at all.
+///
+/// Recorded on the index checkpoint so an unpinned milestone still says which
+/// source produced it. The full hash is used deliberately: an abbreviation can
+/// stop resolving uniquely as a repository grows, and this value's whole job is
+/// to still be resolvable long after the snapshot it replaces was reclaimed.
+///
+/// Best-effort — a non-git checkout, a repository with no commits, or a missing
+/// `git` binary all yield `None`, and the checkpoint is simply written without
+/// the tag.
+fn git_head_sha(root: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!sha.is_empty()).then_some(sha)
+}
+
 pub fn collect_source_files(
     root: &Path,
     adapters: &[Arc<dyn LanguageAdapter>],
