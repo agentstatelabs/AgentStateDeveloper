@@ -27,10 +27,10 @@ repository = "https://github.com/agentstatelabs/AgentStateDeveloper"
 
 [workspace.dependencies]
 # ASG family — git deps pinned to an ASG release tag (canonical: bump tag deliberately)
-agentstategraph = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v1.2.2" }
-agentstategraph-core = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v1.2.2" }
-agentstategraph-storage = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v1.2.2" }
-agentstategraph-policy = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v1.2.2" }
+agentstategraph = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v1.2.3" }
+agentstategraph-core = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v1.2.3" }
+agentstategraph-storage = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v1.2.3" }
+agentstategraph-policy = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v1.2.3" }
 
 # Common
 rusqlite = { version = "0.33", features = ["bundled"] }
