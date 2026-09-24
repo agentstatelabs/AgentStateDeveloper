@@ -9,8 +9,32 @@ Versions use semantic versioning.
 > ahead of a coordinated `1.0.0`. Version numbers therefore go *down* between
 > `v1.3.1` and `v0.9.38` below. The older entries are kept: the work is real,
 > only its numbering was abandoned.
+>
+> `v1.4.0` follows `v1.2.1`: the `1.3.x` range is skipped so that no version in
+> the current scheme shares a heading with one from the old.
 
 ---
+
+## [v1.4.0] — 2026-09-23
+
+### Added
+- **`asd gc` — reclaim the space the ASG store has been accumulating.** Every `asd index` commits a fresh state tree, and AgentStateGraph has long had a sweep, a vacuum and a retention policy — but ASD wired only `/gc/dry-run`, a report. Nothing ever reclaimed. `asd gc` previews by default and deletes nothing without `--sweep`; `--unpin-legacy` releases milestone pins distilled before AgentStateGraph v1.2.2 (one-time, deletes nothing itself); `--vacuum` shrinks the file. Run for real, each store backed up first and verified after — no object missing from any live ref tip, SQLite `integrity_check` ok, ledger/symbol/effect counts unchanged:
+
+  | store | before | after |
+  |---|---|---|
+  | SessionDrift-ios | 8.49 GB | 1.43 GB |
+  | AgentStateDeveloper | 1.51 GB | 109 MB |
+  | AgentStateGraph | 1.23 GB | 85 MB |
+  | CTXone | 611 MB | 73 MB |
+
+  On a store that predates v1.2.2 the flag matters: SessionDrift reclaimed 3.4% without `--unpin-legacy`, 95.5% with it. Operationally, **don't commit in a repository while `asd gc --sweep` runs on its store** — its hooks wait on the sweep's write lock and then fail (cleanly; nothing is lost).
+- **`POST /api/v1/gc/sweep` — a policy-aware GC preview.** It takes the same body as AgentStateGraph's own route but only previews: `asd-serve` binds every interface without authentication, so `mutate`/`vacuum` are refused with 403 pointing at `asd gc`, and `keep_milestones: false` with 400. Deletion is deliberately CLI-only.
+- **`git_sha` on `/api/v1/history/milestones`**, beside `pins_state` — the revision a milestone was derived from.
+
+### Changed
+- **The index checkpoint records the git revision it indexed, and no longer pins its state.** Every re-index used to pin a full snapshot as a milestone, kept forever: on SessionDrift-ios, 1,503 milestones held 5.3M objects reachable. Nothing in ASD ever read those snapshots. The revision (full hash) is recorded instead, so derived state is rebuilt from source — `git checkout <sha> && asd index` — rather than restored. A rebuild is faithful to what the code looked like, not bit-identical to what an older ASD computed. `pins_state: false` is now the ordinary case for routine checkpoints rather than a legacy-row signal.
+- **A sweep keeps no sparse checkpoints by default** (`--checkpoint-every 0`), departing from AgentStateGraph's 100. ASD's history is derived state; measured on SessionDrift after unpinning, one checkpoint per hundred commits would have kept 1,195,871 objects instead of 256,247.
+- **Requires AgentStateGraph v1.2.3.** It makes pinning opt-in (v1.2.2) and fixes a data-loss race in the sweep this release relies on: previously a commit from another connection — a git hook, `asd-serve`, an MCP server — landing mid-sweep could lose its objects. The sweep now holds the store's write lock from computing its keep-set to its last delete.
 
 ## [v1.2.1] — 2026-09-04
 
