@@ -189,6 +189,7 @@ pub fn build_router(
         .route("/timeline", get(list_timeline))
         .route("/history", get(list_history))
         .route("/gc/dry-run", get(gc_dry_run))
+        .route("/gc/sweep", axum::routing::post(gc_sweep_preview))
         // Searchable views over the same distilled record the charts
         // summarize, plus the health surfaces — see [`metrics`].
         .route("/history/milestones", get(metrics::list_milestones))
@@ -268,6 +269,9 @@ pub fn build_router(
 
 pub enum ApiError {
     BadRequest(String),
+    /// The request is well-formed but this server will not carry it out — e.g.
+    /// a GC sweep asked to delete, which is CLI-only.
+    Forbidden(String),
     NotFound(String),
     Internal(String),
 }
@@ -276,6 +280,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, msg) = match self {
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
+            ApiError::Forbidden(m) => (StatusCode::FORBIDDEN, m),
             ApiError::NotFound(m) => (StatusCode::NOT_FOUND, m),
             ApiError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
         };
@@ -372,6 +377,97 @@ struct GcQuery {
     cached_only: Option<String>,
     /// Recompute even when the memo matches the current head.
     refresh: Option<String>,
+}
+
+/// Body of `POST /api/v1/gc/sweep`: the same shape as AgentStateGraph's own
+/// `/gc/sweep`, so a client can target either server. Every field is optional;
+/// send `{}` for ASD's defaults.
+#[derive(Debug, Default, Deserialize)]
+pub struct GcSweepRequest {
+    keep_recent: Option<usize>,
+    checkpoint_every: Option<usize>,
+    keep_milestones: Option<bool>,
+    mutate: Option<bool>,
+    vacuum: Option<bool>,
+}
+
+/// POST /api/v1/gc/sweep — preview a GC sweep under a retention policy.
+///
+/// **Preview only, by design.** This server binds every interface by default
+/// and has no authentication, so it will not delete or vacuum: a request with
+/// `mutate` or `vacuum` set is refused with 403 and pointed at `asd gc`, which
+/// runs on the machine that owns the database. Nothing here can change the
+/// store.
+///
+/// Unlike [`gc_dry_run`], which measures against the default keep-set, this is
+/// policy-aware: it answers what `asd gc --sweep` would delete under the same
+/// policy, and shares that command's defaults (`agentstatedeveloper_core::gc`).
+/// `keep_milestones: false` is rejected rather than honoured — ASD never
+/// drops a pin someone asked for; `asd gc --unpin-legacy` clears the pins that
+/// nobody did.
+///
+/// The walk costs what the dry-run's does, so it gets the same treatment: a
+/// private connection off the async pool, one walk at a time behind `gc_gate`.
+/// It is not memoized, since the answer depends on the policy.
+async fn gc_sweep_preview(
+    State(state): State<AppState>,
+    Json(req): Json<GcSweepRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if req.mutate == Some(true) || req.vacuum == Some(true) {
+        return Err(ApiError::Forbidden(
+            "asd-serve only previews GC; deleting and vacuuming are CLI-only. \
+             Run `asd gc --sweep` (add `--vacuum` to shrink the file) on the \
+             machine that owns the database."
+                .to_string(),
+        ));
+    }
+    if req.keep_milestones == Some(false) {
+        return Err(ApiError::BadRequest(
+            "keep_milestones=false is not supported: ASD never drops a milestone \
+             pin someone asked for. Clear pins from before AgentStateGraph v1.2.2 \
+             with `asd gc --unpin-legacy`."
+                .to_string(),
+        ));
+    }
+    let policy = agentstatedeveloper_core::gc::gc_policy(
+        req.keep_recent
+            .unwrap_or(agentstatedeveloper_core::gc::GC_KEEP_RECENT),
+        req.checkpoint_every
+            .unwrap_or(agentstatedeveloper_core::gc::GC_CHECKPOINT_EVERY),
+    );
+
+    let _gate = state.gc_gate.lock().await;
+    let db_path = state.db_path.clone();
+    let shared = Arc::clone(&state.engine);
+    let preview = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        // Same reasoning as the dry-run: a private reader keeps a long walk
+        // from holding the shared engine's lock against every other handler.
+        if db_path.is_file() {
+            match Engine::open_sqlite(&db_path) {
+                Ok(engine) => {
+                    return engine
+                        .repo
+                        .gc_sweep(policy, false, false)
+                        .map_err(|e| e.to_string());
+                }
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "gc sweep preview could not open a private connection; \
+                     falling back to the shared engine"
+                ),
+            }
+        }
+        let engine = shared.blocking_lock();
+        engine
+            .repo
+            .gc_sweep(policy, false, false)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| ApiError::Internal(format!("gc sweep preview task failed: {e}")))?
+    .map_err(ApiError::Internal)?;
+
+    Ok(Json(preview))
 }
 
 /// GET /api/v1/gc/dry-run — what a GC sweep would reclaim under the default

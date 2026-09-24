@@ -9,6 +9,7 @@ pub mod context_for;
 pub mod dead_code;
 pub mod endpoints;
 pub mod feedback;
+pub mod gc;
 pub mod graph;
 pub mod help;
 pub mod hooks;
