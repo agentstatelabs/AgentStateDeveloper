@@ -20,6 +20,7 @@ pub mod effects;
 pub mod engine;
 pub mod error;
 pub mod feedback;
+pub mod gc;
 pub mod help;
 pub mod index;
 pub mod index_pipeline;

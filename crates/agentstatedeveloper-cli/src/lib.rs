@@ -220,6 +220,13 @@ pub enum Command {
     /// By default runs read-only (dry-run); pass `--fix` to apply corrections.
     Repair(commands::repair::RepairArgs),
 
+    /// Garbage-collect the ASG store: preview by default, reporting what a
+    /// sweep would reclaim; `--sweep` deletes, `--vacuum` shrinks the file, and
+    /// `--unpin-legacy` releases milestones distilled before AgentStateGraph
+    /// v1.2.2. Takes the store's write lock while sweeping, so other ASD
+    /// writers wait rather than lose data.
+    Gc(commands::gc::GcArgs),
+
     /// Working notes scoped to a symbol or investigation, with a
     /// promote-to-ledger path. Local-only; not synced by `asd sync`.
     #[command(subcommand)]
@@ -406,6 +413,7 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::VerifyEffects(args) => verify_effects::run(cfg, args),
         Command::Trace(args) => trace::run(cfg, args),
         Command::Sync(args) => sync::run(cfg, args),
+        Command::Gc(args) => gc::run(cfg, args),
         Command::Hydrate(args) => hydrate::run(cfg, args),
         Command::Audit(sub) => audit::run(cfg, sub),
         Command::Mcp(sub) => mcp::run(cfg, sub),
