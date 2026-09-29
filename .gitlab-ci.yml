@@ -198,9 +198,9 @@ homebrew:
 # installed. That is the point: this runs in a clean container, so there is no
 # pre-existing install to mask a break.
 #
-# Ordered after `homebrew` rather than after `publish-github`, because the
-# formula does not exist until that job renders it. ASD_VERIFY_WAIT covers the
-# GitLab -> GitHub tap mirror, which lands seconds later.
+# Ordered after `homebrew` so the release assets are known to exist. This job
+# never waits on anything: the tap formula is checked by `verify-formula`
+# below, for the reason given there.
 verify-install:
   stage: .post
   image: debian:bookworm-slim
@@ -210,25 +210,50 @@ verify-install:
       artifacts: false
   rules:
     - if: $CI_COMMIT_TAG
-  variables:
-    # Budget for the GitLab -> GitHub tap mirror, measured rather than guessed.
-    # On v1.2.0 the formula took 11m43s to appear after the `homebrew` job
-    # finished, and this job starts ~8s later — so the original 300s was less
-    # than half of what one real release needed, and the job failed on its own
-    # timeout while the release was fine. 1800s is ~2.5x the observed latency;
-    # the wait is a sleep loop, so headroom is nearly free and a false red is
-    # not.
-    ASD_VERIFY_WAIT: "1800"
   script:
     - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates ruby >/dev/null
     - chmod +x scripts/verify-release.sh install.sh
-    - ./scripts/verify-release.sh "$CI_COMMIT_TAG"
+    - ./scripts/verify-release.sh "$CI_COMMIT_TAG" --shell --docs
+
+# Check the GitHub tap formula — the one `brew tap` clones — against the
+# published assets.
+#
+# This MUST NOT wait while holding a runner. The `homebrew` job pushes the
+# formula to the GitLab tap; the tap project's own publish-github job mirrors
+# it to GitHub, and that job needs a runner too. The GitLab instance has
+# ONE shared runner, so a job here that polls GitHub blocks the very job it is
+# waiting for: until v1.4.0 verify-install polled for up to 1800s, the mirror
+# could not land until it gave up, and every release ended in a false red
+# ("formula still reads X after waiting 1800s"). The 11m43s "mirror latency"
+# measured on v1.2.0 was mostly that queueing.
+#
+# `when: delayed` waits WITHOUT a runner, so the tap's publish-github runs
+# during the delay. ASD_VERIFY_WAIT is then only a short allowance for GitHub
+# itself; exhausting it is still reported apart from a wrong formula.
+verify-formula:
+  stage: .post
+  image: debian:bookworm-slim
+  before_script: []   # no cargo needed; the default before_script is rust setup
+  needs:
+    - job: homebrew
+      artifacts: false
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: delayed
+      start_in: 10 minutes
+  variables:
+    ASD_VERIFY_WAIT: "300"
+  script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates ruby >/dev/null
+    - chmod +x scripts/verify-release.sh
+    - ./scripts/verify-release.sh "$CI_COMMIT_TAG" --formula
 
 # site-version: move agentstatedeveloper in agentstatelabs.com/releases.json to
 # this tag, which is what agentstatedeveloper.dev and agentstatelabs.com show as
-# the current version. Ordered after verify-install so the site only advertises
-# a release that has been proven installable. Gated on SITE_RELEASES_TOKEN so it
-# no-ops until that is configured.
+# the current version. Ordered after BOTH verify jobs so the site only
+# advertises a release that has been proven installable: verify-install proves
+# the shell installer, verify-formula the Homebrew formula users `brew install`.
+# Gated on SITE_RELEASES_TOKEN so it no-ops until that is configured.
 site-version:
   stage: .post
   image: debian:bookworm-slim
@@ -236,6 +261,8 @@ site-version:
   cache: {}
   needs:
     - job: verify-install
+      artifacts: false
+    - job: verify-formula
       artifacts: false
   rules:
     - if: '$CI_COMMIT_TAG && $SITE_RELEASES_TOKEN'
