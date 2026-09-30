@@ -15,6 +15,13 @@ Versions use semantic versioning.
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **The tag pipeline can no longer starve its own tap mirror.** `verify-install` polled the GitHub tap for up to 1800s while holding the GitLab instance's only runner — the runner the tap project's `publish-github` job needed to put the formula there. The mirror could not land until the poll gave up, so the wait always ran out, and v1.4.0 stalled for over an hour. The v1.2.0 "mirror latency" of 11m43s that the 1800s budget was based on was mostly this queueing. The formula check is now its own `verify-formula` job, delayed 10 minutes with `when: delayed`, which waits without holding a runner; its remaining wait is 300s and still reports an exhausted budget apart from a wrong formula. `verify-install` keeps the shell-installer and docs checks and no longer waits. Every `curl` in `verify-release.sh` is now time-bounded, and with a token the wait loop polls the authoritative API rather than the lagging CDN. `site-version` now waits for both `verify-install` and `verify-formula`, so the site still only advertises a release proven installable by both the shell installer and Homebrew.
+
+---
+
 ## [v1.4.0] — 2026-09-23
 
 ### Added

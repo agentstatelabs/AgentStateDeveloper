@@ -87,10 +87,13 @@ No sibling tap clone is needed any more.
 
 ## After the release: verify it is installable
 
-CI runs `scripts/verify-release.sh` automatically on every tag (the
-`verify-install` job, after `homebrew`). It checks the shell installer end to
-end in a clean container, the tap formula against the published assets, and
-that the documented commands are current.
+CI runs `scripts/verify-release.sh` automatically on every tag, in two jobs
+after `homebrew`: `verify-install` checks the shell installer end to end in a
+clean container and that the documented commands are current;
+`verify-formula` checks the GitHub tap formula against the published assets.
+`verify-formula` is delayed 10 minutes rather than polling, because on a
+single runner a polling job starves the tap's own publish job — the one that
+puts the formula on GitHub — and fails a good release.
 
 Two limits worth knowing:
 
