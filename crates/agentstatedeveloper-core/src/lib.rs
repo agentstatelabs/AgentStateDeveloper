@@ -25,6 +25,7 @@ pub mod help;
 pub mod index;
 pub mod index_pipeline;
 pub mod ledger;
+pub mod ledger_integrity;
 pub mod map;
 pub mod overview;
 pub mod paths;
@@ -85,6 +86,10 @@ pub use index::{AsgIndexStore, IndexStore};
 pub use index_pipeline::{CollectResult, IndexSummary, collect_source_files, run_index};
 pub use ledger::{
     ApprovalOutcome, AsgLedgerStore, LedgerStore, RatifyOps, ReviewOutcome, detect_orphaned_entries,
+};
+pub use ledger_integrity::{
+    LedgerCounts, LedgerRestoreReport, ledger_counts, missing_ledger_entries,
+    restore_missing_ledger_entries,
 };
 pub use overview::{architecture_overview, build_id_map, dead_code_report, endpoints_report};
 pub use policy::{

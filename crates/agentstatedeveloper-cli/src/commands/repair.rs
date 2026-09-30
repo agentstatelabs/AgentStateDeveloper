@@ -2,7 +2,8 @@
 //! apply safe auto-corrections.
 //!
 //! Without `--fix` the command is read-only (dry-run).  Use `--fix` to
-//! automatically drop orphaned effect records and stale callee/caller refs.
+//! automatically drop orphaned effect records and stale callee/caller refs,
+//! and to restore ledger entries the store lost (from the ledger cache).
 //!
 //! ## Example output (human-readable, dry-run)
 //!
@@ -21,14 +22,18 @@
 use anyhow::Result;
 use clap::Args;
 
-use agentstatedeveloper_core::{Engine, IssueSeverity, repair_asg, scan_asg, scan_sidecar};
+use agentstatedeveloper_core::{
+    Engine, IssueSeverity, RepairIssue, missing_ledger_entries, repair_asg,
+    restore_missing_ledger_entries, scan_asg, scan_sidecar,
+};
 
 use crate::config::Config;
 
 #[derive(Debug, Args)]
 pub struct RepairArgs {
     /// Apply auto-fixable corrections (drop orphaned effects and stale
-    /// callee/caller refs).  Without this flag the command is read-only.
+    /// callee/caller refs; restore lost ledger entries from the ledger
+    /// cache).  Without this flag the command is read-only.
     #[arg(long)]
     pub fix: bool,
 
@@ -52,9 +57,23 @@ pub fn run(cfg: &Config, args: RepairArgs) -> Result<()> {
     let sidecar_issues = scan_sidecar(&conclusions_dir);
 
     if args.fix {
+        // Restore lost ledger entries first, so the ASG scan below sees them.
+        let ledger_found = ledger_missing_issue(&engine)?.is_some();
+        let restore = restore_missing_ledger_entries(&engine, &cfg.agent_id)?;
         let mut report = repair_asg(&engine.repo, &engine.ref_name, &cfg.agent_id, false)?;
         report.issues.extend(sidecar_issues.clone());
-        report.issues_found += sidecar_issues.len();
+        report.issues_found += sidecar_issues.len() + usize::from(ledger_found);
+        report.fixes_applied += restore.restored;
+        // Whatever could not be written is still missing.
+        report.issues.extend(ledger_missing_issue(&engine)?);
+        if restore.restored > 0 {
+            eprintln!(
+                "restored {} ledger entr{} into the store — run `asd sync` to write {} to .asd/",
+                restore.restored,
+                if restore.restored == 1 { "y" } else { "ies" },
+                if restore.restored == 1 { "it" } else { "them" }
+            );
+        }
         if args.json {
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {
@@ -63,6 +82,7 @@ pub fn run(cfg: &Config, args: RepairArgs) -> Result<()> {
     } else {
         // Dry-run: scan only.
         let mut issues = scan_asg(&engine.repo, &engine.ref_name)?;
+        issues.extend(ledger_missing_issue(&engine)?);
         issues.extend(sidecar_issues);
         let report = agentstatedeveloper_core::RepairReport {
             issues_found: issues.len(),
@@ -78,6 +98,61 @@ pub fn run(cfg: &Config, args: RepairArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// One issue summarising ledger entries the cache acknowledged but the store
+/// has lost — one line, not one per entry, since a single bad day can lose
+/// thousands. `None` when nothing is missing.
+fn ledger_missing_issue(engine: &Engine) -> Result<Option<RepairIssue>> {
+    let (missing, unparseable) = missing_ledger_entries(engine)?;
+    if missing.is_empty() && unparseable.is_empty() {
+        return Ok(None);
+    }
+    let mut by_kind = std::collections::BTreeMap::<&str, usize>::new();
+    for e in &missing {
+        *by_kind.entry(e.kind.as_str()).or_default() += 1;
+    }
+    let kinds = by_kind
+        .iter()
+        .map(|(k, n)| format!("{n} {k}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sample = missing
+        .iter()
+        .take(3)
+        .map(|e| e.entry_id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let unparseable_note = if unparseable.is_empty() {
+        String::new()
+    } else {
+        format!(
+            ". {} more cannot be restored: their cached body no longer parses ({})",
+            unparseable.len(),
+            unparseable
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    Ok(Some(RepairIssue {
+        kind: "ledger_missing_from_asg".into(),
+        severity: IssueSeverity::Error,
+        path: "/asd/v1/ledger".into(),
+        detail: format!(
+            "{} ledger entr{} acknowledged (in the ledger cache) but missing from the store, \
+             so `asd sync` cannot export {} and `asd hydrate` cannot restore {} ({kinds}; e.g. {sample}). \
+             --fix restores {} from the cache{unparseable_note}",
+            missing.len(),
+            if missing.len() == 1 { "y" } else { "ies" },
+            if missing.len() == 1 { "it" } else { "them" },
+            if missing.len() == 1 { "it" } else { "them" },
+            if missing.len() == 1 { "it" } else { "them" },
+        ),
+        auto_fixable: true,
+    }))
 }
 
 fn print_report_human(report: &agentstatedeveloper_core::RepairReport, dry_run: bool) {
