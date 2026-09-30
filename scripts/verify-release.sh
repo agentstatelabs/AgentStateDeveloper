@@ -79,6 +79,11 @@ fail() { printf '  \033[31mFAIL\033[0m %s\n' "$1" >&2; FAILED=1; }
 note() { printf '       %s\n' "$1"; }
 head_() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
+# Every request is bounded. The wait loops below are bounded by their own
+# budgets, but a single stalled connection is not — without these, one hung
+# request could hold a CI runner indefinitely.
+curl() { command curl --connect-timeout 15 --max-time 120 "$@"; }
+
 sha_of() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
   else shasum -a 256 "$1" | awk '{print $1}'; fi
@@ -152,13 +157,25 @@ if [ "$DO_FORMULA" -eq 1 ]; then
   TMPDIR_F=$(mktemp -d -t asd-formula.XXXXXX)
 
   # The homebrew job pushes the formula to the GitLab tap, whose own publish
-  # job mirrors it to the GitHub tap read here. Running straight after that
-  # job therefore races the mirror. ASD_VERIFY_WAIT gives the mirror a bounded
-  # budget (seconds) to land the expected version; 0 means check once.
+  # job mirrors it to the GitHub tap read here. ASD_VERIFY_WAIT gives the
+  # mirror a bounded budget (seconds) to land the expected version; 0 means
+  # check once. In CI the verify-formula job is DELAYED instead of relying on
+  # this budget: polling holds the runner the mirror job needs (.gitlab-ci.yml).
+  #
+  # With a token the loop polls the authoritative API, so it stops as soon as
+  # the release is really there; without one it polls the CDN to stay clear of
+  # the 60/hour unauthenticated limit, and may run its whole budget on CDN lag
+  # before the API verdict below passes it.
   WAIT="${ASD_VERIFY_WAIT:-0}"
   WAITED=0
+  API_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
   while :; do
-    curl -fsSL -o "$TMPDIR_F/asd.rb" "$TAP_RAW" 2>/dev/null || true
+    if [ -n "$API_TOKEN" ]; then
+      curl -fsSL -H "Accept: application/vnd.github.raw" -H "Authorization: Bearer $API_TOKEN" \
+        -o "$TMPDIR_F/asd.rb" "$TAP_API" 2>/dev/null || true
+    else
+      curl -fsSL -o "$TMPDIR_F/asd.rb" "$TAP_RAW" 2>/dev/null || true
+    fi
     if [ -s "$TMPDIR_F/asd.rb" ] \
        && [ "$(grep -m1 'version "' "$TMPDIR_F/asd.rb" | sed 's/.*"\(.*\)".*/\1/')" = "$VER" ]; then
       break
@@ -176,7 +193,6 @@ if [ "$DO_FORMULA" -eq 1 ]; then
   RAW_VER=""
   [ -s "$TMPDIR_F/asd.rb" ] && RAW_VER=$(grep -m1 'version "' "$TMPDIR_F/asd.rb" | sed 's/.*"\(.*\)".*/\1/')
   FORMULA_SRC="raw CDN"
-  API_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
   if [ -n "$API_TOKEN" ]; then
     curl -fsSL -H "Accept: application/vnd.github.raw" -H "Authorization: Bearer $API_TOKEN" \
       -o "$TMPDIR_F/asd.api.rb" "$TAP_API" 2>/dev/null || true
@@ -225,7 +241,9 @@ if [ "$DO_FORMULA" -eq 1 ]; then
       note "read from: $FORMULA_SRC"
       note "the GitLab tap may have the right formula while the GitHub tap has not caught up"
       note "check: gh api repos/${TAP_REPO}/contents/Formula/asd.rb --jq .content | base64 -d | head"
-      note "if that reads $VER this was a mirror delay, not a bad release — raise ASD_VERIFY_WAIT"
+      note "if that reads $VER this was a mirror delay, not a bad release:"
+      note "check whether the tap project's publish-github job was still queued for"
+      note "the runner; if it ran and was just slow, raise verify-formula's start_in"
     else
       fail "formula version is '$FVER', expected $VER"
     fi
