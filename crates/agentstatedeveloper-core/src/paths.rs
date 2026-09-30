@@ -72,6 +72,11 @@ pub fn edge_evidence_from_prefix(from_symbol_id: &str) -> String {
     format!("{}/index/edge-evidence/{}", ASD_ROOT, from_symbol_id)
 }
 
+/// Root of the ledger tree: `<root>/<symbol_id>/<entry_id>`.
+pub fn ledger_root() -> String {
+    format!("{}/ledger", ASD_ROOT)
+}
+
 pub fn ledger_entry_path(symbol_id: &str, entry_id: &str) -> String {
     format!("{}/ledger/{}/{}", ASD_ROOT, symbol_id, entry_id)
 }

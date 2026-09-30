@@ -15,6 +15,21 @@ Versions use semantic versioning.
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **Ledger entries were silently lost from the store while every surface kept showing them.** On one store 1,684 of 12,085 entries — decisions, invariants, proofs, validation scenarios — were in `asd_ledger_cache` but gone from the ASG ledger tree, so `asd sync` could not export them, `asd hydrate` could not restore them, and `asd status` still said "hydrated". `sync_to_dir` was not dropping anything; the store was. AgentStateGraph moved refs unconditionally, so concurrent writers (parallel agent processes, the MCP server, git-hook re-indexes) discarded each other's commits, and every `asd index` speculation commit reverted ledger writes made while it was open — after `append_entry` had already returned `Ok` and written the cache. Fixed at the source in AgentStateGraph v1.2.5 (compare-and-swap ref writes; speculations merge onto the current head), which this release pins. Two new tests reproduce both paths: four concurrent writers lost 35 of 48 acknowledged entries before the fix, and none after.
+
+### Added
+- **`asd repair` finds and restores lost ledger entries.** A new `ledger_missing_from_asg` issue reports every entry the ledger cache acknowledged but the store no longer has, by kind; `asd repair --fix` writes each back from the cache, byte-for-byte with its reverse-index record, one commit per restore so the audit trail says what was recovered. Entries are matched by id, so one moved by `ledger rebind` is never mistaken for a lost one. On the affected store `--fix` restored all 1,684 in 50 s, after which cache, store and sidecar all read 12,085.
+- **`asd sync` and `asd status` report ledger counts in the cache, the store and the sidecar** (CLI and MCP; `ledger` and `ledger_warning` in JSON), and warn on a mismatch — pointing at `asd repair --fix` for entries the store lost and at `asd sync` for entries not yet exported. `asd status` no longer says the sidecar is current when those counts disagree: "hydrated" only ever meant a marker file existed.
+
+### Changed
+- **Human-readable `asd status` now opens the store** to count ledger entries: ~0.1 s warm on a 12,000-entry store, up from ~0.02 s. Counting reads keys only; no entry is loaded.
+- **AgentStateGraph pinned to v1.2.5.**
+
+---
+
 ## [v1.4.0] — 2026-09-23
 
 ### Added

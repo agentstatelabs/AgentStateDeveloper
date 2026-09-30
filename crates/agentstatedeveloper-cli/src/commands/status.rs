@@ -10,7 +10,7 @@ use serde_json::json;
 
 use agentstatedeveloper_core::{
     AsgLedgerStore, Engine, LedgerStore, SearchFtsDb, SidecarState, compute_index_consistency,
-    compute_trust_score, format_age,
+    compute_trust_score, format_age, ledger_counts,
     schema::{LedgerKind, Symbol},
     sidecar_lifecycle_state,
 };
@@ -106,9 +106,21 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
     // rebuild or an out-of-band ledger migration; surfacing the delta
     // turns a silent "why does asd status say 412 but asd health say
     // 408?" puzzle into a one-line `advice` field.
+    let engine = Engine::open_sqlite(&cfg.db_path).ok();
+
+    // Ledger entries in the cache vs the store vs the sidecar. "hydrated"
+    // only ever meant a marker file exists; on its own it said nothing about
+    // whether the sidecar holds what the store acknowledged. Before ASG
+    // compare-and-swapped its refs, concurrent writers lost ~14% of one
+    // store's ledger while this line kept reading "sidecar is current".
+    let ledger = engine
+        .as_ref()
+        .and_then(|e| ledger_counts(&e.repo, &e.ref_name, e.fts.as_ref(), Some(project_root)).ok());
+    let ledger_warning = ledger.as_ref().and_then(|l| l.warning());
+
     let (concept_gaps, asg_symbol_count): (Vec<serde_json::Value>, Option<usize>) = if args.json {
-        if let Ok(engine) = Engine::open_sqlite(&cfg.db_path) {
-            let ledger_store = AsgLedgerStore::from_engine(&engine);
+        if let Some(engine) = engine.as_ref() {
+            let ledger_store = AsgLedgerStore::from_engine(engine);
             let tree = engine
                 .repo
                 .get_tree(&engine.ref_name, "/asd/v1/index/by-qname")
@@ -144,7 +156,9 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
     };
 
     let sidecar_key = sidecar_state_key(&sidecar_state);
-    let sidecar_action = sidecar_action_hint(&sidecar_state);
+    let sidecar_action = ledger_warning
+        .clone()
+        .unwrap_or_else(|| sidecar_action_hint(&sidecar_state).to_string());
 
     if args.json {
         let index_state = if fresh {
@@ -173,6 +187,8 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
             "state": index_state,
             "sidecar": sidecar_key,
             "sidecar_action": sidecar_action,
+            "ledger": ledger,
+            "ledger_warning": ledger_warning,
             "dirty_files": dirty_files,
             "concept_gaps": concept_gaps,
             "index_consistency": index_consistency,
@@ -228,12 +244,27 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
     let sidecar_label = match sidecar_state {
         SidecarState::Missing => "missing — run 'asd sync' to create",
         SidecarState::Present => "present — run 'asd hydrate' to load into ASG",
+        SidecarState::Hydrated if ledger_warning.is_some() => {
+            "hydrated — but ledger counts disagree (see warning below)"
+        }
         SidecarState::Hydrated => "hydrated",
         SidecarState::FreshReset => {
             "fresh-reset (deliberate reset — re-run 'asd index' + 'asd sync')"
         }
     };
     println!("  sidecar:  {sidecar_label}");
+    if let Some(l) = &ledger {
+        let fmt = |n: Option<usize>| n.map_or_else(|| "—".to_string(), |n| n.to_string());
+        println!(
+            "  ledger:   cache {} · store {} · sidecar {}",
+            fmt(l.cache),
+            l.asg,
+            fmt(l.sidecar)
+        );
+    }
+    if let Some(w) = &ledger_warning {
+        println!("  warning:  {w}");
+    }
 
     if args.show_dirty {
         let files = dirty_files;

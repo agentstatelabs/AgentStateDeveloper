@@ -13,7 +13,7 @@ use anyhow::Result;
 use clap::Args;
 use serde_json::json;
 
-use agentstatedeveloper_core::{Engine, prune_sidecar, sync_to_dir};
+use agentstatedeveloper_core::{Engine, ledger_counts, prune_sidecar, sync_to_dir};
 
 use crate::config::Config;
 
@@ -40,6 +40,20 @@ pub fn run(cfg: &Config, args: SyncArgs) -> Result<()> {
         summary.pruned = prune_sidecar(&engine.repo, &engine.ref_name, &dir)?;
     }
 
+    // Sync exports the store, so an entry the store lost is silently absent
+    // from the sidecar too. Count what the ledger cache acknowledged against
+    // what landed, and say so when they differ.
+    let ledger = ledger_counts(
+        &engine.repo,
+        &engine.ref_name,
+        engine.fts.as_ref(),
+        Some(&dir),
+    )?;
+    let ledger_warning = ledger.warning();
+    if let Some(w) = &ledger_warning {
+        eprintln!("asd sync: warning: {w}");
+    }
+
     let out = json!({
         "dir": dir.join(".asd/v1").display().to_string(),
         "effects_written": summary.effects_written,
@@ -47,6 +61,8 @@ pub fn run(cfg: &Config, args: SyncArgs) -> Result<()> {
         "symbols_written": summary.symbols_written,
         "schema_version": summary.schema_version,
         "pruned": summary.pruned,
+        "ledger": ledger,
+        "ledger_warning": ledger_warning,
         "note": "current-state only; ASG commit history is not carried in the sidecar",
     });
     println!("{}", serde_json::to_string_pretty(&out)?);

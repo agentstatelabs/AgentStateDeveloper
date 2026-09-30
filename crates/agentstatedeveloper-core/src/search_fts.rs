@@ -1386,6 +1386,43 @@ impl SearchFtsDb {
         Ok(entries)
     }
 
+    /// Every cached ledger entry id for `ref_name`, without parsing bodies —
+    /// the cheap side of the ledger integrity count.
+    pub fn ledger_cache_entry_ids(&self, ref_name: &str) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT entry_id FROM asd_ledger_cache WHERE ref_name = ?1")?;
+        let ids = stmt
+            .query_map(params![ref_name], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids)
+    }
+
+    /// Every cached ledger entry for `ref_name`. Rows whose body no longer
+    /// parses come back as ids in the second vec rather than being skipped,
+    /// so an integrity count cannot under-report what the cache holds.
+    pub fn all_ledger_entries(
+        &self,
+        ref_name: &str,
+    ) -> rusqlite::Result<(Vec<LedgerEntry>, Vec<String>)> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT entry_id, body FROM asd_ledger_cache WHERE ref_name = ?1")?;
+        let rows = stmt.query_map(params![ref_name], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut entries = Vec::new();
+        let mut unparseable = Vec::new();
+        for row in rows {
+            let (entry_id, body) = row?;
+            match serde_json::from_str::<LedgerEntry>(&body) {
+                Ok(e) => entries.push(e),
+                Err(_) => unparseable.push(entry_id),
+            }
+        }
+        Ok((entries, unparseable))
+    }
+
     /// Bulk-insert ledger entries in a single transaction — used by `asd index`
     /// to reconcile the SQLite cache from the authoritative git store.
     /// `entries`: slice of `(symbol_id, LedgerEntry)` pairs.

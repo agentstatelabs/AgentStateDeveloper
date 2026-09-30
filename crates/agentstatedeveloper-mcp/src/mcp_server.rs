@@ -2433,6 +2433,17 @@ impl AsdMcpServer {
                     )
                     .unwrap_or(0);
                 }
+                // Cache vs store vs sidecar: an entry the store lost is
+                // absent from the sidecar too, so say so rather than report
+                // a clean export. `asd repair --fix` restores it.
+                let ledger = agentstatedeveloper_core::ledger_counts(
+                    &engine.repo,
+                    &engine.ref_name,
+                    engine.fts.as_ref(),
+                    Some(&dir),
+                )
+                .ok();
+                let ledger_warning = ledger.as_ref().and_then(|l| l.warning());
                 serde_json::json!({
                     "symbols_written": summary.symbols_written,
                     "effects_written": summary.effects_written,
@@ -2440,6 +2451,8 @@ impl AsdMcpServer {
                     "rebinds_synced": summary.rebinds_synced,
                     "pruned": summary.pruned,
                     "schema_version": summary.schema_version,
+                    "ledger": ledger,
+                    "ledger_warning": ledger_warning,
                 })
                 .to_string()
             }
@@ -5455,6 +5468,20 @@ impl AsdMcpServer {
             .map(|asg| agentstatedeveloper_core::compute_index_consistency(asg, count as usize))
             .unwrap_or(serde_json::Value::Null);
 
+        // Cache vs store vs sidecar ledger counts — see `asd status`. A
+        // "hydrated" marker alone said nothing about lost entries.
+        let ledger = agentstatedeveloper_core::ledger_counts(
+            &engine.repo,
+            &ref_name,
+            engine.fts.as_ref(),
+            Some(project_root),
+        )
+        .ok();
+        let ledger_warning = ledger.as_ref().and_then(|l| l.warning());
+        let sidecar_action = ledger_warning
+            .clone()
+            .unwrap_or_else(|| sidecar_action.to_string());
+
         let out = serde_json::json!({
             "db": db_path.display().to_string(),
             "symbols": count,
@@ -5463,6 +5490,8 @@ impl AsdMcpServer {
             "state": index_state,
             "sidecar": sidecar_key,
             "sidecar_action": sidecar_action,
+            "ledger": ledger,
+            "ledger_warning": ledger_warning,
             "dirty_files": dirty_files,
             "concept_gaps": concept_gaps,
             "index_consistency": index_consistency,
