@@ -28,7 +28,7 @@ Versions use semantic versioning.
 
 ### Changed
 - **Human-readable `asd status` now opens the store** to count ledger entries: ~0.1 s warm on a 12,000-entry store, up from ~0.02 s. Counting reads keys only; no entry is loaded.
-- **AgentStateGraph pinned to v1.2.5.**
+- **AgentStateGraph pinned to v1.2.6.** v1.2.5 made concurrent writers stop discarding each other's commits (the ledger loss above). v1.2.6 closes the losses that remained, two of which reached ASD: an `asd gc` sweep running while `asd index` held a speculation could delete the index pass's not-yet-committed objects, after which the commit either published a broken tree or silently dropped the pass's writes — open speculations are now GC roots in every process; and a write arriving while a sweep held its lock could be rolled back after returning `Ok` — it now waits, or fails loudly. It also stops concurrent updates to one task, policy or reminder reverting each other, and makes merges fail instead of guessing when they can't read an input.
 
 ---
 
