@@ -23,7 +23,9 @@ use crate::config::Config;
 #[derive(Debug, Args)]
 pub struct HydrateArgs {
     /// Project root to hydrate from. `.asd/v1/` is appended internally.
-    /// Defaults to the current working directory.
+    /// Defaults to the current working directory. The store filled is the
+    /// `.asd-state.db` in that same directory unless `--db`/`ASD_DB` names
+    /// another — never a parent's or the registry's active repo.
     #[arg(long)]
     pub dir: Option<PathBuf>,
 
@@ -53,6 +55,7 @@ pub fn run(cfg: &Config, args: HydrateArgs) -> Result<()> {
     };
 
     let mut out = json!({
+        "db": cfg.db_path.display().to_string(),
         "dir": dir.join(".asd/v1").display().to_string(),
         "symbols_loaded": summary.symbols_loaded,
         "symbols_skipped": summary.symbols_skipped,

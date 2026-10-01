@@ -374,15 +374,26 @@ pub enum Command {
 
 /// Resolve [`Config`] from the parsed CLI flags.
 pub fn config_from_cli(cli: &Cli) -> Config {
-    // init/onboard/index create or (re)populate a db in the current location, so
-    // they must resolve to `./.asd-state.db` (or --db/ASD_DB) only — never the
-    // walk-up parent or the registry's active repo (Plan Q t-002 scoping).
+    // init/onboard/index/hydrate create or (re)populate a db in the current
+    // location, so they must resolve to `./.asd-state.db` (or --db/ASD_DB) only —
+    // never the walk-up parent or the registry's active repo (Plan Q t-002
+    // scoping). hydrate was missing from this list: run in a directory holding
+    // only a sidecar, it fell through to the registry's active repo and loaded
+    // one project's symbols and ledger into another project's store.
     let local_only = matches!(
         cli.cmd,
-        Command::Init(_) | Command::Onboard(_) | Command::Index(_)
+        Command::Init(_) | Command::Onboard(_) | Command::Index(_) | Command::Hydrate(_)
     );
+    // `hydrate --dir <d>` fills the store beside the sidecar it reads, not one
+    // in whatever directory `asd` ran from. An explicit --db or ASD_DB still wins.
+    let explicit_db = cli.db.clone().or_else(|| match &cli.cmd {
+        Command::Hydrate(args) if std::env::var_os("ASD_DB").is_none() => {
+            args.dir.as_ref().map(|d| d.join(".asd-state.db"))
+        }
+        _ => None,
+    });
     Config::resolve_with_brief(
-        cli.db.clone(),
+        explicit_db,
         cli.policy.clone(),
         cli.audit_log.clone(),
         cli.brief,
