@@ -712,6 +712,7 @@ impl AsdMcpServer {
             Ok(results) => {
                 let total_read: usize = results.iter().map(|r| r.read).sum();
                 let total_imported: usize = results.iter().map(|r| r.imported).sum();
+                let total_up_to_date: usize = results.iter().map(|r| r.skipped_up_to_date).sum();
                 let total_unknown: usize = results.iter().map(|r| r.skipped_unknown_qname).sum();
                 let total_parse: usize = results.iter().map(|r| r.skipped_parse_error).sum();
                 serde_json::to_string(&serde_json::json!({
@@ -721,11 +722,13 @@ impl AsdMcpServer {
                         "file": r.file,
                         "read": r.read,
                         "imported": r.imported,
+                        "skipped_up_to_date": r.skipped_up_to_date,
                         "skipped_unknown_qname": r.skipped_unknown_qname,
                         "skipped_parse_error": r.skipped_parse_error,
                     })).collect::<Vec<_>>(),
                     "total_read": total_read,
                     "total_imported": total_imported,
+                    "total_skipped_up_to_date": total_up_to_date,
                     "total_skipped_unknown_qname": total_unknown,
                     "total_skipped_parse_error": total_parse,
                 }))
@@ -2164,7 +2167,11 @@ impl AsdMcpServer {
         let mut declared: Vec<Effect> = Vec::with_capacity(p.declared.len());
         for (i, v) in p.declared.into_iter().enumerate() {
             match serde_json::from_value::<Effect>(v) {
-                Ok(e) => declared.push(e),
+                // `adapter` marks an effect a re-index inferred and may
+                // refresh; a declared one must not carry it (an effect copied
+                // from `asd effects` output would), or the next index replaces
+                // the declaration with its own inference.
+                Ok(e) => declared.push(Effect { adapter: None, ..e }),
                 Err(e) => return err_json(&format!("declared[{}]: {}", i, e)),
             }
         }

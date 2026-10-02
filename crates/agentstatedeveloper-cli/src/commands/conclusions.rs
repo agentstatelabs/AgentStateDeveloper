@@ -155,11 +155,13 @@ fn import(cfg: &Config, args: ImportArgs) -> Result<()> {
             "file": r.file,
             "read": r.read,
             "imported": r.imported,
+            "skipped_up_to_date": r.skipped_up_to_date,
             "skipped_unknown_qname": r.skipped_unknown_qname,
             "skipped_parse_error": r.skipped_parse_error,
         })).collect::<Vec<_>>(),
         "total_read": results.iter().map(|r| r.read).sum::<usize>(),
         "total_imported": results.iter().map(|r| r.imported).sum::<usize>(),
+        "total_skipped_up_to_date": results.iter().map(|r| r.skipped_up_to_date).sum::<usize>(),
         "total_skipped_unknown_qname": results.iter().map(|r| r.skipped_unknown_qname).sum::<usize>(),
         "total_skipped_parse_error": results.iter().map(|r| r.skipped_parse_error).sum::<usize>(),
     });
