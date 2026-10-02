@@ -26,7 +26,7 @@
 //!
 //! Total object count is O(N) regardless of repo size.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -41,7 +41,7 @@ use crate::doc_adapters::{adapt_document, is_doc_file};
 use crate::error::{AsdError, Result};
 use crate::ledger::detect_orphaned_entries;
 use crate::paths;
-use crate::schema::{EffectCategory, EffectDecl, Position, Symbol, TransitiveEffect};
+use crate::schema::{EffectDecl, Position, Symbol, TransitiveEffect};
 use crate::search_fts::{SearchDocsDb, SearchFtsDb};
 use crate::symbol::{canonical_symbol_id, symbol_fingerprint};
 
@@ -1009,43 +1009,14 @@ fn transitive_updates(
         })
         .collect();
 
-    let mut memo: HashMap<String, HashMap<EffectCategory, BTreeSet<String>>> = HashMap::new();
-    let mut updates: Vec<(String, Vec<TransitiveEffect>)> = Vec::new();
-
-    for sym in symbol_ids {
-        let mut stack: HashSet<String> = HashSet::new();
-        let computed =
-            compute_transitive_mem(callees_of, &effects_cache, sym, &mut memo, &mut stack);
-
-        let Some(decl) = effects_cache.get(sym) else {
-            continue;
-        };
-
-        let declared_cats: HashSet<EffectCategory> =
-            decl.declared.iter().map(|e| e.effect.clone()).collect();
-
-        let mut new_transitive: Vec<TransitiveEffect> = computed
-            .into_iter()
-            .filter(|(cat, _)| !declared_cats.contains(cat))
-            .map(|(cat, via_set)| TransitiveEffect {
-                effect: cat,
-                via: via_set.into_iter().collect(),
-                qualifiers: serde_json::Value::Null,
+    crate::transitive::transitive_effects(callees_of, &effects_cache, symbol_ids)
+        .into_iter()
+        .filter(|(sym, new_transitive)| {
+            effects_cache.get(sym).is_some_and(|decl| {
+                !crate::transitive::transitive_eq(&decl.transitive, new_transitive)
             })
-            .collect();
-
-        new_transitive.sort_by(|a, b| {
-            a.effect
-                .as_str()
-                .cmp(b.effect.as_str())
-                .then_with(|| a.via.cmp(&b.via))
-        });
-
-        if !transitive_eq(&decl.transitive, &new_transitive) {
-            updates.push((sym.clone(), new_transitive));
-        }
-    }
-    updates
+        })
+        .collect()
 }
 
 /// Write each symbol's new `transitive` field — and nothing else. Writing
@@ -1100,61 +1071,6 @@ fn write_transitive(
         .map_err(|e| AsdError::Other(e.to_string()))?;
 
     Ok(updated)
-}
-
-/// DFS over the in-memory `callees_of` map — no repo reads.
-fn compute_transitive_mem(
-    callees_of: &HashMap<String, Vec<String>>,
-    effects: &HashMap<String, EffectDecl>,
-    sym: &str,
-    memo: &mut HashMap<String, HashMap<EffectCategory, BTreeSet<String>>>,
-    stack: &mut HashSet<String>,
-) -> HashMap<EffectCategory, BTreeSet<String>> {
-    if let Some(cached) = memo.get(sym) {
-        return cached.clone();
-    }
-    if stack.contains(sym) {
-        return HashMap::new();
-    }
-    stack.insert(sym.to_string());
-
-    let mut acc: HashMap<EffectCategory, BTreeSet<String>> = HashMap::new();
-    let empty = Vec::new();
-    let callees = callees_of.get(sym).unwrap_or(&empty);
-
-    for callee in callees {
-        if let Some(decl) = effects.get(callee) {
-            for e in &decl.declared {
-                acc.entry(e.effect.clone())
-                    .or_default()
-                    .insert(callee.clone());
-            }
-        }
-        let callee_trans = compute_transitive_mem(callees_of, effects, callee, memo, stack);
-        for (cat, _) in callee_trans {
-            acc.entry(cat).or_default().insert(callee.clone());
-        }
-    }
-
-    stack.remove(sym);
-    memo.insert(sym.to_string(), acc.clone());
-    acc
-}
-
-fn transitive_eq(a: &[TransitiveEffect], b: &[TransitiveEffect]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let to_key = |t: &TransitiveEffect| {
-        let mut via = t.via.clone();
-        via.sort();
-        (t.effect.clone(), via)
-    };
-    let mut a_keys: Vec<_> = a.iter().map(to_key).collect();
-    let mut b_keys: Vec<_> = b.iter().map(to_key).collect();
-    a_keys.sort();
-    b_keys.sort();
-    a_keys == b_keys
 }
 
 fn same_module(caller: &str, callee: &str) -> bool {
@@ -1305,7 +1221,7 @@ mod tests {
     use super::*;
     use crate::effects::{AsgEffectStore, EffectStore};
     use crate::engine::Engine;
-    use crate::schema::Effect;
+    use crate::schema::{Effect, EffectCategory};
 
     fn decl(symbol_id: &str, declared: Vec<Effect>) -> EffectDecl {
         EffectDecl {
