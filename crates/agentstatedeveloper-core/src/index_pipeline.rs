@@ -26,7 +26,7 @@
 //!
 //! Total object count is O(N) regardless of repo size.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -41,10 +41,7 @@ use crate::doc_adapters::{adapt_document, is_doc_file};
 use crate::error::{AsdError, Result};
 use crate::ledger::detect_orphaned_entries;
 use crate::paths;
-use crate::schema::{
-    EffectCategory, EffectDecl, Position, Symbol, TransitiveEffect, Verification,
-    VerificationSource, VerificationStatus,
-};
+use crate::schema::{EffectCategory, EffectDecl, Position, Symbol, TransitiveEffect};
 use crate::search_fts::{SearchDocsDb, SearchFtsDb};
 use crate::symbol::{canonical_symbol_id, symbol_fingerprint};
 
@@ -211,32 +208,23 @@ pub fn run_index(
     // -----------------------------------------------------------------------
     let total = files.len();
 
-    // Seed from existing state so incremental re-index preserves prior data.
+    // Existing symbols, so this run's calls resolve to symbols indexed by
+    // earlier runs. Read for resolution only — see `run_qnames` below.
     let mut by_qname: serde_json::Map<String, Value> = repo
         .get_tree(ref_name, "/asd/v1/index/by-qname")
         .ok()
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default();
 
-    let mut by_effects: serde_json::Map<String, Value> = repo
-        .get_tree(ref_name, "/asd/v1/effects")
-        .ok()
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default();
-
-    // code tree: lang → { "clean_file/symbol_fp" → Symbol }
-    // Seed from existing state.
-    let mut by_code: BTreeMap<String, serde_json::Map<String, Value>> = {
-        let existing = repo
-            .get_tree(ref_name, "/asd/v1/code")
-            .ok()
-            .and_then(|v| v.as_object().cloned())
-            .unwrap_or_default();
-        existing
-            .into_iter()
-            .filter_map(|(lang, subtree)| subtree.as_object().cloned().map(|m| (lang, m)))
-            .collect()
-    };
+    // What THIS run produced, written at flush time on top of the subtrees as
+    // the flush speculation forked them. Writing back a copy read here
+    // instead reverted whatever changed while this run parsed: an
+    // `effect_declare`, a runtime trace, another index.
+    let mut run_qnames: Vec<(String, Value)> = Vec::new();
+    // (symbol_id, inferred effects, file)
+    let mut run_effects: Vec<(String, Vec<crate::schema::Effect>, String)> = Vec::new();
+    // (language, "clean_file/symbol_fp", Symbol) — the `/asd/v1/code` tree.
+    let mut run_code: Vec<(String, String, Value)> = Vec::new();
 
     let mut symbol_count = 0usize;
     let mut disambiguated_count = 0usize;
@@ -321,40 +309,20 @@ pub fn run_index(
                 qname_first_file.insert(p.qname.clone(), file_str.clone());
             }
             by_qname.insert(p.qname.clone(), sym_val.clone());
-            let inferred = adapter.infer_effects(&source, p);
-            // Effects returned by the static checker were confirmed from
-            // source — mark Ok. An empty list means the adapter couldn't
-            // determine effects (not that it confirmed purity), so stay
-            // Unverified until a runtime trace or manual declaration says more.
-            let verification_status = if inferred.is_empty() {
-                VerificationStatus::Unverified
-            } else {
-                VerificationStatus::Ok
-            };
-            by_effects.insert(
-                symbol_id.clone(),
-                serde_json::to_value(&EffectDecl {
-                    symbol_id: symbol_id.clone(),
-                    declared: inferred,
-                    transitive: Vec::new(),
-                    verification: Some(Verification {
-                        by: VerificationSource::StaticChecker,
-                        at: Utc::now(),
-                        status: verification_status,
-                        mismatches: Vec::new(),
-                    }),
-                    confidence: None,
-                    runtime: None,
-                    matched_policy: None,
-                })
-                .map_err(|e| AsdError::Other(e.to_string()))?,
-            );
+            run_qnames.push((p.qname.clone(), sym_val.clone()));
+            let mut inferred = adapter.infer_effects(&source, p);
+            // Stamp provenance so a re-index can tell what it inferred from
+            // what a person declared (`effect_declare`), and refresh only the
+            // former.
+            for effect in &mut inferred {
+                effect
+                    .adapter
+                    .get_or_insert_with(|| adapter.language().to_string());
+            }
+            run_effects.push((symbol_id.clone(), inferred, file_str.clone()));
 
             let code_key = format!("{}/{}", paths::clean(&file_str), symbol_fp);
-            by_code
-                .entry(sym.language.clone())
-                .or_default()
-                .insert(code_key, sym_val);
+            run_code.push((sym.language.clone(), code_key, sym_val));
 
             qname_to_sym_id.insert(p.qname.clone(), symbol_id.clone());
             symbol_count += 1;
@@ -370,7 +338,6 @@ pub fn run_index(
     }
 
     let unique_symbol_count = by_qname.len();
-    let unique_effect_count = by_effects.len();
     if disambiguated_count > 0 || !collision_log.is_empty() {
         if disambiguated_count > 0 {
             eprintln!(
@@ -435,24 +402,59 @@ pub fn run_index(
         workspace.properties.extend(props);
     }
 
-    // Build the nested code tree JSON: { lang: { "file/fp": Symbol, … }, … }
-    let code_tree: serde_json::Map<String, Value> = by_code
-        .into_iter()
-        .map(|(lang, subtree)| (lang, Value::Object(subtree)))
-        .collect();
-
     // Flush Pass 1: 3 spec_set_json calls (complete subtrees) → O(N) objects.
-    let spec1 = repo
-        .speculate(ref_name, Some("asd-index-pass1".into()))
-        .map_err(|e| AsdError::Other(e.to_string()))?;
-    repo.spec_set_json(spec1, "/asd/v1/index/by-qname", &Value::Object(by_qname))
-        .map_err(|e| AsdError::Other(e.to_string()))?;
-    repo.spec_set_json(spec1, "/asd/v1/effects", &Value::Object(by_effects))
-        .map_err(|e| AsdError::Other(e.to_string()))?;
-    if !code_tree.is_empty() {
-        repo.spec_set_json(spec1, "/asd/v1/code", &Value::Object(code_tree))
+    //
+    // Each subtree is the one the speculation forked from plus this run's
+    // keys, so the speculation changes exactly what this run produced, and
+    // committing it — a three-way merge onto the head — keeps every write
+    // that landed meanwhile.
+    let (spec1, fork) = speculate_at_head(repo, ref_name, "asd-index-pass1")?;
+    let flushed = (|| -> Result<usize> {
+        let mut qname_tree = read_seed(repo, &fork, "/asd/v1/index/by-qname")?;
+        qname_tree.extend(run_qnames);
+
+        let mut effects_tree = read_seed(repo, &fork, "/asd/v1/effects")?;
+        let now = Utc::now();
+        for (symbol_id, inferred, file) in run_effects {
+            let existing = effects_tree
+                .get(&symbol_id)
+                .and_then(|v| serde_json::from_value::<EffectDecl>(v.clone()).ok());
+            let merged =
+                crate::effects::merge_reindexed_effects(existing, &symbol_id, inferred, &file, now);
+            effects_tree.insert(
+                symbol_id,
+                serde_json::to_value(&merged).map_err(|e| AsdError::Other(e.to_string()))?,
+            );
+        }
+        let effect_count = effects_tree.len();
+
+        let mut code_tree = read_seed(repo, &fork, "/asd/v1/code")?;
+        for (lang, key, sym_val) in run_code {
+            if let Value::Object(by_key) = code_tree
+                .entry(lang)
+                .or_insert_with(|| Value::Object(Default::default()))
+            {
+                by_key.insert(key, sym_val);
+            }
+        }
+
+        repo.spec_set_json(spec1, "/asd/v1/index/by-qname", &Value::Object(qname_tree))
             .map_err(|e| AsdError::Other(e.to_string()))?;
-    }
+        repo.spec_set_json(spec1, "/asd/v1/effects", &Value::Object(effects_tree))
+            .map_err(|e| AsdError::Other(e.to_string()))?;
+        if !code_tree.is_empty() {
+            repo.spec_set_json(spec1, "/asd/v1/code", &Value::Object(code_tree))
+                .map_err(|e| AsdError::Other(e.to_string()))?;
+        }
+        Ok(effect_count)
+    })();
+    let unique_effect_count = match flushed {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = repo.discard_speculation(spec1);
+            return Err(e);
+        }
+    };
     // A re-index is a routine checkpoint, so it deliberately does NOT carry
     // `TAG_PIN_STATE`: pinning here would retain a full state tree on every
     // run and leave the store with nothing reclaimable. What it records
@@ -919,8 +921,55 @@ fn disambiguate_qnames(parsed: &mut Vec<ParsedSymbol>) -> usize {
     renamed
 }
 
-/// Compute transitive effects entirely in memory, then flush changed
-/// EffectDecls as a single `spec_set_json` call → O(N) objects.
+/// Fork a speculation from `ref_name` and return it with the commit it forked
+/// from (as a ref string), so the caller can read exactly the state the
+/// speculation starts from. A write landing between the two head reads leaves
+/// the fork point unknown, so that attempt is discarded and retried.
+fn speculate_at_head(
+    repo: &Repository,
+    ref_name: &str,
+    label: &str,
+) -> Result<(agentstategraph::SpecHandle, String)> {
+    for _ in 0..8 {
+        let before = repo
+            .head(ref_name)
+            .map_err(|e| AsdError::Other(e.to_string()))?;
+        let spec = repo
+            .speculate(ref_name, Some(label.into()))
+            .map_err(|e| AsdError::Other(e.to_string()))?;
+        match repo.head(ref_name) {
+            Ok(after) if after == before => return Ok((spec, before.to_hex())),
+            Ok(_) => {
+                let _ = repo.discard_speculation(spec);
+            }
+            Err(e) => {
+                let _ = repo.discard_speculation(spec);
+                return Err(AsdError::Other(e.to_string()));
+            }
+        }
+    }
+    Err(AsdError::Other(format!(
+        "{ref_name} moved on every attempt to fork a speculation from it"
+    )))
+}
+
+/// Read a subtree as a JSON map, as the base a flush writes on top of. A
+/// subtree that does not exist yet (a first index) is empty; any other read
+/// error fails the index — an empty seed written back would replace the whole
+/// subtree.
+fn read_seed(repo: &Repository, at: &str, path: &str) -> Result<serde_json::Map<String, Value>> {
+    match repo.get_tree(at, path) {
+        Ok(Value::Object(map)) => Ok(map),
+        Ok(_) => Ok(serde_json::Map::new()),
+        Err(agentstategraph::RepoError::Tree(agentstategraph::tree::TreeError::PathNotFound(
+            _,
+        ))) => Ok(serde_json::Map::new()),
+        Err(e) => Err(AsdError::Other(format!("read {path}: {e}"))),
+    }
+}
+
+/// Compute transitive effects entirely in memory, then write the ones that
+/// changed in one speculation.
 ///
 /// Takes `callees_of` from the in-memory Pass-2 map to avoid repo reads
 /// during the DFS.
@@ -931,6 +980,18 @@ fn propagate_transitive_batched(
     callees_of: &HashMap<String, Vec<String>>,
     agent_id: &str,
 ) -> Result<usize> {
+    let updates = transitive_updates(repo, ref_name, symbol_ids, callees_of);
+    write_transitive(repo, ref_name, &updates, agent_id)
+}
+
+/// Each symbol whose stored `transitive` effects differ from the ones its
+/// callees now imply, with the new list.
+fn transitive_updates(
+    repo: &Repository,
+    ref_name: &str,
+    symbol_ids: &[String],
+    callees_of: &HashMap<String, Vec<String>>,
+) -> Vec<(String, Vec<TransitiveEffect>)> {
     // Read the complete effects tree once.
     let effects_tree = repo
         .get_tree(ref_name, "/asd/v1/effects")
@@ -939,7 +1000,7 @@ fn propagate_transitive_batched(
         .unwrap_or_default();
 
     // Deserialize into a local cache for fast access.
-    let mut effects_cache: HashMap<String, EffectDecl> = effects_tree
+    let effects_cache: HashMap<String, EffectDecl> = effects_tree
         .iter()
         .filter_map(|(k, v)| {
             serde_json::from_value::<EffectDecl>(v.clone())
@@ -949,7 +1010,7 @@ fn propagate_transitive_batched(
         .collect();
 
     let mut memo: HashMap<String, HashMap<EffectCategory, BTreeSet<String>>> = HashMap::new();
-    let mut updates: Vec<(String, EffectDecl)> = Vec::new();
+    let mut updates: Vec<(String, Vec<TransitiveEffect>)> = Vec::new();
 
     for sym in symbol_ids {
         let mut stack: HashSet<String> = HashSet::new();
@@ -981,32 +1042,55 @@ fn propagate_transitive_batched(
         });
 
         if !transitive_eq(&decl.transitive, &new_transitive) {
-            let mut updated = decl.clone();
-            updated.transitive = new_transitive;
-            updates.push((sym.clone(), updated));
+            updates.push((sym.clone(), new_transitive));
         }
     }
+    updates
+}
 
-    let updated = updates.len();
-    if updated == 0 {
+/// Write each symbol's new `transitive` field — and nothing else. Writing
+/// back the whole effects map read by [`transitive_updates`] reverted any
+/// effect declared, traced or verified while the pass computed.
+///
+/// One subtree write, not one per symbol: a nested `spec_set_json` copies
+/// every map on the path, so per-symbol writes stored a copy of the whole
+/// effects map for each update (10x the database on a cold index). The
+/// subtree is the one the speculation forked from, so the speculation still
+/// changes only these fields.
+fn write_transitive(
+    repo: &Repository,
+    ref_name: &str,
+    updates: &[(String, Vec<TransitiveEffect>)],
+    agent_id: &str,
+) -> Result<usize> {
+    if updates.is_empty() {
         return Ok(0);
     }
-
-    // Apply updates to the local cache, then rebuild the complete effects map.
-    for (sym_id, decl) in &updates {
-        effects_cache.insert(sym_id.clone(), decl.clone());
-    }
-
-    let effects_map: serde_json::Map<String, Value> = effects_cache
-        .iter()
-        .filter_map(|(k, v)| serde_json::to_value(v).ok().map(|val| (k.clone(), val)))
-        .collect();
-
-    let spec = repo
-        .speculate(ref_name, Some("asd-index-transitive".into()))
-        .map_err(|e| AsdError::Other(e.to_string()))?;
-    repo.spec_set_json(spec, "/asd/v1/effects", &Value::Object(effects_map))
-        .map_err(|e| AsdError::Other(e.to_string()))?;
+    let (spec, fork) = speculate_at_head(repo, ref_name, "asd-index-transitive")?;
+    let staged = (|| -> Result<usize> {
+        let mut effects = read_seed(repo, &fork, "/asd/v1/effects")?;
+        let mut updated = 0;
+        for (sym_id, transitive) in updates {
+            // Gone since the pass read it: nothing left to annotate.
+            let Some(Value::Object(decl)) = effects.get_mut(sym_id) else {
+                continue;
+            };
+            let value =
+                serde_json::to_value(transitive).map_err(|e| AsdError::Other(e.to_string()))?;
+            decl.insert("transitive".to_string(), value);
+            updated += 1;
+        }
+        repo.spec_set_json(spec, "/asd/v1/effects", &Value::Object(effects))
+            .map_err(|e| AsdError::Other(e.to_string()))?;
+        Ok(updated)
+    })();
+    let updated = match staged {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = repo.discard_speculation(spec);
+            return Err(e);
+        }
+    };
     let opts = CommitOptions::new(
         agent_id,
         IntentCategory::Refine,
@@ -1214,4 +1298,66 @@ fn walk(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::effects::{AsgEffectStore, EffectStore};
+    use crate::engine::Engine;
+    use crate::schema::Effect;
+
+    fn decl(symbol_id: &str, declared: Vec<Effect>) -> EffectDecl {
+        EffectDecl {
+            symbol_id: symbol_id.into(),
+            declared,
+            transitive: Vec::new(),
+            verification: None,
+            confidence: None,
+            runtime: None,
+            matched_policy: None,
+        }
+    }
+
+    #[test]
+    fn the_transitive_write_keeps_a_declaration_made_while_it_computed() {
+        let engine = Engine::open_in_memory().unwrap();
+        let (repo, ref_name) = (&engine.repo, engine.ref_name.as_str());
+        let store = AsgEffectStore::new(repo);
+        let net = Effect {
+            adapter: Some("python".into()),
+            ..Effect::new(EffectCategory::IoNetOut)
+        };
+        store
+            .put_effects(ref_name, "caller", &decl("caller", Vec::new()), "index")
+            .unwrap();
+        store
+            .put_effects(ref_name, "callee", &decl("callee", vec![net]), "index")
+            .unwrap();
+
+        let callees_of = HashMap::from([("caller".to_string(), vec!["callee".to_string()])]);
+        let ids = vec!["caller".to_string(), "callee".to_string()];
+        let updates = transitive_updates(repo, ref_name, &ids, &callees_of);
+        assert_eq!(updates.len(), 1, "caller reaches io.net.out via callee");
+
+        // An `effect_declare` lands while the pass computes.
+        let by_hand = Effect {
+            note: Some("writes the rate cache".into()),
+            ..Effect::new(EffectCategory::IoFsWrite)
+        };
+        store
+            .put_effects(ref_name, "caller", &decl("caller", vec![by_hand]), "human")
+            .unwrap();
+
+        write_transitive(repo, ref_name, &updates, "index").unwrap();
+
+        let after = store.get_effects(ref_name, "caller").unwrap().unwrap();
+        assert_eq!(
+            after.declared.first().and_then(|e| e.note.as_deref()),
+            Some("writes the rate cache"),
+            "the transitive write reverted a declaration: {after:?}"
+        );
+        assert_eq!(after.transitive.len(), 1);
+        assert_eq!(after.transitive[0].via, vec!["callee".to_string()]);
+    }
 }

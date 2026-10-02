@@ -539,11 +539,15 @@ pub struct ImportFileResult {
     pub class: &'static str,
     pub file: String,
     /// Plan T t-007: total non-empty lines read from the file. Always
-    /// equals `imported + skipped_unknown_qname + skipped_parse_error`
-    /// — surfaced so callers can spot silent drops (`read > imported`)
+    /// equals `imported + skipped_up_to_date + skipped_unknown_qname +
+    /// skipped_parse_error` — surfaced so callers can spot silent drops
     /// without doing the arithmetic themselves.
     pub read: usize,
     pub imported: usize,
+    /// Records the store already holds at the same or a newer revision.
+    /// Not a drop: importing them would have replaced newer data (an entry
+    /// updated in place since the last export) with the committed copy.
+    pub skipped_up_to_date: usize,
     pub skipped_unknown_qname: usize,
     pub skipped_parse_error: usize,
 }
@@ -568,12 +572,19 @@ pub fn import_all(
     agent_id: &str,
 ) -> std::io::Result<Vec<ImportFileResult>> {
     let mut out = Vec::new();
+    let mut stored = stored_entries(engine)?;
     for class in ConclusionClass::all() {
         let stem = class.filename_stem();
         // Class-layout file (default).
         let class_file = in_dir.join(format!("{stem}.jsonl"));
         if class_file.is_file() {
-            out.push(import_one(engine, &class_file, stem, agent_id)?);
+            out.push(import_one(
+                engine,
+                &mut stored,
+                &class_file,
+                stem,
+                agent_id,
+            )?);
         }
         // Package-layout directory (opt-in via .asd/config.toml).
         // Read every *.jsonl in the per-class subdirectory.
@@ -586,7 +597,7 @@ pub fn import_all(
             // Sort for stable import order (helps test determinism).
             shard_paths.sort();
             for path in shard_paths {
-                out.push(import_one(engine, &path, stem, agent_id)?);
+                out.push(import_one(engine, &mut stored, &path, stem, agent_id)?);
             }
         }
         // If neither path exists, emit a zero-row result so callers
@@ -597,6 +608,7 @@ pub fn import_all(
                 file: class_file.to_string_lossy().into_owned(),
                 read: 0,
                 imported: 0,
+                skipped_up_to_date: 0,
                 skipped_unknown_qname: 0,
                 skipped_parse_error: 0,
             });
@@ -607,6 +619,7 @@ pub fn import_all(
 
 fn import_one(
     engine: &Engine,
+    stored: &mut std::collections::HashMap<String, LedgerEntry>,
     path: &Path,
     stem: &'static str,
     agent_id: &str,
@@ -616,6 +629,7 @@ fn import_one(
         file: path.display().to_string(),
         read: 0,
         imported: 0,
+        skipped_up_to_date: 0,
         skipped_unknown_qname: 0,
         skipped_parse_error: 0,
     };
@@ -654,13 +668,81 @@ fn import_one(
                 continue;
             }
         };
+        // A committed record must never replace a newer copy in the store.
+        // The post-merge/post-checkout hook re-appended every committed
+        // record unconditionally, reverting each entry revised in place since
+        // the last export to the committed copy on every pull or branch
+        // switch. A tie goes to the store. Looking the entry up by id also
+        // stops a rebound entry from being resurrected at its old symbol.
+        if let Some(current) = stored.get(&entry.entry_id)
+            && revised_at(current) >= revised_at(&entry)
+        {
+            result.skipped_up_to_date += 1;
+            continue;
+        }
         if ledger.append_entry(&ref_name, &entry, agent_id).is_ok() {
             result.imported += 1;
+            stored.insert(entry.entry_id.clone(), entry);
         } else {
             result.skipped_parse_error += 1;
         }
     }
     Ok(result)
+}
+
+/// When `entry` was last revised. Entries are revised in place two ways:
+/// rewritten under the same id with a fresh `created_at` (`asd think`'s
+/// deterministic ids), or tagged with the time of the change while
+/// `created_at` stays put (`approved-at:`, `rejected-at:` and `withdrawn-at:`
+/// from ratify, `orphaned-at:` from indexing).
+fn revised_at(entry: &LedgerEntry) -> DateTime<Utc> {
+    entry
+        .tags
+        .iter()
+        .filter_map(|tag| tag.split_once("-at:"))
+        .filter_map(|(_, at)| DateTime::parse_from_rfc3339(at).ok())
+        .map(|at| at.with_timezone(&Utc))
+        .fold(entry.created_at, DateTime::max)
+}
+
+/// Every stored ledger entry by id, wherever it lives — an entry rebound
+/// since the export sits under its new symbol. Read in one pass over the
+/// ledger tree: a lookup per record re-read the whole ledger map each time,
+/// ~100 s for 8,700 records. Where one id is stored twice, the latest
+/// revision stands.
+fn stored_entries(
+    engine: &Engine,
+) -> std::io::Result<std::collections::HashMap<String, LedgerEntry>> {
+    let mut stored: std::collections::HashMap<String, LedgerEntry> =
+        std::collections::HashMap::new();
+    let tree = match engine
+        .repo
+        .get_tree(&engine.ref_name, &crate::paths::ledger_root())
+    {
+        Ok(tree) => tree,
+        Err(agentstategraph::RepoError::Tree(agentstategraph::tree::TreeError::PathNotFound(
+            _,
+        ))) => return Ok(stored),
+        // Not an empty ledger: importing as if it were would revert every
+        // revision made since the last export.
+        Err(e) => return Err(std::io::Error::other(format!("read the ledger: {e}"))),
+    };
+    let entries = tree
+        .as_object()
+        .into_iter()
+        .flat_map(|by_symbol| by_symbol.values())
+        .filter_map(|per_symbol| per_symbol.as_object())
+        .flat_map(|by_id| by_id.values())
+        .filter_map(|v| serde_json::from_value::<LedgerEntry>(v.clone()).ok());
+    for entry in entries {
+        match stored.get(&entry.entry_id) {
+            Some(kept) if revised_at(kept) >= revised_at(&entry) => {}
+            _ => {
+                stored.insert(entry.entry_id.clone(), entry);
+            }
+        }
+    }
+    Ok(stored)
 }
 
 /// Rebuild a LedgerEntry from an ExportRecord. Returns None on unparseable
@@ -905,6 +987,136 @@ mod tests {
             .list_entries(&engine2.ref_name, &sym.symbol_id)
             .unwrap();
         assert_eq!(entries.len(), 1, "second import must not duplicate");
+    }
+
+    // ---- a committed record never replaces a newer stored revision --------
+
+    fn revision_symbol() -> crate::schema::Symbol {
+        crate::schema::Symbol {
+            symbol_id: "sym_rev".into(),
+            symbol_fp: "fp_rev".into(),
+            qname: "App.Rates.fetch".into(),
+            language: "python".into(),
+            kind: SymbolKind::Function,
+            file: "src/rates.py".into(),
+            start: crate::schema::Position { line: 1, col: 0 },
+            end: crate::schema::Position { line: 2, col: 0 },
+            signature: None,
+            doc: None,
+        }
+    }
+
+    /// A store holding `revision_symbol` and `entry`.
+    fn store_with(entry: &LedgerEntry) -> Engine {
+        let engine = Engine::open_in_memory().unwrap();
+        AsgIndexStore::from_engine(&engine)
+            .put_symbol(&engine.ref_name, &revision_symbol(), "test")
+            .unwrap();
+        AsgLedgerStore::from_engine(&engine)
+            .append_entry(&engine.ref_name, entry, "test")
+            .unwrap();
+        engine
+    }
+
+    fn decision() -> LedgerEntry {
+        LedgerEntry::new(
+            "sym_rev",
+            LedgerKind::Decision,
+            "retry rates once",
+            Author {
+                kind: AuthorKind::Agent,
+                id: "c".into(),
+            },
+        )
+    }
+
+    fn stored(engine: &Engine, entry_id: &str) -> LedgerEntry {
+        AsgLedgerStore::from_engine(engine)
+            .list_entries(&engine.ref_name, "sym_rev")
+            .unwrap()
+            .into_iter()
+            .find(|e| e.entry_id == entry_id)
+            .unwrap()
+    }
+
+    fn approve(entry: &mut LedgerEntry, at: DateTime<Utc>) {
+        // What ratify's approve does: tags in place, `created_at` untouched.
+        entry.tags.push("approved".into());
+        entry.tags.push(format!(
+            "approved-at:{}",
+            at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        ));
+    }
+
+    #[test]
+    fn import_keeps_an_entry_approved_in_place_since_the_export() {
+        let entry = decision();
+        let engine = store_with(&entry);
+        let tmp = tempdir().unwrap();
+        export_all(&engine, tmp.path()).unwrap(); // committed: not approved
+
+        let mut approved = entry.clone();
+        approve(&mut approved, entry.created_at + chrono::Duration::hours(1));
+        AsgLedgerStore::from_engine(&engine)
+            .append_entry(&engine.ref_name, &approved, "test")
+            .unwrap();
+
+        let results = import_all(&engine, tmp.path(), "hook").unwrap();
+        assert_eq!(
+            results.iter().map(|r| r.skipped_up_to_date).sum::<usize>(),
+            1
+        );
+        assert_eq!(results.iter().map(|r| r.imported).sum::<usize>(), 0);
+        assert!(
+            stored(&engine, &entry.entry_id)
+                .tags
+                .contains(&"approved".to_string()),
+            "import reverted an in-place approval"
+        );
+    }
+
+    #[test]
+    fn import_applies_a_teammates_in_place_approval() {
+        let entry = decision();
+        let mine = store_with(&entry);
+
+        let mut approved = entry.clone();
+        approve(&mut approved, entry.created_at + chrono::Duration::hours(1));
+        let theirs = store_with(&approved);
+        let tmp = tempdir().unwrap();
+        export_all(&theirs, tmp.path()).unwrap();
+
+        let results = import_all(&mine, tmp.path(), "hook").unwrap();
+        assert_eq!(results.iter().map(|r| r.imported).sum::<usize>(), 1);
+        assert!(
+            stored(&mine, &entry.entry_id)
+                .tags
+                .contains(&"approved".to_string()),
+            "a teammate's approval did not import"
+        );
+    }
+
+    #[test]
+    fn import_applies_a_newer_rewrite_under_the_same_id() {
+        let entry = decision();
+        let mine = store_with(&entry);
+
+        // `asd think` re-run elsewhere: same id, fresh `created_at`.
+        let mut rewritten = entry.clone();
+        rewritten.summary = "retry rates twice".into();
+        rewritten.created_at = entry.created_at + chrono::Duration::hours(1);
+        let theirs = store_with(&rewritten);
+        let tmp = tempdir().unwrap();
+        export_all(&theirs, tmp.path()).unwrap();
+
+        import_all(&mine, tmp.path(), "hook").unwrap();
+        assert_eq!(stored(&mine, &entry.entry_id).summary, "retry rates twice");
+
+        // And the reverse: the older committed copy does not come back.
+        let tmp_old = tempdir().unwrap();
+        export_all(&store_with(&entry), tmp_old.path()).unwrap();
+        import_all(&mine, tmp_old.path(), "hook").unwrap();
+        assert_eq!(stored(&mine, &entry.entry_id).summary, "retry rates twice");
     }
 
     // ---- Plan K t-001: sort-on-write byte-stability + conflict-resistance --
