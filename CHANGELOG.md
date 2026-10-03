@@ -17,6 +17,8 @@ Versions use semantic versioning.
 
 ## [Unreleased]
 
+## [v1.4.3] — 2026-10-03
+
 ### Fixed
 - **The symbol index only ever grew, and ledger entries came loose from the code they described.** `asd index` added and updated symbols but never removed one, so the index kept every name a symbol had ever had: SessionDrift-ios held 12,044 entries for 9,244 live symbols. Most of the excess was not deleted code but line-number churn — same-named symbols in a file are told apart by line (`load:412`), the line is part of the symbol's id, so an edit above them gave each a new id — and a ledger entry stayed on the old id, out of the reach of `prepare-change` and of conclusions export. Each run now settles the stale entries in the files it parsed (and, on a run over the whole project, in files that no longer exist): a symbol whose body reappears unchanged under a new id in the same file has moved, and its ledger entries and any effects record go with it; a symbol that is gone is removed with its effects and code entries — unless ledger entries or runtime evidence still hang off it, in which case it stays as before. A hand-declared effect on a symbol that is gone (not merely moved) goes with it. A partial run (`asd index src`) only touches the files it parsed. On a copy of SessionDrift-ios the first run moved 1,628 symbols (carrying 270 ledger entries) and removed 890, leaving 9,526 entries — the live symbols plus 282 kept for their ledger; conclusions export went from 11,128 records to 11,398, losing none; later runs found nothing stale and re-index time went from 19.2 s to 17.2 s. The index summary reports `stale_pruned`, `stale_rebound`, `ledger_entries_rebound` and `stale_kept`.
 
