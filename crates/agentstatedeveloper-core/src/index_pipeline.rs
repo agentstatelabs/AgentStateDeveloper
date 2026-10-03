@@ -408,12 +408,12 @@ pub fn run_index(
     // keys, so the speculation changes exactly what this run produced, and
     // committing it — a three-way merge onto the head — keeps every write
     // that landed meanwhile.
-    let (spec1, fork) = speculate_at_head(repo, ref_name, "asd-index-pass1")?;
+    let (spec1, fork) = crate::subtree::speculate_at_head(repo, ref_name, "asd-index-pass1")?;
     let flushed = (|| -> Result<usize> {
-        let mut qname_tree = read_seed(repo, &fork, "/asd/v1/index/by-qname")?;
+        let mut qname_tree = crate::subtree::read_seed(repo, &fork, "/asd/v1/index/by-qname")?;
         qname_tree.extend(run_qnames);
 
-        let mut effects_tree = read_seed(repo, &fork, "/asd/v1/effects")?;
+        let mut effects_tree = crate::subtree::read_seed(repo, &fork, "/asd/v1/effects")?;
         let now = Utc::now();
         for (symbol_id, inferred, file) in run_effects {
             let existing = effects_tree
@@ -428,7 +428,7 @@ pub fn run_index(
         }
         let effect_count = effects_tree.len();
 
-        let mut code_tree = read_seed(repo, &fork, "/asd/v1/code")?;
+        let mut code_tree = crate::subtree::read_seed(repo, &fork, "/asd/v1/code")?;
         for (lang, key, sym_val) in run_code {
             if let Value::Object(by_key) = code_tree
                 .entry(lang)
@@ -921,53 +921,6 @@ fn disambiguate_qnames(parsed: &mut Vec<ParsedSymbol>) -> usize {
     renamed
 }
 
-/// Fork a speculation from `ref_name` and return it with the commit it forked
-/// from (as a ref string), so the caller can read exactly the state the
-/// speculation starts from. A write landing between the two head reads leaves
-/// the fork point unknown, so that attempt is discarded and retried.
-fn speculate_at_head(
-    repo: &Repository,
-    ref_name: &str,
-    label: &str,
-) -> Result<(agentstategraph::SpecHandle, String)> {
-    for _ in 0..8 {
-        let before = repo
-            .head(ref_name)
-            .map_err(|e| AsdError::Other(e.to_string()))?;
-        let spec = repo
-            .speculate(ref_name, Some(label.into()))
-            .map_err(|e| AsdError::Other(e.to_string()))?;
-        match repo.head(ref_name) {
-            Ok(after) if after == before => return Ok((spec, before.to_hex())),
-            Ok(_) => {
-                let _ = repo.discard_speculation(spec);
-            }
-            Err(e) => {
-                let _ = repo.discard_speculation(spec);
-                return Err(AsdError::Other(e.to_string()));
-            }
-        }
-    }
-    Err(AsdError::Other(format!(
-        "{ref_name} moved on every attempt to fork a speculation from it"
-    )))
-}
-
-/// Read a subtree as a JSON map, as the base a flush writes on top of. A
-/// subtree that does not exist yet (a first index) is empty; any other read
-/// error fails the index — an empty seed written back would replace the whole
-/// subtree.
-fn read_seed(repo: &Repository, at: &str, path: &str) -> Result<serde_json::Map<String, Value>> {
-    match repo.get_tree(at, path) {
-        Ok(Value::Object(map)) => Ok(map),
-        Ok(_) => Ok(serde_json::Map::new()),
-        Err(agentstategraph::RepoError::Tree(agentstategraph::tree::TreeError::PathNotFound(
-            _,
-        ))) => Ok(serde_json::Map::new()),
-        Err(e) => Err(AsdError::Other(format!("read {path}: {e}"))),
-    }
-}
-
 /// Compute transitive effects entirely in memory, then write the ones that
 /// changed in one speculation.
 ///
@@ -1037,9 +990,9 @@ fn write_transitive(
     if updates.is_empty() {
         return Ok(0);
     }
-    let (spec, fork) = speculate_at_head(repo, ref_name, "asd-index-transitive")?;
+    let (spec, fork) = crate::subtree::speculate_at_head(repo, ref_name, "asd-index-transitive")?;
     let staged = (|| -> Result<usize> {
-        let mut effects = read_seed(repo, &fork, "/asd/v1/effects")?;
+        let mut effects = crate::subtree::read_seed(repo, &fork, "/asd/v1/effects")?;
         let mut updated = 0;
         for (sym_id, transitive) in updates {
             // Gone since the pass read it: nothing left to annotate.

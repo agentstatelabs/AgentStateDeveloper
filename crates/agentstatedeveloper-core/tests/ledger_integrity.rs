@@ -161,6 +161,34 @@ fn restore_puts_lost_entries_back_and_sync_exports_them() {
     assert_eq!((again.missing, again.restored), (0, 0));
 }
 
+/// A restore is one commit, however many entries it brings back. It was two
+/// per entry, each storing a fresh copy of the ledger and ledger-idx maps:
+/// restoring 1,684 entries grew a 1.5 GB store to 5.5 GB.
+#[test]
+fn a_restore_lands_as_one_commit() {
+    let (_dir, engine, entries) = seeded(10);
+    for e in &entries[..6] {
+        lose_from_store(&engine, e);
+    }
+    let before = engine.repo.log(&engine.ref_name, 10_000).unwrap().len();
+
+    let report = restore_missing_ledger_entries(&engine, "tester").unwrap();
+    assert_eq!((report.missing, report.restored), (6, 6));
+
+    let log = engine.repo.log(&engine.ref_name, 10_000).unwrap();
+    assert_eq!(log.len() - before, 1, "one commit for the whole restore");
+    assert!(
+        log[0]
+            .intent
+            .description
+            .starts_with("restore 6 ledger entries"),
+        "{}",
+        log[0].intent.description
+    );
+    let (missing, _) = missing_ledger_entries(&engine).unwrap();
+    assert!(missing.is_empty(), "{} still missing", missing.len());
+}
+
 /// `ledger rebind` moves an entry to a new symbol and its cache row follows.
 /// Matching by entry id means the move is never mistaken for a loss.
 #[test]
