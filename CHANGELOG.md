@@ -17,6 +17,9 @@ Versions use semantic versioning.
 
 ## [Unreleased]
 
+### Fixed
+- **`asd repair --fix` multiplied the store's size when it restored many ledger entries.** It wrote two commits per restored entry — the entry, then its reverse-index record — and each stored a fresh copy of the ledger and ledger-index maps: restoring SessionDrift-ios's 1,684 lost entries grew its store from 1.5 GB to 5.5 GB (`asd gc --sweep --vacuum` took it back to 1.5 GB). A restore is now one commit, with every restored entry id in its reasoning. The same restore on a copy of that store now adds 7 MB and takes 7 s instead of about 50 s.
+
 ## [v1.4.1] — 2026-10-02
 
 ### Fixed

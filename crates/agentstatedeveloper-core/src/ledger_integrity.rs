@@ -224,39 +224,82 @@ pub fn restore_missing_ledger_entries(
         unparseable,
         ..Default::default()
     };
-    for entry in &missing {
-        let result = (|| -> Result<()> {
-            let value = serde_json::to_value(entry)?;
-            engine.repo.set_json(
-                &engine.ref_name,
-                &paths::ledger_entry_path(&entry.symbol_id, &entry.entry_id),
-                &value,
-                CommitOptions::new(
-                    agent_id,
-                    IntentCategory::Refine,
-                    format!(
-                        "restore ledger {} {} for {} (lost from the store, recovered from the ledger cache)",
-                        entry.kind.as_str(),
-                        entry.entry_id,
-                        entry.symbol_id
-                    ),
-                ),
-            )?;
-            engine.repo.set_json(
-                &engine.ref_name,
-                &paths::ledger_entry_index_path(&entry.entry_id),
-                &Value::String(entry.symbol_id.clone()),
-                CommitOptions::new(
-                    agent_id,
-                    IntentCategory::Refine,
-                    format!("restore ledger-idx {}", entry.entry_id),
-                ),
-            )?;
-            Ok(())
-        })();
-        match result {
-            Ok(()) => report.restored += 1,
-            Err(e) => report.failed.push((entry.entry_id.clone(), e.to_string())),
+    if missing.is_empty() {
+        return Ok(report);
+    }
+
+    // One commit for the whole restore. A commit per entry — two, with its
+    // reverse-index record — stored a fresh copy of the ledger and
+    // ledger-idx maps each time: restoring 1,684 entries grew a 1.5 GB store
+    // to 5.5 GB. Both subtrees are rebuilt in memory on top of the state the
+    // speculation forked from and written once each, so the commit adds
+    // exactly the restored entries and keeps anything written meanwhile.
+    let repo = &engine.repo;
+    let (spec, fork) =
+        crate::subtree::speculate_at_head(repo, &engine.ref_name, "asd-repair-ledger")?;
+    let staged = (|| -> Result<()> {
+        let mut ledger = crate::subtree::read_seed(repo, &fork, &paths::ledger_root())?;
+        let mut index = crate::subtree::read_seed(repo, &fork, &paths::ledger_index_root())?;
+        for entry in &missing {
+            let by_id = ledger
+                .entry(entry.symbol_id.clone())
+                .or_insert_with(|| Value::Object(Default::default()));
+            let Value::Object(by_id) = by_id else {
+                return Err(AsdError::Other(format!(
+                    "ledger node for {} is not a map",
+                    entry.symbol_id
+                )));
+            };
+            by_id.insert(entry.entry_id.clone(), serde_json::to_value(entry)?);
+            index.insert(
+                entry.entry_id.clone(),
+                Value::String(entry.symbol_id.clone()),
+            );
+        }
+        repo.spec_set_json(spec, &paths::ledger_root(), &Value::Object(ledger))
+            .map_err(|e| AsdError::Other(e.to_string()))?;
+        repo.spec_set_json(spec, &paths::ledger_index_root(), &Value::Object(index))
+            .map_err(|e| AsdError::Other(e.to_string()))?;
+        Ok(())
+    })();
+    let committed = staged.and_then(|()| {
+        // The audit trail: what was recovered, by kind, with every id.
+        let mut kinds: std::collections::BTreeMap<&str, usize> = Default::default();
+        for entry in &missing {
+            *kinds.entry(entry.kind.as_str()).or_default() += 1;
+        }
+        let kinds = kinds
+            .iter()
+            .map(|(kind, n)| format!("{n} {kind}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ids = missing
+            .iter()
+            .map(|e| format!("{} ({})", e.entry_id, e.symbol_id))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let opts = CommitOptions::new(
+            agent_id,
+            IntentCategory::Refine,
+            format!(
+                "restore {} ledger entries lost from the store, recovered from the ledger cache ({kinds})",
+                missing.len()
+            ),
+        )
+        .with_reasoning(ids);
+        repo.commit_speculation(spec, opts)
+            .map(|_| ())
+            .map_err(|e| AsdError::Other(e.to_string()))
+    });
+    match committed {
+        Ok(()) => report.restored = missing.len(),
+        Err(e) => {
+            let _ = repo.discard_speculation(spec);
+            let e = e.to_string();
+            report.failed = missing
+                .iter()
+                .map(|entry| (entry.entry_id.clone(), e.clone()))
+                .collect();
         }
     }
     Ok(report)

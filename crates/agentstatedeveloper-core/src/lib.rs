@@ -41,6 +41,7 @@ pub mod search_fts;
 pub mod ser_helpers;
 pub mod sidecar;
 pub mod sidecar_config;
+mod subtree;
 pub mod symbol;
 pub mod test_summary;
 pub mod thinking;
