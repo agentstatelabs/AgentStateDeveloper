@@ -432,6 +432,7 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
+            "db": cfg.db_path.display().to_string(),
             "files": summary.files,
             "skipped": summary.skipped,
             "symbols": summary.symbols,

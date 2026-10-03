@@ -252,3 +252,48 @@ fn sync_outside_any_project_never_exports_the_active_repo_into_the_cwd() {
     );
     assert_eq!(sb.decoy_state(), before);
 }
+
+/// `asd index <project>` run from the project's parent directory used
+/// `./.asd-state.db`: it built and registered a new store in the parent and
+/// left the project's own store untouched (2026-10-02, `Apps/` and
+/// SessionDrift-ios).
+#[test]
+fn index_from_a_parent_directory_uses_the_projects_store() {
+    let sb = Sandbox::new();
+    let parent = sb.dir("apps");
+    let project = parent.join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("rates.py"),
+        "def fetch_rates():\n    return 1\n",
+    )
+    .unwrap();
+    let project_db = project.join(".asd-state.db");
+    seed(&project_db, "sym_existing", 1);
+
+    let out = sb.asd(&parent, &["index", "proj"]);
+
+    assert!(
+        !parent.join(".asd-state.db").exists(),
+        "index built a stray store in the parent"
+    );
+    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        Path::new(summary["db"].as_str().unwrap()),
+        project_db.canonicalize().unwrap(),
+        "{summary}"
+    );
+    let engine = Engine::open_sqlite(&project_db).unwrap();
+    let qnames = engine
+        .repo
+        .get_json(&engine.ref_name, "/asd/v1/index/by-qname")
+        .unwrap();
+    assert!(
+        qnames
+            .as_object()
+            .unwrap()
+            .keys()
+            .any(|q| q.ends_with("fetch_rates")),
+        "the project's store was not indexed: {qnames}"
+    );
+}

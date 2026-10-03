@@ -5,7 +5,7 @@
 //! [`run_oss_command`] for OSS subcommands and provides its own
 //! handlers for the ratify / audit-verify commands that OSS stubs out.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -384,12 +384,16 @@ pub fn config_from_cli(cli: &Cli) -> Config {
         cli.cmd,
         Command::Init(_) | Command::Onboard(_) | Command::Index(_) | Command::Hydrate(_)
     );
-    // `hydrate --dir <d>` fills the store beside the sidecar it reads, not one
-    // in whatever directory `asd` ran from. An explicit --db or ASD_DB still wins.
+    // `hydrate --dir <d>` fills the store beside the sidecar it reads, and
+    // `index <dir>` uses the store of the directory it indexes — not one in
+    // whatever directory `asd` ran from. An explicit --db or ASD_DB still wins.
     let explicit_db = cli.db.clone().or_else(|| match &cli.cmd {
         Command::Hydrate(args) if std::env::var_os("ASD_DB").is_none() => {
             args.dir.as_ref().map(|d| d.join(".asd-state.db"))
         }
+        Command::Index(args) if std::env::var_os("ASD_DB").is_none() => std::env::current_dir()
+            .ok()
+            .map(|cwd| index_store(&args.path, &cwd)),
         _ => None,
     });
     Config::resolve_with_brief(
@@ -399,6 +403,34 @@ pub fn config_from_cli(cli: &Cli) -> Config {
         cli.brief,
         local_only,
     )
+}
+
+/// The store `asd index <path>` uses when neither `--db` nor `ASD_DB` names
+/// one. It was always `./.asd-state.db`, so indexing a project from its parent
+/// directory (`asd index SessionDrift-ios` from `Apps/`) built and registered a
+/// new store in the parent instead of using the one the project has.
+///
+/// - the current directory, or a file: `./.asd-state.db`, as before;
+/// - a directory with a store of its own: that store;
+/// - a directory inside the current project (the current directory has a
+///   store): `./.asd-state.db`, as before;
+/// - any other directory: a new store in it, beside what it indexes.
+fn index_store(path: &Path, cwd: &Path) -> PathBuf {
+    let here = PathBuf::from("./.asd-state.db");
+    let (Ok(dir), Ok(cwd)) = (cwd.join(path).canonicalize(), cwd.canonicalize()) else {
+        return here;
+    };
+    if !dir.is_dir() || dir == cwd {
+        return here;
+    }
+    let own = dir.join(".asd-state.db");
+    if own.exists() {
+        return own;
+    }
+    if cwd.join(".asd-state.db").exists() && dir.starts_with(&cwd) {
+        return here;
+    }
+    own
 }
 
 /// Dispatch the OSS command set. `asd-pro` can call this for any
@@ -465,5 +497,68 @@ pub fn run_with_config(cfg: &Config, cmd: Command) -> Result<()> {
         Command::Trust(args) => trust::run(cfg, args),
         Command::Workflow(args) => workflow::run(cfg, args),
         Command::Repo(cmd) => repo::run(cfg, cmd),
+    }
+}
+
+#[cfg(test)]
+mod index_store_tests {
+    use super::index_store;
+    use std::path::PathBuf;
+
+    fn touch_store(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(".asd-state.db"), b"").unwrap();
+    }
+
+    #[test]
+    fn the_current_directory_and_files_keep_the_local_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().canonicalize().unwrap();
+        std::fs::write(cwd.join("a.py"), b"").unwrap();
+        let here = PathBuf::from("./.asd-state.db");
+        assert_eq!(index_store(&PathBuf::from("."), &cwd), here);
+        assert_eq!(index_store(&cwd, &cwd), here);
+        assert_eq!(index_store(&PathBuf::from("a.py"), &cwd), here);
+    }
+
+    #[test]
+    fn a_project_indexed_from_its_parent_uses_its_own_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let apps = tmp.path().canonicalize().unwrap();
+        touch_store(&apps.join("proj"));
+        assert_eq!(
+            index_store(&PathBuf::from("proj"), &apps),
+            apps.join("proj/.asd-state.db")
+        );
+        // From anywhere, by absolute path, even with a store of your own here.
+        touch_store(&apps.join("other"));
+        assert_eq!(
+            index_store(&apps.join("proj"), &apps.join("other")),
+            apps.join("proj/.asd-state.db")
+        );
+    }
+
+    #[test]
+    fn a_subdirectory_of_the_current_project_uses_its_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().canonicalize().unwrap();
+        touch_store(&proj);
+        std::fs::create_dir_all(proj.join("src")).unwrap();
+        assert_eq!(
+            index_store(&PathBuf::from("src"), &proj),
+            PathBuf::from("./.asd-state.db")
+        );
+    }
+
+    #[test]
+    fn a_directory_with_no_store_gets_one_of_its_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let apps = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(apps.join("fresh")).unwrap();
+        assert_eq!(
+            index_store(&PathBuf::from("fresh"), &apps),
+            apps.join("fresh/.asd-state.db"),
+            "would have built a store in the parent"
+        );
     }
 }
