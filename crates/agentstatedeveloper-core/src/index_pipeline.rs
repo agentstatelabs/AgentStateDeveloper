@@ -41,7 +41,7 @@ use crate::doc_adapters::{adapt_document, is_doc_file};
 use crate::error::{AsdError, Result};
 use crate::ledger::detect_orphaned_entries;
 use crate::paths;
-use crate::schema::{EffectDecl, Position, Symbol, TransitiveEffect, VerificationSource};
+use crate::schema::{EffectDecl, Position, Symbol, TransitiveEffect};
 use crate::search_fts::{SearchDocsDb, SearchFtsDb};
 use crate::symbol::{canonical_symbol_id, symbol_fingerprint};
 
@@ -110,6 +110,13 @@ pub struct IndexSummary {
     /// Stale entries kept because ledger entries or runtime evidence still
     /// hang off them.
     pub stale_kept: usize,
+    /// Effects records for symbols nothing in the index refers to any more,
+    /// dropped by a run over the whole project. Records holding runtime or
+    /// trace evidence stay.
+    pub orphaned_effects_pruned: usize,
+    /// `/asd/v1/code` entries no indexed symbol points at — mostly the old
+    /// body fingerprint left behind by an edit — in files this run covered.
+    pub code_entries_pruned: usize,
 }
 
 /// Build the `symbol_id → (ledger_text, ledger_flags)` map used to
@@ -444,6 +451,9 @@ pub fn run_index(
         let mut effects_tree = crate::subtree::read_seed(repo, &fork, "/asd/v1/effects")?;
         let mut code_tree = crate::subtree::read_seed(repo, &fork, "/asd/v1/code")?;
 
+        let is_gone = |file: &str| {
+            whole_project && !parsed_files.contains(file) && !index_root.join(file).exists()
+        };
         let mut pass1 = Pass1::default();
         settle_stale(
             repo,
@@ -452,18 +462,11 @@ pub fn run_index(
             StaleScope {
                 produced_qnames: &run_qnames.iter().map(|(q, _)| q.as_str()).collect(),
                 produced: &indexed_symbols,
-                produced_code: &run_code
-                    .iter()
-                    .map(|(lang, key, _)| (lang.as_str(), key.as_str()))
-                    .collect(),
                 parsed_files: &parsed_files,
-                is_gone: &|file: &str| {
-                    whole_project && !parsed_files.contains(file) && !index_root.join(file).exists()
-                },
+                is_gone: &is_gone,
             },
             &mut qname_tree,
             &mut effects_tree,
-            &mut code_tree,
             &mut pass1,
         )?;
 
@@ -482,7 +485,6 @@ pub fn run_index(
                 serde_json::to_value(&merged).map_err(|e| AsdError::Other(e.to_string()))?,
             );
         }
-        pass1.effects = effects_tree.len();
 
         for (lang, key, sym_val) in run_code {
             if let Value::Object(by_key) = code_tree
@@ -493,11 +495,22 @@ pub fn run_index(
             }
         }
 
+        prune_orphans(
+            &qname_tree,
+            &indexed_symbols,
+            whole_project,
+            &|file: &str| parsed_files.contains(file) || is_gone(file),
+            &mut effects_tree,
+            &mut code_tree,
+            &mut pass1,
+        );
+        pass1.effects = effects_tree.len();
+
         repo.spec_set_json(spec1, "/asd/v1/index/by-qname", &Value::Object(qname_tree))
             .map_err(|e| AsdError::Other(e.to_string()))?;
         repo.spec_set_json(spec1, "/asd/v1/effects", &Value::Object(effects_tree))
             .map_err(|e| AsdError::Other(e.to_string()))?;
-        if !code_tree.is_empty() {
+        if !code_tree.is_empty() || pass1.code_entries_pruned > 0 {
             repo.spec_set_json(spec1, "/asd/v1/code", &Value::Object(code_tree))
                 .map_err(|e| AsdError::Other(e.to_string()))?;
         }
@@ -521,11 +534,13 @@ pub fn run_index(
         agent_id,
         IntentCategory::Checkpoint,
         format!(
-            "asd index: {} symbols across {} files ({} stale pruned, {} moved)",
+            "asd index: {} symbols across {} files ({} stale pruned, {} moved, {} orphaned effects and {} code entries dropped)",
             unique_symbol_count,
             files.len(),
             pass1.removed_ids.len() - pass1.rebound,
-            pass1.rebound
+            pass1.rebound,
+            pass1.orphaned_effects.len(),
+            pass1.code_entries_pruned
         ),
     )
     .with_tags(
@@ -795,7 +810,13 @@ pub fn run_index(
                 // Stale symbols left the store this run: their effects rows
                 // leave the cache, and ledger entries that moved follow
                 // their symbol there too (the cache answers `list_entries`).
-                if let Err(e) = fts.delete_effects_for(&pass1.removed_ids, ref_name) {
+                let gone: Vec<String> = pass1
+                    .removed_ids
+                    .iter()
+                    .chain(&pass1.orphaned_effects)
+                    .cloned()
+                    .collect();
+                if let Err(e) = fts.delete_effects_for(&gone, ref_name) {
                     cache_sync_warnings.push(format!("effects cache prune failed: {e}"));
                 }
                 for entry in &pass1.rebound_entries {
@@ -929,6 +950,8 @@ pub fn run_index(
         stale_rebound: pass1.rebound,
         ledger_entries_rebound: pass1.rebound_entries.len(),
         stale_kept: pass1.kept,
+        orphaned_effects_pruned: pass1.orphaned_effects.len(),
+        code_entries_pruned: pass1.code_entries_pruned,
     })
 }
 
@@ -1009,6 +1032,9 @@ struct Pass1 {
     rebound_entries: Vec<crate::schema::LedgerEntry>,
     /// Stale entries kept for the knowledge still attached to them.
     kept: usize,
+    /// Ids whose effects record went with no symbol left to describe.
+    orphaned_effects: Vec<String>,
+    code_entries_pruned: usize,
 }
 
 /// What one run covered, for deciding what of the stored index it can call
@@ -1016,7 +1042,6 @@ struct Pass1 {
 struct StaleScope<'a> {
     produced_qnames: &'a HashSet<&'a str>,
     produced: &'a [Symbol],
-    produced_code: &'a HashSet<(&'a str, &'a str)>,
     parsed_files: &'a HashSet<String>,
     is_gone: &'a dyn Fn(&str) -> bool,
 }
@@ -1024,13 +1049,15 @@ struct StaleScope<'a> {
 /// Remove the entries this run shows to be stale (see [`crate::stale`]) from
 /// the subtrees pass 1 is about to write.
 ///
-/// - A symbol that moved (same file, kind, base name and body under a new id)
-///   hands its ledger entries — and its effects record, when the new id has
-///   none — to the new id, then leaves the index.
-/// - A symbol that is gone leaves the index with its effects and code
-///   entries, unless ledger entries or runtime evidence still hang off it:
-///   those stay, as before, so nothing anyone recorded is dropped and its
-///   ledger keeps exporting.
+/// - A symbol that moved hands its ledger entries — and its effects record,
+///   when the new id has none — to the new id, then leaves the index. It
+///   moved when its body reappears under a new id in the same file (same
+///   kind and base name), or when another file now produces its qname
+///   ([`crate::stale::find_displaced`]).
+/// - A symbol that is gone leaves the index with its effects record, unless
+///   ledger entries or runtime evidence still hang off it: those stay, as
+///   before, so nothing anyone recorded is dropped and its ledger keeps
+///   exporting. Its code entries go in [`prune_orphans`].
 ///
 /// The ledger and ledger-idx subtrees are written once, in the same
 /// speculation, and only when an entry moved.
@@ -1042,19 +1069,27 @@ fn settle_stale(
     scope: StaleScope<'_>,
     qname_tree: &mut serde_json::Map<String, Value>,
     effects_tree: &mut serde_json::Map<String, Value>,
-    code_tree: &mut serde_json::Map<String, Value>,
     pass1: &mut Pass1,
 ) -> Result<()> {
-    let stale = crate::stale::find_stale(
+    let mut stale = crate::stale::find_stale(
         qname_tree,
         scope.produced_qnames,
         scope.parsed_files,
         scope.is_gone,
     );
+    let mut moves = crate::stale::match_moves(&stale, scope.produced);
+    for (st, new_id) in crate::stale::find_displaced(
+        qname_tree,
+        scope.produced,
+        scope.parsed_files,
+        scope.is_gone,
+    ) {
+        moves.insert(st.symbol.symbol_id.clone(), new_id);
+        stale.push(st);
+    }
     if stale.is_empty() {
         return Ok(());
     }
-    let moves = crate::stale::match_moves(&stale, scope.produced);
     let mut ledger = crate::subtree::read_seed(repo, fork, &paths::ledger_root())?;
     let mut ledger_index: Option<serde_json::Map<String, Value>> = None;
 
@@ -1105,12 +1140,7 @@ fn settle_stale(
                 .is_some_and(|entries| !entries.is_empty());
             let has_evidence = effects_tree
                 .get(old_id)
-                .and_then(|v| serde_json::from_value::<EffectDecl>(v.clone()).ok())
-                .is_some_and(|d| {
-                    d.runtime.is_some()
-                        || d.verification
-                            .is_some_and(|v| !matches!(v.by, VerificationSource::StaticChecker))
-                });
+                .is_some_and(crate::effects::value_carries_evidence);
             if has_ledger || has_evidence {
                 pass1.kept += 1;
                 continue;
@@ -1119,14 +1149,6 @@ fn settle_stale(
         }
         pass1.removed_ids.push(old_id.clone());
         qname_tree.remove(&st.key);
-        let code_key = format!("{}/{}", paths::clean(&st.symbol.file), st.symbol.symbol_fp);
-        if !scope
-            .produced_code
-            .contains(&(st.symbol.language.as_str(), code_key.as_str()))
-            && let Some(Value::Object(by_key)) = code_tree.get_mut(&st.symbol.language)
-        {
-            by_key.remove(&code_key);
-        }
     }
 
     if let Some(index) = ledger_index {
@@ -1136,6 +1158,67 @@ fn settle_stale(
             .map_err(|e| AsdError::Other(e.to_string()))?;
     }
     Ok(())
+}
+
+/// Drop what no indexed symbol refers to any more, once this run's symbols
+/// are merged in:
+///
+/// - effects records whose id is neither in the index nor produced by this
+///   run (a symbol losing a cross-file qname collision still keeps its
+///   record), unless they hold runtime or trace evidence. Only a run over the
+///   whole project can tell, since a partial run records its symbols under
+///   different paths and so different ids.
+/// - code entries in files `in_scope` covers that no indexed or produced
+///   symbol points at — chiefly the old fingerprint an edited body leaves.
+fn prune_orphans(
+    qname_tree: &serde_json::Map<String, Value>,
+    produced: &[Symbol],
+    whole_project: bool,
+    in_scope: &dyn Fn(&str) -> bool,
+    effects_tree: &mut serde_json::Map<String, Value>,
+    code_tree: &mut serde_json::Map<String, Value>,
+    pass1: &mut Pass1,
+) {
+    let indexed: Vec<Symbol> = qname_tree
+        .values()
+        .filter_map(|v| serde_json::from_value(v.clone()).ok())
+        .collect();
+    let live = || indexed.iter().chain(produced);
+
+    if whole_project {
+        let ids: HashSet<&str> = live().map(|s| s.symbol_id.as_str()).collect();
+        effects_tree.retain(|id, value| {
+            let keep = ids.contains(id.as_str()) || crate::effects::value_carries_evidence(value);
+            if !keep {
+                pass1.orphaned_effects.push(id.clone());
+            }
+            keep
+        });
+    }
+
+    let code_keys: HashSet<(&str, String)> = live()
+        .map(|s| {
+            (
+                s.language.as_str(),
+                format!("{}/{}", paths::clean(&s.file), s.symbol_fp),
+            )
+        })
+        .collect();
+    for (lang, by_key) in code_tree.iter_mut() {
+        let Value::Object(by_key) = by_key else {
+            continue;
+        };
+        by_key.retain(|key, value| {
+            let file = value.get("file").and_then(Value::as_str);
+            let keep = file.is_none_or(|f| !in_scope(f))
+                || code_keys.contains(&(lang.as_str(), key.clone()));
+            if !keep {
+                pass1.code_entries_pruned += 1;
+            }
+            keep
+        });
+    }
+    code_tree.retain(|_, by_key| by_key.as_object().is_none_or(|m| !m.is_empty()));
 }
 
 /// Compute transitive effects entirely in memory, then write the ones that

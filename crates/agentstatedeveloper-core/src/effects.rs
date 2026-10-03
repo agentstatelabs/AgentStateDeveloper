@@ -148,6 +148,23 @@ pub fn merge_reindexed_effects(
     decl
 }
 
+/// Whether an effects record holds what no re-index can reproduce: runtime
+/// evidence, or a verification by a trace or a test. Such a record is kept
+/// when its symbol leaves the index; anything else is re-derived from source.
+pub fn carries_evidence(decl: &EffectDecl) -> bool {
+    decl.runtime.is_some()
+        || decl
+            .verification
+            .as_ref()
+            .is_some_and(|v| !matches!(v.by, VerificationSource::StaticChecker))
+}
+
+/// [`carries_evidence`] for a stored record; one that does not parse holds
+/// nothing worth keeping.
+pub(crate) fn value_carries_evidence(value: &serde_json::Value) -> bool {
+    serde_json::from_value::<EffectDecl>(value.clone()).is_ok_and(|decl| carries_evidence(&decl))
+}
+
 /// Same effects in any order, ignoring the provenance stamp and the
 /// `verify-effects` flag.
 fn same_effects(a: &[Effect], b: &[Effect]) -> bool {

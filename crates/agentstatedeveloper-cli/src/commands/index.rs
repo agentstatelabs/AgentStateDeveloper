@@ -446,6 +446,8 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
             "stale_rebound": summary.stale_rebound,
             "ledger_entries_rebound": summary.ledger_entries_rebound,
             "stale_kept": summary.stale_kept,
+            "orphaned_effects_pruned": summary.orphaned_effects_pruned,
+            "code_entries_pruned": summary.code_entries_pruned,
             "disambiguated": summary.disambiguated,
             "doc_files": summary.doc_files,
             "docs_indexed": summary.docs_indexed,
