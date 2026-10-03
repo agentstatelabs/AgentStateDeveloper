@@ -11,7 +11,7 @@
 //!
 //! | kind | severity | auto-fixable |
 //! |---|---|---|
-//! | `orphaned_effect` | warn | yes — deleted |
+//! | `orphaned_effect` | warn | yes — deleted, unless it holds runtime or trace evidence |
 //! | `effect_id_mismatch` | error | no — ambiguous, needs manual resolution |
 //! | `malformed_effect` | error | no — unknown cause |
 //! | `orphaned_callee_ref` | warn | yes — ref removed from callees list |
@@ -120,49 +120,55 @@ pub fn repair_asg(
         });
     }
 
-    let mut fixes_applied = 0usize;
+    // Every fix lands in one commit. A commit per dropped effect or rewritten
+    // edge list stored a fresh copy of the enclosing map each time — on a
+    // store with 54,685 orphaned effects, roughly 100 GB. The
+    // subtrees are cleaned in memory on top of the state the speculation
+    // forked from and written once each.
+    let (spec, fork) = crate::subtree::speculate_at_head(repo, ref_name, "asd-repair")?;
+    let staged = (|| -> Result<(usize, usize, usize)> {
+        let live = build_live_symbol_ids(repo, &fork);
 
-    // -----------------------------------------------------------------------
-    // Fix 1: orphaned effect records → delete.
-    // -----------------------------------------------------------------------
-    for issue in issues.iter().filter(|i| i.kind == "orphaned_effect") {
-        let opts = CommitOptions::new(
-            agent_id,
-            IntentCategory::Refine,
-            format!("repair: drop orphaned effect {}", issue.path),
-        );
-        match repo.delete(ref_name, &issue.path, opts) {
-            Ok(_) => fixes_applied += 1,
-            Err(e) => eprintln!("asd repair: delete {} failed: {}", issue.path, e),
+        // Fix 1: orphaned effect records → delete, keeping evidence.
+        let effects_root = format!("{}/effects", paths::ASD_ROOT);
+        let mut effects = crate::subtree::read_seed(repo, &fork, &effects_root)?;
+        let before = effects.len();
+        effects
+            .retain(|id, value| live.contains(id) || crate::effects::value_carries_evidence(value));
+        let effects_dropped = before - effects.len();
+        if effects_dropped > 0 {
+            repo.spec_set_json(spec, &effects_root, &serde_json::Value::Object(effects))
+                .map_err(|e| crate::error::AsdError::Other(e.to_string()))?;
         }
-    }
 
-    // -----------------------------------------------------------------------
-    // Fix 2: orphaned callee refs — rebuild each callees list without orphans.
-    // -----------------------------------------------------------------------
-    let live_ids = build_live_symbol_ids(repo, ref_name);
-    fixes_applied += rewrite_edge_lists(
-        repo,
-        ref_name,
-        agent_id,
-        &live_ids,
-        "callees",
-        &format!("{}/index/callees", paths::ASD_ROOT),
-        |id| paths::callees_path(id),
-    );
-
-    // -----------------------------------------------------------------------
-    // Fix 3: orphaned caller refs — same approach for the callers index.
-    // -----------------------------------------------------------------------
-    fixes_applied += rewrite_edge_lists(
-        repo,
-        ref_name,
-        agent_id,
-        &live_ids,
-        "callers",
-        &format!("{}/index/callers", paths::ASD_ROOT),
-        |id| paths::callers_path(id),
-    );
+        // Fixes 2 and 3: orphaned callee and caller refs.
+        let callees = stage_edge_lists(repo, spec, &fork, &live, "callees")?;
+        let callers = stage_edge_lists(repo, spec, &fork, &live, "callers")?;
+        Ok((effects_dropped, callees, callers))
+    })();
+    let fixes_applied = match staged {
+        Ok((0, 0, 0)) => {
+            let _ = repo.discard_speculation(spec);
+            0
+        }
+        Ok((effects, callees, callers)) => {
+            let opts = CommitOptions::new(
+                agent_id,
+                IntentCategory::Refine,
+                format!(
+                    "repair: drop {effects} orphaned effect(s), {callees} orphaned callee ref(s), \
+                     {callers} orphaned caller ref(s)"
+                ),
+            );
+            repo.commit_speculation(spec, opts)
+                .map_err(|e| crate::error::AsdError::Other(e.to_string()))?;
+            effects + callees + callers
+        }
+        Err(e) => {
+            let _ = repo.discard_speculation(spec);
+            return Err(e);
+        }
+    };
 
     // Re-scan: show what remains after fixes.
     let remaining = scan_asg(repo, ref_name)?;
@@ -226,15 +232,20 @@ fn check_effects(
                     });
                 }
                 if !live.contains(key) {
+                    let evidence = crate::effects::carries_evidence(&decl);
                     issues.push(RepairIssue {
                         kind: "orphaned_effect".to_string(),
                         severity: IssueSeverity::Warn,
                         path: paths::effects_path(key),
-                        detail: format!(
-                            "symbol '{}' not found in index; effect record is orphaned",
-                            key
-                        ),
-                        auto_fixable: true,
+                        detail: if evidence {
+                            format!(
+                                "symbol '{key}' not found in index; effect record is orphaned \
+                                 but holds runtime or trace evidence, so it is kept"
+                            )
+                        } else {
+                            format!("symbol '{key}' not found in index; effect record is orphaned")
+                        },
+                        auto_fixable: !evidence,
                     });
                 }
             }
@@ -330,76 +341,66 @@ fn check_ledger(
     }
 }
 
-/// Walk an edge-list subtree (callees or callers), remove IDs that are no
-/// longer live, and rewrite the list if anything changed.  Returns the total
-/// number of individual ref drops performed.
-fn rewrite_edge_lists(
+/// Remove ids that are no longer live from every list in the `field` edge
+/// subtree (`callees` or `callers`) as the speculation forked it, and write
+/// the subtree once if anything changed. Returns the number of refs dropped.
+fn stage_edge_lists(
     repo: &Repository,
-    ref_name: &str,
-    agent_id: &str,
+    spec: agentstategraph::SpecHandle,
+    fork: &str,
     live: &HashSet<String>,
     field: &str,
-    prefix: &str,
-    path_fn: impl Fn(&str) -> String,
-) -> usize {
-    let map = match repo.get_tree(ref_name, prefix) {
-        Ok(serde_json::Value::Object(m)) => m,
-        _ => return 0,
-    };
+) -> Result<usize> {
+    let prefix = format!("{}/index/{field}", paths::ASD_ROOT);
+    let mut map = crate::subtree::read_seed(repo, fork, &prefix)?;
     let mut total_dropped = 0usize;
-    for (owner_id, value) in &map {
+    for value in map.values_mut() {
         let all = extract_str_array(value, field);
         let clean: Vec<&String> = all.iter().filter(|id| live.contains(*id)).collect();
         let dropped = all.len() - clean.len();
-        if dropped == 0 {
-            continue;
-        }
-        let new_val = json!({ field: clean });
-        let opts = CommitOptions::new(
-            agent_id,
-            IntentCategory::Refine,
-            format!(
-                "repair: dropped {} orphaned {} ref(s) from {}",
-                dropped, field, owner_id
-            ),
-        );
-        match repo.set_json(ref_name, &path_fn(owner_id), &new_val, opts) {
-            Ok(_) => total_dropped += dropped,
-            Err(e) => eprintln!(
-                "asd repair: rewrite {} for {} failed: {}",
-                field, owner_id, e
-            ),
+        if dropped > 0 {
+            *value = json!({ field: clean });
+            total_dropped += dropped;
         }
     }
-    total_dropped
+    if total_dropped > 0 {
+        repo.spec_set_json(spec, &prefix, &serde_json::Value::Object(map))
+            .map_err(|e| crate::error::AsdError::Other(e.to_string()))?;
+    }
+    Ok(total_dropped)
 }
 
 /// Drop orphaned callee and caller refs whose target symbol_id no longer
-/// exists in the live index.  Returns the total number of individual refs
-/// dropped.  Called by [`hydrate_from_dir`] after a hydrate pass to clean
-/// up any stale edges the sidecar may have carried.
+/// exists in the live index, in one commit.  Returns the total number of
+/// individual refs dropped.  Called by [`hydrate_from_dir`] after a hydrate
+/// pass to clean up any stale edges the sidecar may have carried.
 pub fn drop_orphaned_edge_refs(repo: &Repository, ref_name: &str, agent_id: &str) -> Result<usize> {
-    let live = build_live_symbol_ids(repo, ref_name);
-    let mut dropped = 0usize;
-    dropped += rewrite_edge_lists(
-        repo,
-        ref_name,
-        agent_id,
-        &live,
-        "callees",
-        &format!("{}/index/callees", paths::ASD_ROOT),
-        |id| paths::callees_path(id),
-    );
-    dropped += rewrite_edge_lists(
-        repo,
-        ref_name,
-        agent_id,
-        &live,
-        "callers",
-        &format!("{}/index/callers", paths::ASD_ROOT),
-        |id| paths::callers_path(id),
-    );
-    Ok(dropped)
+    let (spec, fork) = crate::subtree::speculate_at_head(repo, ref_name, "asd-drop-edge-refs")?;
+    let staged = (|| -> Result<usize> {
+        let live = build_live_symbol_ids(repo, &fork);
+        Ok(stage_edge_lists(repo, spec, &fork, &live, "callees")?
+            + stage_edge_lists(repo, spec, &fork, &live, "callers")?)
+    })();
+    match staged {
+        Ok(0) => {
+            let _ = repo.discard_speculation(spec);
+            Ok(0)
+        }
+        Ok(dropped) => {
+            let opts = CommitOptions::new(
+                agent_id,
+                IntentCategory::Refine,
+                format!("repair: drop {dropped} orphaned edge ref(s)"),
+            );
+            repo.commit_speculation(spec, opts)
+                .map_err(|e| crate::error::AsdError::Other(e.to_string()))?;
+            Ok(dropped)
+        }
+        Err(e) => {
+            let _ = repo.discard_speculation(spec);
+            Err(e)
+        }
+    }
 }
 
 /// Informational check: find draft scratch entries whose `symbol_id` is no

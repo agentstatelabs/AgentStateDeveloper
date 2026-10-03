@@ -2415,6 +2415,8 @@ impl AsdMcpServer {
                 "stale_rebound": s.stale_rebound,
                 "ledger_entries_rebound": s.ledger_entries_rebound,
                 "stale_kept": s.stale_kept,
+                "orphaned_effects_pruned": s.orphaned_effects_pruned,
+                "code_entries_pruned": s.code_entries_pruned,
             })
             .to_string(),
             Err(e) => err_json(&e.to_string()),

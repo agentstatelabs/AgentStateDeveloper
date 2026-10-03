@@ -11,7 +11,9 @@
 //! store's whole project — entries for files that no longer exist. A stale
 //! symbol whose body reappears unchanged under a new id in the same file
 //! (same kind, same base name, same body fingerprint) has moved; anything
-//! else is gone.
+//! else is gone. So has a symbol whose qname another file now produces: the
+//! id hashes the file, so a moved file overwrote its entry and stranded what
+//! was attached to the old id.
 
 use std::collections::{HashMap, HashSet};
 
@@ -55,6 +57,49 @@ pub(crate) fn find_stale(
             })
         })
         .collect()
+}
+
+/// Entries this run replaces under the same qname with a different symbol —
+/// the symbol moved to another file, whose path its id hashes — each with
+/// the id taking its place. Writing the run's qnames over them used to
+/// strand their ledger entries and effects on an id nothing indexed.
+///
+/// An entry counts only when its own file is in the run's scope and the run
+/// did not produce its id: a same-named symbol in a file the run never
+/// looked at, or one that lost a cross-file collision this run, is still
+/// there.
+pub(crate) fn find_displaced(
+    by_qname: &serde_json::Map<String, Value>,
+    produced: &[Symbol],
+    parsed_files: &HashSet<String>,
+    is_gone: &dyn Fn(&str) -> bool,
+) -> Vec<(Stale, String)> {
+    let produced_ids: HashSet<&str> = produced.iter().map(|s| s.symbol_id.as_str()).collect();
+    // The last symbol produced under a qname is the one the index keeps.
+    let winners: HashMap<&str, &str> = produced
+        .iter()
+        .map(|s| (s.qname.as_str(), s.symbol_id.as_str()))
+        .collect();
+    let mut displaced: Vec<(Stale, String)> = winners
+        .into_iter()
+        .filter_map(|(qname, new_id)| {
+            let symbol: Symbol = serde_json::from_value(by_qname.get(qname)?.clone()).ok()?;
+            let replaced = symbol.symbol_id != new_id
+                && !produced_ids.contains(symbol.symbol_id.as_str())
+                && (parsed_files.contains(&symbol.file) || is_gone(&symbol.file));
+            replaced.then(|| {
+                (
+                    Stale {
+                        key: qname.to_string(),
+                        symbol,
+                    },
+                    new_id.to_string(),
+                )
+            })
+        })
+        .collect();
+    displaced.sort_by(|a, b| a.0.key.cmp(&b.0.key));
+    displaced
 }
 
 /// For each stale symbol that moved, the id it moved to: the one symbol
@@ -162,5 +207,38 @@ mod tests {
         assert!(match_moves(&stale, &[moved, twin]).is_empty());
         // A different file is not a move.
         assert!(match_moves(&stale, &[sym("m.f:7", "n.py", "body2")]).is_empty());
+    }
+
+    #[test]
+    fn a_qname_taken_over_from_a_file_in_scope_is_displaced() {
+        let stored = map(&[
+            sym("T.moved", "old/t.swift", "fp1"),
+            sym("T.elsewhere", "other/t.swift", "fp2"),
+            sym("T.collides", "a/t.swift", "fp3"),
+        ]);
+        let moved = sym("T.moved", "new/t.swift", "fp1");
+        let elsewhere = sym("T.elsewhere", "new/t.swift", "fp2");
+        // Both files still produce `T.collides`; the later one wins the slot.
+        let collides_a = sym("T.collides", "a/t.swift", "fp3");
+        let collides_b = sym("T.collides", "b/t.swift", "fp3");
+        let parsed: HashSet<String> = ["new/t.swift", "a/t.swift", "b/t.swift"]
+            .map(String::from)
+            .into();
+        let gone = |f: &str| f == "old/t.swift";
+        let found = find_displaced(
+            &stored,
+            &[moved.clone(), elsewhere, collides_a, collides_b],
+            &parsed,
+            &gone,
+        );
+        // other/t.swift was neither parsed nor deleted; a/t.swift's symbol
+        // was produced again and merely lost the slot.
+        assert_eq!(
+            found
+                .iter()
+                .map(|(st, new_id)| (st.key.as_str(), new_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("T.moved", moved.symbol_id.as_str())]
+        );
     }
 }

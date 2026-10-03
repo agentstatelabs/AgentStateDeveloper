@@ -17,6 +17,11 @@ Versions use semantic versioning.
 
 ## [Unreleased]
 
+### Fixed
+- **`asd repair --fix` made one commit per orphaned effects record and per edge list it cleaned.** Each commit stored a fresh copy of the enclosing map, so on ThreadWeaver-ios — 54,685 orphaned effects records and 118 dead callee refs — `--fix` would have written roughly 100 GB. Every deletion and edge-list rewrite now lands in a single commit; restoring lost ledger entries stays its own. On a copy of that store `--fix` took 6.8 s and grew it by about 1.5 MB. An orphaned effects record that holds runtime or trace evidence is now kept and reported as not auto-fixable, as the index already did. `asd hydrate`'s clean-up of dead edge refs is one commit too.
+- **A symbol whose file moved left its ledger entries and effects on an id nothing indexed.** A symbol's id hashes its file path, but its qname need not: Swift anchors qnames at `Sources/` and collapses repeated folder names, so moving a package or folder kept the qname and changed the id. The new entry overwrote the old one, leaving its ledger entries out of the reach of `prepare-change` and conclusions export and its effects record orphaned — how ThreadWeaver-ios came to hold its 54,685. A run now treats such an overwrite as a move, as it does a line shift: ledger entries go to the new id, and so does the effects record if the new id has none. It applies only when the old symbol's file was parsed this run or no longer exists, and the run did not produce the old id; a symbol that merely lost a cross-file qname collision is left alone. Moves are counted in `stale_rebound`.
+- **Effects records and code entries for symbols no longer indexed were never removed.** A run over the whole project now drops effects records whose symbol is neither in the index nor produced by the run, unless they hold runtime or trace evidence. Every run drops `/asd/v1/code` entries that no indexed symbol points at in the files it covered — mostly the old body fingerprint left by each edit. On a copy of ThreadWeaver-ios a re-index dropped 54,685 orphaned effects records and 51,835 stale code entries in 16 s; the store did not grow, and effects records now match its 3,424 symbols. The index summary reports `orphaned_effects_pruned` and `code_entries_pruned`.
+
 ## [v1.4.3] — 2026-10-03
 
 ### Fixed
