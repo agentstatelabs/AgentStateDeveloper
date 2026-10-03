@@ -1477,6 +1477,28 @@ impl SearchFtsDb {
         Ok(())
     }
 
+    /// Drop the cached `EffectDecl`s of symbols that left the index.
+    pub fn delete_effects_for(
+        &self,
+        symbol_ids: &[String],
+        ref_name: &str,
+    ) -> rusqlite::Result<()> {
+        if symbol_ids.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute_batch("BEGIN;")?;
+        for symbol_id in symbol_ids {
+            if let Err(e) = self.conn.execute(
+                "DELETE FROM asd_effects_cache WHERE symbol_id = ?1 AND ref_name = ?2",
+                params![symbol_id, ref_name],
+            ) {
+                let _ = self.conn.execute_batch("ROLLBACK;");
+                return Err(e);
+            }
+        }
+        self.conn.execute_batch("COMMIT;")
+    }
+
     /// Return the cached `EffectDecl` for a symbol, or `None` if not cached.
     pub fn get_effects_for(
         &self,
