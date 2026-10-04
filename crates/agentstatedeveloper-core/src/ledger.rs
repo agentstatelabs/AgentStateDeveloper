@@ -267,57 +267,94 @@ impl<'a> LedgerStore for AsgLedgerStore<'a> {
 /// (already carrying the `"orphaned"` tag) are skipped. Runs in O(symbols +
 /// ledger_entries) — safe to call at the end of `asd index` or from `health`.
 pub fn detect_orphaned_entries(repo: &Repository, ref_name: &str, agent_id: &str) -> Result<usize> {
+    tag_orphaned_entries(repo, ref_name, agent_id).map(|tagged| tagged.len())
+}
+
+/// [`detect_orphaned_entries`], returning the entries it tagged so the
+/// caller can bring the ledger cache up to date.
+///
+/// Every tag lands in one commit. A commit per entry stored a fresh copy of
+/// the ledger map each time.
+pub(crate) fn tag_orphaned_entries(
+    repo: &Repository,
+    ref_name: &str,
+    agent_id: &str,
+) -> Result<Vec<LedgerEntry>> {
     use chrono::Utc;
 
-    // Build set of all symbol_ids currently in the index.
-    let qname_prefix = format!("{}/index/by-qname", paths::ASD_ROOT);
-    let indexed: HashSet<String> = match repo.get_tree(ref_name, &qname_prefix) {
-        Ok(serde_json::Value::Object(map)) => map
-            .values()
-            .filter_map(|v| v.get("symbol_id")?.as_str().map(|s| s.to_string()))
-            .collect(),
-        _ => HashSet::new(),
-    };
+    let (spec, fork) = crate::subtree::speculate_at_head(repo, ref_name, "asd-tag-orphans")?;
+    let staged = (|| -> Result<Vec<LedgerEntry>> {
+        // Every symbol_id currently in the index.
+        let indexed: HashSet<String> =
+            crate::subtree::read_seed(repo, &fork, &format!("{}/index/by-qname", paths::ASD_ROOT))?
+                .values()
+                .filter_map(|v| v.get("symbol_id")?.as_str().map(|s| s.to_string()))
+                .collect();
+        let mut ledger = crate::subtree::read_seed(repo, &fork, &paths::ledger_root())?;
 
-    // Walk every ledger entry.
-    let ledger_prefix = format!("{}/ledger", paths::ASD_ROOT);
-    let ledger_tree = match repo.get_tree(ref_name, &ledger_prefix) {
-        Ok(v) => v,
-        Err(_) => return Ok(0),
-    };
-
-    let mut tagged = 0usize;
-    let now_tag = format!("orphaned-at:{}", Utc::now().format("%Y-%m-%dT%H:%M:%SZ"));
-
-    if let serde_json::Value::Object(by_symbol) = ledger_tree {
-        for (sym_id, per_symbol) in by_symbol {
-            if indexed.contains(&sym_id) {
+        let now_tag = format!("orphaned-at:{}", Utc::now().format("%Y-%m-%dT%H:%M:%SZ"));
+        let mut tagged = Vec::new();
+        for (sym_id, per_symbol) in ledger.iter_mut() {
+            if indexed.contains(sym_id) {
                 continue;
             }
-            if let serde_json::Value::Object(entries_map) = per_symbol {
-                for (entry_id, v) in entries_map {
-                    if let Ok(mut entry) = serde_json::from_value::<LedgerEntry>(v) {
-                        if entry.tags.iter().any(|t| t == "orphaned") {
-                            continue;
-                        }
-                        entry.tags.push("orphaned".to_string());
-                        entry.tags.push(now_tag.clone());
-                        let path = paths::ledger_entry_path(&sym_id, &entry_id);
-                        let value = serde_json::to_value(&entry)?;
-                        let opts = CommitOptions::new(
-                            agent_id,
-                            IntentCategory::Refine,
-                            format!("tag orphaned entry {}", entry_id),
-                        );
-                        repo.set_json(ref_name, &path, &value, opts)
-                            .map_err(|e| AsdError::Other(e.to_string()))?;
-                        tagged += 1;
-                    }
+            let serde_json::Value::Object(entries_map) = per_symbol else {
+                continue;
+            };
+            for value in entries_map.values_mut() {
+                let Ok(mut entry) = serde_json::from_value::<LedgerEntry>(value.clone()) else {
+                    continue;
+                };
+                if entry.tags.iter().any(|t| t == "orphaned") {
+                    continue;
                 }
+                entry.tags.push("orphaned".to_string());
+                entry.tags.push(now_tag.clone());
+                *value = serde_json::to_value(&entry)?;
+                tagged.push(entry);
             }
         }
+        if !tagged.is_empty() {
+            repo.spec_set_json(
+                spec,
+                &paths::ledger_root(),
+                &serde_json::Value::Object(ledger),
+            )
+            .map_err(|e| AsdError::Other(e.to_string()))?;
+        }
+        Ok(tagged)
+    })();
+    match staged {
+        Ok(tagged) if tagged.is_empty() => {
+            let _ = repo.discard_speculation(spec);
+            Ok(tagged)
+        }
+        Ok(tagged) => {
+            let opts = CommitOptions::new(
+                agent_id,
+                IntentCategory::Refine,
+                format!(
+                    "tag {} orphaned ledger entr{}",
+                    tagged.len(),
+                    if tagged.len() == 1 { "y" } else { "ies" }
+                ),
+            )
+            .with_reasoning(
+                tagged
+                    .iter()
+                    .map(|e| e.entry_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+            repo.commit_speculation(spec, opts)
+                .map_err(|e| AsdError::Other(e.to_string()))?;
+            Ok(tagged)
+        }
+        Err(e) => {
+            let _ = repo.discard_speculation(spec);
+            Err(e)
+        }
     }
-    Ok(tagged)
 }
 
 #[cfg(test)]

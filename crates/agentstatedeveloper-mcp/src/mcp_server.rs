@@ -19,7 +19,7 @@ use agentstatedeveloper_core::{
     AsgScratchStore, AuditEvent, Author, AuthorKind, CleanFilter, ConclusionClass, Decision,
     Effect, EffectCategory, EffectDecl, EffectStore, Engine, FeedbackEntry, FeedbackStore,
     FeedbackVerdict, FtsFilters, IndexStore, LedgerEntry, LedgerKind, LedgerStore, Mismatch,
-    ParsedSymbol, Rebind, ScratchEntry, ScratchFilter, ScratchStatus, ScratchStore, SearchDocsDb,
+    ParsedSymbol, ScratchEntry, ScratchFilter, ScratchStatus, ScratchStore, SearchDocsDb,
     SearchFtsDb, SidecarState, Situation, Symbol, Verification, VerificationSource,
     VerificationStatus, WorkflowSummary, actions, append_workflow_session,
     apply_feedback_adjustments, apply_file_scope_feedback, brief,
@@ -2512,8 +2512,6 @@ impl AsdMcpServer {
         description = "Record that a symbol was renamed or moved. Writes a rebind record so the old symbol_id maps to the new one, then re-parents all ledger entries from the old symbol_id to the new one. Use this whenever an agent or human renames a function, class, or method so its ledger history follows the rename."
     )]
     async fn ledger_rebind(&self, params: Parameters<LedgerRebindParams>) -> String {
-        use agentstategraph::CommitOptions;
-        use agentstategraph_core::IntentCategory;
         let p = params.0;
         let engine = self.engine.lock().await;
         let ref_name = &engine.ref_name;
@@ -2554,91 +2552,48 @@ impl AsdMcpServer {
             Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
         };
 
-        // Write rebind record
-        let rebind = Rebind {
-            from_symbol_id: p.from_symbol_id.clone(),
-            to_symbol_id: new_symbol.symbol_id.clone(),
-            to_qname: new_symbol.qname.clone(),
-            at: chrono::Utc::now(),
-            by: p.agent_id.clone(),
-        };
-        let rebind_path = paths::rebind_path(&p.from_symbol_id);
-        let rebind_val = match serde_json::to_value(&rebind) {
-            Ok(v) => v,
+        // An id with nothing filed under it is most likely a typo.
+        match AsgLedgerStore::from_engine(&engine)
+            .list_entries_with_superseded(ref_name, &p.from_symbol_id)
+        {
+            Ok(entries) if entries.is_empty() => {
+                return serde_json::json!({
+                    "error": format!("no ledger entries are filed under {}", p.from_symbol_id)
+                })
+                .to_string();
+            }
+            Ok(_) => {}
             Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
-        };
-        if let Err(e) = engine.repo.set_json(
-            ref_name,
-            &rebind_path,
-            &rebind_val,
-            CommitOptions::new(
-                &p.agent_id,
-                IntentCategory::Refine,
-                format!("rebind {} → {}", p.from_symbol_id, new_symbol.symbol_id),
-            ),
-        ) {
-            return serde_json::json!({ "error": e.to_string() }).to_string();
         }
 
-        // Re-parent ledger entries
-        let ledger_store = AsgLedgerStore::from_engine(&engine);
-        let entries = match ledger_store.list_entries_with_superseded(ref_name, &p.from_symbol_id) {
-            Ok(v) => v,
+        let outcome = match agentstatedeveloper_core::rebind_ledger(
+            &engine.repo,
+            engine.fts.as_ref(),
+            ref_name,
+            &[(p.from_symbol_id.clone(), new_symbol)],
+            &p.agent_id,
+        ) {
+            Ok(mut outcomes) => outcomes.remove(0),
             Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
         };
-        let mut reparented = 0usize;
-        for mut entry in entries {
-            entry.symbol_id = new_symbol.symbol_id.clone();
-            let new_path = paths::ledger_entry_path(&new_symbol.symbol_id, &entry.entry_id);
-            let val = match serde_json::to_value(&entry) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            if engine
-                .repo
-                .set_json(
-                    ref_name,
-                    &new_path,
-                    &val,
-                    CommitOptions::new(
-                        &p.agent_id,
-                        IntentCategory::Refine,
-                        format!("reparent ledger entry {} after rebind", entry.entry_id),
-                    ),
-                )
-                .is_ok()
-            {
-                let old_path = paths::ledger_entry_path(&p.from_symbol_id, &entry.entry_id);
-                let _ = engine.repo.delete(
-                    ref_name,
-                    &old_path,
-                    CommitOptions::new(
-                        &p.agent_id,
-                        IntentCategory::Refine,
-                        format!("remove old ledger entry {} after rebind", entry.entry_id),
-                    ),
-                );
-                reparented += 1;
-            }
-        }
 
         let audit_event =
             AuditEvent::new(event_types::LEDGER_REBIND, &p.agent_id, "agent", "allow")
-                .with_subject(p.from_symbol_id.clone())
-                .with_secondary(new_symbol.symbol_id.clone())
+                .with_subject(outcome.from_symbol_id.clone())
+                .with_secondary(outcome.to_symbol_id.clone())
                 .with_payload(serde_json::json!({
-                    "from_symbol_id": p.from_symbol_id,
-                    "to_symbol_id": new_symbol.symbol_id,
-                    "to_qname": new_symbol.qname,
-                    "entries_reparented": reparented,
+                    "from_symbol_id": outcome.from_symbol_id,
+                    "to_symbol_id": outcome.to_symbol_id,
+                    "to_qname": outcome.to_qname,
+                    "entries_reparented": outcome.entries_moved,
                 }));
         emit_audit(engine.audit.as_ref(), audit_event);
 
         serde_json::json!({
-            "from_symbol_id": p.from_symbol_id,
-            "to_symbol_id": new_symbol.symbol_id,
-            "to_qname": new_symbol.qname,
-            "entries_reparented": reparented,
+            "from_symbol_id": outcome.from_symbol_id,
+            "to_symbol_id": outcome.to_symbol_id,
+            "to_qname": outcome.to_qname,
+            "entries_reparented": outcome.entries_moved,
         })
         .to_string()
     }

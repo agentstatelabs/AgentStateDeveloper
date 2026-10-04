@@ -8,9 +8,8 @@
 
 use agentstatedeveloper_core::{
     AsgIndexStore, AsgLedgerStore, Author, AuthorKind, Engine, IndexStore, LedgerEntry, LedgerKind,
-    LedgerStore, Position, Rebind, Symbol, SymbolKind, paths,
+    LedgerStore, Position, Rebind, Symbol, SymbolKind, paths, rebind_ledger,
 };
-use chrono::Utc;
 
 fn make_symbol(id: &str, qname: &str) -> Symbol {
     Symbol {
@@ -57,52 +56,19 @@ fn append_entry(engine: &Engine, symbol_id: &str, summary: &str) -> LedgerEntry 
     entry
 }
 
-/// Simulate the rebind logic (matches the CLI/MCP implementation).
-fn do_rebind(engine: &Engine, from_symbol_id: &str, to_symbol_id: &str, to_qname: &str) {
-    use agentstategraph::CommitOptions;
-    use agentstategraph_core::IntentCategory;
-
-    let rebind = Rebind {
-        from_symbol_id: from_symbol_id.to_string(),
-        to_symbol_id: to_symbol_id.to_string(),
-        to_qname: to_qname.to_string(),
-        at: Utc::now(),
-        by: "test-agent".to_string(),
-    };
-    let rebind_path = paths::rebind_path(from_symbol_id);
-    engine
-        .repo
-        .set_json(
-            &engine.ref_name,
-            &rebind_path,
-            &serde_json::to_value(&rebind).unwrap(),
-            CommitOptions::new("test", IntentCategory::Refine, "rebind"),
-        )
-        .expect("write rebind record");
-
-    let ledger = AsgLedgerStore::new(&engine.repo);
-    let entries = ledger
-        .list_entries_with_superseded(&engine.ref_name, from_symbol_id)
-        .expect("list entries");
-    for mut entry in entries {
-        entry.symbol_id = to_symbol_id.to_string();
-        let new_path = paths::ledger_entry_path(to_symbol_id, &entry.entry_id);
-        engine
-            .repo
-            .set_json(
-                &engine.ref_name,
-                &new_path,
-                &serde_json::to_value(&entry).unwrap(),
-                CommitOptions::new("test", IntentCategory::Refine, "reparent entry"),
-            )
-            .expect("write reparented entry");
-        let old_path = paths::ledger_entry_path(from_symbol_id, &entry.entry_id);
-        let _ = engine.repo.delete(
-            &engine.ref_name,
-            &old_path,
-            CommitOptions::new("test", IntentCategory::Refine, "delete old entry"),
-        );
-    }
+/// Rebind through the implementation the CLI and MCP share. This used to
+/// re-implement it here — deleting the old entries, which the CLI never did —
+/// so these tests passed while `asd ledger rebind` copied entries instead of
+/// moving them.
+fn do_rebind(engine: &Engine, from_symbol_id: &str, to: &Symbol) {
+    rebind_ledger(
+        &engine.repo,
+        None,
+        &engine.ref_name,
+        &[(from_symbol_id.to_string(), to.clone())],
+        "test-agent",
+    )
+    .expect("rebind");
 }
 
 #[test]
@@ -119,7 +85,7 @@ fn rebind_reparents_entries_to_new_symbol() {
         .expect("list before");
     assert_eq!(before.len(), 2, "two entries under A before rebind");
 
-    do_rebind(&engine, &sym_a.symbol_id, &sym_b.symbol_id, &sym_b.qname);
+    do_rebind(&engine, &sym_a.symbol_id, &sym_b);
 
     // Post-rebind: entries under B.
     let after_b = ledger
@@ -147,7 +113,7 @@ fn rebind_record_is_written_with_correct_fields() {
     let (sym_a, sym_b) = seed_two_symbols(&engine);
     append_entry(&engine, &sym_a.symbol_id, "some decision");
 
-    do_rebind(&engine, &sym_a.symbol_id, &sym_b.symbol_id, &sym_b.qname);
+    do_rebind(&engine, &sym_a.symbol_id, &sym_b);
 
     let rebind_path = paths::rebind_path(&sym_a.symbol_id);
     let val = engine
@@ -169,7 +135,7 @@ fn rebind_with_no_entries_is_idempotent() {
     // No entries under sym_a.
 
     // Should not panic or error.
-    do_rebind(&engine, &sym_a.symbol_id, &sym_b.symbol_id, &sym_b.qname);
+    do_rebind(&engine, &sym_a.symbol_id, &sym_b);
 
     let ledger = AsgLedgerStore::new(&engine.repo);
     let entries_b = ledger

@@ -17,6 +17,16 @@ Versions use semantic versioning.
 
 ## [Unreleased]
 
+### Fixed
+- **`asd ledger rebind` could not rebind an orphaned symbol, and neither the CLI nor MCP moved entries cleanly.**
+  - The CLI's `--from` was documented as a symbol id but looked up by qname, and an orphaned symbol's old qname is by definition no longer in the index, so the one case rebind exists for always failed. It now takes a symbol id or a qname.
+  - The MCP `ledger_rebind` tool did take the id, and moved the entries in the store. But it left the entry index and the SQLite ledger cache filing them under the old id, kept their `orphaned` tags, and made two commits per entry.
+  - Both now share one move. All rebinds land in a single commit: entries leave the old id, and the entry index and cache follow. `orphaned`/`orphaned-at:` tags are dropped and `rebound-at:` is added, so a copy exported while the entry was tagged orphaned can't win the next `conclusions import` and move it back.
+  - New `--map <file>` takes many rebinds as `{"<symbol_id or qname>": "<new qname>"}`. Every source and target is checked before anything is written.
+  - A raw id with no ledger entries under it is rejected as a likely typo.
+  - On a copy of ThreadWeaver-ios, the 21 orphaned symbols `asd repair` reported were matched to live symbols by rebuilding their ids from git history. Their 23 entries moved in 1 s and one commit; the store grew by about 700 KB, and `asd repair` then reported no issues.
+- **Tagging orphaned ledger entries during `asd index` made a commit per entry, and the tags never reached the ledger cache.** Each commit stored a fresh copy of the ledger map. The tags now land in one commit, and the cache is updated with them.
+
 ## [v1.4.4] — 2026-10-03
 
 ### Fixed
