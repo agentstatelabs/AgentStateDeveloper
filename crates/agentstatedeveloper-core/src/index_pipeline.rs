@@ -39,7 +39,6 @@ use crate::adapter::{CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols};
 use crate::audit::{AuditEvent, AuditSink, event_types};
 use crate::doc_adapters::{adapt_document, is_doc_file};
 use crate::error::{AsdError, Result};
-use crate::ledger::detect_orphaned_entries;
 use crate::paths;
 use crate::schema::{EffectDecl, Position, Symbol, TransitiveEffect};
 use crate::search_fts::{SearchDocsDb, SearchFtsDb};
@@ -769,7 +768,8 @@ pub fn run_index(
     let transitive_updates =
         propagate_transitive_batched(repo, ref_name, &all_symbol_ids, &callees_of, agent_id)?;
 
-    let orphaned_tagged = detect_orphaned_entries(repo, ref_name, agent_id)?;
+    let orphan_tagged = crate::ledger::tag_orphaned_entries(repo, ref_name, agent_id)?;
+    let orphaned_tagged = orphan_tagged.len();
 
     if let Some(sink) = audit {
         let event = AuditEvent::new(event_types::INDEX_RUN, agent_id, "agent", "allow")
@@ -809,7 +809,8 @@ pub fn run_index(
             Ok(fts) => {
                 // Stale symbols left the store this run: their effects rows
                 // leave the cache, and ledger entries that moved follow
-                // their symbol there too (the cache answers `list_entries`).
+                // their symbol there too (the cache answers `list_entries`),
+                // as do the tags on entries newly orphaned.
                 let gone: Vec<String> = pass1
                     .removed_ids
                     .iter()
@@ -822,6 +823,12 @@ pub fn run_index(
                 for entry in &pass1.rebound_entries {
                     if let Err(e) = fts.upsert_ledger_entry(entry, ref_name) {
                         cache_sync_warnings.push(format!("ledger cache rebind failed: {e}"));
+                        break;
+                    }
+                }
+                for entry in &orphan_tagged {
+                    if let Err(e) = fts.upsert_ledger_entry(entry, ref_name) {
+                        cache_sync_warnings.push(format!("ledger cache orphan tag failed: {e}"));
                         break;
                     }
                 }

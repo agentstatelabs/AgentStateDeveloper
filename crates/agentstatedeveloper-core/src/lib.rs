@@ -31,6 +31,7 @@ pub mod overview;
 pub mod paths;
 pub mod policy;
 pub mod prepare_change;
+pub mod rebind;
 pub mod recipes;
 pub mod registry;
 pub mod repair;
@@ -103,6 +104,7 @@ pub use prepare_change::{
     aggregate_candidate_data, cliff_cutoff_index, dirty_files_for_change, explain_conflict_risk,
     file_score_floor, finalize_file_scores, propagate_caller_invariants,
 };
+pub use rebind::{RebindOutcome, rebind_ledger};
 pub use repair::{
     IssueSeverity, RepairIssue, RepairReport, drop_orphaned_edge_refs, repair_asg, scan_asg,
     scan_sidecar,

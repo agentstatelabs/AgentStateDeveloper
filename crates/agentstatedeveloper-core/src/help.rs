@@ -591,8 +591,8 @@ pub const REGISTRY: &[HelpDoc] = &[
     HelpDoc {
         feature: "ledger_rebind",
         group: "ledger",
-        synopsis: "Record a rename/move: rebind old symbol_id to the new one and re-parent all its ledger entries.",
-        syntax: "asd ledger rebind --from <symbol_id> --to <qname>",
+        synopsis: "Record a rename/move: move every ledger entry filed under the old symbol onto the new one, in one commit.",
+        syntax: "asd ledger rebind --from <symbol_id|qname> --to <qname> | --map <file.json>",
         params: &[
             p!(
                 "from_symbol_id",
@@ -610,9 +610,14 @@ pub const REGISTRY: &[HelpDoc] = &[
                 "Agent/user performing the rebind (default asd-mcp)."
             ),
         ],
-        examples: &["asd ledger rebind --from sym-old --to myapp::auth::verify"],
+        examples: &[
+            "asd ledger rebind --from sym-old --to myapp::auth::verify",
+            "asd ledger rebind --map rebinds.json",
+        ],
         gotchas: &[
             "Run this whenever you rename a function/class so its ledger history isn't orphaned.",
+            "An orphaned symbol (`asd repair` lists them as `orphaned_ledger`) is no longer in the index: pass its symbol_id, not its old qname.",
+            "`--map` takes `{\"<symbol_id or qname>\": \"<new qname>\", …}`; every entry is checked before anything is written.",
         ],
         related: &["ledger_append", "ledger_get"],
     },

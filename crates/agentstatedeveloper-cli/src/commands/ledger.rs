@@ -7,8 +7,7 @@ use clap::{Args, Subcommand, ValueEnum};
 
 use agentstatedeveloper_core::{
     AsgIndexStore, AsgLedgerStore, AuditEvent, Author, AuthorKind, Decision, Engine, IndexStore,
-    LedgerEntry, LedgerKind, LedgerStore, Rebind, Situation, actions, emit_audit, event_types,
-    paths,
+    LedgerEntry, LedgerKind, LedgerStore, Situation, actions, emit_audit, event_types,
 };
 
 use serde_json::json;
@@ -159,13 +158,26 @@ pub struct SupersedeArgs {
 
 #[derive(Debug, Args)]
 pub struct RebindArgs {
-    /// The old symbol_id (e.g., `sym_abc123…`) whose history should follow the rename.
-    #[arg(long)]
-    pub from: String,
+    /// The symbol whose ledger history should move: its symbol_id
+    /// (`sym_abc123…`) — the only handle on an orphaned symbol, which is no
+    /// longer in the index — or its qualified name.
+    #[arg(
+        long,
+        required_unless_present = "map",
+        requires = "to",
+        conflicts_with = "map"
+    )]
+    pub from: Option<String>,
 
-    /// The new qualified name the symbol was renamed to. Must already exist in the index.
-    #[arg(long)]
-    pub to: String,
+    /// The qualified name the history moves to. Must exist in the index.
+    #[arg(long, requires = "from", conflicts_with = "map")]
+    pub to: Option<String>,
+
+    /// A JSON file of many rebinds at once: `{"<symbol_id or qname>": "<qname
+    /// it moves to>", …}`. Every source and target is checked before anything
+    /// is written, and all of them land in one commit.
+    #[arg(long, value_name = "FILE")]
+    pub map: Option<PathBuf>,
 
     /// Author/agent performing the rebind.
     #[arg(long, default_value = "asd-cli-user")]
@@ -756,123 +768,118 @@ fn append(cfg: &Config, args: AppendArgs) -> Result<()> {
 }
 
 fn rebind(cfg: &Config, args: RebindArgs) -> Result<()> {
-    use agentstategraph::CommitOptions;
-    use agentstategraph_core::IntentCategory;
-    use chrono::Utc;
-
     let engine = open_engine(cfg)?;
 
-    // Policy gate — must pass before any writes.
-    let situation = Situation::new("rebind symbol")
-        .with_qualifier("from_symbol_id", &args.from)
-        .with_qualifier("to_qname", &args.to);
-    match engine
-        .policy
-        .evaluate(&situation, actions::LEDGER_REBIND, &args.agent_id)?
-    {
-        Decision::Deny {
+    let requested: Vec<(String, String)> = match (&args.map, args.from, args.to) {
+        (Some(path), _, _) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
+            let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&text)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+            map.into_iter()
+                .map(|(from, to)| match to {
+                    serde_json::Value::String(to) => Ok((from, to)),
+                    _ => Err(anyhow::anyhow!(
+                        "{}: the target for {from} must be a qualified name",
+                        path.display()
+                    )),
+                })
+                .collect::<Result<_>>()?
+        }
+        (None, Some(from), Some(to)) => vec![(from, to)],
+        _ => anyhow::bail!("pass --from and --to, or --map"),
+    };
+    if requested.is_empty() {
+        anyhow::bail!("no rebinds listed");
+    }
+
+    // Resolve and check every rebind before writing any of them.
+    let index_store = AsgIndexStore::from_engine(&engine);
+    let ledger_store = AsgLedgerStore::from_engine(&engine);
+    let mut resolved = Vec::with_capacity(requested.len());
+    let mut problems = Vec::new();
+    for (from, to) in &requested {
+        let situation = Situation::new("rebind symbol")
+            .with_qualifier("from_symbol_id", from)
+            .with_qualifier("to_qname", to);
+        if let Decision::Deny {
             matched_policy,
             reason,
-        } => {
-            anyhow::bail!("policy denied by {matched_policy}: {reason}");
+        } = engine
+            .policy
+            .evaluate(&situation, actions::LEDGER_REBIND, &args.agent_id)?
+        {
+            problems.push(format!(
+                "{from}: policy denied by {matched_policy}: {reason}"
+            ));
+            continue;
         }
-        _ => {}
+        let from_id = if from.starts_with("sym_") {
+            if ledger_store
+                .list_entries_with_superseded(&engine.ref_name, from)?
+                .is_empty()
+            {
+                problems.push(format!("{from}: no ledger entries are filed under it"));
+                continue;
+            }
+            from.clone()
+        } else {
+            match index_store.get_symbol_by_qname(&engine.ref_name, from)? {
+                Some(symbol) => symbol.symbol_id,
+                None => {
+                    problems.push(format!(
+                        "{from}: not in the index — for an orphaned symbol, pass its symbol_id"
+                    ));
+                    continue;
+                }
+            }
+        };
+        match index_store.get_symbol_by_qname(&engine.ref_name, to)? {
+            Some(symbol) => resolved.push((from_id, symbol)),
+            None => problems.push(format!("{to}: not in the index — run `asd index` first")),
+        }
+    }
+    if !problems.is_empty() {
+        anyhow::bail!("nothing rebound:\n  {}", problems.join("\n  "));
     }
 
-    // Resolve qnames → symbol_ids.
-    let index_store = AsgIndexStore::from_engine(&engine);
-    let from_symbol = index_store
-        .get_symbol_by_qname(&engine.ref_name, &args.from)?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "from qname not found in index: {} — run `asd index` first",
-                args.from
-            )
-        })?;
-    let new_symbol = index_store
-        .get_symbol_by_qname(&engine.ref_name, &args.to)?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "qname not found in index: {} — run `asd index` first",
-                args.to
-            )
-        })?;
-
-    if new_symbol.symbol_id == from_symbol.symbol_id {
-        anyhow::bail!("from and to resolve to the same symbol_id — nothing to rebind");
-    }
-
-    // Write the rebind record.
-    let rebind = Rebind {
-        from_symbol_id: from_symbol.symbol_id.clone(),
-        to_symbol_id: new_symbol.symbol_id.clone(),
-        to_qname: args.to.clone(),
-        at: Utc::now(),
-        by: args.agent_id.clone(),
-    };
-    let rebind_path = paths::rebind_path(&from_symbol.symbol_id);
-    let opts = CommitOptions::new(
+    let outcomes = agentstatedeveloper_core::rebind_ledger(
+        &engine.repo,
+        engine.fts.as_ref(),
+        &engine.ref_name,
+        &resolved,
         &args.agent_id,
-        IntentCategory::Refine,
-        format!("rebind {} → {}", args.from, args.to),
-    );
-    engine
-        .repo
-        .set_json(
-            &engine.ref_name,
-            &rebind_path,
-            &serde_json::to_value(&rebind)?,
-            opts,
-        )
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    )?;
 
-    // Re-parent all ledger entries from old symbol_id to new symbol_id.
-    let ledger_store = AsgLedgerStore::from_engine(&engine);
-    let entries =
-        ledger_store.list_entries_with_superseded(&engine.ref_name, &from_symbol.symbol_id)?;
-    let count = entries.len();
-    for mut entry in entries {
-        // Write under the new symbol_id path.
-        entry.symbol_id = new_symbol.symbol_id.clone();
-        let new_path = paths::ledger_entry_path(&new_symbol.symbol_id, &entry.entry_id);
-        let opts = CommitOptions::new(
-            &args.agent_id,
-            IntentCategory::Refine,
-            format!("rebind entry {} to {}", entry.entry_id, args.to),
-        );
-        engine
-            .repo
-            .set_json(
-                &engine.ref_name,
-                &new_path,
-                &serde_json::to_value(&entry)?,
-                opts,
-            )
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+    for (outcome, (from, _)) in outcomes.iter().zip(&requested) {
+        let event = AuditEvent::new(event_types::LEDGER_REBIND, &args.agent_id, "agent", "allow")
+            .with_subject(outcome.from_symbol_id.clone())
+            .with_secondary(outcome.to_symbol_id.clone())
+            .with_payload(json!({
+                "from": from,
+                "from_symbol_id": outcome.from_symbol_id,
+                "to_symbol_id": outcome.to_symbol_id,
+                "to_qname": outcome.to_qname,
+                "entries_moved": outcome.entries_moved,
+            }));
+        emit_audit(engine.audit.as_ref(), event);
     }
 
-    let event = AuditEvent::new(event_types::LEDGER_REBIND, &args.agent_id, "agent", "allow")
-        .with_subject(from_symbol.symbol_id.clone())
-        .with_secondary(new_symbol.symbol_id.clone())
-        .with_payload(json!({
-            "from_qname": args.from,
-            "from_symbol_id": from_symbol.symbol_id,
-            "to_symbol_id": new_symbol.symbol_id,
-            "to_qname": args.to,
-            "entries_moved": count,
-        }));
-    emit_audit(engine.audit.as_ref(), event);
-
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
+    let output = match outcomes.as_slice() {
+        [one] if args.map.is_none() => json!({
             "status": "rebound",
-            "from_symbol_id": from_symbol.symbol_id,
-            "to_symbol_id": new_symbol.symbol_id,
-            "to_qname": args.to,
-            "entries_moved": count,
-        }))?
-    );
+            "from_symbol_id": one.from_symbol_id,
+            "to_symbol_id": one.to_symbol_id,
+            "to_qname": one.to_qname,
+            "entries_moved": one.entries_moved,
+        }),
+        all => json!({
+            "status": "rebound",
+            "rebinds": all,
+            "entries_moved": all.iter().map(|o| o.entries_moved).sum::<usize>(),
+        }),
+    };
+    println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
 }
 
