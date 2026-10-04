@@ -17,6 +17,8 @@ Versions use semantic versioning.
 
 ## [Unreleased]
 
+## [v1.4.5] — 2026-10-03
+
 ### Fixed
 - **`asd ledger rebind` could not rebind an orphaned symbol, and neither the CLI nor MCP moved entries cleanly.**
   - The CLI's `--from` was documented as a symbol id but looked up by qname, and an orphaned symbol's old qname is by definition no longer in the index, so the one case rebind exists for always failed. It now takes a symbol id or a qname.
