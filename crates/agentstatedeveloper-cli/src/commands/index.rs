@@ -429,6 +429,9 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
     if !args.verbose {
         eprintln!("{}", log_note);
     }
+    if let Some(w) = agentstatedeveloper_core::outdated_hooks(&project_root) {
+        eprintln!("warning: {w}");
+    }
 
     println!(
         "{}",

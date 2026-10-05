@@ -17,6 +17,27 @@ Versions use semantic versioning.
 
 ## [Unreleased]
 
+### Fixed
+- **`asd hydrate` stored moved ledger entries twice, hiding some from their symbol, and wrote two commits per entry.**
+  - **What happened.** Hydrate filed each entry under the symbol `.asd/v1` last saw it on. When `asd index` had since moved an entry to a new symbol id (a line shift, a file move, a rebind), hydrate brought it back under the old id as well, because `asd sync` never removed the old file without `--prune`.
+  - **The damage.** SessionDrift-ios's git hooks still ran hydrate on every checkout, and they ended up storing 272 entries twice: once under the live symbol and once under a dead id. For 144 of them the ledger cache, which holds one row per entry, pointed at the dead copy, so `list_entries` and everything built on it missed those entries on their live symbol. Ledger counts didn't show it, because they count entry ids.
+  - **The cost.** Each entry took two commits, about 24,700 per hydrate of a 12,000-entry ledger. That's most of how SessionDrift's store grew from 1.4 GB to 3.4 GB in two days.
+  - **Now:**
+    - Hydrate stages the whole ledger and the rebind replay on one speculation and commits once.
+    - An entry the store already files keeps its place. The sidecar's copy there replaces it only when it's a newer revision, the same rule `conclusions import` uses.
+    - A new entry is filed once: under the copy on a live symbol, then the latest revision, then the copy `asd sync` wrote last.
+    - Rebinds replay as moves and are skipped once applied.
+    - The ledger cache is updated.
+  - **Measured on a copy of SessionDrift-ios's store and sidecar:** a hydrate like the old hooks' loads no entries and skips 12,448 sidecar copies, so no duplicate comes back. Its one commit is the sidecar's effects; the ledger needs none.
+- **`asd sync` left sidecar files behind for entries the store had moved.** It now removes them, with or without `--prune`, and reports the count as `moved_entries_removed`. `asd index` syncs after every run, so a moved entry can no longer come back from `.asd/v1`. On the SessionDrift copy, sync removed 280 such files and the sidecar no longer files any entry twice.
+- **`asd repair` didn't see an entry filed under more than one symbol.**
+  - A new `ledger_duplicate` issue reports each one. `--fix` keeps the copy under a live symbol, then the latest revision, then the copy the entry index names. It removes the rest and points the entry index and the ledger cache at the kept copy.
+  - A new `empty_ledger_node` issue reports symbol nodes left with no entries. An older hydrate's rebind replay deleted entries one by one and left those nodes, and repair used to count them as orphans. `--fix` removes them.
+  - Both fixes land in repair's single commit. On the SessionDrift copy, `--fix` cleared 273 duplicates and 10 empty nodes in one commit in 8 s, and orphaned-ledger warnings went from 218 to the 8 that are real.
+
+### Added
+- **`asd status` warns when a project's git hooks still run `asd hydrate`** (CLI, and MCP as `hooks_warning`); so do `asd index` and `asd hydrate`. Hooks from before Plan B reloaded the whole ledger from `.asd/v1` on every checkout and merge. `asd init` installs the current ones, which import committed conclusions instead.
+
 ## [v1.4.6] — 2026-10-05
 
 ### Fixed

@@ -695,7 +695,7 @@ fn import_one(
 /// deterministic ids), or tagged with the time of the change while
 /// `created_at` stays put (`approved-at:`, `rejected-at:` and `withdrawn-at:`
 /// from ratify, `orphaned-at:` from indexing).
-fn revised_at(entry: &LedgerEntry) -> DateTime<Utc> {
+pub(crate) fn revised_at(entry: &LedgerEntry) -> DateTime<Utc> {
     entry
         .tags
         .iter()
