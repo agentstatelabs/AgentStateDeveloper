@@ -17,6 +17,14 @@ Versions use semantic versioning.
 
 ## [Unreleased]
 
+### Fixed
+- **Ledger entries kept their `orphaned` tags after their symbol came back.** `asd index` tagged an entry `orphaned` once its symbol left the index, but never removed the tag. So an entry stayed marked orphaned after its symbol returned, for example when you checked a branch out again or restored a file.
+  - SessionDrift-ios has 7 such entries, from a branch that was never merged into `main`.
+  - Each index run now clears `orphaned`/`orphaned-at:` from entries whose symbol is back in the index, and adds `reattached-at:`. The new tag keeps a copy exported while the entry was tagged from winning the next `conclusions import` and tagging it again.
+  - The tags are cleared in the same single commit that adds new ones, and the ledger cache follows.
+  - The index summary reports the count as `orphaned_untagged`.
+  - Indexing that branch over a copy of SessionDrift-ios's store cleared exactly those 7 entries in one commit. The entry for a function deleted on `main` stayed tagged.
+
 ## [v1.4.5] — 2026-10-03
 
 ### Fixed

@@ -58,6 +58,9 @@ pub struct IndexSummary {
     pub cross_module_edges: usize,
     pub transitive_updates: usize,
     pub orphaned_tagged: usize,
+    /// Ledger entries whose orphan tags were cleared because their symbol is
+    /// back in the index.
+    pub orphaned_untagged: usize,
     /// Number of symbols that received a :line suffix to resolve a same-file
     /// qname collision.  0 means the index is collision-free.
     pub disambiguated: usize,
@@ -768,8 +771,9 @@ pub fn run_index(
     let transitive_updates =
         propagate_transitive_batched(repo, ref_name, &all_symbol_ids, &callees_of, agent_id)?;
 
-    let orphan_tagged = crate::ledger::tag_orphaned_entries(repo, ref_name, agent_id)?;
-    let orphaned_tagged = orphan_tagged.len();
+    let orphan_tags = crate::ledger::tag_orphaned_entries(repo, ref_name, agent_id)?;
+    let orphaned_tagged = orphan_tags.tagged.len();
+    let orphaned_untagged = orphan_tags.untagged.len();
 
     if let Some(sink) = audit {
         let event = AuditEvent::new(event_types::INDEX_RUN, agent_id, "agent", "allow")
@@ -781,6 +785,7 @@ pub fn run_index(
                 "edges": resolved_edge_count,
                 "transitive_updates": transitive_updates,
                 "orphaned_tagged": orphaned_tagged,
+                "orphaned_untagged": orphaned_untagged,
             }));
         let _ = sink.emit(&event);
     }
@@ -810,7 +815,7 @@ pub fn run_index(
                 // Stale symbols left the store this run: their effects rows
                 // leave the cache, and ledger entries that moved follow
                 // their symbol there too (the cache answers `list_entries`),
-                // as do the tags on entries newly orphaned.
+                // as do orphan tags added or cleared.
                 let gone: Vec<String> = pass1
                     .removed_ids
                     .iter()
@@ -826,7 +831,7 @@ pub fn run_index(
                         break;
                     }
                 }
-                for entry in &orphan_tagged {
+                for entry in orphan_tags.tagged.iter().chain(&orphan_tags.untagged) {
                     if let Err(e) = fts.upsert_ledger_entry(entry, ref_name) {
                         cache_sync_warnings.push(format!("ledger cache orphan tag failed: {e}"));
                         break;
@@ -929,6 +934,7 @@ pub fn run_index(
         cross_module_edges,
         transitive_updates,
         orphaned_tagged,
+        orphaned_untagged,
         disambiguated: disambiguated_count,
         top_collisions,
         doc_files: doc_files_count,

@@ -106,6 +106,47 @@ fn is_orphan_tag(t: &String) -> bool {
     t == "orphaned" || t.starts_with("orphaned-at:")
 }
 
+/// The commit the orphan-tagging pass makes ("tag N orphaned …" and/or
+/// "clear orphan tags from N …").
+fn is_tagging_commit(description: &str) -> bool {
+    description.starts_with("tag ") || description.starts_with("clear orphan tags")
+}
+
+fn set_by_qname(engine: &Engine, tree: &Value, why: &str) {
+    engine
+        .repo
+        .set_json(
+            &engine.ref_name,
+            "/asd/v1/index/by-qname",
+            tree,
+            agentstategraph::CommitOptions::new(
+                "t",
+                agentstategraph_core::IntentCategory::Refine,
+                why.to_string(),
+            ),
+        )
+        .unwrap();
+}
+
+/// Leave `qname`'s entries tagged orphaned while the symbol is in the index
+/// — the state stores indexed before v1.4.6 could be left in, and that an
+/// index run now clears. The symbol drops out of the index long enough to be
+/// tagged, then its entry is put back as it was.
+fn tag_as_orphan_and_restore(engine: &Engine, qname: &str) {
+    // `orphaned-at:` has one-second resolution: tag strictly after
+    // `created_at`, or the entry's own creation time decides any race.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let by_qname = engine
+        .repo
+        .get_tree(&engine.ref_name, "/asd/v1/index/by-qname")
+        .unwrap();
+    let mut without = by_qname.clone();
+    without.as_object_mut().unwrap().remove(qname);
+    set_by_qname(engine, &without, &format!("drop {qname}"));
+    agentstatedeveloper_core::detect_orphaned_entries(&engine.repo, &engine.ref_name, "t").unwrap();
+    set_by_qname(engine, &by_qname, &format!("restore {qname}"));
+}
+
 /// A project with live symbols `m.a` and `m.b`, and ledger entries filed
 /// under two ids nothing indexes — tagged orphaned by the second index run.
 struct Fixture {
@@ -358,32 +399,7 @@ fn importing_conclusions_exported_before_a_rebind_keeps_it() {
         index(&engine, &dir, &db);
         let c = id_of(&engine, "m.c");
         let entry = note(&engine, &c, "c is load-bearing");
-        // `orphaned-at:` has one-second resolution: tag strictly after
-        // `created_at`, or the entry's own creation time decides the race.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        // `m.c` drops out of the index long enough to be tagged orphaned…
-        let mut by_qname = engine
-            .repo
-            .get_tree(&engine.ref_name, "/asd/v1/index/by-qname")
-            .unwrap();
-        by_qname.as_object_mut().unwrap().remove("m.c");
-        engine
-            .repo
-            .set_json(
-                &engine.ref_name,
-                "/asd/v1/index/by-qname",
-                &by_qname,
-                agentstategraph::CommitOptions::new(
-                    "t",
-                    agentstategraph_core::IntentCategory::Refine,
-                    "drop m.c",
-                ),
-            )
-            .unwrap();
-        agentstatedeveloper_core::detect_orphaned_entries(&engine.repo, &engine.ref_name, "t")
-            .unwrap();
-        // …then comes back, still tagged.
-        index(&engine, &dir, &db);
+        tag_as_orphan_and_restore(&engine, "m.c");
         entry.entry_id
     };
     let out_dir = dir.join("exported");
@@ -443,4 +459,150 @@ fn importing_conclusions_exported_before_a_rebind_keeps_it() {
         vec![entry_id.as_str()]
     );
     assert!(!a[0].tags.iter().any(is_orphan_tag));
+}
+
+/// A symbol whose entries were tagged orphaned and that is back in the index
+/// — SessionDrift-ios's branch-only symbols on a checkout of that branch —
+/// loses the tags on the next index run, in its one tagging commit.
+#[test]
+fn an_index_run_clears_orphan_tags_when_the_symbol_is_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("proj");
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join(".asd-state.db");
+    std::fs::write(
+        dir.join("m.py"),
+        "def a():\n    return 1\n\n\ndef c():\n    return 3\n",
+    )
+    .unwrap();
+    let engine = Engine::open_sqlite(&db).unwrap();
+    index(&engine, &dir, &db);
+    let c = id_of(&engine, "m.c");
+    let entry = note(&engine, &c, "c is load-bearing");
+    let gone = note(&engine, "sym_gone", "on a symbol that stays gone");
+    tag_as_orphan_and_restore(&engine, "m.c");
+    // A store left like this by an earlier version has the tags cached too.
+    let tagged = stored_under(&engine, &c).remove(0);
+    agentstatedeveloper_core::SearchFtsDb::open(&db)
+        .unwrap()
+        .upsert_ledger_entry(&tagged, &engine.ref_name)
+        .unwrap();
+    assert!(
+        cached(&db, &entry.entry_id).1.iter().any(is_orphan_tag),
+        "precondition: tagged while live, in the store and the cache"
+    );
+    let before = head(&engine);
+
+    let summary = index(&engine, &dir, &db);
+
+    assert_eq!((summary.orphaned_untagged, summary.orphaned_tagged), (1, 0));
+    let (symbol_id, tags) = cached(&db, &entry.entry_id);
+    assert_eq!(symbol_id, c);
+    assert!(!tags.iter().any(is_orphan_tag), "cached copy still tagged");
+    let stored = &stored_under(&engine, &c)[0];
+    assert!(!stored.tags.iter().any(is_orphan_tag), "{:?}", stored.tags);
+    assert!(stored.tags.iter().any(|t| t.starts_with("reattached-at:")));
+    // The entry whose symbol is still gone keeps its tags.
+    assert!(
+        stored_under(&engine, "sym_gone")[0]
+            .tags
+            .iter()
+            .any(is_orphan_tag)
+    );
+    let _ = gone;
+    let tag_commits = engine
+        .repo
+        .log(&engine.ref_name, 50)
+        .unwrap()
+        .into_iter()
+        .take_while(|c| c.id.to_hex() != before)
+        .filter(|c| is_tagging_commit(&c.intent.description))
+        .count();
+    assert_eq!(tag_commits, 1);
+
+    // Settled: nothing left to change, so no commit.
+    let settled = head(&engine);
+    let again = index(&engine, &dir, &db);
+    assert_eq!((again.orphaned_untagged, again.orphaned_tagged), (0, 0));
+    assert!(
+        !engine
+            .repo
+            .log(&engine.ref_name, 10)
+            .unwrap()
+            .into_iter()
+            .take_while(|c| c.id.to_hex() != settled)
+            .any(|c| is_tagging_commit(&c.intent.description)),
+        "a settled index touched orphan tags"
+    );
+}
+
+/// A copy exported while the entry was still tagged must not tag it again on
+/// the next `conclusions import` (the post-merge and post-checkout hooks).
+#[test]
+fn importing_a_copy_exported_while_tagged_keeps_the_tags_cleared() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("proj");
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join(".asd-state.db");
+    std::fs::write(
+        dir.join("m.py"),
+        "def a():\n    return 1\n\n\ndef c():\n    return 3\n",
+    )
+    .unwrap();
+    let c = {
+        let engine = Engine::open_sqlite(&db).unwrap();
+        index(&engine, &dir, &db);
+        let c = id_of(&engine, "m.c");
+        note(&engine, &c, "c is load-bearing");
+        tag_as_orphan_and_restore(&engine, "m.c");
+        c
+    };
+    let out_dir = dir.join("exported");
+    let export = asd(
+        &dir,
+        &db,
+        &["conclusions", "export", "--out", out_dir.to_str().unwrap()],
+    );
+    assert!(
+        export.status.success(),
+        "{}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+    let exported = std::fs::read_dir(&out_dir)
+        .unwrap()
+        .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap_or_default())
+        .collect::<String>();
+    assert!(
+        exported.contains("orphaned-at:"),
+        "precondition: the export carries the tagged copy"
+    );
+
+    {
+        let engine = Engine::open_sqlite(&db).unwrap();
+        assert_eq!(index(&engine, &dir, &db).orphaned_untagged, 1);
+    }
+    let import = asd(
+        &dir,
+        &db,
+        &[
+            "conclusions",
+            "import",
+            "--in-dir",
+            out_dir.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        import.status.success(),
+        "{}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+
+    let engine = Engine::open_sqlite(&db).unwrap();
+    let stored = stored_under(&engine, &c);
+    assert_eq!(stored.len(), 1);
+    assert!(
+        !stored[0].tags.iter().any(is_orphan_tag),
+        "the import tagged it again: {:?}",
+        stored[0].tags
+    );
 }
