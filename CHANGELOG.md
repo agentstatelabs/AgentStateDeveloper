@@ -17,6 +17,8 @@ Versions use semantic versioning.
 
 ## [Unreleased]
 
+## [v1.4.6] — 2026-10-05
+
 ### Fixed
 - **Ledger entries kept their `orphaned` tags after their symbol came back.** `asd index` tagged an entry `orphaned` once its symbol left the index, but never removed the tag. So an entry stayed marked orphaned after its symbol returned, for example when you checked a branch out again or restored a file.
   - SessionDrift-ios has 7 such entries, from a branch that was never merged into `main`.
