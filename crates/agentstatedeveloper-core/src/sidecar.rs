@@ -49,10 +49,10 @@ use agentstategraph_core::IntentCategory;
 use serde_json::Value;
 
 use crate::error::{AsdError, Result};
-use crate::ledger::{AsgLedgerStore, LedgerStore};
 use crate::paths;
 use crate::repair::drop_orphaned_edge_refs;
 use crate::schema::{ASD_SCHEMA_VERSION, EffectDecl, LedgerEntry, Rebind, Symbol};
+use crate::search_fts::SearchFtsDb;
 
 /// Relative path (from project root) to the sidecar root.
 const SIDECAR_REL_ROOT: &str = ".asd/v1";
@@ -72,6 +72,37 @@ pub enum SidecarState {
     Hydrated,
     /// The sidecar was deliberately reset (`meta/fresh-reset` sentinel is present).
     FreshReset,
+}
+
+/// A warning when the project under `root` runs git hooks from before Plan
+/// B, which reload the whole ledger from `.asd/v1/` with `asd hydrate` on
+/// every checkout and merge. On a store that holds more than the sidecar —
+/// anything since the last `asd sync` — that rewrote every entry each time,
+/// and before v1.4.7 it re-filed moved entries under their old symbols.
+/// `asd init` installs the current hooks, which import committed
+/// conclusions instead.
+pub fn outdated_hooks(root: &Path) -> Option<String> {
+    let hooks = root.join(".asd/hooks");
+    let stale: Vec<&str> = ["post-checkout", "post-merge"]
+        .into_iter()
+        .filter(|name| {
+            fs::read_to_string(hooks.join(name)).is_ok_and(|script| {
+                script
+                    .lines()
+                    .any(|l| !l.trim_start().starts_with('#') && l.contains("asd hydrate"))
+            })
+        })
+        .collect();
+    (!stale.is_empty()).then(|| {
+        format!(
+            "this project's {} hook{} still run{} `asd hydrate`, reloading the whole ledger \
+             from .asd/v1 on every checkout — run `asd init` to install the current hooks \
+             (they import committed conclusions instead), and commit .asd/hooks",
+            stale.join(" and "),
+            if stale.len() == 1 { "" } else { "s" },
+            if stale.len() == 1 { "s" } else { "" },
+        )
+    })
 }
 
 /// Inspect the on-disk sidecar under `dir` and return its lifecycle state.
@@ -113,6 +144,9 @@ pub struct SyncSummary {
     pub schema_version: String,
     /// Files removed by `--prune` (0 when prune was not requested).
     pub pruned: usize,
+    /// Ledger files removed because the store now files their entry under
+    /// another symbol. Always done, `--prune` or not.
+    pub moved_entries_removed: usize,
 }
 
 /// Result of [`hydrate_from_dir`]. `missing_schema_version` is true when
@@ -123,6 +157,10 @@ pub struct HydrateSummary {
     pub effects_loaded: usize,
     pub ledger_entries_loaded: usize,
     pub symbols_loaded: usize,
+    /// Sidecar ledger copies not written: the store already files the entry
+    /// (under that symbol at the same or a newer revision, or under another
+    /// symbol it was moved to), or another copy of it was taken.
+    pub ledger_entries_skipped: usize,
     pub rebinds_replayed: usize,
     pub missing_schema_version: bool,
     /// Symbols whose sidecar file was newer than the existing ASG entry and
@@ -181,8 +219,10 @@ pub fn sync_to_dir(repo: &Repository, ref_name: &str, dir: &Path) -> Result<Sync
 
     // Ledger: two-level tree, /asd/v1/ledger/<symbol_id>/<entry_id>.
     let mut ledger_entries_written = 0usize;
+    let mut moved_entries_removed = 0usize;
     let ledger_prefix = format!("{}/ledger", paths::ASD_ROOT);
     if let Ok(serde_json::Value::Object(by_symbol)) = repo.get_tree(ref_name, &ledger_prefix) {
+        moved_entries_removed = remove_moved_entries(&ledger_dir, &by_symbol)?;
         let sorted_syms: BTreeMap<_, _> = by_symbol.into_iter().collect();
         for (symbol_id, bucket) in sorted_syms {
             let serde_json::Value::Object(entries) = bucket else {
@@ -243,7 +283,57 @@ pub fn sync_to_dir(repo: &Repository, ref_name: &str, dir: &Path) -> Result<Sync
         rebinds_synced,
         schema_version: ASD_SCHEMA_VERSION.to_string(),
         pruned: 0,
+        moved_entries_removed,
     })
+}
+
+/// Remove sidecar ledger files for entries the store now files under a
+/// different symbol — moved by a line shift, a file move or a rebind. Left
+/// in place, they put each moved entry back under its old symbol on the next
+/// `asd hydrate`. Files for entries the store does not hold at all are left
+/// for `--prune`. Returns the number of files removed.
+fn remove_moved_entries(
+    ledger_dir: &Path,
+    by_symbol: &serde_json::Map<String, Value>,
+) -> Result<usize> {
+    if !ledger_dir.is_dir() {
+        return Ok(0);
+    }
+    let stored = crate::ledger_dupes::locations(by_symbol);
+    let mut removed = 0usize;
+    for sym_entry in fs::read_dir(ledger_dir)? {
+        let sym_dir = sym_entry?.path();
+        if !sym_dir.is_dir() {
+            continue;
+        }
+        let Some(symbol_id) = sym_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        for file_entry in fs::read_dir(&sym_dir)? {
+            let path = file_entry?.path();
+            if !is_json_file(&path) {
+                continue;
+            }
+            let Some(entry_id) = path.file_stem().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if stored
+                .get(entry_id)
+                .is_some_and(|symbols| !symbols.contains(&symbol_id))
+            {
+                fs::remove_file(&path)?;
+                removed += 1;
+            }
+        }
+        if fs::read_dir(&sym_dir)?.next().is_none() {
+            fs::remove_dir(&sym_dir)?;
+        }
+    }
+    Ok(removed)
 }
 
 /// Remove orphaned `.asd/v1/` sidecar files — files whose keys no longer
@@ -395,6 +485,18 @@ pub fn hydrate_from_dir(
     dir: &Path,
     agent_id: &str,
 ) -> Result<HydrateSummary> {
+    hydrate_from_dir_with_cache(repo, None, ref_name, dir, agent_id)
+}
+
+/// [`hydrate_from_dir`], also writing the ledger entries it loads into the
+/// ledger cache, which answers `list_entries`.
+pub fn hydrate_from_dir_with_cache(
+    repo: &Repository,
+    fts: Option<&SearchFtsDb>,
+    ref_name: &str,
+    dir: &Path,
+    agent_id: &str,
+) -> Result<HydrateSummary> {
     let root = dir.join(SIDECAR_REL_ROOT);
     if !root.exists() {
         return Err(AsdError::Other(format!(
@@ -408,8 +510,6 @@ pub fn hydrate_from_dir(
     let symbols_dir = root.join("symbols");
     let rebinds_dir = root.join("rebinds");
     let meta_dir = root.join("meta");
-
-    let ledger_store = AsgLedgerStore::new(repo);
 
     // -----------------------------------------------------------------------
     // Symbols — bulk load: read all sidecar files into memory maps, then
@@ -602,142 +702,26 @@ pub fn hydrate_from_dir(
     }
 
     // -----------------------------------------------------------------------
-    // Ledger entries — individual writes are fine here; ledger entries are
-    // rare and the nested per-symbol path structure makes bulk writes complex.
-    // Parse failures skip the file rather than aborting the hydrate.
+    // Ledger entries and rebind records — staged on one speculation and
+    // committed once (see `hydrate_ledger`).
     // -----------------------------------------------------------------------
-    let mut ledger_entries_loaded = 0usize;
-    if ledger_dir.is_dir() {
-        for sym_entry in fs::read_dir(&ledger_dir)? {
-            let sym_entry = sym_entry?;
-            let sym_path = sym_entry.path();
-            if !sym_path.is_dir() {
-                continue;
-            }
-            for file_entry in fs::read_dir(&sym_path)? {
-                let file_entry = file_entry?;
-                let file_path = file_entry.path();
-                if !is_json_file(&file_path) {
-                    continue;
-                }
-                let text = match fs::read_to_string(&file_path) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        eprintln!(
-                            "asd hydrate: skipping unreadable {}: {}",
-                            file_path.display(),
-                            e
-                        );
-                        blobs_rejected += 1;
-                        continue;
-                    }
-                };
-                let entry: LedgerEntry = match serde_json::from_str(&text) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        eprintln!(
-                            "asd hydrate: skipping malformed ledger entry {}: {}",
-                            file_path.display(),
-                            e
-                        );
-                        blobs_rejected += 1;
-                        continue;
-                    }
-                };
-                ledger_store.append_entry(ref_name, &entry, agent_id)?;
-                ledger_entries_loaded += 1;
-            }
+    let ledger = hydrate_ledger(
+        repo,
+        ref_name,
+        &ledger_dir,
+        &rebinds_dir,
+        agent_id,
+        &mut blobs_rejected,
+    )?;
+    if let Some(fts) = fts {
+        for entry in &ledger.changed {
+            fts.upsert_ledger_entry(entry, ref_name)
+                .map_err(|e| AsdError::Other(format!("ledger cache: {e}")))?;
         }
     }
-
-    // Rebind records: restore to ASG repo for provenance, then defensively
-    // re-parent any ledger entries still stored under old symbol_ids.
-    // Sort by `at` timestamp (ascending) so chained rebinds (A→B→C) replay
-    // in commit order.
-    let mut rebinds_replayed = 0usize;
-    if rebinds_dir.is_dir() {
-        let mut rebinds: Vec<Rebind> = Vec::new();
-        for entry in fs::read_dir(&rebinds_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !is_json_file(&path) {
-                continue;
-            }
-            let text = fs::read_to_string(&path)?;
-            let rebind: Rebind = serde_json::from_str(&text)?;
-            rebinds.push(rebind);
-        }
-        // Sort by timestamp so chained rebinds apply in correct order.
-        rebinds.sort_by_key(|r| r.at);
-
-        for rebind in &rebinds {
-            // Restore the rebind record itself for provenance.
-            let rebind_path = paths::rebind_path(&rebind.from_symbol_id);
-            let val = serde_json::to_value(rebind)?;
-            let opts = CommitOptions::new(
-                agent_id,
-                IntentCategory::Refine,
-                format!(
-                    "hydrate rebind {} → {}",
-                    rebind.from_symbol_id, rebind.to_symbol_id
-                ),
-            );
-            repo.set_json(ref_name, &rebind_path, &val, opts)
-                .map_err(|e| AsdError::Other(e.to_string()))?;
-
-            // Defensively re-parent any entries still under from_symbol_id.
-            // This handles the case where the sidecar was last synced before
-            // the rebind occurred.
-            let stale_entries = ledger_store
-                .list_entries_with_superseded(ref_name, &rebind.from_symbol_id)
-                .unwrap_or_default();
-            for mut entry in stale_entries {
-                entry.symbol_id = rebind.to_symbol_id.clone();
-                let new_path = paths::ledger_entry_path(&rebind.to_symbol_id, &entry.entry_id);
-                let entry_val = serde_json::to_value(&entry)?;
-                let opts = CommitOptions::new(
-                    agent_id,
-                    IntentCategory::Refine,
-                    format!("reparent entry {} during rebind replay", entry.entry_id),
-                );
-                if repo
-                    .set_json(ref_name, &new_path, &entry_val, opts)
-                    .map_err(|e| AsdError::Other(e.to_string()))
-                    .is_ok()
-                {
-                    // Update the reverse index to point to the new symbol_id.
-                    let idx_path = paths::ledger_entry_index_path(&entry.entry_id);
-                    let idx_val = serde_json::Value::String(rebind.to_symbol_id.clone());
-                    let idx_opts = CommitOptions::new(
-                        agent_id,
-                        IntentCategory::Refine,
-                        format!(
-                            "ledger-idx reparent {} → {}",
-                            entry.entry_id, rebind.to_symbol_id
-                        ),
-                    );
-                    // Best-effort during rebind replay. A failure here
-                    // leaves the ledger-by-symbol index slightly stale;
-                    // the next `asd repair` reconciles it. Hydrate must
-                    // keep going so the rest of the sidecar lands.
-                    let _ = repo.set_json(ref_name, &idx_path, &idx_val, idx_opts);
-
-                    let old_path =
-                        paths::ledger_entry_path(&rebind.from_symbol_id, &entry.entry_id);
-                    let opts = CommitOptions::new(
-                        agent_id,
-                        IntentCategory::Refine,
-                        format!("remove stale entry {} after rebind replay", entry.entry_id),
-                    );
-                    // Best-effort: same rationale as set_json above —
-                    // a leftover entry at the old path is cleanable via
-                    // `asd repair` and must not abort hydrate.
-                    let _ = repo.delete(ref_name, &old_path, opts);
-                }
-            }
-            rebinds_replayed += 1;
-        }
-    }
+    let ledger_entries_loaded = ledger.loaded;
+    let ledger_entries_skipped = ledger.skipped;
+    let rebinds_replayed = ledger.rebinds_replayed;
 
     let missing_schema_version = !meta_dir.join("schema-version").is_file();
 
@@ -777,12 +761,292 @@ pub fn hydrate_from_dir(
         effects_loaded,
         ledger_entries_loaded,
         symbols_loaded,
+        ledger_entries_skipped,
         rebinds_replayed,
         missing_schema_version,
         symbols_skipped,
         blobs_rejected,
         refs_dropped,
     })
+}
+
+/// What [`hydrate_ledger`] did.
+#[derive(Default)]
+struct LedgerHydrate {
+    loaded: usize,
+    skipped: usize,
+    rebinds_replayed: usize,
+    /// Entries written, as stored — for the ledger cache.
+    changed: Vec<LedgerEntry>,
+}
+
+/// One sidecar copy of a ledger entry, with when `asd sync` last wrote it.
+struct SidecarCopy {
+    symbol_id: String,
+    entry: LedgerEntry,
+    written: Option<std::time::SystemTime>,
+}
+
+/// Every ledger entry under `.asd/v1/ledger/`, grouped by entry id: a
+/// sidecar written before v1.4.7 can hold one entry under several symbols.
+fn read_sidecar_ledger(
+    ledger_dir: &Path,
+    blobs_rejected: &mut usize,
+) -> Result<BTreeMap<String, Vec<SidecarCopy>>> {
+    let mut copies: BTreeMap<String, Vec<SidecarCopy>> = BTreeMap::new();
+    if !ledger_dir.is_dir() {
+        return Ok(copies);
+    }
+    for sym_entry in fs::read_dir(ledger_dir)? {
+        let sym_path = sym_entry?.path();
+        if !sym_path.is_dir() {
+            continue;
+        }
+        for file_entry in fs::read_dir(&sym_path)? {
+            let file_path = file_entry?.path();
+            if !is_json_file(&file_path) {
+                continue;
+            }
+            let text = match fs::read_to_string(&file_path) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!(
+                        "asd hydrate: skipping unreadable {}: {}",
+                        file_path.display(),
+                        e
+                    );
+                    *blobs_rejected += 1;
+                    continue;
+                }
+            };
+            let entry: LedgerEntry = match serde_json::from_str(&text) {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!(
+                        "asd hydrate: skipping malformed ledger entry {}: {}",
+                        file_path.display(),
+                        e
+                    );
+                    *blobs_rejected += 1;
+                    continue;
+                }
+            };
+            let written = fs::metadata(&file_path).and_then(|m| m.modified()).ok();
+            copies
+                .entry(entry.entry_id.clone())
+                .or_default()
+                .push(SidecarCopy {
+                    symbol_id: entry.symbol_id.clone(),
+                    entry,
+                    written,
+                });
+        }
+    }
+    Ok(copies)
+}
+
+/// Load the sidecar's ledger entries and rebind records into the store, in
+/// one commit.
+///
+/// - An entry the store already files keeps the place the store gave it — a
+///   moved entry stays moved. The sidecar's copy there replaces the stored
+///   one only when it is a newer revision, the rule conclusions import uses.
+///   Re-filing entries under the symbol the sidecar last saw them on is how
+///   SessionDrift-ios came to store 272 entries twice.
+/// - An entry new to the store is filed once, under the sidecar copy with
+///   the best claim (see [`crate::ledger_dupes::claim`]; then the copy
+///   `asd sync` wrote last).
+/// - A rebind record the store lacks is restored, and entries still filed
+///   under its old symbol move to the new one, as `asd ledger rebind` would.
+///
+/// Writing each entry with its own two commits stored fresh copies of the
+/// ledger and entry-index maps every time: ~24,700 commits per hydrate of a
+/// 12,000-entry ledger.
+fn hydrate_ledger(
+    repo: &Repository,
+    ref_name: &str,
+    ledger_dir: &Path,
+    rebinds_dir: &Path,
+    agent_id: &str,
+    blobs_rejected: &mut usize,
+) -> Result<LedgerHydrate> {
+    let copies = read_sidecar_ledger(ledger_dir, blobs_rejected)?;
+    let mut rebinds: Vec<Rebind> = Vec::new();
+    if rebinds_dir.is_dir() {
+        for entry in fs::read_dir(rebinds_dir)? {
+            let path = entry?.path();
+            if !is_json_file(&path) {
+                continue;
+            }
+            match fs::read_to_string(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|t| serde_json::from_str::<Rebind>(&t).map_err(|e| e.to_string()))
+            {
+                Ok(rebind) => rebinds.push(rebind),
+                Err(e) => {
+                    eprintln!("asd hydrate: skipping rebind {}: {}", path.display(), e);
+                    *blobs_rejected += 1;
+                }
+            }
+        }
+    }
+    // Chained rebinds (A→B→C) replay in the order they were made.
+    rebinds.sort_by_key(|r| r.at);
+    if copies.is_empty() && rebinds.is_empty() {
+        return Ok(LedgerHydrate::default());
+    }
+
+    let (spec, fork) = crate::subtree::speculate_at_head(repo, ref_name, "asd-hydrate-ledger")?;
+    let staged = (|| -> Result<LedgerHydrate> {
+        let rebinds_root = format!("{}/rebinds", paths::ASD_ROOT);
+        let mut ledger = crate::subtree::read_seed(repo, &fork, &paths::ledger_root())?;
+        let mut index = crate::subtree::read_seed(repo, &fork, &paths::ledger_index_root())?;
+        let mut records = crate::subtree::read_seed(repo, &fork, &rebinds_root)?;
+        let live: std::collections::HashSet<String> =
+            crate::subtree::read_seed(repo, &fork, &format!("{}/index/by-qname", paths::ASD_ROOT))?
+                .values()
+                .filter_map(|v| v.get("symbol_id")?.as_str().map(str::to_string))
+                .collect();
+        let stored = crate::ledger_dupes::locations(&ledger);
+        let mut out = LedgerHydrate::default();
+        let mut ledger_changed = false;
+
+        let put = |ledger: &mut serde_json::Map<String, Value>,
+                   symbol_id: &str,
+                   entry: &LedgerEntry|
+         -> Result<()> {
+            let Value::Object(entries) = ledger
+                .entry(symbol_id.to_string())
+                .or_insert_with(|| Value::Object(Default::default()))
+            else {
+                return Err(AsdError::Other(format!(
+                    "ledger node for {symbol_id} is not a map"
+                )));
+            };
+            entries.insert(entry.entry_id.clone(), serde_json::to_value(entry)?);
+            Ok(())
+        };
+
+        for (entry_id, mut copies) in copies {
+            if let Some(symbols) = stored.get(&entry_id) {
+                for copy in copies {
+                    let current = symbols
+                        .contains(&copy.symbol_id)
+                        .then(|| ledger.get(&copy.symbol_id)?.get(&entry_id))
+                        .flatten()
+                        .and_then(|v| serde_json::from_value::<LedgerEntry>(v.clone()).ok());
+                    match current {
+                        Some(current)
+                            if crate::conclusions_export::revised_at(&copy.entry)
+                                > crate::conclusions_export::revised_at(&current) =>
+                        {
+                            put(&mut ledger, &copy.symbol_id, &copy.entry)?;
+                            ledger_changed = true;
+                            out.loaded += 1;
+                            out.changed.push(copy.entry);
+                        }
+                        _ => out.skipped += 1,
+                    }
+                }
+                continue;
+            }
+            copies.sort_by(|a, b| {
+                crate::ledger_dupes::claim(&b.symbol_id, &b.entry, &live)
+                    .cmp(&crate::ledger_dupes::claim(&a.symbol_id, &a.entry, &live))
+                    .then(b.written.cmp(&a.written))
+                    .then(a.symbol_id.cmp(&b.symbol_id))
+            });
+            let mut copies = copies.into_iter();
+            let Some(keep) = copies.next() else {
+                continue;
+            };
+            out.skipped += copies.len();
+            put(&mut ledger, &keep.symbol_id, &keep.entry)?;
+            index.insert(entry_id, Value::String(keep.symbol_id.clone()));
+            ledger_changed = true;
+            out.loaded += 1;
+            out.changed.push(keep.entry);
+        }
+
+        let rebound_at = format!(
+            "rebound-at:{}",
+            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ")
+        );
+        let mut records_changed = false;
+        for rebind in &rebinds {
+            let mut replayed = false;
+            if !records.contains_key(&rebind.from_symbol_id) {
+                records.insert(rebind.from_symbol_id.clone(), serde_json::to_value(rebind)?);
+                records_changed = true;
+                replayed = true;
+            }
+            // Entries still filed under the old symbol: the sidecar was
+            // synced before the rebind was made.
+            if rebind.from_symbol_id != rebind.to_symbol_id
+                && let Some(Value::Object(entries)) = ledger.remove(&rebind.from_symbol_id)
+            {
+                for (entry_id, value) in entries {
+                    let mut entry: LedgerEntry = serde_json::from_value(value).map_err(|e| {
+                        AsdError::Other(format!(
+                            "ledger entry {entry_id} under {}: {e}",
+                            rebind.from_symbol_id
+                        ))
+                    })?;
+                    entry.symbol_id = rebind.to_symbol_id.clone();
+                    entry
+                        .tags
+                        .retain(|t| t != "orphaned" && !t.starts_with("orphaned-at:"));
+                    entry.tags.push(rebound_at.clone());
+                    put(&mut ledger, &rebind.to_symbol_id, &entry)?;
+                    index.insert(entry_id, Value::String(rebind.to_symbol_id.clone()));
+                    out.changed.push(entry);
+                    ledger_changed = true;
+                    replayed = true;
+                }
+            }
+            out.rebinds_replayed += usize::from(replayed);
+        }
+
+        let write = |path: &str, map: serde_json::Map<String, Value>| {
+            repo.spec_set_json(spec, path, &Value::Object(map))
+                .map_err(|e| AsdError::Other(e.to_string()))
+        };
+        if ledger_changed {
+            write(&paths::ledger_root(), ledger)?;
+            write(&paths::ledger_index_root(), index)?;
+        }
+        if records_changed {
+            write(&rebinds_root, records)?;
+        }
+        Ok(out)
+    })();
+    match staged {
+        Ok(out) if out.changed.is_empty() && out.rebinds_replayed == 0 => {
+            let _ = repo.discard_speculation(spec);
+            Ok(out)
+        }
+        Ok(out) => {
+            let opts = CommitOptions::new(
+                agent_id,
+                IntentCategory::Checkpoint,
+                format!(
+                    "asd hydrate: {} ledger entr{}, {} rebind(s) ({} sidecar cop{} already in the store)",
+                    out.loaded,
+                    if out.loaded == 1 { "y" } else { "ies" },
+                    out.rebinds_replayed,
+                    out.skipped,
+                    if out.skipped == 1 { "y" } else { "ies" },
+                ),
+            );
+            repo.commit_speculation(spec, opts)
+                .map_err(|e| AsdError::Other(e.to_string()))?;
+            Ok(out)
+        }
+        Err(e) => {
+            let _ = repo.discard_speculation(spec);
+            Err(e)
+        }
+    }
 }
 
 fn is_json_file(p: &Path) -> bool {

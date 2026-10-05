@@ -25,6 +25,7 @@ pub mod help;
 pub mod index;
 pub mod index_pipeline;
 pub mod ledger;
+mod ledger_dupes;
 pub mod ledger_integrity;
 pub mod map;
 pub mod overview;
@@ -106,8 +107,8 @@ pub use prepare_change::{
 };
 pub use rebind::{RebindOutcome, rebind_ledger};
 pub use repair::{
-    IssueSeverity, RepairIssue, RepairReport, drop_orphaned_edge_refs, repair_asg, scan_asg,
-    scan_sidecar,
+    IssueSeverity, RepairIssue, RepairReport, drop_orphaned_edge_refs, repair_asg,
+    repair_asg_with_cache, scan_asg, scan_sidecar,
 };
 pub use schema::{
     ASD_PATH_PREFIX, ASD_SCHEMA_VERSION, Author, AuthorKind, ConclusionClass, Effect,
@@ -132,8 +133,8 @@ pub use search_fts::{
 };
 pub use ser_helpers::{drop_empty_recursive, drop_empty_top_level};
 pub use sidecar::{
-    HydrateSummary, SidecarState, SyncSummary, hydrate_from_dir, mark_fresh_reset, prune_sidecar,
-    sidecar_lifecycle_state, sync_to_dir,
+    HydrateSummary, SidecarState, SyncSummary, hydrate_from_dir, hydrate_from_dir_with_cache,
+    mark_fresh_reset, outdated_hooks, prune_sidecar, sidecar_lifecycle_state, sync_to_dir,
 };
 pub use symbol::{canonical_symbol_id, symbol_fingerprint};
 pub use transitive::{declared_effect_blast_radius, propagate_transitive};

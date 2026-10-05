@@ -15,7 +15,7 @@ use crate::policy::{
 };
 use crate::schema::{LedgerEntry, Symbol};
 use crate::search_fts::SearchFtsDb;
-use crate::sidecar::hydrate_from_dir;
+use crate::sidecar::hydrate_from_dir_with_cache;
 use serde_json::json;
 
 /// The top-level ASD engine. Owns an ASG repository, a policy gate, an
@@ -170,8 +170,9 @@ impl Engine {
             }
         };
         if is_empty && sidecar_root.exists() {
-            let _ = hydrate_from_dir(
+            let _ = hydrate_from_dir_with_cache(
                 &engine.repo,
+                engine.fts.as_ref(),
                 &engine.ref_name,
                 &project_root,
                 "asd-auto-hydrate",

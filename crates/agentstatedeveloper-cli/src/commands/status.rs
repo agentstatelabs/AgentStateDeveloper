@@ -189,6 +189,7 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
             "sidecar_action": sidecar_action,
             "ledger": ledger,
             "ledger_warning": ledger_warning,
+            "hooks_warning": agentstatedeveloper_core::outdated_hooks(project_root),
             "dirty_files": dirty_files,
             "concept_gaps": concept_gaps,
             "index_consistency": index_consistency,
@@ -263,6 +264,9 @@ pub fn run(cfg: &Config, args: StatusArgs) -> Result<()> {
         );
     }
     if let Some(w) = &ledger_warning {
+        println!("  warning:  {w}");
+    }
+    if let Some(w) = agentstatedeveloper_core::outdated_hooks(project_root) {
         println!("  warning:  {w}");
     }
 

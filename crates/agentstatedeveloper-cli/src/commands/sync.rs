@@ -63,6 +63,7 @@ pub fn run(cfg: &Config, args: SyncArgs) -> Result<()> {
         "symbols_written": summary.symbols_written,
         "schema_version": summary.schema_version,
         "pruned": summary.pruned,
+        "moved_entries_removed": summary.moved_entries_removed,
         "ledger": ledger,
         "ledger_warning": ledger_warning,
         "note": "current-state only; ASG commit history is not carried in the sidecar",

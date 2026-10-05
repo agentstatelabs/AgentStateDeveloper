@@ -16,7 +16,7 @@ use anyhow::Result;
 use clap::Args;
 use serde_json::json;
 
-use agentstatedeveloper_core::{Engine, LedgerEntry, LedgerKind, hydrate_from_dir};
+use agentstatedeveloper_core::{Engine, LedgerEntry, LedgerKind, hydrate_from_dir_with_cache};
 
 use crate::config::Config;
 
@@ -42,7 +42,16 @@ pub fn run(cfg: &Config, args: HydrateArgs) -> Result<()> {
     // sidecar::hydrate_from_dir returns a clear error if `.asd/v1/`
     // doesn't exist. Surface it as-is; the message already says "did
     // you mean to run `asd sync` first?".
-    let summary = hydrate_from_dir(&engine.repo, &engine.ref_name, &dir, &cfg.agent_id)?;
+    if let Some(w) = agentstatedeveloper_core::outdated_hooks(&dir) {
+        eprintln!("warning: {w}");
+    }
+    let summary = hydrate_from_dir_with_cache(
+        &engine.repo,
+        engine.fts.as_ref(),
+        &engine.ref_name,
+        &dir,
+        &cfg.agent_id,
+    )?;
 
     // Plan T: hydrate used to leave the SQLite fast-read caches
     // (asd_symbols_cache, asd_call_edges, FTS) empty — a born-cold DB where
@@ -61,6 +70,7 @@ pub fn run(cfg: &Config, args: HydrateArgs) -> Result<()> {
         "symbols_skipped": summary.symbols_skipped,
         "effects_loaded": summary.effects_loaded,
         "ledger_entries_loaded": summary.ledger_entries_loaded,
+        "ledger_entries_skipped": summary.ledger_entries_skipped,
         "rebinds_replayed": summary.rebinds_replayed,
         "blobs_rejected": summary.blobs_rejected,
         "refs_dropped": summary.refs_dropped,

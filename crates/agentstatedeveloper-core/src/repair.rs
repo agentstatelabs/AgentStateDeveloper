@@ -17,6 +17,8 @@
 //! | `orphaned_callee_ref` | warn | yes — ref removed from callees list |
 //! | `orphaned_caller_ref` | warn | yes — ref removed from callers list |
 //! | `orphaned_ledger` | warn | no — preserve audit trail |
+//! | `ledger_duplicate` | error | yes — keeps the copy under a live symbol (else the latest revision), removes the rest |
+//! | `empty_ledger_node` | warn | yes — removed |
 //! | `sidecar_unknown_file` | warn | no — manual review (might be intentional) |
 //! | `sidecar_unknown_dir` | warn | no — manual review |
 //! | `sidecar_wrong_extension` | warn | no — manual review |
@@ -30,7 +32,7 @@ use serde_json::json;
 
 use crate::error::Result;
 use crate::paths;
-use crate::schema::{EffectDecl, ScratchEntry, ScratchStatus};
+use crate::schema::{EffectDecl, LedgerEntry, ScratchEntry, ScratchStatus};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -88,6 +90,7 @@ pub fn scan_asg(repo: &Repository, ref_name: &str) -> Result<Vec<RepairIssue>> {
     check_callee_refs(repo, ref_name, &live_symbol_ids, &mut issues);
     check_caller_refs(repo, ref_name, &live_symbol_ids, &mut issues);
     check_ledger(repo, ref_name, &live_symbol_ids, &mut issues);
+    check_ledger_duplicates(repo, ref_name, &live_symbol_ids, &mut issues);
     check_scratch(repo, ref_name, &live_symbol_ids, &mut issues);
 
     Ok(issues)
@@ -104,6 +107,19 @@ pub fn scan_asg(repo: &Repository, ref_name: &str) -> Result<Vec<RepairIssue>> {
 /// (no writes, `fixes_applied` is 0).
 pub fn repair_asg(
     repo: &Repository,
+    ref_name: &str,
+    agent_id: &str,
+    dry_run: bool,
+) -> Result<RepairReport> {
+    repair_asg_with_cache(repo, None, ref_name, agent_id, dry_run)
+}
+
+/// [`repair_asg`], also pointing the ledger cache at the copy kept of each
+/// duplicated entry — the cache answers `list_entries`, and a row left on a
+/// removed copy would hide the entry from its symbol.
+pub fn repair_asg_with_cache(
+    repo: &Repository,
+    fts: Option<&crate::search_fts::SearchFtsDb>,
     ref_name: &str,
     agent_id: &str,
     dry_run: bool,
@@ -126,7 +142,7 @@ pub fn repair_asg(
     // subtrees are cleaned in memory on top of the state the speculation
     // forked from and written once each.
     let (spec, fork) = crate::subtree::speculate_at_head(repo, ref_name, "asd-repair")?;
-    let staged = (|| -> Result<(usize, usize, usize)> {
+    let staged = (|| -> Result<(usize, usize, usize, LedgerCleanup)> {
         let live = build_live_symbol_ids(repo, &fork);
 
         // Fix 1: orphaned effect records → delete, keeping evidence.
@@ -144,25 +160,39 @@ pub fn repair_asg(
         // Fixes 2 and 3: orphaned callee and caller refs.
         let callees = stage_edge_lists(repo, spec, &fork, &live, "callees")?;
         let callers = stage_edge_lists(repo, spec, &fork, &live, "callers")?;
-        Ok((effects_dropped, callees, callers))
+
+        // Fix 4: an entry filed under several symbols keeps one copy; a
+        // symbol node with no entries left goes.
+        let ledger = stage_ledger_cleanup(repo, spec, &fork, &live)?;
+        Ok((effects_dropped, callees, callers, ledger))
     })();
     let fixes_applied = match staged {
-        Ok((0, 0, 0)) => {
+        Ok((0, 0, 0, ledger)) if ledger.kept.is_empty() && ledger.empty_nodes == 0 => {
             let _ = repo.discard_speculation(spec);
             0
         }
-        Ok((effects, callees, callers)) => {
+        Ok((effects, callees, callers, ledger)) => {
+            let LedgerCleanup { kept, empty_nodes } = ledger;
             let opts = CommitOptions::new(
                 agent_id,
                 IntentCategory::Refine,
                 format!(
                     "repair: drop {effects} orphaned effect(s), {callees} orphaned callee ref(s), \
-                     {callers} orphaned caller ref(s)"
+                     {callers} orphaned caller ref(s), {} duplicated ledger entr{}, \
+                     {empty_nodes} empty ledger node(s)",
+                    kept.len(),
+                    if kept.len() == 1 { "y" } else { "ies" }
                 ),
             );
             repo.commit_speculation(spec, opts)
                 .map_err(|e| crate::error::AsdError::Other(e.to_string()))?;
-            effects + callees + callers
+            if let Some(fts) = fts {
+                for entry in &kept {
+                    fts.upsert_ledger_entry(entry, ref_name)
+                        .map_err(|e| crate::error::AsdError::Other(format!("ledger cache: {e}")))?;
+                }
+            }
+            effects + callees + callers + kept.len() + empty_nodes
         }
         Err(e) => {
             let _ = repo.discard_speculation(spec);
@@ -324,8 +354,19 @@ fn check_ledger(
         Ok(serde_json::Value::Object(m)) => m,
         _ => return,
     };
-    for (symbol_id, _) in &map {
-        if !live.contains(symbol_id) {
+    for (symbol_id, entries) in &map {
+        if entries.as_object().is_some_and(|m| m.is_empty()) {
+            issues.push(RepairIssue {
+                kind: "empty_ledger_node".to_string(),
+                severity: IssueSeverity::Warn,
+                path: paths::ledger_symbol_path(symbol_id),
+                detail: format!(
+                    "no ledger entries left under '{symbol_id}' — a node an earlier \
+                     `asd hydrate` emptied while replaying a rebind"
+                ),
+                auto_fixable: true,
+            });
+        } else if !live.contains(symbol_id) {
             issues.push(RepairIssue {
                 kind: "orphaned_ledger".to_string(),
                 severity: IssueSeverity::Warn,
@@ -339,6 +380,138 @@ fn check_ledger(
             });
         }
     }
+}
+
+fn check_ledger_duplicates(
+    repo: &Repository,
+    ref_name: &str,
+    live: &HashSet<String>,
+    issues: &mut Vec<RepairIssue>,
+) {
+    let ledger = match repo.get_tree(ref_name, &paths::ledger_root()) {
+        Ok(serde_json::Value::Object(m)) => m,
+        _ => return,
+    };
+    let index = match repo.get_tree(ref_name, &paths::ledger_index_root()) {
+        Ok(serde_json::Value::Object(m)) => m,
+        _ => Default::default(),
+    };
+    for (entry_id, symbols) in crate::ledger_dupes::locations(&ledger) {
+        if symbols.len() < 2 {
+            continue;
+        }
+        let keep = keeper(&entry_id, &symbols, &ledger, &index, live);
+        issues.push(RepairIssue {
+            kind: "ledger_duplicate".to_string(),
+            severity: IssueSeverity::Error,
+            path: paths::ledger_entry_index_path(&entry_id),
+            detail: format!(
+                "entry '{entry_id}' is filed under {} symbols ({}); the ledger cache shows it \
+                 under one of them only. --fix keeps the copy under '{keep}' and removes the rest",
+                symbols.len(),
+                symbols.join(", ")
+            ),
+            auto_fixable: true,
+        });
+    }
+}
+
+/// Which of the symbols an entry is filed under keeps it: see
+/// [`crate::ledger_dupes::claim`]; then the symbol the entry index names;
+/// then the smallest id, so the choice never depends on map order.
+fn keeper(
+    entry_id: &str,
+    symbols: &[String],
+    ledger: &serde_json::Map<String, serde_json::Value>,
+    index: &serde_json::Map<String, serde_json::Value>,
+    live: &HashSet<String>,
+) -> String {
+    let indexed_at = index.get(entry_id).and_then(|v| v.as_str());
+    symbols
+        .iter()
+        .filter_map(|sym| {
+            let entry: LedgerEntry =
+                serde_json::from_value(ledger.get(sym)?.get(entry_id)?.clone()).ok()?;
+            let (is_live, revised) = crate::ledger_dupes::claim(sym, &entry, live);
+            Some(((is_live, revised, indexed_at == Some(sym.as_str())), sym))
+        })
+        .max_by(|(a, sa), (b, sb)| a.cmp(b).then_with(|| sb.cmp(sa)))
+        .map(|(_, sym)| sym.clone())
+        .unwrap_or_else(|| symbols[0].clone())
+}
+
+/// What [`stage_ledger_cleanup`] changed.
+struct LedgerCleanup {
+    /// The copy kept of each duplicated entry — for the ledger cache.
+    kept: Vec<LedgerEntry>,
+    /// Symbol nodes removed for holding no entries.
+    empty_nodes: usize,
+}
+
+/// Keep one copy of every entry filed under several symbols, and drop symbol
+/// nodes left with no entries, in the ledger and entry-index subtrees as the
+/// speculation forked them, written once.
+fn stage_ledger_cleanup(
+    repo: &Repository,
+    spec: agentstategraph::SpecHandle,
+    fork: &str,
+    live: &HashSet<String>,
+) -> Result<LedgerCleanup> {
+    let mut ledger = crate::subtree::read_seed(repo, fork, &paths::ledger_root())?;
+    let dupes: Vec<(String, Vec<String>)> = crate::ledger_dupes::locations(&ledger)
+        .into_iter()
+        .filter(|(_, symbols)| symbols.len() > 1)
+        .collect();
+    let before = ledger.len();
+    ledger.retain(|_, entries| entries.as_object().is_none_or(|m| !m.is_empty()));
+    let empty_nodes = before - ledger.len();
+    if dupes.is_empty() {
+        if empty_nodes > 0 {
+            repo.spec_set_json(
+                spec,
+                &paths::ledger_root(),
+                &serde_json::Value::Object(ledger),
+            )
+            .map_err(|e| crate::error::AsdError::Other(e.to_string()))?;
+        }
+        return Ok(LedgerCleanup {
+            kept: Vec::new(),
+            empty_nodes,
+        });
+    }
+    let mut index = crate::subtree::read_seed(repo, fork, &paths::ledger_index_root())?;
+    let mut kept = Vec::with_capacity(dupes.len());
+    for (entry_id, symbols) in dupes {
+        let keep = keeper(&entry_id, &symbols, &ledger, &index, live);
+        for sym in symbols.iter().filter(|s| **s != keep) {
+            let emptied = match ledger.get_mut(sym) {
+                Some(serde_json::Value::Object(entries)) => {
+                    entries.remove(&entry_id);
+                    entries.is_empty()
+                }
+                _ => false,
+            };
+            if emptied {
+                ledger.remove(sym);
+            }
+        }
+        if let Some(entry) = ledger
+            .get(&keep)
+            .and_then(|m| m.get(&entry_id))
+            .and_then(|v| serde_json::from_value::<LedgerEntry>(v.clone()).ok())
+        {
+            kept.push(entry);
+        }
+        index.insert(entry_id, serde_json::Value::String(keep));
+    }
+    for (path, map) in [
+        (paths::ledger_root(), ledger),
+        (paths::ledger_index_root(), index),
+    ] {
+        repo.spec_set_json(spec, &path, &serde_json::Value::Object(map))
+            .map_err(|e| crate::error::AsdError::Other(e.to_string()))?;
+    }
+    Ok(LedgerCleanup { kept, empty_nodes })
 }
 
 /// Remove ids that are no longer live from every list in the `field` edge

@@ -23,7 +23,7 @@ use anyhow::Result;
 use clap::Args;
 
 use agentstatedeveloper_core::{
-    Engine, IssueSeverity, RepairIssue, missing_ledger_entries, repair_asg,
+    Engine, IssueSeverity, RepairIssue, missing_ledger_entries, repair_asg_with_cache,
     restore_missing_ledger_entries, scan_asg, scan_sidecar,
 };
 
@@ -60,7 +60,13 @@ pub fn run(cfg: &Config, args: RepairArgs) -> Result<()> {
         // Restore lost ledger entries first, so the ASG scan below sees them.
         let ledger_found = ledger_missing_issue(&engine)?.is_some();
         let restore = restore_missing_ledger_entries(&engine, &cfg.agent_id)?;
-        let mut report = repair_asg(&engine.repo, &engine.ref_name, &cfg.agent_id, false)?;
+        let mut report = repair_asg_with_cache(
+            &engine.repo,
+            engine.fts.as_ref(),
+            &engine.ref_name,
+            &cfg.agent_id,
+            false,
+        )?;
         report.issues.extend(sidecar_issues.clone());
         report.issues_found += sidecar_issues.len() + usize::from(ledger_found);
         report.fixes_applied += restore.restored;
