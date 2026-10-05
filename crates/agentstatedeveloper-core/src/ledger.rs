@@ -261,29 +261,50 @@ impl<'a> LedgerStore for AsgLedgerStore<'a> {
 // ---------------------------------------------------------------------------
 
 /// Walk every ledger entry and tag those whose `symbol_id` is no longer
-/// present in the qname index as `"orphaned"` and `"orphaned-at:<timestamp>"`.
+/// present in the qname index as `"orphaned"` and `"orphaned-at:<timestamp>"`;
+/// clear those tags from entries whose symbol is back.
 ///
 /// Returns the number of entries newly tagged. Already-orphaned entries
 /// (already carrying the `"orphaned"` tag) are skipped. Runs in O(symbols +
 /// ledger_entries) — safe to call at the end of `asd index` or from `health`.
 pub fn detect_orphaned_entries(repo: &Repository, ref_name: &str, agent_id: &str) -> Result<usize> {
-    tag_orphaned_entries(repo, ref_name, agent_id).map(|tagged| tagged.len())
+    tag_orphaned_entries(repo, ref_name, agent_id).map(|changed| changed.tagged.len())
 }
 
-/// [`detect_orphaned_entries`], returning the entries it tagged so the
+/// The entries one orphan-tagging pass changed.
+#[derive(Default)]
+pub(crate) struct OrphanTags {
+    /// Newly tagged: their symbol left the index.
+    pub tagged: Vec<LedgerEntry>,
+    /// Tags cleared: their symbol is back — a branch switched back to, a
+    /// file restored.
+    pub untagged: Vec<LedgerEntry>,
+}
+
+fn is_orphan_tag(tag: &str) -> bool {
+    tag == "orphaned" || tag.starts_with("orphaned-at:")
+}
+
+/// [`detect_orphaned_entries`], returning the entries it changed so the
 /// caller can bring the ledger cache up to date.
 ///
-/// Every tag lands in one commit. A commit per entry stored a fresh copy of
-/// the ledger map each time.
+/// An entry whose symbol is back loses its orphan tags and gains
+/// `reattached-at:<now>`. Conclusions import keeps whichever copy of an entry
+/// was revised last, judged by its `*-at:` tags, so without a later tag a
+/// copy exported while the entry was tagged would count as newer and tag it
+/// again.
+///
+/// Every change lands in one commit. A commit per entry stored a fresh copy
+/// of the ledger map each time.
 pub(crate) fn tag_orphaned_entries(
     repo: &Repository,
     ref_name: &str,
     agent_id: &str,
-) -> Result<Vec<LedgerEntry>> {
+) -> Result<OrphanTags> {
     use chrono::Utc;
 
     let (spec, fork) = crate::subtree::speculate_at_head(repo, ref_name, "asd-tag-orphans")?;
-    let staged = (|| -> Result<Vec<LedgerEntry>> {
+    let staged = (|| -> Result<OrphanTags> {
         // Every symbol_id currently in the index.
         let indexed: HashSet<String> =
             crate::subtree::read_seed(repo, &fork, &format!("{}/index/by-qname", paths::ASD_ROOT))?
@@ -292,29 +313,50 @@ pub(crate) fn tag_orphaned_entries(
                 .collect();
         let mut ledger = crate::subtree::read_seed(repo, &fork, &paths::ledger_root())?;
 
-        let now_tag = format!("orphaned-at:{}", Utc::now().format("%Y-%m-%dT%H:%M:%SZ"));
-        let mut tagged = Vec::new();
+        let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+        let orphaned_at = format!("orphaned-at:{now}");
+        let reattached_at = format!("reattached-at:{now}");
+        let mut changed = OrphanTags::default();
         for (sym_id, per_symbol) in ledger.iter_mut() {
-            if indexed.contains(sym_id) {
-                continue;
-            }
+            let live = indexed.contains(sym_id);
             let serde_json::Value::Object(entries_map) = per_symbol else {
                 continue;
             };
             for value in entries_map.values_mut() {
+                // Read the tags off the stored value: parsing every entry in
+                // a 12,000-entry ledger on each index is wasted work.
+                let tagged = value
+                    .get("tags")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|tags| {
+                        tags.iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .any(is_orphan_tag)
+                    });
+                if live != tagged {
+                    continue;
+                }
                 let Ok(mut entry) = serde_json::from_value::<LedgerEntry>(value.clone()) else {
                     continue;
                 };
-                if entry.tags.iter().any(|t| t == "orphaned") {
-                    continue;
+                if live {
+                    entry
+                        .tags
+                        .retain(|t| !is_orphan_tag(t) && !t.starts_with("reattached-at:"));
+                    entry.tags.push(reattached_at.clone());
+                } else {
+                    entry.tags.push("orphaned".to_string());
+                    entry.tags.push(orphaned_at.clone());
                 }
-                entry.tags.push("orphaned".to_string());
-                entry.tags.push(now_tag.clone());
                 *value = serde_json::to_value(&entry)?;
-                tagged.push(entry);
+                if live {
+                    changed.untagged.push(entry);
+                } else {
+                    changed.tagged.push(entry);
+                }
             }
         }
-        if !tagged.is_empty() {
+        if !changed.tagged.is_empty() || !changed.untagged.is_empty() {
             repo.spec_set_json(
                 spec,
                 &paths::ledger_root(),
@@ -322,33 +364,45 @@ pub(crate) fn tag_orphaned_entries(
             )
             .map_err(|e| AsdError::Other(e.to_string()))?;
         }
-        Ok(tagged)
+        Ok(changed)
     })();
     match staged {
-        Ok(tagged) if tagged.is_empty() => {
+        Ok(changed) if changed.tagged.is_empty() && changed.untagged.is_empty() => {
             let _ = repo.discard_speculation(spec);
-            Ok(tagged)
+            Ok(changed)
         }
-        Ok(tagged) => {
+        Ok(changed) => {
+            let plural = |n: usize| if n == 1 { "y" } else { "ies" };
+            let (t, u) = (changed.tagged.len(), changed.untagged.len());
             let opts = CommitOptions::new(
                 agent_id,
                 IntentCategory::Refine,
-                format!(
-                    "tag {} orphaned ledger entr{}",
-                    tagged.len(),
-                    if tagged.len() == 1 { "y" } else { "ies" }
-                ),
+                match (t, u) {
+                    (_, 0) => format!("tag {t} orphaned ledger entr{}", plural(t)),
+                    (0, _) => format!("clear orphan tags from {u} ledger entr{}", plural(u)),
+                    _ => format!(
+                        "tag {t} orphaned ledger entr{}, clear orphan tags from {u}",
+                        plural(t)
+                    ),
+                },
             )
             .with_reasoning(
-                tagged
+                changed
+                    .tagged
                     .iter()
-                    .map(|e| e.entry_id.as_str())
+                    .map(|e| format!("tagged {}", e.entry_id))
+                    .chain(
+                        changed
+                            .untagged
+                            .iter()
+                            .map(|e| format!("cleared {}", e.entry_id)),
+                    )
                     .collect::<Vec<_>>()
                     .join("\n"),
             );
             repo.commit_speculation(spec, opts)
                 .map_err(|e| AsdError::Other(e.to_string()))?;
-            Ok(tagged)
+            Ok(changed)
         }
         Err(e) => {
             let _ = repo.discard_speculation(spec);

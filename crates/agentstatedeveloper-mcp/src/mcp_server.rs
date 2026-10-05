@@ -2411,6 +2411,7 @@ impl AsdMcpServer {
                 "cross_module_edges": s.cross_module_edges,
                 "transitive_updates": s.transitive_updates,
                 "orphaned_tagged": s.orphaned_tagged,
+                "orphaned_untagged": s.orphaned_untagged,
                 "stale_pruned": s.stale_pruned,
                 "stale_rebound": s.stale_rebound,
                 "ledger_entries_rebound": s.ledger_entries_rebound,

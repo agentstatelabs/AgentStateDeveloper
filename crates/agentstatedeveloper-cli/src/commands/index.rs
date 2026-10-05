@@ -145,6 +145,7 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
                 "cross_module_edges": 0,
                 "transitive_updates": 0,
                 "orphaned_tagged": 0,
+                "orphaned_untagged": 0,
             }))?
         );
         return Ok(());
@@ -442,6 +443,7 @@ pub fn run(cfg: &Config, args: IndexArgs) -> Result<()> {
             "cross_module_edges": summary.cross_module_edges,
             "transitive_updates": summary.transitive_updates,
             "orphaned_tagged": summary.orphaned_tagged,
+            "orphaned_untagged": summary.orphaned_untagged,
             "stale_pruned": summary.stale_pruned,
             "stale_rebound": summary.stale_rebound,
             "ledger_entries_rebound": summary.ledger_entries_rebound,
