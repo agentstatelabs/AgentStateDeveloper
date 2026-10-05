@@ -17,6 +17,8 @@ Versions use semantic versioning.
 
 ## [Unreleased]
 
+## [v1.4.7] — 2026-10-05
+
 ### Fixed
 - **`asd hydrate` stored moved ledger entries twice, hiding some from their symbol, and wrote two commits per entry.**
   - **What happened.** Hydrate filed each entry under the symbol `.asd/v1` last saw it on. When `asd index` had since moved an entry to a new symbol id (a line shift, a file move, a rebind), hydrate brought it back under the old id as well, because `asd sync` never removed the old file without `--prune`.
