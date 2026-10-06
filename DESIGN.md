@@ -2713,6 +2713,152 @@ tracer — no QA instance, no added print statements, no code changes.
 stored data in seconds, and the answer's provenance (which test, when)
 is attached.
 
+## Plan W — Hub sync: judgment on its own ref
+
+Scoped 2026-10-06 against v1.4.7.
+
+### Motivation
+
+Teams share ASD judgment today by committing the `.asd/conclusions/*.jsonl`
+sidecar to git. That works, but it is lossy by design and fragile:
+
+- **What it drops.**
+  - `symbol_id` (records re-resolve by qname, and an unknown qname is
+    skipped) and `matched_policy`.
+  - Feedback verdicts, rebinds, declared effects and runtime evidence are
+    never exported at all.
+- **How it breaks.** It has a record of stale-branch reverts, and the custom
+  merge driver can't run on a server-side merge. See "The conclusions
+  sidecar is regenerated, not appended" below.
+
+AgentStateGraph's Plan G adds git-style push and pull between ASG stores
+through a hub. ASD should sync its judgment that way: at full fidelity, with
+ASG's merge, and without riding on git branches.
+
+Judgment is small. Measured on two live stores:
+
+| Store | Current tree | Irreplaceable (ledger, ledger-idx, feedback) |
+|---|---|---|
+| ASD's own | 13.7 MB | 0.72 MB (~5%) |
+| AgentStateGraph's | 17.7 MB | 0.83 MB (~5%) |
+
+The rest is the regenerable index.
+
+### Decisions this plan builds on (2026-10-06)
+
+1. **Sync anything hard or impossible to reproduce.** Anything regenerable
+   from source stays local and is rebuilt on each machine.
+2. **One team-wide judgment ref per repo, not one per git branch.**
+   - This matches the local store today: `conclusions import` never deletes,
+     so the single ref already gathers judgment from every branch checked out.
+   - Judgment about code that exists only on an unmerged branch shows as
+     orphaned on other machines until that branch merges.
+3. **Scratch stays local.** Promoting scratch puts it in the ledger, which
+   syncs.
+4. **With a hub configured, the sidecar is export-only.** It stays visible in
+   git and PR review, but hooks stop importing it; the hub is the source.
+   Repos without a hub keep today's export and import.
+5. **The hub holds judgment, not the index.**
+   - Code tools (search, read, callers/callees, impact) keep running locally,
+     where the checkout and index live.
+   - Plan R's cross-repo impact gets a small published contract manifest
+     (t-009), not the full index.
+6. **Raw traces stay local; the evidence derived from them syncs.** That
+   evidence is runtime confirmations on effects and `edge-evidence`. Raw
+   traces, and Plan V's captured query samples, can hold sensitive values and
+   are reproducible by re-running.
+
+### Findings this plan closes
+
+Verified against v1.4.7 by reading the code, plus a read-only measurement of
+two stores.
+
+1. **One ref holds everything.**
+   - The namespace is the sanitized name of the DB's directory
+     (`engine.rs:55`), and the ref is hard-coded `"main"` (`engine.rs:135`).
+   - About 75 store call sites pass that single `ref_name`.
+2. **There is no identity that's stable across machines.**
+   - The namespace and the registry name both come from the local directory
+     name, so two teammates' checkouts of one repo don't match.
+   - Every git worktree indexes into its own namespace and registers as its
+     own repo: 5 of 13 entries in one live registry are worktrees.
+   - A stable id already exists: `resolve_repo_id` in `cross_service.rs:274`
+     (`ASD_REPO_ID`, else the normalized git origin URL). But it is only
+     stored inside endpoint records.
+   - The registry drops unknown fields on rewrite (`DiskRepo`,
+     `registry.rs:238`), contradicting `docs/repo-registry.md`.
+3. **Judgment isn't self-contained.** Ledger entries are filed under
+   `canonical_symbol_id(qname, kind, initial_file)` (`symbol.rs:5`). That id
+   only means something next to an index, so a store with judgment but no
+   index can't show or re-attach entries.
+4. **Effects mix three sources in one record** (`effects/<sid>`): inference,
+   declarations and runtime evidence. v1.4.1 stopped re-indexing from
+   overwriting declarations and stamps inferred effects with
+   `Effect::adapter`. `index/edge-evidence/` sits under `index/` but is
+   written only by `asd trace`, so it isn't regenerable.
+5. **The SQLite caches would go stale after a pull.**
+   - `asd_ledger_cache`, `asd_effects_cache` and `asd_feedback`
+     (`search_fts.rs:311-369`) are upsert-only and keyed by ref name, not
+     namespace. Reads hit them first.
+   - Measured drift already: 710 cached ledger rows against 441 live entries,
+     and 3,470 cached effects against 3,172.
+   - No code path does a full rebuild of them.
+6. **Opening a store writes to it.** `Engine::open_sqlite` runs `repo.init()`
+   (`engine.rs:126`) and may hydrate and rebuild caches. A hub or reader
+   can't open a synced store passively.
+7. **Some judgment is at risk today.**
+   - ASD's own store still holds a legacy `default` namespace with 269 ledger
+     entries that aren't in the active namespace.
+   - 4 of them (think records) exist nowhere else, including the sidecar.
+
+### Task table
+
+| Task | Description | Wave |
+|------|-------------|------|
+| t-001 | **Stable store identity.** The store id is `resolve_repo_id`. Derive the ASG namespace from the store id instead of the directory name, so clones in differently named directories and worktrees of one repo share it. The registry records `store_id` and `remote`, and preserves unknown fields (fix `DiskRepo` to match the docs). Migration: re-home existing namespaces under the store id, and fold legacy namespaces in, recovering the `default` namespace's 269 entries (including 4 think records) through the newer-revision rule. Stop registering worktrees as separate repos. | 1 |
+| t-002 | **Split the store into two refs.** A synced **`judgment`** ref holds the ledger, rebinds, feedback, declared effects, runtime evidence and the judged-symbol table (t-004). A **`local`** ref, marked local-only so ASG Plan G refuses to push it, holds code, by-qname, callers/callees, endpoints, dataflow, inferred effects, scratch, raw traces, `ledger-idx` and meta. `Engine` carries both ref names; route every call site. Migration: one commit creates `judgment` from the current tree, and the old history stays on the local ref, so the first push is small. | 1 |
+| t-003 | **Separate declared effects and runtime evidence from inference.** Move declarations and runtime evidence to `judgment` (for example `effects-declared/<sid>` and `evidence/<sid>`), and move `edge-evidence` out of `index/`. Inferred effects stay on `local`, identified by `adapter`. Reads merge the two views, so `code_read` and the effect checks see what they see today. | 1 |
+| t-004 | **Judged-symbol table.** For every symbol with judgment, store `sid → qname, file, kind` on the judgment ref. When an id doesn't resolve against the local index, re-resolve it by qname, using the same logic as `conclusions import`. Judgment can then be shown and re-attached without the index, and survives renames and line-number churn the way the sidecar does. | 1 |
+| t-005 | **Caches that follow the store.** Key the ASD caches by namespace and ref. Fully rebuild the ledger, effects and feedback caches whenever the judgment ref changes from outside (a pull or hydrate). Add a `ledger-idx` rebuild. A cache must never outlive the tree it mirrors. | 2 |
+| t-006 | **`asd remote add \| push \| pull \| status`** on ASG Plan G. The hub URL is per store; the device token lives in the OS keychain, never in the repo. Hooks: post-commit pushes the judgment ref in the background, best-effort; post-merge and post-checkout pull. Pull is fetch plus ASG merge of `judgment`; a conflicting entry resolves by the existing newer-revision rule. `asd status` shows ahead/behind for the hub. | 2 |
+| t-007 | **Sidecar with a hub.** When a remote is configured, hooks keep exporting `.asd/conclusions` but stop importing it. Without a remote, nothing changes. `asd init` and `asd status` say which mode a repo is in. | 2 |
+| t-008 | **Read-only open.** An open mode that doesn't run `init`, hydrate or rebuild caches, for any reader serving a synced store: a hub, CTXone, or `asd-serve` on someone else's store. | 3 |
+| t-009 | **Published contract manifest for Plan R.** A small, latest-only ref (or snapshot) holding the repo's endpoints and service manifest (~60 KB on ASD's own store). The hub reads it for cross-repo impact without the full index. Update Plan R to read manifests from the hub, and drop its "hosted SaaS out of scope" line, since a hosted hub is now planned. | 3 |
+| t-010 | **Docs.** Correct the storage layout table (scratch lives in the ASG tree, not `.asd/scratch/`; add feedback and the two refs). Update `docs/FEDERATION.md` and `docs/repo-registry.md` (XDG support is claimed but not implemented; unknown fields; `store_id`). Add a "connect a hub" guide. | 3 |
+
+### Acceptance
+
+- Two clones of one repo in differently named directories, and a worktree of
+  either, resolve to the same store id and namespace.
+- After migration, a count of ledger entries, rebinds, feedback verdicts,
+  declared effects and runtime evidence matches between the old tree and the
+  new judgment ref. That count includes the legacy `default` namespace's
+  entries. Nothing is lost.
+- On machine B, after A pushes and B pulls, ledger, effects, feedback and
+  search show A's judgment immediately. Caches are rebuilt; entries whose
+  symbol B hasn't indexed show by qname.
+- The `local` ref can't be pushed.
+- With a hub configured, hooks export the sidecar but never import it.
+- The first push of ASD's own store is about 1 MB.
+
+### What's NOT in this plan
+
+- **The sync engine and hub.** These are AgentStateGraph Plan G.
+- **Hub accounts and hosting.**
+- **Hosted code tools.** Decision 5.
+- **Per-git-branch judgment refs** (decision 2), and **syncing scratch**
+  (decision 3).
+- **Shipping the commercial audit log.** It's a separate, append-only
+  stream, not ASG state.
+
+### Done when
+
+A team connects a repo to a hub and every teammate's judgment shows up on
+every other teammate's machine at full fidelity. That includes feedback,
+rebinds, declared effects and runtime evidence. Nothing is lost in the
+migration, the regenerable index never leaves the machine, and a team
+without a hub keeps working exactly as today.
+
 
 ## Feedback withdrawal — tombstone shape (plan `feedback-lifecycle` t-002)
 
