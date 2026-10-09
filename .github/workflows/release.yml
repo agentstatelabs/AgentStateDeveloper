@@ -91,9 +91,8 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
 
-      # agentstategraph + agent-skillgen are public git deps now, so cargo
-      # fetches them anonymously — no auth step needed.
-      # (Removed post-public-flip 2026-07-27.)
+      # No git dependencies: AgentStateGraph comes from crates.io and
+      # agent-skillgen is vendored, so no auth step is needed.
 
       - name: build asd
         run: cargo build --release --locked --target ${{ matrix.target }} -p agentstatedeveloper-cli

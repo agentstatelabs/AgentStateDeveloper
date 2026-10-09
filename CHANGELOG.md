@@ -23,6 +23,7 @@ Versions use semantic versioning.
 ### Changed
 - **`agent-skillgen` is vendored into the CLI** (`src/skillgen/`, from v0.1.0) instead of being a git dependency, which crates.io rejects. CTXone carries the same copy; change it upstream first and re-copy it into both.
 - **The initial-read prompt is embedded from inside the CLI crate** (`assets/initial-read-prompt.md`), so the published package builds. `docs/initial-read-prompt.md` is still the copy people read, and a test fails if the two differ.
+- **AgentStateGraph comes from crates.io** (`agentstategraph*` = "1.2.8") instead of git tags, which crates.io rejects in published manifests.
 - **The Kotlin and Swift adapters declare `BUSL-1.1 AND MIT`** and ship `LICENSE-THIRD-PARTY`. They embed the MIT-licensed `tree-sitter-kotlin` 0.3.6 and `tree-sitter-swift` 0.4.3 grammars unmodified, and those notices were missing.
 
 ## [v1.4.7] — 2026-10-05
