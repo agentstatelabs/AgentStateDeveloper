@@ -3,17 +3,16 @@
 version = 4
 
 [[package]]
-name = "agent-skillgen"
-version = "0.1.0"
-source = "git+https://github.com/agentstatelabs/agent-skillgen.git?tag=v0.1.0#be42d5d0b2b7f627d1271bf61a10a0fd0d5d7897"
+name = "agentstatedeveloper"
+version = "1.4.8"
 dependencies = [
- "serde",
- "serde_json",
+ "agentstatedeveloper-adapters",
+ "agentstatedeveloper-core",
 ]
 
 [[package]]
 name = "agentstatedeveloper-adapters"
-version = "1.4.7"
+version = "1.4.8"
 dependencies = [
  "agentstatedeveloper-core",
  "agentstatedeveloper-csharp",
@@ -29,9 +28,8 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-cli"
-version = "1.4.7"
+version = "1.4.8"
 dependencies = [
- "agent-skillgen",
  "agentstatedeveloper-adapters",
  "agentstatedeveloper-core",
  "agentstategraph",
@@ -54,7 +52,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-conformance"
-version = "1.4.7"
+version = "1.4.8"
 dependencies = [
  "agentstatedeveloper-adapters",
  "agentstatedeveloper-core",
@@ -62,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-core"
-version = "1.4.7"
+version = "1.4.8"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -81,7 +79,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-csharp"
-version = "1.4.7"
+version = "1.4.8"
 dependencies = [
  "agentstatedeveloper-core",
  "serde_json",
@@ -92,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-go"
-version = "1.4.7"
+version = "1.4.8"
 dependencies = [
  "agentstatedeveloper-core",
  "serde_json",
@@ -103,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-java"
-version = "1.4.7"
+version = "1.4.8"
 dependencies = [
  "agentstatedeveloper-core",
  "serde_json",
@@ -114,7 +112,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-kotlin"
-version = "1.4.7"
+version = "1.4.8"
 dependencies = [
  "agentstatedeveloper-core",
  "cc",
@@ -126,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-mcp"
-version = "1.4.7"
+version = "1.4.8"
 dependencies = [
  "agentstatedeveloper-adapters",
  "agentstatedeveloper-core",
@@ -153,7 +151,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-python"
-version = "1.4.7"
+version = "1.4.8"
 dependencies = [
  "agentstatedeveloper-core",
  "serde_json",
@@ -164,7 +162,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-ruby"
-version = "1.4.7"
+version = "1.4.8"
 dependencies = [
  "agentstatedeveloper-core",
  "serde_json",
@@ -175,7 +173,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-rust"
-version = "1.4.7"
+version = "1.4.8"
 dependencies = [
  "agentstatedeveloper-core",
  "serde_json",
@@ -186,7 +184,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-swift"
-version = "1.4.7"
+version = "1.4.8"
 dependencies = [
  "agentstatedeveloper-core",
  "cc",
@@ -198,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-typescript"
-version = "1.4.7"
+version = "1.4.8"
 dependencies = [
  "agentstatedeveloper-core",
  "serde_json",
@@ -209,8 +207,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph"
-version = "1.2.7"
-source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v1.2.7#df55a8a7fbdd9b43cbd41da5ccba11cc2a9abc3e"
+version = "1.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb56b99f7d73969d9b34951f99b3908489c1cbbe9fa8c6e6290c66f3a97a586e"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-reminders",
@@ -225,8 +224,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-core"
-version = "1.2.7"
-source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v1.2.7#df55a8a7fbdd9b43cbd41da5ccba11cc2a9abc3e"
+version = "1.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44ba88c5b22bfaedf23b54b566ba8cad20ec43da454c56098e536bc34426f064"
 dependencies = [
  "blake3",
  "chrono",
@@ -238,8 +238,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-policy"
-version = "1.2.7"
-source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v1.2.7#df55a8a7fbdd9b43cbd41da5ccba11cc2a9abc3e"
+version = "1.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a0b83234ad13e9ef9f3534b96019b4f955fa2f28b533e3a53d266b5b86d0a3d"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -253,8 +254,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-reminders"
-version = "1.2.7"
-source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v1.2.7#df55a8a7fbdd9b43cbd41da5ccba11cc2a9abc3e"
+version = "1.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4279adbab178d979e033dd44aae27ce292715f623dfe1bcce84f98511a3485b"
 dependencies = [
  "agentstategraph-core",
  "chrono",
@@ -266,8 +268,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-storage"
-version = "1.2.7"
-source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v1.2.7#df55a8a7fbdd9b43cbd41da5ccba11cc2a9abc3e"
+version = "1.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ee0f62e669bb1834162a0aabb2a07799377da1340e8223f1d6ac8cc666f738c"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-reminders",
@@ -281,8 +284,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-taint"
-version = "1.2.7"
-source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v1.2.7#df55a8a7fbdd9b43cbd41da5ccba11cc2a9abc3e"
+version = "1.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3fe3793be0374b46176e10080e9b1353cf89d8dcce92af237717b300d53c6315"
 dependencies = [
  "agentstategraph-core",
  "chrono",

@@ -40,7 +40,13 @@ owned by the normal commit flow. But it does **verify** that the version in
 `Cargo.toml` matches the tag, and refuses otherwise (`ALLOW_VERSION_SKEW=1`
 overrides, not recommended).
 
-So bump the workspace version and land it on `main` *before* tagging.
+So bump the workspace version and land it on `main` *before* tagging. The
+internal crates in `[workspace.dependencies]` carry the same version (crates.io
+needs one on every path dependency), so bump them in the same commit:
+
+```sh
+perl -pi -e 's/"1\.4\.7"/"1.4.8"/ if /^version = |^agentstatedeveloper-/' Cargo.toml
+```
 
 The cleanest pattern is to do release work in a fresh worktree off
 `origin/main`:
@@ -84,6 +90,27 @@ commits it to the tap on GitLab; the tap's own publish job mirrors it to the
 GitHub tap that `brew tap` reads. Never write the GitHub tap directly.
 
 No sibling tap clone is needed any more.
+
+## After the release: publish the crates to crates.io
+
+The workspace publishes to crates.io as `agentstatedeveloper` (the library),
+`agentstatedeveloper-core`, `-adapters`, the nine language adapters, `-cli` and
+`-mcp`. `agentstatedeveloper-conformance` is `publish = false`.
+
+No CI job does this yet. Once the tag pipeline is green, publish from a
+detached checkout of the tag, never from a branch:
+
+```sh
+git worktree add --detach /tmp/asd-vX.Y.Z vX.Y.Z
+cd /tmp/asd-vX.Y.Z
+cargo publish --workspace --dry-run
+cargo publish --workspace
+```
+
+The AgentStateGraph crates come from crates.io too, so an ASG bump means a
+new `version` on the `agentstategraph*` lines in `[workspace.dependencies]`,
+and that ASG version must already be published. A crates.io version can be
+yanked but never deleted or re-uploaded.
 
 ## After the release: verify it is installable
 

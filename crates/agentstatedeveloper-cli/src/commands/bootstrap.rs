@@ -13,7 +13,7 @@ use clap::Args;
 pub struct BootstrapArgs {}
 
 pub fn run(_args: BootstrapArgs) -> Result<()> {
-    match agent_skillgen::render_bootstrap(&crate::commands::skill::asd_skill_spec()) {
+    match crate::skillgen::render_bootstrap(&crate::commands::skill::asd_skill_spec()) {
         Some(block) => print!("{block}"),
         None => println!("No bootstrap steps are defined."),
     }
@@ -26,7 +26,7 @@ mod tests {
 
     #[test]
     fn asd_bootstrap_renders_real_steps() {
-        let block = agent_skillgen::render_bootstrap(&asd_skill_spec())
+        let block = crate::skillgen::render_bootstrap(&asd_skill_spec())
             .expect("ASD declares bootstrap steps");
         assert!(block.contains("asd index ."));
         assert!(block.contains("asd mcp install"));
