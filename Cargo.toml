@@ -15,6 +15,7 @@ members = [
     "crates/agentstatedeveloper-conformance",
     "crates/agentstatedeveloper-cli",
     "crates/agentstatedeveloper-mcp",
+    "crates/agentstatedeveloper",
 ]
 
 [workspace.package]
@@ -24,6 +25,11 @@ authors = ["Craig Brown"]
 license = "BUSL-1.1"
 description = "AgentStateDeveloper — code-level context and audit overlay for agent-authored code"
 repository = "https://github.com/agentstatelabs/AgentStateDeveloper"
+homepage = "https://github.com/agentstatelabs/AgentStateDeveloper"
+keywords = ["agents", "code-intelligence", "mcp", "tree-sitter", "audit"]
+categories = ["development-tools"]
+# Local asd state (index logs, caches, sidecar DBs) must never be packaged.
+exclude = [".asd/", ".asd-*"]
 
 [workspace.dependencies]
 # ASG family — git deps pinned to an ASG release tag (canonical: bump tag deliberately)
@@ -55,20 +61,16 @@ clap = { version = "4", features = ["derive"] }
 directories = "5"
 
 # Internal crates
-agentstatedeveloper-core = { path = "crates/agentstatedeveloper-core" }
-agentstatedeveloper-python = { path = "crates/agentstatedeveloper-python" }
-agentstatedeveloper-typescript = { path = "crates/agentstatedeveloper-typescript" }
-agentstatedeveloper-rust = { path = "crates/agentstatedeveloper-rust" }
-agentstatedeveloper-go = { path = "crates/agentstatedeveloper-go" }
-agentstatedeveloper-java = { path = "crates/agentstatedeveloper-java" }
-agentstatedeveloper-csharp = { path = "crates/agentstatedeveloper-csharp" }
-agentstatedeveloper-ruby = { path = "crates/agentstatedeveloper-ruby" }
-agentstatedeveloper-kotlin = { path = "crates/agentstatedeveloper-kotlin" }
-agentstatedeveloper-swift = { path = "crates/agentstatedeveloper-swift" }
-agentstatedeveloper-adapters = { path = "crates/agentstatedeveloper-adapters" }
-# Shared agent-onboarding engine (suite-onboarding t-001). Git/tag dep like the
-# ASG family, pinned to a public release tag. For local dev against a working
-# copy, patch it back to a path.
-agent-skillgen = { git = "https://github.com/agentstatelabs/agent-skillgen.git", tag = "v0.1.0" }
-agentstatedeveloper-cli = { path = "crates/agentstatedeveloper-cli" }
-agentstatedeveloper-mcp = { path = "crates/agentstatedeveloper-mcp" }
+agentstatedeveloper-core = { path = "crates/agentstatedeveloper-core", version = "1.4.7" }
+agentstatedeveloper-python = { path = "crates/agentstatedeveloper-python", version = "1.4.7" }
+agentstatedeveloper-typescript = { path = "crates/agentstatedeveloper-typescript", version = "1.4.7" }
+agentstatedeveloper-rust = { path = "crates/agentstatedeveloper-rust", version = "1.4.7" }
+agentstatedeveloper-go = { path = "crates/agentstatedeveloper-go", version = "1.4.7" }
+agentstatedeveloper-java = { path = "crates/agentstatedeveloper-java", version = "1.4.7" }
+agentstatedeveloper-csharp = { path = "crates/agentstatedeveloper-csharp", version = "1.4.7" }
+agentstatedeveloper-ruby = { path = "crates/agentstatedeveloper-ruby", version = "1.4.7" }
+agentstatedeveloper-kotlin = { path = "crates/agentstatedeveloper-kotlin", version = "1.4.7" }
+agentstatedeveloper-swift = { path = "crates/agentstatedeveloper-swift", version = "1.4.7" }
+agentstatedeveloper-adapters = { path = "crates/agentstatedeveloper-adapters", version = "1.4.7" }
+agentstatedeveloper-cli = { path = "crates/agentstatedeveloper-cli", version = "1.4.7" }
+agentstatedeveloper-mcp = { path = "crates/agentstatedeveloper-mcp", version = "1.4.7" }

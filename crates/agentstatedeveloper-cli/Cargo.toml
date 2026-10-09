@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/agentstatedeveloper-cli"
+keywords.workspace = true
+categories.workspace = true
+exclude.workspace = true
 description = "asd CLI — command-line interface for AgentStateDeveloper"
 
 [[bin]]
@@ -13,7 +19,6 @@ path = "src/main.rs"
 [dependencies]
 agentstatedeveloper-core = { workspace = true }
 agentstatedeveloper-adapters = { workspace = true }
-agent-skillgen = { workspace = true }
 agentstategraph = { workspace = true }
 agentstategraph-core = { workspace = true }
 

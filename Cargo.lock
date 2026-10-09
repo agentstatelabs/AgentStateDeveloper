@@ -3,12 +3,11 @@
 version = 4
 
 [[package]]
-name = "agent-skillgen"
-version = "0.1.0"
-source = "git+https://github.com/agentstatelabs/agent-skillgen.git?tag=v0.1.0#be42d5d0b2b7f627d1271bf61a10a0fd0d5d7897"
+name = "agentstatedeveloper"
+version = "1.4.7"
 dependencies = [
- "serde",
- "serde_json",
+ "agentstatedeveloper-adapters",
+ "agentstatedeveloper-core",
 ]
 
 [[package]]
@@ -31,7 +30,6 @@ dependencies = [
 name = "agentstatedeveloper-cli"
 version = "1.4.7"
 dependencies = [
- "agent-skillgen",
  "agentstatedeveloper-adapters",
  "agentstatedeveloper-core",
  "agentstategraph",

@@ -59,8 +59,12 @@ cargo install --path crates/agentstatedeveloper-cli   # installs asd
 cargo install --path crates/agentstatedeveloper-mcp   # installs asd-mcp + asd-serve
 ```
 
-> **Note:** the crate name `asd` on crates.io is taken by an unrelated diff tool.
-> Install from source using the commands above.
+Or from crates.io (the name `asd` there belongs to an unrelated diff tool, so
+the packages are named after the project):
+
+```bash
+cargo install agentstatedeveloper-cli agentstatedeveloper-mcp
+```
 
 ### Uninstall
 
