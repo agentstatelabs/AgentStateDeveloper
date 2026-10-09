@@ -17,6 +17,8 @@ Versions use semantic versioning.
 
 ## [Unreleased]
 
+## [v1.4.8] — 2026-10-09
+
 ### Added
 - **The crates are packaged for crates.io.** `cargo install agentstatedeveloper-cli agentstatedeveloper-mcp` installs `asd`, `asd-mcp` and `asd-serve`. A new `agentstatedeveloper` library crate re-exports `agentstatedeveloper-core` and `default_adapters()`. Every published crate ships the license and a README, links its own docs.rs page, and excludes local `.asd/` state from its package. `agentstatedeveloper-conformance` is `publish = false`.
 
