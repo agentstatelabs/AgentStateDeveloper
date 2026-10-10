@@ -17,6 +17,11 @@ Versions use semantic versioning.
 
 ## [Unreleased]
 
+### Changed
+- **LICENSE names AgentStateLabs, LLC as the licensor without the "not yet formed" placeholder, and the Licensed Work as "AgentStateDeveloper" without a version.** The old line named 0.1.0 while shipping with every release; each version already has its own Change Date.
+- **LICENSING.md states that releases published before 2026-09-09 also get the 18-month Change Date**, though their LICENSE files say four years, and points licensing questions to licensing@agentstatelabs.com, matching LICENSE.
+- Crate metadata credits AgentStateLabs, LLC as the author.
+
 ## [v1.4.8] — 2026-10-09
 
 ### Added
