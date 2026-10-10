@@ -40,8 +40,13 @@ after its release date. After conversion, all BSL restrictions lift for
 that version — the 18-month clock keeps the ecosystem protected while
 guaranteeing long-term openness.
 
+The 18-month term covers every release, including those published before
+2026-09-09. Those releases shipped a LICENSE that says four years, but
+that day the term was shortened to 18 months for all versions, and a
+shorter term only widens the grant.
+
 ## Questions
 
 If you're unsure whether your use is covered by the BSL 1.1 grant, email
-**info@agentstatelabs.com** and we'll clarify. The bar is straightforward:
+**licensing@agentstatelabs.com** and we'll clarify. The bar is straightforward:
 internal use is free.
