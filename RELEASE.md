@@ -97,14 +97,28 @@ The workspace publishes to crates.io as `agentstatedeveloper` (the library),
 `agentstatedeveloper-core`, `-adapters`, the nine language adapters, `-cli` and
 `-mcp`. `agentstatedeveloper-conformance` is `publish = false`.
 
-No CI job does this yet. Once the tag pipeline is green, publish from a
-detached checkout of the tag, never from a branch:
+The `publish-crates` job does this on every release tag, once
+`CARGO_REGISTRY_TOKEN` is set. It needs `publish-github`, so it runs only after
+the checks, the tests, the realism stage and the GitHub mirror's leak scan have
+passed, and it runs the leak scan again before
+`scripts/publish-crates.sh --publish`. Crates already on crates.io at the
+version are skipped, so retrying the job is safe.
+
+`CARGO_REGISTRY_TOKEN` is a masked, protected CI variable (`v*` tags are
+protected, so tag pipelines can read it). Make it a crates.io token scoped to
+`publish-update` and `agentstatedeveloper*`, with an expiry. `publish-update`
+cannot create a crate, so a crate new to the workspace (a new language
+adapter, say) gets its first version published by hand. crates.io also
+rate-limits new crate names (a burst of five, then about one every ten
+minutes); re-run the script until it reports nothing left to do.
+
+By hand, from a detached checkout of the tag, never from a branch:
 
 ```sh
 git worktree add --detach /tmp/asd-vX.Y.Z vX.Y.Z
 cd /tmp/asd-vX.Y.Z
-cargo publish --workspace --dry-run
-cargo publish --workspace
+scripts/publish-crates.sh             # dry run
+scripts/publish-crates.sh --publish   # the real upload (uses `cargo login`)
 ```
 
 The AgentStateGraph crates come from crates.io too, so an ASG bump means a
