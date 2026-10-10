@@ -21,7 +21,7 @@ members = [
 [workspace.package]
 version = "1.4.8"
 edition = "2024"
-authors = ["Craig Brown"]
+authors = ["AgentStateLabs, LLC"]
 license = "BUSL-1.1"
 description = "AgentStateDeveloper — code-level context and audit overlay for agent-authored code"
 repository = "https://github.com/agentstatelabs/AgentStateDeveloper"
