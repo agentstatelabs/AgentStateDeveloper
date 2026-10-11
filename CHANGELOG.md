@@ -17,6 +17,13 @@ Versions use semantic versioning.
 
 ## [Unreleased]
 
+### Added
+- **Logs, traces and metrics through [oxtel](https://github.com/agentstatelabs/oxtel)** in `asd-mcp` and `asd-serve`, replacing their `tracing-subscriber` setup.
+  - `asd-mcp` logs to stderr, as before, keeping stdout for MCP frames: text on a terminal, one JSON object per line otherwise. Each MCP request gets a span named like `tools/call search` and `mcp.server.operation.duration`. Tool arguments and results are never recorded.
+  - `asd-serve` keeps text on stdout, which CTXone's process pool reads for the "listening on" line. Each HTTP request gets a span named by its route and a `request` log line with its status, duration and trace id, replacing tower-http's trace layer. It now shuts down gracefully on SIGINT and SIGTERM.
+  - `OXTEL_LOG_FORMAT` (`text`, `json`, `ecs`, `none`) and `OXTEL_LOG_OUTPUT` (`stderr`, `stdout`) override either binary's default. `RUST_LOG` still sets the level.
+  - **Nothing is sent anywhere by default.** The new opt-in `otlp` feature of `agentstatedeveloper-mcp` sends traces, metrics and logs over OTLP once `OTEL_EXPORTER_OTLP_ENDPOINT` is set. A default build contains no OTLP client.
+
 ### Changed
 - **LICENSE names AgentStateLabs, LLC as the licensor without the "not yet formed" placeholder, and the Licensed Work as "AgentStateDeveloper" without a version.** The old line named 0.1.0 while shipping with every release; each version already has its own Change Date.
 - **LICENSING.md states that releases published before 2026-09-09 also get the 18-month Change Date**, though their LICENSE files say four years, and points licensing questions to licensing@agentstatelabs.com, matching LICENSE.

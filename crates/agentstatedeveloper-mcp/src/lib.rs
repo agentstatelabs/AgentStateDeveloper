@@ -38,7 +38,6 @@ use serde_json::json;
 use tokio::sync::Mutex;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
-use tower_http::trace::TraceLayer;
 
 /// Engine is shared across handlers. The underlying `Repository` holds a
 /// `Box<dyn Storage>` trait object that is not guaranteed Send+Sync at the
@@ -260,7 +259,9 @@ pub fn build_router(
     router
         .with_state(state)
         .layer(cors)
-        .layer(TraceLayer::new_for_http())
+        // A span, a request log line and duration metrics per request, named
+        // by the OpenTelemetry HTTP conventions.
+        .layer(oxtel_tower::HttpServerLayer::new())
 }
 
 // -----------------------------------------------------------------------------
