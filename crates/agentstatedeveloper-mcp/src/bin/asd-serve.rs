@@ -21,12 +21,20 @@ use tokio::sync::Mutex;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,tower_http=info")),
-        )
-        .init();
+    // Logs, traces and metrics through oxtel; nothing is exported unless
+    // built with the `otlp` feature and OTEL_EXPORTER_OTLP_ENDPOINT is set.
+    // Text on standard output, as before: CTXone's AsdProcessPool reads the
+    // "listening on host:port" line from this process's stdout to find the
+    // port it was given. OXTEL_LOG_FORMAT and OXTEL_LOG_OUTPUT still win.
+    let _telemetry = oxtel::builder()
+        .with_default_service_name("asd-serve")
+        .with_resource_attribute(oxtel::KeyValue::new(
+            "service.version",
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .with_local_logs(oxtel::sdk::logs::LocalFormat::Text)
+        .with_local_logs_output(oxtel::LogOutput::Stdout)
+        .install()?;
 
     let db_path =
         PathBuf::from(std::env::var("ASD_DB").unwrap_or_else(|_| "./.asd-state.db".to_string()));
@@ -69,6 +77,34 @@ async fn main() -> Result<()> {
         .map(|a| a.to_string())
         .unwrap_or_else(|_| addr.clone());
     tracing::info!("listening on {}", bound);
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
+}
+
+/// Resolves on SIGINT (Ctrl-C) or, on Unix, SIGTERM, which supervisors and
+/// container runtimes send. The server finishes what's in flight and `main`
+/// returns, so pending telemetry is sent.
+async fn shutdown_signal() {
+    let interrupt = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                terminate.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = interrupt => {}
+        () = terminate => {}
+    }
+    tracing::info!("shutting down");
 }
