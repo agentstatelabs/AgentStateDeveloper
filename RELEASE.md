@@ -95,8 +95,12 @@ on an older line, leaves the tap on the newer release, and the job logs
 `formula already at X; not moving it to vY`. Re-running the tag the tap is on
 renders the same formula, so it repairs a wrong sha256 or pushes nothing. A
 tag's pipeline runs the scripts at that tag, so a tag cut before this guard
-landed (v1.4.8 and earlier) still rewrites the formula to its own version when
-re-run.
+landed (v1.4.8 and earlier) still rewrites the formula on the GitLab tap to its
+own version when re-run. The tap's own `version-guard` job then fails and
+`publish-github` doesn't run, so the older formula never reaches the GitHub
+tap. Revert that commit on the GitLab tap, or let the next release write the
+formula forward; until then `version-guard` blocks every push to the tap's
+`main`.
 
 No sibling tap clone is needed any more.
 
@@ -261,8 +265,21 @@ now means re-running the CI workflow, not passing flags to this script.
 ```sh
 gh release delete v<X> -R agentstatelabs/agentstatedeveloper-releases
 git push origin :refs/tags/v<X>      # remove tag from source
-# tap commit lives in homebrew-agentstatedeveloper; revert + push as usual
+# tap commit lives in homebrew-agentstatedeveloper; revert it with the
+# Allow-Downgrade trailer (below)
 ```
 
-Revert the tap by hand: re-running the previous tag's pipeline will not move
-the formula back.
+Roll the tap back by hand: re-running the previous tag's pipeline will not
+move the formula back, and the tap's `version-guard` refuses a plain revert.
+Commit the older formula to the GitLab tap with the trailer
+`Allow-Downgrade: <version>` at the end of the commit message, or run a tap
+pipeline on `main` with the variable `TAP_ALLOW_DOWNGRADE=<version>`. Either
+must name the exact version being published; without one, `version-guard`
+refuses the downgrade.
+
+```sh
+# in a clone of the GitLab tap, homebrew-agentstatedeveloper
+git revert --no-edit <the version-bump commit>
+git commit --amend --no-edit --trailer "Allow-Downgrade: <previous version>"
+git push origin HEAD:main
+```
