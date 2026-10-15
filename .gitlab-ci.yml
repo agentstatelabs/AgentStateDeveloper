@@ -196,6 +196,10 @@ ci-guard:
 # assets over HTTPS and writes to a GitLab project. Nothing reaches back into
 # GitLab from GitHub Actions, and the tap URL is built from $CI_SERVER_URL so
 # no internal hostname lands in a mirrored file.
+#
+# Re-running it is safe: the formula only moves forward, so re-running an older
+# tag leaves the tap on the newer release, and re-running the current tag
+# pushes nothing unless a sha256 needs repairing.
 homebrew:
   stage: .post
   image: rust:1-bookworm
@@ -259,6 +263,9 @@ verify-install:
 # `when: delayed` waits WITHOUT a runner, so the tap's publish-github runs
 # during the delay. ASD_VERIFY_WAIT is then only a short allowance for GitHub
 # itself; exhausting it is still reported apart from a wrong formula.
+#
+# On a re-run of an older tag the tap is already on a later release, which
+# `homebrew` never moves back; the check says so and passes instead of waiting.
 verify-formula:
   stage: .post
   image: debian:bookworm-slim

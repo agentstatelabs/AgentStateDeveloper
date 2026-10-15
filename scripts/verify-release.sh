@@ -89,6 +89,24 @@ sha_of() {
   else shasum -a 256 "$1" | awk '{print $1}'; fi
 }
 
+# True when formula version $1 is a later release than $VER. publish-homebrew.sh
+# never moves the formula back, so re-running an older tag (or a patch tag cut
+# on an older line) leaves the tap there for good. $VER is always plain X.Y.Z,
+# so a prerelease formula version is later only when its X.Y.Z is.
+tap_is_newer() {
+  [[ "$1" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-.+)?$ ]] || return 1
+  local f=("${BASH_REMATCH[@]:1:3}")
+  [[ "$VER" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+  local t=("${BASH_REMATCH[@]:1:3}") i
+  for i in 0 1 2; do
+    if ((10#${f[i]} != 10#${t[i]})); then
+      ((10#${f[i]} > 10#${t[i]}))
+      return
+    fi
+  done
+  return 1
+}
+
 # ── shell installer ─────────────────────────────────────────────────────────
 if [ "$DO_SHELL" -eq 1 ]; then
   head_ "shell installer ($TAG)"
@@ -176,8 +194,11 @@ if [ "$DO_FORMULA" -eq 1 ]; then
     else
       curl -fsSL -o "$TMPDIR_F/asd.rb" "$TAP_RAW" 2>/dev/null || true
     fi
-    if [ -s "$TMPDIR_F/asd.rb" ] \
-       && [ "$(grep -m1 'version "' "$TMPDIR_F/asd.rb" | sed 's/.*"\(.*\)".*/\1/')" = "$VER" ]; then
+    LOOP_VER=""
+    [ -s "$TMPDIR_F/asd.rb" ] && LOOP_VER=$(grep -m1 'version "' "$TMPDIR_F/asd.rb" | sed 's/.*"\(.*\)".*/\1/')
+    # A later release is as final as this one: the homebrew job will not
+    # replace it, so there is nothing to wait for.
+    if [ "$LOOP_VER" = "$VER" ] || tap_is_newer "$LOOP_VER"; then
       break
     fi
     [ "$WAITED" -ge "$WAIT" ] && break
@@ -232,6 +253,10 @@ if [ "$DO_FORMULA" -eq 1 ]; then
     FVER=$(grep -m1 'version "' "$TMPDIR_F/asd.rb" | sed 's/.*"\(.*\)".*/\1/')
     if [ "$FVER" = "$VER" ]; then
       pass "formula version is $VER"
+    elif tap_is_newer "$FVER"; then
+      # Homebrew serves one version per formula. The later one had its own
+      # verify-formula run, and the checks below still cover what is served.
+      pass "formula is on $FVER, later than $VER; the homebrew job never moves it back"
     elif [ "$WAITED" -ge "$WAIT" ] && [ "$WAIT" -gt 0 ]; then
       # Distinguish "the tap has not mirrored yet" from "the formula is wrong".
       # They look identical in the version string, and conflating them is how a

@@ -89,6 +89,15 @@ and the Homebrew formula. The formula is rendered **GitLab-side** by the
 commits it to the tap on GitLab; the tap's own publish job mirrors it to the
 GitHub tap that `brew tap` reads. Never write the GitHub tap directly.
 
+Re-running a tag's pipeline is safe for the formula: it only moves forward.
+Re-running an older tag (v1.4.7 after v1.4.8 shipped), or cutting a patch tag
+on an older line, leaves the tap on the newer release, and the job logs
+`formula already at X; not moving it to vY`. Re-running the tag the tap is on
+renders the same formula, so it repairs a wrong sha256 or pushes nothing. A
+tag's pipeline runs the scripts at that tag, so a tag cut before this guard
+landed (v1.4.8 and earlier) still rewrites the formula to its own version when
+re-run.
+
 No sibling tap clone is needed any more.
 
 ## After the release: publish the crates to crates.io
@@ -134,7 +143,9 @@ clean container and that the documented commands are current;
 `verify-formula` checks the GitHub tap formula against the published assets.
 `verify-formula` is delayed 10 minutes rather than polling, because on a
 single runner a polling job starves the tap's own publish job — the one that
-puts the formula on GitHub — and fails a good release.
+puts the formula on GitHub — and fails a good release. When the tap is already
+on a later release (a re-run of an older tag), `verify-formula` says so and
+passes, since `homebrew` will never move the formula back to this tag.
 
 Two limits worth knowing:
 
@@ -252,3 +263,6 @@ gh release delete v<X> -R agentstatelabs/agentstatedeveloper-releases
 git push origin :refs/tags/v<X>      # remove tag from source
 # tap commit lives in homebrew-agentstatedeveloper; revert + push as usual
 ```
+
+Revert the tap by hand: re-running the previous tag's pipeline will not move
+the formula back.
