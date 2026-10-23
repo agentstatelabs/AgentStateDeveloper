@@ -38,6 +38,8 @@ default:
 # cost seconds, not a workspace build. GIT_DEPTH: 0 so origin/main is reachable.
 conclusions-guard:
   stage: check
+  tags: [macbook-amd64]
+  cache: []
   image: alpine:latest
   before_script: []   # no cargo needed; skip the rust default before_script
   variables:
@@ -51,6 +53,9 @@ conclusions-guard:
 
 fmt:
   stage: check
+  tags: [macbook-amd64]
+  cache: []
+  before_script: []
   script:
     - rustup component add rustfmt
     - cargo fmt --all -- --check
