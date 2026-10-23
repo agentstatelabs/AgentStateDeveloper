@@ -287,6 +287,11 @@ fn design_md_and_changelog_backtick_examples_resolve() {
         // fallback command described in DESIGN.md (commit 983472f).
         // Not implemented yet; remove when it ships.
         "query-example",
+        // `remote` — forward-looking Plan W t-006 hub-sync command
+        // (`asd remote add | push | pull | status`) described in
+        // DESIGN.md (commit 0e46df49). Not implemented yet; remove when
+        // it ships.
+        "remote",
     ];
 
     // CARGO_MANIFEST_DIR for the cli crate → repo/crates/cli;
