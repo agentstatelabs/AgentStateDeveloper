@@ -17,6 +17,8 @@ Versions use semantic versioning.
 
 ## [Unreleased]
 
+## [v1.4.9] — 2026-10-22
+
 ### Added
 - **Logs, traces and metrics through [oxtel](https://github.com/agentstatelabs/oxtel)** in `asd-mcp` and `asd-serve`, replacing their `tracing-subscriber` setup.
   - `asd-mcp` logs to stderr, as before, keeping stdout for MCP frames: text on a terminal, one JSON object per line otherwise. Each MCP request gets a span named like `tools/call search` and `mcp.server.operation.duration`. Tool arguments and results are never recorded.

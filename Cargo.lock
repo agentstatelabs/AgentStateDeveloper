@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agentstatedeveloper"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "agentstatedeveloper-adapters",
  "agentstatedeveloper-core",
@@ -18,7 +18,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-adapters"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "agentstatedeveloper-core",
  "agentstatedeveloper-csharp",
@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-cli"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "agentstatedeveloper-adapters",
  "agentstatedeveloper-core",
@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-conformance"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "agentstatedeveloper-adapters",
  "agentstatedeveloper-core",
@@ -66,7 +66,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-core"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -85,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-csharp"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "agentstatedeveloper-core",
  "serde_json",
@@ -96,7 +96,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-go"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "agentstatedeveloper-core",
  "serde_json",
@@ -107,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-java"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "agentstatedeveloper-core",
  "serde_json",
@@ -118,7 +118,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-kotlin"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "agentstatedeveloper-core",
  "cc",
@@ -130,7 +130,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-mcp"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "agentstatedeveloper-adapters",
  "agentstatedeveloper-core",
@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-python"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "agentstatedeveloper-core",
  "serde_json",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-ruby"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "agentstatedeveloper-core",
  "serde_json",
@@ -181,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-rust"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "agentstatedeveloper-core",
  "serde_json",
@@ -192,7 +192,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-swift"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "agentstatedeveloper-core",
  "cc",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "agentstatedeveloper-typescript"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "agentstatedeveloper-core",
  "serde_json",
