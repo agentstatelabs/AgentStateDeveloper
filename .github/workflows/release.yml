@@ -48,14 +48,14 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
             ext: ""
           # Cross-compile x86_64-apple-darwin from arm64 macOS. `macos-13`
           # (Intel) is GitHub's most-contended runner class — jobs sit
           # queued for hours. The Apple toolchain cross-compiles between
           # mac architectures natively; rustup target add covers the std.
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-15
             ext: ""
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
