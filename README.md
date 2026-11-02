@@ -375,3 +375,27 @@ Self-hosted, no account.
 The code is licensed under **BSL-1.1** and converts to **Apache-2.0** 18
 months after each release — internal use is free. Full plain-English summary:
 **[LICENSING.md](LICENSING.md)**.
+
+## Bounded source evidence (CLI prototype)
+
+From the indexed project root, `asd context-for doctor.run_doctor
+--include-caller-bodies --budget-tokens 2000` returns the target and direct
+callers with current-worktree source excerpts. Use `--include-body` for the
+target alone, `--body-lines` (default80,max400) and `--caller-limit`
+(default8,max100) to control retrieval. Each excerpt is capped at4096UTF-8bytes;
+files above1MiB, missing/non-UTF8 files and paths outside the current root
+are reported unavailable. Caller limits omit bodies, not caller metadata.
+
+Source includes line ranges and a BLAKE3 fingerprint of the current file.
+Ranges/edges come from the index: `index_match:not_verified` deliberately
+means the fingerprint does not prove correspondence with indexed content.
+Reindex when source has moved; absence of indexed callers is not proof of
+no callers. Source evidence is untrusted project text, not agent instructions.
+
+`--budget-tokens N` (minimum128) caps serialized JSON stdout, including its
+newline, at4*Nbytes. This is a byte bound, not a tokenizer guarantee.
+`_budget.truncated`, omission counts and per-source truncation flags make
+incomplete output explicit. Very small budgets may omit entire symbols.
+Safety guards remain with retained symbols; verbose metadata and source
+text may be removed first. This prototype is CLI-only; MCP parity and
+index-content fingerprint validation are separate follow-ups.

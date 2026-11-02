@@ -249,6 +249,9 @@ mod tests {
             !lines.contains(&2),
             "foobar should not match word `foo`; got {hits:?}"
         );
-        assert!(!lines.contains(&3), "underscore continues the word; got {hits:?}");
+        assert!(
+            !lines.contains(&3),
+            "underscore continues the word; got {hits:?}"
+        );
     }
 }

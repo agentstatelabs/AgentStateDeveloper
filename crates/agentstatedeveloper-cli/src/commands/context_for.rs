@@ -10,7 +10,7 @@
 
 use anyhow::Result;
 use clap::Args;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use agentstatedeveloper_core::{AsgEffectStore, AsgIndexStore, AsgLedgerStore, Engine, IndexStore};
 
@@ -28,14 +28,26 @@ pub struct ContextForArgs {
     /// Example: `DriftSynthPool.resolveForPreview,Scheduler.restartLane`
     pub qnames: String,
 
-    /// Approximate token budget for the output (rough estimate: 1 token ≈ 4 chars).
-    /// When set, ledger entries and callees are trimmed to fit.
+    /// Output ceiling of 4 serialized UTF-8 bytes per approximate token (min 128).
+    /// Not a tokenizer guarantee. JSON and its newline fit; omissions are flagged.
     #[arg(long)]
     pub budget_tokens: Option<usize>,
 
-    /// Include full source body of each symbol (can be large).
+    /// Include bounded current-worktree source using indexed ranges (freshness unverified).
     #[arg(long, default_value = "false")]
     pub include_body: bool,
+
+    /// Include source excerpts for direct callers as well as the target.
+    #[arg(long)]
+    pub include_caller_bodies: bool,
+
+    /// Maximum source lines per excerpt (1..400).
+    #[arg(long, default_value = "80", value_parser = clap::value_parser!(u32).range(1..=400))]
+    pub body_lines: u32,
+
+    /// Maximum direct callers supplied with source (0..100); remaining metadata stays.
+    #[arg(long, default_value = "8", value_parser = clap::value_parser!(u32).range(0..=100))]
+    pub caller_limit: u32,
 
     /// Suppress the stale-index warning.
     #[arg(long)]
@@ -47,6 +59,16 @@ pub struct ContextForArgs {
 }
 
 pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
+    let budget_bytes = args
+        .budget_tokens
+        .map(|tokens| {
+            anyhow::ensure!(tokens >= 128, "--budget-tokens must be at least 128");
+            tokens
+                .checked_mul(4)
+                .ok_or_else(|| anyhow::anyhow!("--budget-tokens is too large"))
+        })
+        .transpose()?;
+    let root = std::env::current_dir()?;
     let mut t = AsdTimer::new(args.timing);
     if !args.quiet {
         if let Some(warn) = agentstatedeveloper_core::stale_warning(&cfg.db_path, 3600) {
@@ -63,7 +85,6 @@ pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
     t.phase("build_id_map");
 
     let qnames: Vec<&str> = args.qnames.split(',').map(|s| s.trim()).collect();
-    let budget_chars = args.budget_tokens.map(|t| t * 4);
 
     let mut symbols_out = Vec::new();
 
@@ -77,7 +98,7 @@ pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
         };
         t.phase("symbol_lookup");
 
-        let sym_ctx = assemble_symbol_context(
+        let mut sym_ctx = assemble_symbol_context(
             &engine,
             &index_store,
             &effect_store,
@@ -88,48 +109,55 @@ pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
             engine.fts.as_ref(),
             None, // single symbol — compute ownership fresh
         )?;
+        if args.include_body || args.include_caller_bodies {
+            sym_ctx["source"] = super::context_evidence::source_excerpt(
+                &root,
+                &symbol.file,
+                symbol.start.line,
+                symbol.end.line,
+                args.body_lines as usize,
+            );
+        }
+        if args.include_caller_bodies {
+            let caller_ids = index_store.get_callers(&engine.ref_name, &symbol.symbol_id)?;
+            let callers = sym_ctx["callers"].as_array_mut().unwrap();
+            for (i, (row, id)) in callers.iter_mut().zip(caller_ids).enumerate() {
+                if i >= args.caller_limit as usize {
+                    row["source"] = json!({"status":"omitted", "reason":"caller-limit"});
+                } else if let Some(caller) = id_map.get(&id) {
+                    row["source"] = super::context_evidence::source_excerpt(
+                        &root,
+                        &caller.file,
+                        caller.start.line,
+                        caller.end.line,
+                        args.body_lines as usize,
+                    );
+                } else {
+                    row["source"] = json!({"status":"unavailable", "reason":"unresolved symbol"});
+                }
+            }
+        }
         t.phase("assemble_context");
         symbols_out.push(sym_ctx);
     }
 
-    let out = json!({
+    let mut out = json!({
         "query": args.qnames,
         "count": symbols_out.len(),
         "symbols": symbols_out,
     });
+    if args.include_body || args.include_caller_bodies {
+        out["source_contract"] = json!({"origin":"current_worktree", "locations":"indexed_ranges",
+            "index_match":"not_verified", "graph_scope":"indexed direct edges; absence does not prove no callers",
+            "body_lines":args.body_lines, "caller_body_limit":args.caller_limit});
+    }
 
     // Token economy (1.0.78): context_for output is always JSON
     // consumed by agents — compact, no whitespace bloat.
-    let mut output = serde_json::to_string(&out)?;
-
-    // Trim to budget if requested (trim ledger entries from the end).
-    if let Some(max_chars) = budget_chars {
-        if output.len() > max_chars {
-            // Re-assemble with fewer ledger entries per symbol.
-            let trimmed = trim_to_budget(&out, max_chars);
-            output = serde_json::to_string(&trimmed)?;
-        }
+    if let Some(bytes) = budget_bytes {
+        out = super::context_evidence::bounded(out, bytes);
     }
-
-    println!("{output}");
+    println!("{}", serde_json::to_string(&out)?);
     t.total("context-for");
     Ok(())
-}
-
-/// Reduce ledger entries to fit within `max_chars`. Trims `decisions_and_notes`
-/// first (least critical), then `proofs`, keeping invariants and hazards.
-fn trim_to_budget(out: &Value, _max_chars: usize) -> Value {
-    // Simple approach: return as-is and let the caller log a warning.
-    // A more sophisticated trim would iterate and drop entries.
-    // For now just note the budget was exceeded.
-    let mut v = out.clone();
-    if let Some(obj) = v.as_object_mut() {
-        obj.insert(
-            "_budget_warning".to_string(),
-            json!(format!(
-                "output exceeds budget; use --budget-tokens to trim, or filter to fewer qnames"
-            )),
-        );
-    }
-    v
 }
