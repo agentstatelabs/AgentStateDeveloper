@@ -33,7 +33,7 @@ pub struct ContextForArgs {
     #[arg(long)]
     pub budget_tokens: Option<usize>,
 
-    /// Include bounded current-worktree source using indexed ranges (freshness unverified).
+    /// Include bounded current source; known-changed indexed files suppress excerpts.
     #[arg(long, default_value = "false")]
     pub include_body: bool,
 
@@ -82,6 +82,21 @@ pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
     let ledger_store = AsgLedgerStore::from_engine(&engine);
 
     let id_map = index_store.build_id_map(&engine);
+    // Read only requested provenance records; metadata-only queries do not
+    // load the source-fingerprint tree at all.
+    let fingerprint_for = |id: &str| {
+        engine
+            .repo
+            .get_tree(
+                &engine.ref_name,
+                &format!(
+                    "{}/{}",
+                    agentstatedeveloper_core::paths::source_fingerprints_root(),
+                    id
+                ),
+            )
+            .ok()
+    };
     t.phase("build_id_map");
 
     let qnames: Vec<&str> = args.qnames.split(',').map(|s| s.trim()).collect();
@@ -117,6 +132,12 @@ pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
                 symbol.end.line,
                 args.body_lines as usize,
             );
+            let indexed = fingerprint_for(&symbol.symbol_id);
+            sym_ctx["source"] = super::context_evidence::verify_indexed_source(
+                sym_ctx["source"].take(),
+                indexed.as_ref(),
+                &symbol,
+            );
         }
         if args.include_caller_bodies {
             let caller_ids = index_store.get_callers(&engine.ref_name, &symbol.symbol_id)?;
@@ -131,6 +152,12 @@ pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
                         caller.start.line,
                         caller.end.line,
                         args.body_lines as usize,
+                    );
+                    let indexed = fingerprint_for(&caller.symbol_id);
+                    row["source"] = super::context_evidence::verify_indexed_source(
+                        row["source"].take(),
+                        indexed.as_ref(),
+                        caller,
                     );
                 } else {
                     row["source"] = json!({"status":"unavailable", "reason":"unresolved symbol"});
@@ -148,7 +175,8 @@ pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
     });
     if args.include_body || args.include_caller_bodies {
         out["source_contract"] = json!({"origin":"current_worktree", "locations":"indexed_ranges",
-            "index_match":"not_verified", "graph_scope":"indexed direct edges; absence does not prove no callers",
+            "index_verification":"per_excerpt", "graph_freshness":"not_verified",
+            "graph_scope":"indexed direct edges; absence does not prove no callers",
             "body_lines":args.body_lines, "caller_body_limit":args.caller_limit});
     }
 

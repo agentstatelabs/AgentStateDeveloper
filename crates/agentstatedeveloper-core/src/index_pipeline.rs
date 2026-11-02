@@ -245,6 +245,7 @@ pub fn run_index(
     let mut run_effects: Vec<(String, Vec<crate::schema::Effect>, String)> = Vec::new();
     // (language, "clean_file/symbol_fp", Symbol) — the `/asd/v1/code` tree.
     let mut run_code: Vec<(String, String, Value)> = Vec::new();
+    let mut run_source_fingerprints: Vec<(String, Value)> = Vec::new();
     // Every file this run parsed, as its symbols record it: what this run
     // may declare stale entries in (see `crate::stale`).
     let mut parsed_files: HashSet<String> = HashSet::new();
@@ -292,6 +293,7 @@ pub fn run_index(
         parsed_files.insert(file_str.clone());
 
         let mut parsed = adapter.parse_symbols(&file_str, &source)?;
+        let file_blake3 = blake3::hash(source.as_bytes()).to_hex().to_string();
         disambiguated_count += disambiguate_qnames(&mut parsed);
 
         // Plan L t-005: detect dynamic-dispatch sites the call-graph
@@ -322,6 +324,13 @@ pub fn run_index(
             };
 
             let sym_val = serde_json::to_value(&sym).map_err(|e| AsdError::Other(e.to_string()))?;
+            run_source_fingerprints.push((
+                symbol_id.clone(),
+                serde_json::json!({
+                    "file":sym.file,"symbol_fp":sym.symbol_fp,"start_line":sym.start.line,
+                    "end_line":sym.end.line,"file_blake3":file_blake3
+                }),
+            ));
 
             // Accumulate into in-memory maps — no repo writes yet.
             // Detect collisions: same qname parsed from two different files.
@@ -521,6 +530,8 @@ pub fn run_index(
         let mut qname_tree = crate::subtree::read_seed(repo, &fork, "/asd/v1/index/by-qname")?;
         let mut effects_tree = crate::subtree::read_seed(repo, &fork, "/asd/v1/effects")?;
         let mut code_tree = crate::subtree::read_seed(repo, &fork, "/asd/v1/code")?;
+        let provenance_path = crate::paths::source_fingerprints_root();
+        let mut provenance = crate::subtree::read_seed(repo, &fork, &provenance_path)?;
 
         let is_gone = |file: &str| {
             whole_project && !parsed_files.contains(file) && !index_root.join(file).exists()
@@ -576,6 +587,17 @@ pub fn run_index(
             &mut pass1,
         );
         pass1.effects = effects_tree.len();
+
+        // Merge at the same speculation fork as symbols. Never certify old
+        // symbol locations with a newer file hash, and prune deleted IDs.
+        provenance.extend(run_source_fingerprints);
+        let live_ids: HashSet<&str> = qname_tree
+            .values()
+            .filter_map(|v| v["symbol_id"].as_str())
+            .collect();
+        provenance.retain(|id, _| live_ids.contains(id.as_str()));
+        repo.spec_set_json(spec1, &provenance_path, &Value::Object(provenance))
+            .map_err(|e| AsdError::Other(e.to_string()))?;
 
         repo.spec_set_json(spec1, "/asd/v1/index/by-qname", &Value::Object(qname_tree))
             .map_err(|e| AsdError::Other(e.to_string()))?;

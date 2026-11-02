@@ -7,8 +7,47 @@ use serde_json::{Value, json};
 
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
+/// These are byte-identity states, not confidence/quality buckets. `matched`
+/// certifies this symbol's indexed file/range only, never graph completeness.
+pub(super) fn verify_indexed_source(
+    mut source: Value,
+    indexed: Option<&Value>,
+    symbol: &agentstatedeveloper_core::Symbol,
+) -> Value {
+    let Some(indexed) = indexed else {
+        return source;
+    };
+    let Some(expected) = indexed["file_blake3"].as_str() else {
+        return source;
+    };
+    let binding_matches = indexed["file"] == symbol.file
+        && indexed["symbol_fp"] == symbol.symbol_fp
+        && indexed["start_line"] == symbol.start.line
+        && indexed["end_line"] == symbol.end.line
+        && expected.len() == 64
+        && expected.bytes().all(|b| b.is_ascii_hexdigit());
+    if !binding_matches {
+        source["index_match"] = json!("not_verified");
+        source["provenance_warning"] = json!("provenance does not match the indexed symbol record");
+        return source;
+    }
+    source["indexed_file_blake3"] = json!(expected);
+    let Some(current) = source["file_blake3"].as_str() else {
+        return source;
+    };
+    if current == expected {
+        source["index_match"] = json!("matched");
+        source
+    } else {
+        // Suppress text rather than presenting a different function at an old
+        // range as if it were the requested symbol.
+        json!({"status":"unavailable","reason":"source changed since indexing; reindex before using indexed ranges",
+            "index_match":"mismatch","file_blake3":current,"indexed_file_blake3":expected})
+    }
+}
+
 pub(super) fn source_excerpt(root: &Path, file: &str, start: u32, end: u32, lines: usize) -> Value {
-    let unavailable = |reason: &str| json!({"status":"unavailable", "reason":reason});
+    let unavailable = |reason: &str| json!({"status":"unavailable", "reason":reason,"index_match":"not_verified"});
     if start == 0 || end < start {
         return unavailable("invalid indexed range");
     }
@@ -33,8 +72,9 @@ pub(super) fn source_excerpt(root: &Path, file: &str, start: u32, end: u32, line
     if read.is_err() || bytes.len() as u64 > MAX_FILE_BYTES {
         return unavailable("source read failed or exceeded limit");
     }
+    let file_blake3 = blake3::hash(&bytes).to_hex().to_string();
     let Ok(text) = std::str::from_utf8(&bytes) else {
-        return unavailable("source is not UTF-8");
+        return json!({"status":"unavailable","reason":"source is not UTF-8","file_blake3":file_blake3,"index_match":"not_verified"});
     };
     let selected: Vec<_> = text
         .lines()
@@ -43,7 +83,7 @@ pub(super) fn source_excerpt(root: &Path, file: &str, start: u32, end: u32, line
         .take(lines)
         .collect();
     if selected.is_empty() {
-        return unavailable("indexed range is outside current source");
+        return json!({"status":"unavailable","reason":"indexed range is outside current source","file_blake3":file_blake3,"index_match":"not_verified"});
     }
     let joined = selected.join("\n");
     let mut boundary = joined.len().min(4096);
@@ -53,7 +93,7 @@ pub(super) fn source_excerpt(root: &Path, file: &str, start: u32, end: u32, line
     let excerpt = &joined[..boundary];
     let returned_end = start as usize + excerpt.lines().count().saturating_sub(1);
     // The excerpt fingerprint identifies current bytes, not indexed bytes.
-    json!({"status":"available", "origin":"current_worktree", "file_blake3":blake3::hash(&bytes).to_hex().to_string(),
+    json!({"status":"available", "origin":"current_worktree", "file_blake3":file_blake3,
         "index_match":"not_verified", "start_line":start, "end_line":returned_end,
         "indexed_end_line":end, "truncated":returned_end < end as usize || boundary < joined.len(),
         "complete_lines":boundary == joined.len(), "text":excerpt})
@@ -184,6 +224,38 @@ pub(super) fn bounded(mut value: Value, bytes: usize) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn freshness_requires_matching_file_and_symbol_binding() {
+        let symbol: agentstatedeveloper_core::Symbol = serde_json::from_value(json!({
+            "symbol_id":"sym_a","symbol_fp":"fp_a","qname":"f","file":"f.rs",
+            "language":"rust","kind":"function","start":{"line":2,"col":0},
+            "end":{"line":4,"col":1},"signature":null
+        }))
+        .unwrap();
+        let source = json!({"status":"available","file_blake3":"a".repeat(64),"text":"fn f() {}","index_match":"not_verified"});
+        let record = json!({"file":"f.rs","symbol_fp":"fp_a","start_line":2,"end_line":4,"file_blake3":"a".repeat(64)});
+        assert_eq!(
+            verify_indexed_source(source.clone(), Some(&record), &symbol)["index_match"],
+            "matched"
+        );
+        assert_eq!(
+            verify_indexed_source(source.clone(), None, &symbol)["index_match"],
+            "not_verified"
+        );
+        let mut changed = source.clone();
+        changed["file_blake3"] = json!("b".repeat(64));
+        let stale = verify_indexed_source(changed, Some(&record), &symbol);
+        assert_eq!(stale["index_match"], "mismatch");
+        assert!(stale.get("text").is_none());
+        for key in ["symbol_fp", "start_line", "file_blake3"] {
+            let mut bad = record.clone();
+            bad[key] = json!("invalid");
+            assert_eq!(
+                verify_indexed_source(source.clone(), Some(&bad), &symbol)["index_match"],
+                "not_verified"
+            );
+        }
+    }
     #[test]
     fn source_ranges_hashes_changes_and_unavailable_states() {
         let tmp = tempfile::tempdir().unwrap();

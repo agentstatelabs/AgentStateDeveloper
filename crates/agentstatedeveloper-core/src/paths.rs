@@ -97,6 +97,11 @@ pub fn file_meta_path(file: &str) -> String {
     format!("{}/meta/files/{}", ASD_ROOT, clean(file))
 }
 
+/// Per-symbol provenance committed atomically with the parsed symbol record.
+pub fn source_fingerprints_root() -> String {
+    format!("{}/index/source-fingerprints", ASD_ROOT)
+}
+
 pub fn schema_version_path() -> String {
     format!("{}/meta/schema-version", ASD_ROOT)
 }

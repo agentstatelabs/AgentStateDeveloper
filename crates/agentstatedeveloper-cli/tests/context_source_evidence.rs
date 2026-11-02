@@ -109,8 +109,34 @@ fn target_and_callers_include_real_source_and_explicit_limits() {
     assert!(
         callers
             .iter()
-            .all(|r| r["source"]["index_match"] == "not_verified")
+            .all(|r| r["source"]["index_match"] == "matched")
     );
+    // A changed caller does not invalidate the target's own source, but its
+    // stale caller body must be suppressed independently.
+    write(
+        root,
+        "crates/http/src/lib.rs",
+        "pub fn route(request: Option<&str>) -> bool {\n    match request { Some(p) => evidence_core::run_doctor(p), None => true }\n}\n",
+    );
+    let mixed = json(
+        root,
+        &[
+            "context-for",
+            "doctor.run_doctor",
+            "--include-caller-bodies",
+            "--quiet",
+        ],
+    );
+    assert_eq!(mixed["symbols"][0]["source"]["index_match"], "matched");
+    let changed_caller = mixed["symbols"][0]["callers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["file"] == "crates/http/src/lib.rs")
+        .unwrap();
+    assert_eq!(changed_caller["source"]["index_match"], "mismatch");
+    assert!(changed_caller["source"].get("text").is_none());
+    assert_eq!(mixed["source_contract"]["graph_freshness"], "not_verified");
     let limited = json(
         root,
         &[
@@ -191,9 +217,47 @@ fn target_and_callers_include_real_source_and_explicit_limits() {
         ],
     );
     assert_ne!(changed["symbols"][0]["source"]["file_blake3"], before);
-    assert_eq!(
-        changed["symbols"][0]["source"]["index_match"],
-        "not_verified"
+    assert_eq!(changed["symbols"][0]["source"]["index_match"], "mismatch");
+    assert!(changed["symbols"][0]["source"].get("text").is_none());
+    // Inserting lines must not return the old range even when the function's
+    // semantic body is unchanged. Reindexing restores a matched range.
+    write(
+        root,
+        "crates/core/src/doctor.rs",
+        "\n\n\n\npub fn run_doctor(path: &str) -> bool { path == \"changed\" }\n",
+    );
+    let moved = json(
+        root,
+        &[
+            "context-for",
+            "doctor.run_doctor",
+            "--include-body",
+            "--quiet",
+        ],
+    );
+    assert_eq!(moved["symbols"][0]["source"]["index_match"], "mismatch");
+    assert!(moved["symbols"][0]["source"].get("text").is_none());
+    assert!(
+        call(root, &["index", root.to_str().unwrap()])
+            .status
+            .success()
+    );
+    let refreshed = json(
+        root,
+        &[
+            "context-for",
+            "doctor.run_doctor",
+            "--include-body",
+            "--quiet",
+        ],
+    );
+    assert_eq!(refreshed["symbols"][0]["source"]["index_match"], "matched");
+    assert_eq!(refreshed["symbols"][0]["source"]["start_line"], 5);
+    assert!(
+        refreshed["symbols"][0]["source"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("changed")
     );
     fs::remove_file(root.join("crates/core/src/doctor.rs")).unwrap();
     let missing = json(
@@ -206,4 +270,24 @@ fn target_and_callers_include_real_source_and_explicit_limits() {
         ],
     );
     assert_eq!(missing["symbols"][0]["source"]["status"], "unavailable");
+    assert!(
+        call(root, &["index", root.to_str().unwrap()])
+            .status
+            .success()
+    );
+    let engine = agentstatedeveloper_core::Engine::open_sqlite(&root.join(".asd.db")).unwrap();
+    let provenance = engine
+        .repo
+        .get_tree(
+            &engine.ref_name,
+            &agentstatedeveloper_core::paths::source_fingerprints_root(),
+        )
+        .unwrap();
+    let removed_id = target["symbols"][0]["symbol"]["symbol_id"]
+        .as_str()
+        .unwrap();
+    assert!(
+        provenance.get(removed_id).is_none(),
+        "deleted-symbol provenance must be pruned"
+    );
 }

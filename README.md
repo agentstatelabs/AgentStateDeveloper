@@ -399,3 +399,20 @@ incomplete output explicit. Very small budgets may omit entire symbols.
 Safety guards remain with retained symbols; verbose metadata and source
 text may be removed first. This prototype is CLI-only; MCP parity and
 index-content fingerprint validation are separate follow-ups.
+
+### Indexed-source freshness
+
+New indexing commits per-symbol source provenance atomically with symbol
+metadata. `context-for` source excerpts report `index_match:matched` only
+when the entire current file fingerprint and the indexed symbol binding
+(file, body fingerprint, line range) agree. `mismatch` suppresses source text
+until reindexing. Legacy indexes or incompatible/missing provenance remain
+`not_verified`; unavailable files are explicit. These are byte-identity states,
+not confidence scores. Caller excerpts are checked independently.
+
+Matching a source file does not verify the whole call graph, Cargo/config
+changes, excluded files, dynamic dispatch or complete caller coverage. The
+source contract retains `graph_freshness:not_verified`. Partial-subdirectory
+indexing is not newly certified. Deleted-symbol provenance is pruned with
+canonical records; unrelated records are merged from the same index fork.
+CLI retrieval is implemented here; MCP source-excerpt parity remains separate.
