@@ -939,6 +939,7 @@ fn extract_call_edges_impl(
         };
         let enclosing_type = enclosing_type_qname(&sym.qname, &module_prefix, &known);
         collect_calls(
+            file,
             tree.root_node(),
             src_bytes,
             sym,
@@ -1021,6 +1022,10 @@ fn public_reference_aliases(
                     .strip_prefix("crate.")
                     .or_else(|| binding.qname_prefix.strip_prefix("self."))
                     .unwrap_or(&binding.qname_prefix);
+                let Some(raw) = workspace.rust_reference_path(file, raw) else {
+                    continue;
+                };
+                let raw = raw.as_str();
                 let local_root = format!("{module}.{raw}");
                 let target =
                     if workspace.contains(raw) && owned(raw) {
@@ -1220,6 +1225,7 @@ fn enclosing_type_qname(qname: &str, module_prefix: &str, known: &HashSet<&str>)
 
 #[allow(clippy::too_many_arguments)]
 fn collect_calls(
+    file: &str,
     node: Node<'_>,
     src: &[u8],
     sym: &ParsedSymbol,
@@ -1234,6 +1240,7 @@ fn collect_calls(
     if node.kind() == "call_expression" {
         if let Some(func) = node.child_by_field_name("function") {
             if let Some(callee) = resolve_callee(
+                file,
                 func,
                 src,
                 module_prefix,
@@ -1253,6 +1260,7 @@ fn collect_calls(
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         collect_calls(
+            file,
             child,
             src,
             sym,
@@ -1269,6 +1277,7 @@ fn collect_calls(
 
 #[allow(clippy::too_many_arguments)]
 fn resolve_callee(
+    file: &str,
     func: Node<'_>,
     src: &[u8],
     module_prefix: &str,
@@ -1287,7 +1296,8 @@ fn resolve_callee(
             }
             // Import map.
             if let Some(binding) = imports.get(&name) {
-                if let Some(target) = workspace.resolve_reference(&binding.qname_prefix) {
+                if let Some(target) = workspace.resolve_rust_reference(file, &binding.qname_prefix)
+                {
                     return Some(target);
                 }
             }
@@ -1324,7 +1334,7 @@ fn resolve_callee(
                 // Imported binding.
                 if let Some(binding) = imports.get(&obj_name) {
                     let candidate = format!("{}.{field_name}", binding.qname_prefix);
-                    if let Some(target) = workspace.resolve_reference(&candidate) {
+                    if let Some(target) = workspace.resolve_rust_reference(file, &candidate) {
                         return Some(target);
                     }
                 }
@@ -1335,13 +1345,13 @@ fn resolve_callee(
             // `Type::associated_fn()` or `module::function()`
             let text = node_text(func, src)?.replace("::", ".");
             // Direct workspace hit.
-            if let Some(target) = workspace.resolve_reference(&text) {
+            if let Some(target) = workspace.resolve_rust_reference(file, &text) {
                 return Some(target);
             }
             if let Some((head, tail)) = text.split_once('.') {
                 if let Some(binding) = imports.get(head) {
-                    if let Some(target) =
-                        workspace.resolve_reference(&format!("{}.{tail}", binding.qname_prefix))
+                    if let Some(target) = workspace
+                        .resolve_rust_reference(file, &format!("{}.{tail}", binding.qname_prefix))
                     {
                         return Some(target);
                     }
@@ -1349,7 +1359,7 @@ fn resolve_callee(
                 if head == "Self" {
                     if let Some(owner) = enclosing_type {
                         if let Some(target) =
-                            workspace.resolve_reference(&format!("{owner}.{tail}"))
+                            workspace.resolve_rust_reference(file, &format!("{owner}.{tail}"))
                         {
                             return Some(target);
                         }

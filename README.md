@@ -416,3 +416,19 @@ source contract retains `graph_freshness:not_verified`. Partial-subdirectory
 indexing is not newly certified. Deleted-symbol provenance is pruned with
 canonical records; unrelated records are merged from the same index fork.
 CLI retrieval is implemented here; MCP source-excerpt parity remains separate.
+
+
+### Consumer-scoped Cargo dependency aliases
+
+Rust indexing now maps normal path-dependency keys in each consuming package to
+indexed Cargo library identities, including `package` renames and `[lib]`
+name/path overrides. Calls through qualified paths, renamed imports and public
+re-export chains retain package scope; aliases are not added to the global graph.
+Reindex after Cargo manifest changes to refresh edges, even when Rust source
+bytes did not change. Excerpt file freshness does not certify manifest/graph freshness.
+
+Only indexed path libraries within the index root are resolved. Unknown/registry,
+workspace-inherited, optional, dev/build-only and target-specific declarations
+are not inferred from features or build activation. Known unsupported keys block
+matching global-library fallback; normalized-key collisions are rejected. This
+change does not implement complete Cargo metadata or Rust compiler name resolution.

@@ -112,3 +112,189 @@ fn cargo_public_name_reexports_bind_callers_and_reindex_moves_and_removes_edges(
         ]
     );
 }
+
+#[test]
+fn dependency_keys_are_consumer_scoped_and_manifest_reindex_moves_edges() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write(
+        root,
+        "crates/api/Cargo.toml",
+        "[package]\nname='real-api'\nversion='0.1.0'\n[lib]\nname='public_api'\npath='src/entry.rs'\n",
+    );
+    write(
+        root,
+        "crates/api/src/entry.rs",
+        "pub mod events; pub use events::record_event as publish;",
+    );
+    write(root, "crates/api/src/events.rs", "pub fn record_event() {}");
+    write(
+        root,
+        "crates/decoy/Cargo.toml",
+        "[package]\nname='decoy-api'\nversion='0.1.0'\n[lib]\nname='decoy_api'\n",
+    );
+    write(root, "crates/decoy/src/lib.rs", "pub fn publish() {}");
+    write(
+        root,
+        "crates/facade/Cargo.toml",
+        "[package]\nname='front'\nversion='0.1.0'\n[lib]\nname='front_api'\n[dependencies]\napi_dep={package='real-api',path='../api'}\n",
+    );
+    write(
+        root,
+        "crates/facade/src/lib.rs",
+        "pub use api_dep::publish as emit;",
+    );
+    let consumer = "[package]\nname='consumer'\nversion='0.1.0'\n[dependencies]\napi_dep={package='real-api',path='../api'}\nevent_front={package='front',path='../facade'}\n";
+    write(root, "crates/consumer/Cargo.toml", consumer);
+    write(
+        root,
+        "crates/consumer/src/lib.rs",
+        "use api_dep::publish as audit; use api_dep as backend; fn bare(){audit();} fn qualified(){api_dep::publish();} fn namespace(){backend::publish();} fn facade(){event_front::emit();}",
+    );
+    write(
+        root,
+        "crates/other/Cargo.toml",
+        "[package]\nname='other'\nversion='0.1.0'\n[dependencies]\napi_dep={package='decoy-api',path='../decoy'}\n",
+    );
+    write(
+        root,
+        "crates/other/src/lib.rs",
+        "fn other(){api_dep::publish();}",
+    );
+    index(root);
+    assert_eq!(
+        callers(root, "events.record_event"),
+        vec![
+            "consumer.lib.bare",
+            "consumer.lib.facade",
+            "consumer.lib.namespace",
+            "consumer.lib.qualified"
+        ]
+    );
+    assert_eq!(callers(root, "decoy.lib.publish"), vec!["other.lib.other"]);
+    // Only the consumer manifest changes; its source bytes remain untouched.
+    write(
+        root,
+        "crates/consumer/Cargo.toml",
+        &consumer.replace(
+            "package='real-api',path='../api'",
+            "package='decoy-api',path='../decoy'",
+        ),
+    );
+    index(root);
+    assert_eq!(
+        callers(root, "events.record_event"),
+        vec!["consumer.lib.facade"]
+    );
+    assert_eq!(
+        callers(root, "decoy.lib.publish"),
+        vec![
+            "consumer.lib.bare",
+            "consumer.lib.namespace",
+            "consumer.lib.qualified",
+            "other.lib.other"
+        ]
+    );
+    index(root);
+    assert_eq!(
+        callers(root, "events.record_event"),
+        vec!["consumer.lib.facade"]
+    );
+    write(root, "crates/consumer/Cargo.toml", consumer);
+    index(root);
+    assert_eq!(callers(root, "events.record_event").len(), 4);
+    assert_eq!(callers(root, "decoy.lib.publish"), vec!["other.lib.other"]);
+}
+
+#[test]
+fn unsupported_dependency_scopes_do_not_fall_back_to_global_library_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write(
+        root,
+        "crates/api/Cargo.toml",
+        "[package]\nname='real-api'\nversion='0.1.0'\n[lib]\nname='public_api'\n",
+    );
+    write(root, "crates/api/src/lib.rs", "pub fn check() {}");
+    for (name, table) in [
+        (
+            "mismatch",
+            "[dependencies]\npublic_api={package='wrong',path='../api'}\n",
+        ),
+        ("inherited", "[dependencies]\npublic_api={workspace=true}\n"),
+        ("registry", "[dependencies]\npublic_api='1'\n"),
+        (
+            "dev",
+            "[dev-dependencies]\npublic_api={package='real-api',path='../api'}\n",
+        ),
+        (
+            "build",
+            "[build-dependencies]\npublic_api={package='real-api',path='../api'}\n",
+        ),
+        (
+            "target",
+            "[target.'cfg(unix)'.dependencies]\npublic_api={package='real-api',path='../api'}\n",
+        ),
+        (
+            "optional",
+            "[dependencies]\npublic_api={package='real-api',path='../api',optional=true}\n",
+        ),
+    ] {
+        write(
+            root,
+            &format!("crates/{name}/Cargo.toml"),
+            &format!("[package]\nname='{name}'\nversion='0.1.0'\n{table}"),
+        );
+        write(
+            root,
+            &format!("crates/{name}/src/lib.rs"),
+            "use public_api::check as inspect; fn qualified(){public_api::check();} fn renamed(){inspect();}",
+        );
+    }
+    index(root);
+    assert!(callers(root, "api.lib.check").is_empty());
+}
+
+#[test]
+fn dependency_paths_outside_index_root_and_normalized_key_collisions_are_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write(
+        root,
+        "crates/api/Cargo.toml",
+        "[package]\nname='real-api'\nversion='0.1.0'\n[lib]\nname='public_api'\n",
+    );
+    write(root, "crates/api/src/lib.rs", "pub fn check() {}");
+    write(
+        outside.path(),
+        "Cargo.toml",
+        "[package]\nname='real-api'\nversion='0.1.0'\n[lib]\nname='public_api'\n",
+    );
+    write(outside.path(), "src/lib.rs", "pub fn check() {}");
+    write(
+        root,
+        "crates/external/Cargo.toml",
+        &format!(
+            "[package]\nname='external'\nversion='0.1.0'\n[dependencies]\npublic_api={{package='real-api',path='{}'}}\n",
+            outside.path().display()
+        ),
+    );
+    write(
+        root,
+        "crates/external/src/lib.rs",
+        "fn external(){public_api::check();}",
+    );
+    write(
+        root,
+        "crates/collision/Cargo.toml",
+        "[package]\nname='collision'\nversion='0.1.0'\n[dependencies]\npublic-api={package='real-api',path='../api'}\npublic_api={package='wrong',path='../api'}\n",
+    );
+    write(
+        root,
+        "crates/collision/src/lib.rs",
+        "fn collision(){public_api::check();}",
+    );
+    index(root);
+    assert!(callers(root, "api.lib.check").is_empty());
+}

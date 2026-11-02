@@ -488,6 +488,101 @@ pub fn run_index(
             break;
         }
     }
+    // Cargo aliases belong to the consuming package, not the global namespace.
+    // Only normal path dependencies with indexed libraries inside this root bind.
+    let mut dependency_scopes = HashMap::new();
+    let canonical_root = index_root.canonicalize().ok();
+    for manifest_path in &seen_manifests {
+        let Some(dir) = manifest_path.parent() else {
+            continue;
+        };
+        let Some(manifest) = std::fs::read_to_string(manifest_path)
+            .ok()
+            .and_then(|s| s.parse::<toml::Value>().ok())
+        else {
+            continue;
+        };
+        let mut scope = HashMap::new();
+        if let Some(deps) = manifest.get("dependencies").and_then(|v| v.as_table()) {
+            for (key, value) in deps {
+                let target = (|| -> Option<String> {
+                    if value.get("optional").and_then(|v| v.as_bool()) == Some(true) {
+                        return None;
+                    }
+                    let path = value.get("path")?.as_str()?;
+                    if value.get("workspace").and_then(|v| v.as_bool()) == Some(true) {
+                        return None;
+                    }
+                    let folder = dir.join(path).canonicalize().ok()?;
+                    let root = canonical_root.as_ref()?;
+                    if !folder.starts_with(root) {
+                        return None;
+                    }
+                    let dependency: toml::Value =
+                        std::fs::read_to_string(folder.join("Cargo.toml"))
+                            .ok()?
+                            .parse()
+                            .ok()?;
+                    let package = dependency.get("package")?.get("name")?.as_str()?;
+                    let expected = value.get("package").and_then(|v| v.as_str()).unwrap_or(key);
+                    if expected != package {
+                        return None;
+                    }
+                    let entry = dependency
+                        .get("lib")
+                        .and_then(|v| v.get("path"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("src/lib.rs");
+                    let entry = folder.join(entry).canonicalize().ok()?;
+                    let relative = entry
+                        .strip_prefix(root)
+                        .ok()?
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    workspace.rust_crates.get(&relative).cloned()
+                })();
+                scope
+                    .entry(key.replace('-', "_"))
+                    .and_modify(|binding| *binding = None)
+                    .or_insert(target);
+            }
+        }
+        // No target/features/dev/build activation inference. Block conflicting keys.
+        for table in ["dev-dependencies", "build-dependencies"] {
+            if let Some(deps) = manifest.get(table).and_then(|v| v.as_table()) {
+                for key in deps.keys() {
+                    scope.entry(key.replace('-', "_")).or_insert(None);
+                }
+            }
+        }
+        if let Some(targets) = manifest.get("target").and_then(|v| v.as_table()) {
+            for target in targets.values() {
+                for table in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                    if let Some(deps) = target.get(table).and_then(|v| v.as_table()) {
+                        for key in deps.keys() {
+                            scope.insert(key.replace('-', "_"), None);
+                        }
+                    }
+                }
+            }
+        }
+        dependency_scopes.insert(dir.to_path_buf(), scope);
+    }
+    for ctx in &file_ctxs {
+        if ctx.adapter.language() != "rust" {
+            continue;
+        }
+        let full = index_root.join(&ctx.file_str);
+        if let Some(scope) = full
+            .ancestors()
+            .skip(1)
+            .find_map(|dir| dependency_scopes.get(dir))
+        {
+            workspace
+                .rust_dependencies
+                .insert(ctx.file_str.clone(), scope.clone());
+        }
+    }
     for ctx in &file_ctxs {
         for (alias, target) in ctx.adapter.extract_reference_aliases(
             &ctx.file_str,

@@ -67,12 +67,37 @@ pub struct WorkspaceSymbols {
     pub symbol_files: HashMap<String, String>,
     /// Rust library entry-point path -> Cargo library name (normalized underscores).
     pub rust_crates: HashMap<String, String>,
+    /// Source file -> consumer-scoped dependency key -> indexed library name.
+    /// None blocks unsupported/unknown dependencies instead of guessing globally.
+    pub rust_dependencies: HashMap<String, HashMap<String, Option<String>>>,
     /// Public reference paths -> possible canonical paths or other aliases.
     /// Multiple candidates are retained so conditional/ambiguous exports never guess.
     pub reference_aliases: HashMap<String, HashSet<String>>,
 }
 
 impl WorkspaceSymbols {
+    /// Apply only this consumer's Cargo dependency aliases, never global aliases.
+    pub fn rust_reference_path(&self, file: &str, reference: &str) -> Option<String> {
+        let (head, tail) = reference.split_once('.').unwrap_or((reference, ""));
+        if let Some(binding) = self
+            .rust_dependencies
+            .get(file)
+            .and_then(|scope| scope.get(head))
+        {
+            let library = binding.as_ref()?;
+            return Some(if tail.is_empty() {
+                library.clone()
+            } else {
+                format!("{library}.{tail}")
+            });
+        }
+        Some(reference.to_owned())
+    }
+
+    pub fn resolve_rust_reference(&self, file: &str, reference: &str) -> Option<String> {
+        self.resolve_reference(&self.rust_reference_path(file, reference)?)
+    }
+
     /// Exact qname membership test.
     pub fn contains(&self, qname: &str) -> bool {
         self.qnames.contains(qname)
