@@ -238,8 +238,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("a.txt"), "foo\nfoobar\nfoo_bar\n").unwrap();
         let hits = rg_occurrences(tmp.path(), "foo", &[], 50).unwrap();
-        // --word-regexp matches "foo" on its own line and "foo_bar" (underscore
-        // is a word char), but NOT "foobar".
+        // --word-regexp matches only the standalone word. Letters and
+        // underscores both continue a word, so neither suffix is a boundary.
         let lines: Vec<u64> = hits
             .iter()
             .filter_map(|h| h.get("line").and_then(|l| l.as_u64()))
@@ -249,6 +249,6 @@ mod tests {
             !lines.contains(&2),
             "foobar should not match word `foo`; got {hits:?}"
         );
-        assert!(lines.contains(&3));
+        assert!(!lines.contains(&3), "underscore continues the word; got {hits:?}");
     }
 }
