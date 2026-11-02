@@ -245,6 +245,7 @@ pub fn run_index(
     let mut run_effects: Vec<(String, Vec<crate::schema::Effect>, String)> = Vec::new();
     // (language, "clean_file/symbol_fp", Symbol) — the `/asd/v1/code` tree.
     let mut run_code: Vec<(String, String, Value)> = Vec::new();
+    let mut run_source_fingerprints: Vec<(String, Value)> = Vec::new();
     // Every file this run parsed, as its symbols record it: what this run
     // may declare stale entries in (see `crate::stale`).
     let mut parsed_files: HashSet<String> = HashSet::new();
@@ -281,6 +282,57 @@ pub fn run_index(
     // Plan L t-005: aggregate dynamic-dispatch hints across all files.
     let mut all_dynamic_dispatch: Vec<crate::adapter::DynamicDispatchHint> = Vec::new();
 
+    // Preserve distinct identities for equal module paths in different Rust crates.
+    // Keep legacy names for non-colliding modules, and retain already-qualified
+    // names across subsequent whole-project runs after a counterpart is deleted.
+    let namespace = |file: &str| -> Option<(String, String)> {
+        let (_, tail) = file.rsplit_once("/src/")?;
+        let module = tail.strip_suffix(".rs")?;
+        if matches!(module, "lib" | "main") {
+            return None;
+        }
+        Some((
+            module.replace('/', "."),
+            file.strip_suffix(".rs")?.replace('/', "."),
+        ))
+    };
+    let mut groups: HashMap<String, HashSet<String>> = HashMap::new();
+    for (file, adapter) in &files {
+        if adapter.language() != "rust" {
+            continue;
+        }
+        let relative = file
+            .strip_prefix(&index_root)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if let Some((legacy, _)) = namespace(&relative) {
+            groups.entry(legacy).or_default().insert(relative);
+        }
+    }
+    let mut rust_modules: HashMap<String, (String, String)> = HashMap::new();
+    for group in groups.values().filter(|files| files.len() > 1) {
+        for file in group {
+            if let Some(names) = namespace(file) {
+                rust_modules.insert(file.clone(), names);
+            }
+        }
+    }
+    for symbol in by_qname.values() {
+        if symbol.get("language").and_then(Value::as_str) != Some("rust") {
+            continue;
+        }
+        if let (Some(file), Some(qname)) = (
+            symbol.get("file").and_then(Value::as_str),
+            symbol.get("qname").and_then(Value::as_str),
+        ) {
+            if let Some((legacy, qualified)) = namespace(file) {
+                if qname.starts_with(&format!("{qualified}.")) {
+                    rust_modules.insert(file.to_owned(), (legacy, qualified));
+                }
+            }
+        }
+    }
     for (idx, (file, adapter)) in files.iter().enumerate() {
         if let Some(cb) = progress {
             cb(file, idx + 1, total);
@@ -292,6 +344,14 @@ pub fn run_index(
         parsed_files.insert(file_str.clone());
 
         let mut parsed = adapter.parse_symbols(&file_str, &source)?;
+        if let Some((legacy, qualified)) = rust_modules.get(&file_str) {
+            for symbol in &mut parsed {
+                if let Some(tail) = symbol.qname.strip_prefix(&format!("{legacy}.")) {
+                    symbol.qname = format!("{qualified}.{tail}");
+                }
+            }
+        }
+        let file_blake3 = blake3::hash(source.as_bytes()).to_hex().to_string();
         disambiguated_count += disambiguate_qnames(&mut parsed);
 
         // Plan L t-005: detect dynamic-dispatch sites the call-graph
@@ -322,6 +382,13 @@ pub fn run_index(
             };
 
             let sym_val = serde_json::to_value(&sym).map_err(|e| AsdError::Other(e.to_string()))?;
+            run_source_fingerprints.push((
+                symbol_id.clone(),
+                serde_json::json!({
+                    "file":sym.file,"symbol_fp":sym.symbol_fp,"start_line":sym.start.line,
+                    "end_line":sym.end.line,"file_blake3":file_blake3
+                }),
+            ));
 
             // Accumulate into in-memory maps — no repo writes yet.
             // Detect collisions: same qname parsed from two different files.
@@ -400,8 +467,14 @@ pub fn run_index(
     // by_qname (moves it into a Value::Object).
     // -----------------------------------------------------------------------
     let mut workspace = WorkspaceSymbols::default();
+    workspace.rust_modules = rust_modules;
     for (qname, sym_val) in &by_qname {
         workspace.qnames.insert(qname.clone());
+        if let Some(file) = sym_val.get("file").and_then(|v| v.as_str()) {
+            workspace
+                .symbol_files
+                .insert(qname.clone(), file.to_string());
+        }
         // Extract kind from the serialized Symbol JSON (e.g. "method", "class").
         if let Some(kind_str) = sym_val.get("kind").and_then(|v| v.as_str()) {
             if let Ok(kind) = serde_json::from_value::<crate::schema::SymbolKind>(
@@ -423,6 +496,165 @@ pub fn run_index(
     for ctx in &file_ctxs {
         let props = ctx.adapter.extract_property_types(&ctx.parsed);
         workspace.properties.extend(props);
+    }
+
+    // Discover Rust Cargo library identities, including [lib].name/path overrides.
+    // Stay within this index root; no metadata command or dependency execution.
+    let mut seen_manifests = HashSet::new();
+    for ctx in &file_ctxs {
+        if ctx.adapter.language() != "rust" {
+            continue;
+        }
+        let full = index_root.join(&ctx.file_str);
+        for dir in full.ancestors().skip(1) {
+            if !dir.starts_with(&index_root) {
+                break;
+            }
+            let manifest_path = dir.join("Cargo.toml");
+            if !manifest_path.is_file() {
+                continue;
+            }
+            if seen_manifests.insert(manifest_path.clone()) {
+                if let Some(manifest) = std::fs::read_to_string(&manifest_path)
+                    .ok()
+                    .and_then(|s| s.parse::<toml::Value>().ok())
+                {
+                    let name = manifest
+                        .get("lib")
+                        .and_then(|l| l.get("name"))
+                        .and_then(|n| n.as_str())
+                        .or_else(|| {
+                            manifest
+                                .get("package")
+                                .and_then(|p| p.get("name"))
+                                .and_then(|n| n.as_str())
+                        });
+                    let lib_path = manifest
+                        .get("lib")
+                        .and_then(|l| l.get("path"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("src/lib.rs");
+                    if let (Some(name), Ok(relative)) =
+                        (name, dir.join(lib_path).strip_prefix(&index_root))
+                    {
+                        workspace.rust_crates.insert(
+                            relative.to_string_lossy().replace('\\', "/"),
+                            name.replace('-', "_"),
+                        );
+                    }
+                }
+            }
+            break;
+        }
+    }
+    // Cargo aliases belong to the consuming package, not the global namespace.
+    // Only normal path dependencies with indexed libraries inside this root bind.
+    let mut dependency_scopes = HashMap::new();
+    let canonical_root = index_root.canonicalize().ok();
+    for manifest_path in &seen_manifests {
+        let Some(dir) = manifest_path.parent() else {
+            continue;
+        };
+        let Some(manifest) = std::fs::read_to_string(manifest_path)
+            .ok()
+            .and_then(|s| s.parse::<toml::Value>().ok())
+        else {
+            continue;
+        };
+        let mut scope = HashMap::new();
+        if let Some(deps) = manifest.get("dependencies").and_then(|v| v.as_table()) {
+            for (key, value) in deps {
+                let target = (|| -> Option<String> {
+                    if value.get("optional").and_then(|v| v.as_bool()) == Some(true) {
+                        return None;
+                    }
+                    let path = value.get("path")?.as_str()?;
+                    if value.get("workspace").and_then(|v| v.as_bool()) == Some(true) {
+                        return None;
+                    }
+                    let folder = dir.join(path).canonicalize().ok()?;
+                    let root = canonical_root.as_ref()?;
+                    if !folder.starts_with(root) {
+                        return None;
+                    }
+                    let dependency: toml::Value =
+                        std::fs::read_to_string(folder.join("Cargo.toml"))
+                            .ok()?
+                            .parse()
+                            .ok()?;
+                    let package = dependency.get("package")?.get("name")?.as_str()?;
+                    let expected = value.get("package").and_then(|v| v.as_str()).unwrap_or(key);
+                    if expected != package {
+                        return None;
+                    }
+                    let entry = dependency
+                        .get("lib")
+                        .and_then(|v| v.get("path"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("src/lib.rs");
+                    let entry = folder.join(entry).canonicalize().ok()?;
+                    let relative = entry
+                        .strip_prefix(root)
+                        .ok()?
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    workspace.rust_crates.get(&relative).cloned()
+                })();
+                scope
+                    .entry(key.replace('-', "_"))
+                    .and_modify(|binding| *binding = None)
+                    .or_insert(target);
+            }
+        }
+        // No target/features/dev/build activation inference. Block conflicting keys.
+        for table in ["dev-dependencies", "build-dependencies"] {
+            if let Some(deps) = manifest.get(table).and_then(|v| v.as_table()) {
+                for key in deps.keys() {
+                    scope.entry(key.replace('-', "_")).or_insert(None);
+                }
+            }
+        }
+        if let Some(targets) = manifest.get("target").and_then(|v| v.as_table()) {
+            for target in targets.values() {
+                for table in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                    if let Some(deps) = target.get(table).and_then(|v| v.as_table()) {
+                        for key in deps.keys() {
+                            scope.insert(key.replace('-', "_"), None);
+                        }
+                    }
+                }
+            }
+        }
+        dependency_scopes.insert(dir.to_path_buf(), scope);
+    }
+    for ctx in &file_ctxs {
+        if ctx.adapter.language() != "rust" {
+            continue;
+        }
+        let full = index_root.join(&ctx.file_str);
+        if let Some(scope) = full
+            .ancestors()
+            .skip(1)
+            .find_map(|dir| dependency_scopes.get(dir))
+        {
+            workspace
+                .rust_dependencies
+                .insert(ctx.file_str.clone(), scope.clone());
+        }
+    }
+    for ctx in &file_ctxs {
+        for (alias, target) in ctx.adapter.extract_reference_aliases(
+            &ctx.file_str,
+            &ctx.source,
+            &ctx.parsed,
+            &workspace,
+        ) {
+            workspace
+                .reference_aliases
+                .entry(alias)
+                .or_default()
+                .insert(target);
+        }
     }
 
     // Flush Pass 1: 3 spec_set_json calls (complete subtrees) → O(N) objects.
@@ -452,6 +684,8 @@ pub fn run_index(
         let mut qname_tree = crate::subtree::read_seed(repo, &fork, "/asd/v1/index/by-qname")?;
         let mut effects_tree = crate::subtree::read_seed(repo, &fork, "/asd/v1/effects")?;
         let mut code_tree = crate::subtree::read_seed(repo, &fork, "/asd/v1/code")?;
+        let provenance_path = crate::paths::source_fingerprints_root();
+        let mut provenance = crate::subtree::read_seed(repo, &fork, &provenance_path)?;
 
         let is_gone = |file: &str| {
             whole_project && !parsed_files.contains(file) && !index_root.join(file).exists()
@@ -507,6 +741,17 @@ pub fn run_index(
             &mut pass1,
         );
         pass1.effects = effects_tree.len();
+
+        // Merge at the same speculation fork as symbols. Never certify old
+        // symbol locations with a newer file hash, and prune deleted IDs.
+        provenance.extend(run_source_fingerprints);
+        let live_ids: HashSet<&str> = qname_tree
+            .values()
+            .filter_map(|v| v["symbol_id"].as_str())
+            .collect();
+        provenance.retain(|id, _| live_ids.contains(id.as_str()));
+        repo.spec_set_json(spec1, &provenance_path, &Value::Object(provenance))
+            .map_err(|e| AsdError::Other(e.to_string()))?;
 
         repo.spec_set_json(spec1, "/asd/v1/index/by-qname", &Value::Object(qname_tree))
             .map_err(|e| AsdError::Other(e.to_string()))?;

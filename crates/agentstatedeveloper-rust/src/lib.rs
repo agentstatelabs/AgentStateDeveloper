@@ -68,6 +68,16 @@ impl LanguageAdapter for RustAdapter {
         infer_service_endpoints_in_rust(file, source, symbols)
     }
 
+    fn extract_reference_aliases(
+        &self,
+        file: &str,
+        source: &str,
+        symbols: &[ParsedSymbol],
+        workspace: &WorkspaceSymbols,
+    ) -> Vec<(String, String)> {
+        public_reference_aliases(file, source, symbols, workspace)
+    }
+
     fn extract_call_edges(
         &self,
         file: &str,
@@ -887,7 +897,11 @@ fn extract_call_edges_impl(
     symbols: &[ParsedSymbol],
     workspace: &WorkspaceSymbols,
 ) -> Vec<CallEdge> {
-    let module_prefix = module_qname_prefix(file);
+    let module_prefix = workspace
+        .rust_modules
+        .get(file)
+        .map(|(_, qualified)| qualified.clone())
+        .unwrap_or_else(|| module_qname_prefix(file));
     let known: HashSet<&str> = symbols.iter().map(|s| s.qname.as_str()).collect();
 
     // simple_name -> qname for intra-module resolution.
@@ -929,6 +943,7 @@ fn extract_call_edges_impl(
         };
         let enclosing_type = enclosing_type_qname(&sym.qname, &module_prefix, &known);
         collect_calls(
+            file,
             tree.root_node(),
             src_bytes,
             sym,
@@ -949,6 +964,125 @@ fn extract_call_edges_impl(
             .then_with(|| a.callee_qname.cmp(&b.callee_qname))
     });
     out
+}
+
+/// Collect explicit public exports from a Rust library entry point.
+/// Wildcard exports and restricted pub(crate)/pub(super) exports are not guessed.
+fn public_reference_aliases(
+    file: &str,
+    source: &str,
+    symbols: &[ParsedSymbol],
+    workspace: &WorkspaceSymbols,
+) -> Vec<(String, String)> {
+    let crate_name = workspace.rust_crates.get(file).cloned().or_else(|| {
+        file.ends_with("/src/lib.rs")
+            .then(|| crate_name_from_path(file).map(|s| s.replace('-', "_")))
+            .flatten()
+    });
+    let Some(crate_name) = crate_name else {
+        return Vec::new();
+    };
+    let source_dir = file
+        .rsplit_once('/')
+        .map(|(dir, _)| format!("{dir}/"))
+        .unwrap_or_default();
+    let owned = |q: &str| {
+        workspace
+            .symbol_files
+            .get(q)
+            .is_some_and(|f| f.starts_with(&source_dir))
+    };
+    let module = module_qname_prefix(file);
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_rust::LANGUAGE.into())
+        .is_err()
+    {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(source.as_bytes(), None) else {
+        return Vec::new();
+    };
+    let mut aliases = Vec::new();
+    let mut cursor = tree.root_node().walk();
+    for node in tree.root_node().named_children(&mut cursor) {
+        let mut child_cursor = node.walk();
+        let public = node.named_children(&mut child_cursor).any(|n| {
+            n.kind() == "visibility_modifier"
+                && node_text(n, source.as_bytes()).as_deref() == Some("pub")
+        });
+        if !public {
+            continue;
+        }
+        if node.kind() == "use_declaration" {
+            let Some(argument) = node.child_by_field_name("argument") else {
+                continue;
+            };
+            let mut bindings = HashMap::new();
+            collect_use_tree(argument, source.as_bytes(), "", &mut bindings);
+            for (local, binding) in bindings {
+                let raw = binding
+                    .qname_prefix
+                    .strip_prefix("crate.")
+                    .or_else(|| binding.qname_prefix.strip_prefix("self."))
+                    .unwrap_or(&binding.qname_prefix);
+                let Some(raw) = workspace.rust_reference_path(file, raw) else {
+                    continue;
+                };
+                let raw = raw.as_str();
+                let local_root = format!("{module}.{raw}");
+                let target =
+                    if workspace.contains(raw) && owned(raw) {
+                        raw.to_string()
+                    } else if workspace.contains(&local_root) && owned(&local_root) {
+                        local_root
+                    } else if workspace.symbol_files.iter().any(|(q, f)| {
+                        q.starts_with(&format!("{raw}.")) && f.starts_with(&source_dir)
+                    }) {
+                        raw.to_string()
+                    } else if workspace
+                        .rust_crates
+                        .values()
+                        .any(|name| raw.starts_with(&format!("{name}.")))
+                    {
+                        raw.to_string()
+                    } else {
+                        format!("{crate_name}.{raw}")
+                    };
+                aliases.push((format!("{crate_name}.{local}"), target));
+            }
+        } else if let Some(name) = node
+            .child_by_field_name("name")
+            .and_then(|n| node_text(n, source.as_bytes()))
+        {
+            let canonical = format!("{module}.{name}");
+            if symbols.iter().any(|s| s.qname == canonical) {
+                aliases.push((format!("{crate_name}.{name}"), canonical.clone()));
+                // Public types also expose their associated functions at this path.
+                for s in symbols
+                    .iter()
+                    .filter(|s| s.qname.starts_with(&format!("{canonical}.")))
+                {
+                    aliases.push((s.qname.replacen(&module, &crate_name, 1), s.qname.clone()));
+                }
+            } else if node.kind() == "mod_item" {
+                // Inline modules keep the lib prefix; file modules do not. Require
+                // an owned definition rather than borrowing another crate's module.
+                let scoped = workspace
+                    .rust_reference_path(file, &name)
+                    .unwrap_or_else(|| name.clone());
+                let target = [&canonical, &scoped, &name].into_iter().find(|prefix| {
+                    workspace.symbol_files.iter().any(|(q, f)| {
+                        q.starts_with(&format!("{prefix}.")) && f.starts_with(&source_dir)
+                    })
+                });
+                if let Some(target) = target {
+                    aliases.push((format!("{crate_name}.{name}"), target.clone()));
+                }
+            }
+        }
+    }
+    aliases
 }
 
 /// Import binding: local name → qname prefix in ASD dotted form.
@@ -1098,6 +1232,7 @@ fn enclosing_type_qname(qname: &str, module_prefix: &str, known: &HashSet<&str>)
 
 #[allow(clippy::too_many_arguments)]
 fn collect_calls(
+    file: &str,
     node: Node<'_>,
     src: &[u8],
     sym: &ParsedSymbol,
@@ -1112,6 +1247,7 @@ fn collect_calls(
     if node.kind() == "call_expression" {
         if let Some(func) = node.child_by_field_name("function") {
             if let Some(callee) = resolve_callee(
+                file,
                 func,
                 src,
                 module_prefix,
@@ -1131,6 +1267,7 @@ fn collect_calls(
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         collect_calls(
+            file,
             child,
             src,
             sym,
@@ -1147,6 +1284,7 @@ fn collect_calls(
 
 #[allow(clippy::too_many_arguments)]
 fn resolve_callee(
+    file: &str,
     func: Node<'_>,
     src: &[u8],
     module_prefix: &str,
@@ -1165,8 +1303,9 @@ fn resolve_callee(
             }
             // Import map.
             if let Some(binding) = imports.get(&name) {
-                if workspace.contains(&binding.qname_prefix) {
-                    return Some(binding.qname_prefix.clone());
+                if let Some(target) = workspace.resolve_rust_reference(file, &binding.qname_prefix)
+                {
+                    return Some(target);
                 }
             }
             None
@@ -1202,8 +1341,8 @@ fn resolve_callee(
                 // Imported binding.
                 if let Some(binding) = imports.get(&obj_name) {
                     let candidate = format!("{}.{field_name}", binding.qname_prefix);
-                    if workspace.contains(&candidate) {
-                        return Some(candidate);
+                    if let Some(target) = workspace.resolve_rust_reference(file, &candidate) {
+                        return Some(target);
                     }
                 }
             }
@@ -1213,8 +1352,26 @@ fn resolve_callee(
             // `Type::associated_fn()` or `module::function()`
             let text = node_text(func, src)?.replace("::", ".");
             // Direct workspace hit.
-            if workspace.contains(&text) {
-                return Some(text.clone());
+            if let Some(target) = workspace.resolve_rust_reference(file, &text) {
+                return Some(target);
+            }
+            if let Some((head, tail)) = text.split_once('.') {
+                if let Some(binding) = imports.get(head) {
+                    if let Some(target) = workspace
+                        .resolve_rust_reference(file, &format!("{}.{tail}", binding.qname_prefix))
+                    {
+                        return Some(target);
+                    }
+                }
+                if head == "Self" {
+                    if let Some(owner) = enclosing_type {
+                        if let Some(target) =
+                            workspace.resolve_rust_reference(file, &format!("{owner}.{tail}"))
+                        {
+                            return Some(target);
+                        }
+                    }
+                }
             }
             // Try prefixing with module.
             if !module_prefix.is_empty() {
@@ -1223,11 +1380,7 @@ fn resolve_callee(
                     return Some(candidate);
                 }
             }
-            // Local simple name (last segment) in by_simple.
-            let simple = text.rsplit('.').next()?;
-            if let Some(q) = by_simple.get(simple) {
-                return Some(q.clone());
-            }
+            // A matching final segment is not proof that a qualified path resolves.
             None
         }
         _ => None,
@@ -1443,5 +1596,186 @@ mod service_endpoint_tests {
         // `.get("/k")` on a map (no `://`) must not be an HTTP client call.
         let src = "fn f(m: HashMap<String, u8>) {\n    let _ = m.get(\"/k\");\n}\n";
         assert!(outb(&detect(src)).is_empty(), "{:?}", detect(src));
+    }
+}
+
+#[cfg(test)]
+mod public_export_call_tests {
+    use super::*;
+    fn edges(files: &[(&str, &str)], override_name: Option<&str>) -> Vec<CallEdge> {
+        let adapter = RustAdapter;
+        let parsed: Vec<_> = files
+            .iter()
+            .map(|(f, s)| adapter.parse_symbols(f, s).unwrap())
+            .collect();
+        let mut ws = WorkspaceSymbols::default();
+        for ((file, _), symbols) in files.iter().zip(&parsed) {
+            for symbol in symbols {
+                ws.qnames.insert(symbol.qname.clone());
+                ws.symbol_files
+                    .insert(symbol.qname.clone(), file.to_string());
+            }
+            if file.ends_with("/src/lib.rs") {
+                ws.rust_crates.insert(
+                    file.to_string(),
+                    override_name
+                        .unwrap_or_else(|| crate_name_from_path(file).unwrap())
+                        .replace('-', "_"),
+                );
+            }
+        }
+        for ((file, source), symbols) in files.iter().zip(&parsed) {
+            for (alias, target) in adapter.extract_reference_aliases(file, source, symbols, &ws) {
+                ws.reference_aliases
+                    .entry(alias)
+                    .or_default()
+                    .insert(target);
+            }
+        }
+        files
+            .iter()
+            .zip(&parsed)
+            .flat_map(|((file, source), symbols)| {
+                adapter.extract_call_edges(file, source, symbols, &ws)
+            })
+            .collect()
+    }
+    #[test]
+    fn cross_crate_grouped_reexport_has_both_http_and_mcp_callers() {
+        let got = edges(
+            &[
+                (
+                    "crates/crucible-core/src/lib.rs",
+                    "pub mod doctor; pub use doctor::{run_doctor, run_doctor_with};",
+                ),
+                (
+                    "crates/crucible-core/src/doctor.rs",
+                    "pub fn run_doctor() { run_doctor_with(); } pub fn run_doctor_with() {}",
+                ),
+                (
+                    "crates/crucible-server/src/lib.rs",
+                    "fn doctor() { crucible_core::run_doctor(); }",
+                ),
+                (
+                    "crates/crucible-mcp/src/lib.rs",
+                    "struct Mcp; impl Mcp { fn doctor(&self) { crucible_core::run_doctor(); } }",
+                ),
+            ],
+            None,
+        );
+        let callers: HashSet<_> = got
+            .iter()
+            .filter(|e| e.callee_qname == "doctor.run_doctor")
+            .map(|e| e.caller_qname.as_str())
+            .collect();
+        assert_eq!(
+            callers,
+            HashSet::from(["crucible_server.lib.doctor", "crucible_mcp.lib.Mcp.doctor"])
+        );
+    }
+    #[test]
+    fn imported_names_crate_aliases_and_reexport_chains_resolve() {
+        let got = edges(
+            &[
+                (
+                    "crates/core-lib/src/lib.rs",
+                    "pub mod doctor; pub use crate::doctor::run_doctor as inspect; pub use self::inspect as check;",
+                ),
+                ("crates/core-lib/src/doctor.rs", "pub fn run_doctor() {}"),
+                (
+                    "crates/gateway/src/lib.rs",
+                    "pub use core_lib::check as verify;",
+                ),
+                (
+                    "crates/http/src/lib.rs",
+                    "use gateway::verify as v; use core_lib as cc; fn handler() { v(); cc::inspect(); }",
+                ),
+            ],
+            None,
+        );
+        assert_eq!(
+            got.iter()
+                .filter(|e| e.caller_qname == "http.lib.handler"
+                    && e.callee_qname == "doctor.run_doctor")
+                .count(),
+            1,
+            "{got:?}"
+        );
+    }
+    #[test]
+    fn cargo_library_name_override_and_public_root_function() {
+        let got = edges(
+            &[
+                ("crates/folder/src/lib.rs", "pub fn inspect() {}"),
+                ("caller.rs", "fn handler() { wire_api::inspect(); }"),
+            ],
+            Some("wire_api"),
+        );
+        assert!(
+            got.iter()
+                .any(|e| e.caller_qname == "caller.handler"
+                    && e.callee_qname == "folder.lib.inspect"),
+            "{got:?}"
+        );
+    }
+    #[test]
+    fn public_file_and_inline_module_paths_resolve_without_foreign_module_guesses() {
+        let got = edges(
+            &[
+                (
+                    "crates/api/src/lib.rs",
+                    "pub mod doctor; pub mod nested { pub fn inspect() {} }",
+                ),
+                ("crates/api/src/doctor.rs", "pub fn run_doctor() {}"),
+                (
+                    "caller.rs",
+                    "fn handler() { api::doctor::run_doctor(); api::nested::inspect(); }",
+                ),
+            ],
+            None,
+        );
+        let targets: HashSet<_> = got.iter().map(|e| e.callee_qname.as_str()).collect();
+        assert_eq!(
+            targets,
+            HashSet::from(["doctor.run_doctor", "api.lib.nested.inspect"])
+        );
+    }
+
+    #[test]
+    fn ambiguous_private_and_unknown_qualified_names_do_not_guess() {
+        let got = edges(
+            &[
+                (
+                    "crates/core-lib/src/lib.rs",
+                    "pub use left::run as inspect; pub use right::run as inspect; pub(crate) use left::run as private;",
+                ),
+                ("crates/core-lib/src/left.rs", "pub fn run() {}"),
+                ("crates/core-lib/src/right.rs", "pub fn run() {}"),
+                (
+                    "caller.rs",
+                    "fn run() {} fn handler() { core_lib::inspect(); core_lib::private(); unknown_crate::run(); }",
+                ),
+            ],
+            None,
+        );
+        assert!(
+            got.iter().all(|e| e.caller_qname != "caller.handler"),
+            "{got:?}"
+        );
+    }
+    #[test]
+    fn export_does_not_bind_a_colliding_definition_owned_by_another_crate() {
+        let got = edges(
+            &[
+                (
+                    "crates/a/src/lib.rs",
+                    "pub mod doctor; pub use doctor::run_doctor;",
+                ),
+                ("crates/b/src/doctor.rs", "pub fn run_doctor() {}"),
+                ("caller.rs", "fn handler() { a::run_doctor(); }"),
+            ],
+            None,
+        );
+        assert!(got.is_empty(), "{got:?}");
     }
 }
