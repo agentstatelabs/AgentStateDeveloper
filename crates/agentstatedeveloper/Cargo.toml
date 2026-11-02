@@ -1,0 +1,17 @@
+[package]
+name = "agentstatedeveloper"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/agentstatedeveloper"
+keywords.workspace = true
+categories.workspace = true
+exclude.workspace = true
+description.workspace = true
+
+[dependencies]
+agentstatedeveloper-core = { workspace = true }
+agentstatedeveloper-adapters = { workspace = true }

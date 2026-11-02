@@ -40,7 +40,13 @@ owned by the normal commit flow. But it does **verify** that the version in
 `Cargo.toml` matches the tag, and refuses otherwise (`ALLOW_VERSION_SKEW=1`
 overrides, not recommended).
 
-So bump the workspace version and land it on `main` *before* tagging.
+So bump the workspace version and land it on `main` *before* tagging. The
+internal crates in `[workspace.dependencies]` carry the same version (crates.io
+needs one on every path dependency), so bump them in the same commit:
+
+```sh
+perl -pi -e 's/"1\.4\.7"/"1.4.8"/ if /^version = |^agentstatedeveloper-/' Cargo.toml
+```
 
 The cleanest pattern is to do release work in a fresh worktree off
 `origin/main`:
@@ -83,7 +89,55 @@ and the Homebrew formula. The formula is rendered **GitLab-side** by the
 commits it to the tap on GitLab; the tap's own publish job mirrors it to the
 GitHub tap that `brew tap` reads. Never write the GitHub tap directly.
 
+Re-running a tag's pipeline is safe for the formula: it only moves forward.
+Re-running an older tag (v1.4.7 after v1.4.8 shipped), or cutting a patch tag
+on an older line, leaves the tap on the newer release, and the job logs
+`formula already at X; not moving it to vY`. Re-running the tag the tap is on
+renders the same formula, so it repairs a wrong sha256 or pushes nothing. A
+tag's pipeline runs the scripts at that tag, so a tag cut before this guard
+landed (v1.4.8 and earlier) still rewrites the formula on the GitLab tap to its
+own version when re-run. The tap's own `version-guard` job then fails and
+`publish-github` doesn't run, so the older formula never reaches the GitHub
+tap. Revert that commit on the GitLab tap, or let the next release write the
+formula forward; until then `version-guard` blocks every push to the tap's
+`main`.
+
 No sibling tap clone is needed any more.
+
+## After the release: publish the crates to crates.io
+
+The workspace publishes to crates.io as `agentstatedeveloper` (the library),
+`agentstatedeveloper-core`, `-adapters`, the nine language adapters, `-cli` and
+`-mcp`. `agentstatedeveloper-conformance` is `publish = false`.
+
+The `publish-crates` job does this on every release tag, once
+`CARGO_REGISTRY_TOKEN` is set. It needs `publish-github`, so it runs only after
+the checks, the tests, the realism stage and the GitHub mirror's leak scan have
+passed, and it runs the leak scan again before
+`scripts/publish-crates.sh --publish`. Crates already on crates.io at the
+version are skipped, so retrying the job is safe.
+
+`CARGO_REGISTRY_TOKEN` is a masked, protected CI variable (`v*` tags are
+protected, so tag pipelines can read it). Make it a crates.io token scoped to
+`publish-update` and `agentstatedeveloper*`, with an expiry. `publish-update`
+cannot create a crate, so a crate new to the workspace (a new language
+adapter, say) gets its first version published by hand. crates.io also
+rate-limits new crate names (a burst of five, then about one every ten
+minutes); re-run the script until it reports nothing left to do.
+
+By hand, from a detached checkout of the tag, never from a branch:
+
+```sh
+git worktree add --detach /tmp/asd-vX.Y.Z vX.Y.Z
+cd /tmp/asd-vX.Y.Z
+scripts/publish-crates.sh             # dry run
+scripts/publish-crates.sh --publish   # the real upload (uses `cargo login`)
+```
+
+The AgentStateGraph crates come from crates.io too, so an ASG bump means a
+new `version` on the `agentstategraph*` lines in `[workspace.dependencies]`,
+and that ASG version must already be published. A crates.io version can be
+yanked but never deleted or re-uploaded.
 
 ## After the release: verify it is installable
 
@@ -93,7 +147,9 @@ clean container and that the documented commands are current;
 `verify-formula` checks the GitHub tap formula against the published assets.
 `verify-formula` is delayed 10 minutes rather than polling, because on a
 single runner a polling job starves the tap's own publish job — the one that
-puts the formula on GitHub — and fails a good release.
+puts the formula on GitHub — and fails a good release. When the tap is already
+on a later release (a re-run of an older tag), `verify-formula` says so and
+passes, since `homebrew` will never move the formula back to this tag.
 
 Two limits worth knowing:
 
@@ -209,5 +265,21 @@ now means re-running the CI workflow, not passing flags to this script.
 ```sh
 gh release delete v<X> -R agentstatelabs/agentstatedeveloper-releases
 git push origin :refs/tags/v<X>      # remove tag from source
-# tap commit lives in homebrew-agentstatedeveloper; revert + push as usual
+# tap commit lives in homebrew-agentstatedeveloper; revert it with the
+# Allow-Downgrade trailer (below)
+```
+
+Roll the tap back by hand: re-running the previous tag's pipeline will not
+move the formula back, and the tap's `version-guard` refuses a plain revert.
+Commit the older formula to the GitLab tap with the trailer
+`Allow-Downgrade: <version>` at the end of the commit message, or run a tap
+pipeline on `main` with the variable `TAP_ALLOW_DOWNGRADE=<version>`. Either
+must name the exact version being published; without one, `version-guard`
+refuses the downgrade.
+
+```sh
+# in a clone of the GitLab tap, homebrew-agentstatedeveloper
+git revert --no-edit <the version-bump commit>
+git commit --amend --no-edit --trailer "Allow-Downgrade: <previous version>"
+git push origin HEAD:main
 ```

@@ -24,14 +24,17 @@ use tokio::sync::Mutex;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Write all tracing output to stderr — stdout is reserved for MCP frames.
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // Logs, traces and metrics through oxtel. Log lines go to stderr —
+    // stdout is reserved for MCP frames — as text on a terminal and JSON
+    // otherwise. Nothing is exported unless built with the `otlp` feature
+    // and OTEL_EXPORTER_OTLP_ENDPOINT is set.
+    let _telemetry = oxtel::builder()
+        .with_default_service_name("asd-mcp")
+        .with_resource_attribute(oxtel::KeyValue::new(
+            "service.version",
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .install()?;
 
     let (db_path, track_registry) = match std::env::var("ASD_DB") {
         // Explicit ASD_DB pins this process to one db; do not follow the registry.
@@ -88,7 +91,8 @@ async fn main() -> Result<()> {
         audit_log_path,
         track_registry,
     );
-    let service = server
+    let service = oxtel_rmcp::Instrumented::new(server)
+        .with_transport("pipe")
         .serve(rmcp::transport::stdio())
         .await
         .map_err(|e| anyhow::anyhow!("MCP server error: {}", e))?;

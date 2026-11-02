@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/agentstatedeveloper-mcp"
+keywords.workspace = true
+categories.workspace = true
+exclude.workspace = true
 description = "MCP server for AgentStateDeveloper — exposes asd tools over stdio"
 
 [[bin]]
@@ -13,6 +19,11 @@ path = "src/bin/asd-mcp.rs"
 [[bin]]
 name = "asd-serve"
 path = "src/bin/asd-serve.rs"
+
+[features]
+# Send traces, metrics and logs over OTLP/HTTP once OTEL_EXPORTER_OTLP_ENDPOINT
+# is set. It brings an HTTP client and TLS, so it's opt-in.
+otlp = ["oxtel/otlp"]
 
 [dependencies]
 agentstatedeveloper-core = { workspace = true }
@@ -28,9 +39,13 @@ anyhow = { workspace = true }
 axum = "0.8"
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Logs, traces and metrics. OTLP export is the opt-in `otlp` feature below,
+# so a default build sends nothing anywhere.
+oxtel = { version = "0.2", default-features = false, features = ["log", "config"] }
+oxtel-tower = { version = "0.2", features = ["axum"] }
+oxtel-rmcp = "0.2"
 
 rmcp = { version = "1", features = ["server", "transport-io", "macros"] }
 schemars = "1"

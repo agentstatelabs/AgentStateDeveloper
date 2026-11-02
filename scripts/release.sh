@@ -5,7 +5,7 @@
 #
 # This script BUILDS NOTHING. All five platform builds, the GitHub release,
 # and the Homebrew formula are produced by .github/workflows/release.yml on
-# GitHub-hosted runners (macos-14 / ubuntu-22.04 / windows-latest). Pushing
+# GitHub-hosted runners (macos-15 / ubuntu-22.04 / windows-latest). Pushing
 # the tag is the entire trigger.
 #
 # Why it no longer builds locally:

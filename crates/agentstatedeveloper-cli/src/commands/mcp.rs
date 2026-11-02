@@ -889,7 +889,7 @@ const BLOCK_END: &str = "<!-- asd:end -->";
 /// `SkillSpec` via the shared engine (suite-onboarding t-007), so the always-on
 /// block and the installed `SKILL.md` train the agent from one source.
 fn instruction_body() -> String {
-    agent_skillgen::render_always_on(&crate::commands::skill::asd_skill_spec())
+    crate::skillgen::render_always_on(&crate::commands::skill::asd_skill_spec())
 }
 
 /// Insert or replace the managed block in `content`. Returns the new content.

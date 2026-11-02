@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use agent_skillgen::{
+use crate::skillgen::{
     Action, SkillScope, SkillSpec, SkillState, already_nudged, binary_on_path, install_suite,
     place_skills, record_nudge, should_nudge, skill_status,
 };
@@ -277,7 +277,7 @@ fn describe_state(state: &SkillState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_skillgen::{
+    use crate::skillgen::{
         Action, STAMP_FILE, SkillScope, SkillSpec, SkillState, place_skills, platform,
         render_skill, skill_status, write_stamp,
     };

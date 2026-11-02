@@ -17,6 +17,31 @@ Versions use semantic versioning.
 
 ## [Unreleased]
 
+## [v1.4.9] — 2026-10-22
+
+### Added
+- **Logs, traces and metrics through [oxtel](https://github.com/agentstatelabs/oxtel)** in `asd-mcp` and `asd-serve`, replacing their `tracing-subscriber` setup.
+  - `asd-mcp` logs to stderr, as before, keeping stdout for MCP frames: text on a terminal, one JSON object per line otherwise. Each MCP request gets a span named like `tools/call search` and `mcp.server.operation.duration`. Tool arguments and results are never recorded.
+  - `asd-serve` keeps text on stdout, which CTXone's process pool reads for the "listening on" line. Each HTTP request gets a span named by its route and a `request` log line with its status, duration and trace id, replacing tower-http's trace layer. It now shuts down gracefully on SIGINT and SIGTERM.
+  - `OXTEL_LOG_FORMAT` (`text`, `json`, `ecs`, `none`) and `OXTEL_LOG_OUTPUT` (`stderr`, `stdout`) override either binary's default. `RUST_LOG` still sets the level.
+  - **Nothing is sent anywhere by default.** The new opt-in `otlp` feature of `agentstatedeveloper-mcp` sends traces, metrics and logs over OTLP once `OTEL_EXPORTER_OTLP_ENDPOINT` is set. A default build contains no OTLP client.
+
+### Changed
+- **LICENSE names AgentStateLabs, LLC as the licensor without the "not yet formed" placeholder, and the Licensed Work as "AgentStateDeveloper" without a version.** The old line named 0.1.0 while shipping with every release; each version already has its own Change Date.
+- **LICENSING.md states that releases published before 2026-09-09 also get the 18-month Change Date**, though their LICENSE files say four years, and points licensing questions to licensing@agentstatelabs.com, matching LICENSE.
+- Crate metadata credits AgentStateLabs, LLC as the author.
+
+## [v1.4.8] — 2026-10-09
+
+### Added
+- **The crates are packaged for crates.io.** `cargo install agentstatedeveloper-cli agentstatedeveloper-mcp` installs `asd`, `asd-mcp` and `asd-serve`. A new `agentstatedeveloper` library crate re-exports `agentstatedeveloper-core` and `default_adapters()`. Every published crate ships the license and a README, links its own docs.rs page, and excludes local `.asd/` state from its package. `agentstatedeveloper-conformance` is `publish = false`.
+
+### Changed
+- **`agent-skillgen` is vendored into the CLI** (`src/skillgen/`, from v0.1.0) instead of being a git dependency, which crates.io rejects. CTXone carries the same copy; change it upstream first and re-copy it into both.
+- **The initial-read prompt is embedded from inside the CLI crate** (`assets/initial-read-prompt.md`), so the published package builds. `docs/initial-read-prompt.md` is still the copy people read, and a test fails if the two differ.
+- **AgentStateGraph comes from crates.io** (`agentstategraph*` = "1.2.8") instead of git tags, which crates.io rejects in published manifests.
+- **The Kotlin and Swift adapters declare `BUSL-1.1 AND MIT`** and ship `LICENSE-THIRD-PARTY`. They embed the MIT-licensed `tree-sitter-kotlin` 0.3.6 and `tree-sitter-swift` 0.4.3 grammars unmodified, and those notices were missing.
+
 ## [v1.4.7] — 2026-10-05
 
 ### Fixed

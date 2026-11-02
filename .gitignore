@@ -43,5 +43,6 @@ site/package-lock.json
 
 .leakscan.local
 
-# ASD derived log (absolute paths) — never publish
-.asd/index.log
+# ASD derived log (absolute paths) — never publish. Unanchored: tests write
+# one wherever they run asd, including inside crates/.
+**/.asd/index.log

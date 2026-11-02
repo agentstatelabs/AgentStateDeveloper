@@ -1,9 +1,16 @@
 [package]
 name = "agentstatedeveloper-conformance"
+# Test-only: the cross-language conformance matrix. Not published.
+publish = false
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/agentstatedeveloper-conformance"
+keywords.workspace = true
+categories.workspace = true
 description = "Cross-language conformance matrix + contract tests for AgentStateDeveloper adapters"
 
 [dependencies]

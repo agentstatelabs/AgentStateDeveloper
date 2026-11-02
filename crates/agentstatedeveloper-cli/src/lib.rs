@@ -16,6 +16,9 @@ use agentstatedeveloper_core::{AuditSink, RatifyOps};
 
 pub mod commands;
 pub mod config;
+// Vendored agent-skillgen; the CLI uses only part of its surface.
+#[allow(dead_code, unused_imports)]
+pub(crate) mod skillgen;
 
 pub use config::Config;
 

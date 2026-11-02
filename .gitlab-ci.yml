@@ -5,39 +5,32 @@ stages:
   - realism
 
 default:
-  image: rust:1-bookworm
-  cache:
+  image: "$CI_REGISTRY_IMAGE/rust-ci@sha256:92dbb943fd5181b82165dbaced1f9b4ac1af8959604d5f4ecec3c9673952814e"
+  # One writer archives downloads; compiler objects go directly to scoped S3.
+  cache: &rust_dependency_cache
     key:
-      files:
-        - Cargo.lock
-    paths:
-      - .cargo/
-      - target/
-      - .sccache/
+      files: [Cargo.lock]
+      prefix: cargo-downloads-v1
+    paths: [.cargo/registry/index/, .cargo/registry/cache/, .cargo/git/db/]
+    policy: pull
   before_script:
-    - export CARGO_HOME="$CI_PROJECT_DIR/.cargo"
-    # ASG git dependencies are pulled from public GitHub; no auth rewrite needed.
-    - export CARGO_NET_GIT_FETCH_WITH_CLI=true
-    # sccache: cache compiled crates across pipeline runs to speed rebuilds
-    - export CARGO_INCREMENTAL=0 RUSTC_WRAPPER=sccache SCCACHE_DIR="$CI_PROJECT_DIR/.sccache"
-    - command -v sccache >/dev/null || (curl -sSfL https://github.com/mozilla/sccache/releases/download/v0.8.2/sccache-v0.8.2-x86_64-unknown-linux-musl.tar.gz | tar -xz -C /tmp && install /tmp/sccache-v0.8.2-x86_64-unknown-linux-musl/sccache /usr/local/bin/)
-    - rustc --version && cargo --version
+    - export CARGO_HOME="$CI_PROJECT_DIR/.cargo" CARGO_NET_GIT_FETCH_WITH_CLI=true
+    - export PYO3_PYTHON="$(command -v python3)"
+    - . .ci/configure-sccache.sh
+    - start_ci_sccache
+    - rustc --version && cargo --version && python3 --version && sccache --version
+  after_script:
+    - if command -v sccache >/dev/null 2>&1; then sccache --show-stats || true; fi
 
-# conclusions-guard: fail loudly when a branch would DELETE conclusion records
-# that exist on main.
-#
-# The sidecar is regenerated wholesale from the committer's LOCAL database, so
-# a branch cut before someone else's MR merged silently reverts what landed in
-# between. The union merge driver that would reconcile it (`merge=asdconclusions`
-# in .gitattributes) is a CUSTOM driver living in per-clone git config — GitLab's
-# server-side merge has no ASD binary and cannot apply it. So a merge through
-# the UI looks clean and quietly drops records. Observed on !25, which would
-# have reverted 20 of !24's.
-#
-# Alpine + python3, no Rust: this is a set difference over parsed ids and should
-# cost seconds, not a workspace build. GIT_DEPTH: 0 so origin/main is reachable.
+variables:
+  # CI-only: developer/release profiles remain unchanged.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
 conclusions-guard:
   stage: check
+  tags: [macbook-amd64]
+  cache: []
   image: alpine:latest
   before_script: []   # no cargo needed; skip the rust default before_script
   variables:
@@ -51,6 +44,9 @@ conclusions-guard:
 
 fmt:
   stage: check
+  tags: [macbook-amd64]
+  cache: []
+  before_script: []
   script:
     - rustup component add rustfmt
     - cargo fmt --all -- --check
@@ -62,6 +58,9 @@ clippy:
     - cargo clippy --workspace --all-targets -- -D clippy::correctness
 
 build:
+  cache:
+    <<: *rust_dependency_cache
+    policy: pull-push
   stage: check
   script:
     - cargo build --workspace --locked
@@ -139,10 +138,41 @@ publish-github:
     - printf '%s' "$LEAKSCAN_LOCAL" > .leakscan.local
     - chmod +x scripts/leak-scan.sh scripts/publish-to-github.sh
     - ./scripts/publish-to-github.sh
+# publish-crates: publish the workspace crates to crates.io from a release tag
+# (scripts/publish-crates.sh). It needs publish-github, so only a tag that
+# passed the checks, the tests, the realism stage and the mirror's fail-closed
+# leak scan gets here, and it runs the leak scan again on the tree it packages.
+# Re-running it is safe: crates already at this version are skipped.
+# resource_group keeps two tag pipelines from publishing at once.
+#
+# Set CARGO_REGISTRY_TOKEN (masked + protected; v* tags are protected): a
+# crates.io token scoped to publish-update and agentstatedeveloper*. Gated on
+# it so the job no-ops until configured. publish-update cannot create a crate,
+# so a crate new to the workspace is published once by hand (RELEASE.md).
+publish-crates:
+  stage: .post
+  needs:
+    - job: publish-github
+      artifacts: false
+  resource_group: crates-io
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/ && $CARGO_REGISTRY_TOKEN'
+  script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends python3
+    - |
+      if [ -z "${LEAKSCAN_LOCAL:-}" ]; then
+        echo "ERROR: LEAKSCAN_LOCAL unset; not publishing without the org leak-scan patterns"; exit 1
+      fi
+      printf '%s' "$LEAKSCAN_LOCAL" > .leakscan.local
+    - bash scripts/leak-scan.sh --tree
+    - bash scripts/publish-crates.sh --publish
+
 # ci-guard: guarantees a NON-EMPTY pipeline and fails loudly if the publish
 # prerequisites are missing. Without this, a mis-scoped publish job produces
 # no pipeline at all — silent, and easy to miss for days.
 ci-guard:
+  tags: [macbook-amd64]
+  cache: []
   stage: check
   image: alpine:latest
   before_script: []   # alpine has no curl; skip the rust default before_script
@@ -167,6 +197,10 @@ ci-guard:
 # assets over HTTPS and writes to a GitLab project. Nothing reaches back into
 # GitLab from GitHub Actions, and the tap URL is built from $CI_SERVER_URL so
 # no internal hostname lands in a mirrored file.
+#
+# Re-running it is safe: the formula only moves forward, so re-running an older
+# tag leaves the tap on the newer release, and re-running the current tag
+# pushes nothing unless a sha256 needs repairing.
 homebrew:
   stage: .post
   image: rust:1-bookworm
@@ -230,6 +264,9 @@ verify-install:
 # `when: delayed` waits WITHOUT a runner, so the tap's publish-github runs
 # during the delay. ASD_VERIFY_WAIT is then only a short allowance for GitHub
 # itself; exhausting it is still reported apart from a wrong formula.
+#
+# On a re-run of an older tag the tap is already on a later release, which
+# `homebrew` never moves back; the check says so and passes instead of waiting.
 verify-formula:
   stage: .post
   image: debian:bookworm-slim

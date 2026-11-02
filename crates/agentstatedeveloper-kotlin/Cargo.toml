@@ -3,7 +3,15 @@ name = "agentstatedeveloper-kotlin"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-license.workspace = true
+# The embedded tree-sitter grammar (src/parser.c, src/scanner.c, src/tree_sitter/)
+# is MIT; see LICENSE-THIRD-PARTY.
+license = "BUSL-1.1 AND MIT"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/agentstatedeveloper-kotlin"
+keywords.workspace = true
+categories.workspace = true
+exclude.workspace = true
 description = "Kotlin language adapter for AgentStateDeveloper (tree-sitter-kotlin)"
 
 [dependencies]

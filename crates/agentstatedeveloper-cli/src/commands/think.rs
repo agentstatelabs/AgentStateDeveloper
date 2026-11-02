@@ -24,9 +24,10 @@ use crate::config::Config;
 /// Initial-read prompt template, embedded at compile time so
 /// `asd think prompt` works from any CWD (AcmeProj or any other
 /// project that asd indexes — not just the AgentStateDeveloper
-/// source checkout). The path is resolved relative to think.rs:
-/// repo-root/docs/initial-read-prompt.md.
-pub const INITIAL_READ_PROMPT: &str = include_str!("../../../../docs/initial-read-prompt.md");
+/// source checkout). The embedded copy lives inside the crate so the
+/// published package builds; `docs/initial-read-prompt.md` is the copy
+/// people read, and `initial_read_prompt_matches_docs` keeps them equal.
+pub const INITIAL_READ_PROMPT: &str = include_str!("../../assets/initial-read-prompt.md");
 
 #[derive(Debug, Subcommand)]
 pub enum ThinkCmd {
@@ -748,6 +749,22 @@ fn run_list(cfg: &Config, args: ListArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The embedded prompt must match `docs/initial-read-prompt.md`. Skipped
+    /// outside the source checkout (e.g. in the published package), where
+    /// `docs/` does not exist.
+    #[test]
+    fn initial_read_prompt_matches_docs() {
+        let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/initial-read-prompt.md");
+        let Ok(text) = std::fs::read_to_string(&docs) else {
+            return;
+        };
+        assert_eq!(
+            INITIAL_READ_PROMPT, text,
+            "assets/initial-read-prompt.md has drifted from docs/initial-read-prompt.md; copy the docs file over it"
+        );
+    }
 
     #[test]
     fn ctx_task_id_extracted_from_env_json() {
