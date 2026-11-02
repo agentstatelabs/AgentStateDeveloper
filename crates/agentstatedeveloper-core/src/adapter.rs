@@ -70,6 +70,8 @@ pub struct WorkspaceSymbols {
     /// Source file -> consumer-scoped dependency key -> indexed library name.
     /// None blocks unsupported/unknown dependencies instead of guessing globally.
     pub rust_dependencies: HashMap<String, HashMap<String, Option<String>>>,
+    /// Colliding Rust file modules: source file -> (legacy prefix, file-qualified prefix).
+    pub rust_modules: HashMap<String, (String, String)>,
     /// Public reference paths -> possible canonical paths or other aliases.
     /// Multiple candidates are retained so conditional/ambiguous exports never guess.
     pub reference_aliases: HashMap<String, HashSet<String>>,
@@ -90,6 +92,27 @@ impl WorkspaceSymbols {
             } else {
                 format!("{library}.{tail}")
             });
+        }
+        // Local file modules must resolve within this package, even when another
+        // package has an identically named worker.rs/function.
+        if let Some((package, _)) = file.rsplit_once("/src/") {
+            let local = reference
+                .strip_prefix("crate.")
+                .or_else(|| reference.strip_prefix("self."))
+                .unwrap_or(reference);
+            for (module_file, (legacy, qualified)) in &self.rust_modules {
+                if module_file
+                    .rsplit_once("/src/")
+                    .is_some_and(|(owner, _)| owner == package)
+                {
+                    if local == legacy {
+                        return Some(qualified.clone());
+                    }
+                    if let Some(tail) = local.strip_prefix(&format!("{legacy}.")) {
+                        return Some(format!("{qualified}.{tail}"));
+                    }
+                }
+            }
         }
         Some(reference.to_owned())
     }

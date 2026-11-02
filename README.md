@@ -432,3 +432,12 @@ workspace-inherited, optional, dev/build-only and target-specific declarations
 are not inferred from features or build activation. Known unsupported keys block
 matching global-library fallback; normalized-key collisions are rejected. This
 change does not implement complete Cargo metadata or Rust compiler name resolution.
+
+
+When the same non-entry Rust module path occurs in multiple indexed crates,
+indexing now qualifies those symbols with their relative file path instead of
+letting one qname overwrite another. Non-colliding module names keep their prior
+form; qualified identities remain qualified on reindex after a counterpart is
+removed. Package-local calls and public module re-exports use the qualified
+identities. Run a whole-project reindex to migrate a pre-fix store; callers must
+not assume identical module/function names imply one symbol across crates.

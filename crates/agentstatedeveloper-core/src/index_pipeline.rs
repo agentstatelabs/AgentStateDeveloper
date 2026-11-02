@@ -282,6 +282,57 @@ pub fn run_index(
     // Plan L t-005: aggregate dynamic-dispatch hints across all files.
     let mut all_dynamic_dispatch: Vec<crate::adapter::DynamicDispatchHint> = Vec::new();
 
+    // Preserve distinct identities for equal module paths in different Rust crates.
+    // Keep legacy names for non-colliding modules, and retain already-qualified
+    // names across subsequent whole-project runs after a counterpart is deleted.
+    let namespace = |file: &str| -> Option<(String, String)> {
+        let (_, tail) = file.rsplit_once("/src/")?;
+        let module = tail.strip_suffix(".rs")?;
+        if matches!(module, "lib" | "main") {
+            return None;
+        }
+        Some((
+            module.replace('/', "."),
+            file.strip_suffix(".rs")?.replace('/', "."),
+        ))
+    };
+    let mut groups: HashMap<String, HashSet<String>> = HashMap::new();
+    for (file, adapter) in &files {
+        if adapter.language() != "rust" {
+            continue;
+        }
+        let relative = file
+            .strip_prefix(&index_root)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if let Some((legacy, _)) = namespace(&relative) {
+            groups.entry(legacy).or_default().insert(relative);
+        }
+    }
+    let mut rust_modules: HashMap<String, (String, String)> = HashMap::new();
+    for group in groups.values().filter(|files| files.len() > 1) {
+        for file in group {
+            if let Some(names) = namespace(file) {
+                rust_modules.insert(file.clone(), names);
+            }
+        }
+    }
+    for symbol in by_qname.values() {
+        if symbol.get("language").and_then(Value::as_str) != Some("rust") {
+            continue;
+        }
+        if let (Some(file), Some(qname)) = (
+            symbol.get("file").and_then(Value::as_str),
+            symbol.get("qname").and_then(Value::as_str),
+        ) {
+            if let Some((legacy, qualified)) = namespace(file) {
+                if qname.starts_with(&format!("{qualified}.")) {
+                    rust_modules.insert(file.to_owned(), (legacy, qualified));
+                }
+            }
+        }
+    }
     for (idx, (file, adapter)) in files.iter().enumerate() {
         if let Some(cb) = progress {
             cb(file, idx + 1, total);
@@ -293,6 +344,13 @@ pub fn run_index(
         parsed_files.insert(file_str.clone());
 
         let mut parsed = adapter.parse_symbols(&file_str, &source)?;
+        if let Some((legacy, qualified)) = rust_modules.get(&file_str) {
+            for symbol in &mut parsed {
+                if let Some(tail) = symbol.qname.strip_prefix(&format!("{legacy}.")) {
+                    symbol.qname = format!("{qualified}.{tail}");
+                }
+            }
+        }
         let file_blake3 = blake3::hash(source.as_bytes()).to_hex().to_string();
         disambiguated_count += disambiguate_qnames(&mut parsed);
 
@@ -409,6 +467,7 @@ pub fn run_index(
     // by_qname (moves it into a Value::Object).
     // -----------------------------------------------------------------------
     let mut workspace = WorkspaceSymbols::default();
+    workspace.rust_modules = rust_modules;
     for (qname, sym_val) in &by_qname {
         workspace.qnames.insert(qname.clone());
         if let Some(file) = sym_val.get("file").and_then(|v| v.as_str()) {

@@ -298,3 +298,74 @@ fn dependency_paths_outside_index_root_and_normalized_key_collisions_are_rejecte
     index(root);
     assert!(callers(root, "api.lib.check").is_empty());
 }
+
+#[test]
+fn equal_rust_module_names_keep_distinct_callers_and_reindex_identities() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write(
+        root,
+        "crates/api/Cargo.toml",
+        "[package]\nname='api'\nversion='0.1.0'\n",
+    );
+    write(root, "crates/api/src/lib.rs", "pub fn check() {}");
+    let add = |name: &str| {
+        write(
+            root,
+            &format!("crates/{name}/Cargo.toml"),
+            &format!(
+                "[package]\nname='{name}'\nversion='0.1.0'\n[dependencies]\nbackend={{package='api',path='../api'}}\n"
+            ),
+        );
+        write(
+            root,
+            &format!("crates/{name}/src/lib.rs"),
+            "pub mod worker; pub use worker::run as execute; fn bridge(){ worker::run(); execute(); }",
+        );
+        write(
+            root,
+            &format!("crates/{name}/src/worker.rs"),
+            "pub fn run(){ backend::check(); }",
+        );
+    };
+    add("left");
+    index(root);
+    assert_eq!(callers(root, "api.lib.check"), vec!["worker.run"]);
+    add("right");
+    index(root);
+    let qualified = "crates.left.src.worker.run";
+    assert_eq!(
+        callers(root, "api.lib.check"),
+        vec![qualified, "crates.right.src.worker.run"]
+    );
+    assert_eq!(callers(root, qualified), vec!["left.lib.bridge"]);
+    assert_eq!(
+        callers(root, "crates.right.src.worker.run"),
+        vec!["right.lib.bridge"]
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_asd"))
+        .current_dir(root)
+        .args([
+            "--db",
+            root.join(".asd.db").to_str().unwrap(),
+            "context-for",
+            qualified,
+            "--include-body",
+            "--quiet",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        value["symbols"][0]["symbol"]["file"],
+        "crates/left/src/worker.rs"
+    );
+    assert_eq!(value["symbols"][0]["source"]["index_match"], "matched");
+    fs::remove_file(root.join("crates/right/src/worker.rs")).unwrap();
+    index(root);
+    assert_eq!(callers(root, "api.lib.check"), vec![qualified]);
+    index(root);
+    assert_eq!(callers(root, "api.lib.check"), vec![qualified]);
+    assert_eq!(callers(root, qualified), vec!["left.lib.bridge"]);
+}

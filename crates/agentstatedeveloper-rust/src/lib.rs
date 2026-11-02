@@ -897,7 +897,11 @@ fn extract_call_edges_impl(
     symbols: &[ParsedSymbol],
     workspace: &WorkspaceSymbols,
 ) -> Vec<CallEdge> {
-    let module_prefix = module_qname_prefix(file);
+    let module_prefix = workspace
+        .rust_modules
+        .get(file)
+        .map(|(_, qualified)| qualified.clone())
+        .unwrap_or_else(|| module_qname_prefix(file));
     let known: HashSet<&str> = symbols.iter().map(|s| s.qname.as_str()).collect();
 
     // simple_name -> qname for intra-module resolution.
@@ -1064,7 +1068,10 @@ fn public_reference_aliases(
             } else if node.kind() == "mod_item" {
                 // Inline modules keep the lib prefix; file modules do not. Require
                 // an owned definition rather than borrowing another crate's module.
-                let target = [&canonical, &name].into_iter().find(|prefix| {
+                let scoped = workspace
+                    .rust_reference_path(file, &name)
+                    .unwrap_or_else(|| name.clone());
+                let target = [&canonical, &scoped, &name].into_iter().find(|prefix| {
                     workspace.symbol_files.iter().any(|(q, f)| {
                         q.starts_with(&format!("{prefix}.")) && f.starts_with(&source_dir)
                     })
