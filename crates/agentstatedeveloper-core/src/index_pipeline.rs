@@ -402,6 +402,11 @@ pub fn run_index(
     let mut workspace = WorkspaceSymbols::default();
     for (qname, sym_val) in &by_qname {
         workspace.qnames.insert(qname.clone());
+        if let Some(file) = sym_val.get("file").and_then(|v| v.as_str()) {
+            workspace
+                .symbol_files
+                .insert(qname.clone(), file.to_string());
+        }
         // Extract kind from the serialized Symbol JSON (e.g. "method", "class").
         if let Some(kind_str) = sym_val.get("kind").and_then(|v| v.as_str()) {
             if let Ok(kind) = serde_json::from_value::<crate::schema::SymbolKind>(
@@ -423,6 +428,70 @@ pub fn run_index(
     for ctx in &file_ctxs {
         let props = ctx.adapter.extract_property_types(&ctx.parsed);
         workspace.properties.extend(props);
+    }
+
+    // Discover Rust Cargo library identities, including [lib].name/path overrides.
+    // Stay within this index root; no metadata command or dependency execution.
+    let mut seen_manifests = HashSet::new();
+    for ctx in &file_ctxs {
+        if ctx.adapter.language() != "rust" {
+            continue;
+        }
+        let full = index_root.join(&ctx.file_str);
+        for dir in full.ancestors().skip(1) {
+            if !dir.starts_with(&index_root) {
+                break;
+            }
+            let manifest_path = dir.join("Cargo.toml");
+            if !manifest_path.is_file() {
+                continue;
+            }
+            if seen_manifests.insert(manifest_path.clone()) {
+                if let Some(manifest) = std::fs::read_to_string(&manifest_path)
+                    .ok()
+                    .and_then(|s| s.parse::<toml::Value>().ok())
+                {
+                    let name = manifest
+                        .get("lib")
+                        .and_then(|l| l.get("name"))
+                        .and_then(|n| n.as_str())
+                        .or_else(|| {
+                            manifest
+                                .get("package")
+                                .and_then(|p| p.get("name"))
+                                .and_then(|n| n.as_str())
+                        });
+                    let lib_path = manifest
+                        .get("lib")
+                        .and_then(|l| l.get("path"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("src/lib.rs");
+                    if let (Some(name), Ok(relative)) =
+                        (name, dir.join(lib_path).strip_prefix(&index_root))
+                    {
+                        workspace.rust_crates.insert(
+                            relative.to_string_lossy().replace('\\', "/"),
+                            name.replace('-', "_"),
+                        );
+                    }
+                }
+            }
+            break;
+        }
+    }
+    for ctx in &file_ctxs {
+        for (alias, target) in ctx.adapter.extract_reference_aliases(
+            &ctx.file_str,
+            &ctx.source,
+            &ctx.parsed,
+            &workspace,
+        ) {
+            workspace
+                .reference_aliases
+                .entry(alias)
+                .or_default()
+                .insert(target);
+        }
     }
 
     // Flush Pass 1: 3 spec_set_json calls (complete subtrees) → O(N) objects.

@@ -63,12 +63,57 @@ pub struct WorkspaceSymbols {
     /// extraction runs.  Allows resolving instance property calls when the
     /// property declaration is in a different file than the method body.
     pub properties: HashMap<String, String>,
+    /// Canonical symbol ownership, used to avoid binding exports to a different crate.
+    pub symbol_files: HashMap<String, String>,
+    /// Rust library entry-point path -> Cargo library name (normalized underscores).
+    pub rust_crates: HashMap<String, String>,
+    /// Public reference paths -> possible canonical paths or other aliases.
+    /// Multiple candidates are retained so conditional/ambiguous exports never guess.
+    pub reference_aliases: HashMap<String, HashSet<String>>,
 }
 
 impl WorkspaceSymbols {
     /// Exact qname membership test.
     pub fn contains(&self, qname: &str) -> bool {
         self.qnames.contains(qname)
+    }
+
+    /// Resolve exact definitions or explicit aliases, including module-prefix aliases.
+    /// Every branch must terminate at the same definition; cycles/unknowns are rejected.
+    pub fn resolve_reference(&self, reference: &str) -> Option<String> {
+        fn visit(
+            ws: &WorkspaceSymbols,
+            name: &str,
+            active: &mut HashSet<String>,
+        ) -> Option<String> {
+            if ws.contains(name) {
+                return Some(name.to_string());
+            }
+            if active.len() >= 128 || !active.insert(name.to_string()) {
+                return None;
+            }
+            let result = (|| {
+                let mut prefix = name;
+                loop {
+                    if let Some(targets) = ws.reference_aliases.get(prefix) {
+                        let suffix = &name[prefix.len()..];
+                        let mut found = None;
+                        for target in targets {
+                            let resolved = visit(ws, &format!("{target}{suffix}"), active)?;
+                            if found.as_ref().is_some_and(|old| old != &resolved) {
+                                return None;
+                            }
+                            found = Some(resolved);
+                        }
+                        return found;
+                    }
+                    prefix = prefix.rsplit_once('.')?.0;
+                }
+            })();
+            active.remove(name);
+            result
+        }
+        visit(self, reference, &mut HashSet::new())
     }
 
     /// Build the suffix index from the current `qnames` set. Must be called
@@ -252,6 +297,18 @@ pub trait LanguageAdapter: Send + Sync {
         Vec::new()
     }
 
+    /// Public reference aliases contributed by an adapter after all definitions and
+    /// ownership metadata are known. Raw alias chains are resolved at call sites.
+    fn extract_reference_aliases(
+        &self,
+        _file: &str,
+        _source: &str,
+        _symbols: &[ParsedSymbol],
+        _workspace: &WorkspaceSymbols,
+    ) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
     /// Extract stored property declarations from a file's parsed symbols,
     /// returning `"EnclosingTypeSimpleName.propertyName" → "TypeSimpleName"`.
     ///
@@ -263,5 +320,42 @@ pub trait LanguageAdapter: Send + Sync {
     /// Default: returns an empty map (most adapters don't need this).
     fn extract_property_types(&self, _symbols: &[ParsedSymbol]) -> HashMap<String, String> {
         HashMap::new()
+    }
+}
+
+#[cfg(test)]
+mod reference_alias_tests {
+    use super::*;
+    #[test]
+    fn aliases_accept_convergent_paths_and_modules_but_reject_cycles_and_unknowns() {
+        let mut ws = WorkspaceSymbols::default();
+        ws.qnames.insert("doctor.inspect".into());
+        for (alias, target) in [
+            ("api.inspect", "doctor.inspect"),
+            ("api.inspect", "bridge.inspect"),
+            ("bridge.inspect", "doctor.inspect"),
+            ("api.doctor", "doctor"),
+            ("cycle.a", "cycle.b"),
+            ("cycle.b", "cycle.a"),
+        ] {
+            ws.reference_aliases
+                .entry(alias.into())
+                .or_default()
+                .insert(target.into());
+        }
+        assert_eq!(
+            ws.resolve_reference("api.inspect").as_deref(),
+            Some("doctor.inspect")
+        );
+        assert_eq!(
+            ws.resolve_reference("api.doctor.inspect").as_deref(),
+            Some("doctor.inspect")
+        );
+        assert_eq!(ws.resolve_reference("cycle.a"), None);
+        ws.reference_aliases
+            .get_mut("api.inspect")
+            .unwrap()
+            .insert("missing.inspect".into());
+        assert_eq!(ws.resolve_reference("api.inspect"), None);
     }
 }

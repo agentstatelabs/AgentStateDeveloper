@@ -87,6 +87,7 @@ fn workspace_for(symbols: &[ParsedSymbol]) -> WorkspaceSymbols {
             .collect::<HashMap<_, _>>(),
         suffix_index: HashMap::new(),
         properties: HashMap::new(),
+        ..Default::default()
     };
     ws.build_suffix_index();
     ws
@@ -345,6 +346,7 @@ pub fn run_pipeline_over_tree(root: &Path) -> TreeStats {
             kinds: HashMap::new(),
             suffix_index: HashMap::new(),
             properties: HashMap::new(),
+            ..Default::default()
         };
         for pf in parsed {
             for s in &pf.symbols {
