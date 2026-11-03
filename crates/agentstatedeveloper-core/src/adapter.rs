@@ -145,6 +145,9 @@ pub struct WorkspaceSymbols {
     pub rust_dependency_provenance: HashMap<String, HashMap<String, Vec<BindingSpan>>>,
     pub rust_manifest_provenance: HashMap<String, BindingSpan>,
     pub definition_provenance: HashMap<String, BindingSpan>,
+    /// Rust associated functions with an explicitly recorded `-> Self` return.
+    pub rust_self_returns: HashSet<String>,
+    pub rust_concrete_types: HashMap<String, String>,
 }
 
 impl WorkspaceSymbols {

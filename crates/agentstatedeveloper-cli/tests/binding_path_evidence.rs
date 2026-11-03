@@ -502,3 +502,71 @@ fn file_module_reexport_provenance_drift_rebind_cycles_and_delete() {
             .is_empty()
     );
 }
+
+#[test]
+fn receiver_inference_retains_constructor_type_and_local_binding_freshness() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("fixture");
+    write(
+        &root,
+        "crates/api/Cargo.toml",
+        "[package]\nname='api'\nversion='0.1.0'\n",
+    );
+    write(
+        &root,
+        "crates/api/src/lib.rs",
+        "pub struct Store;\nimpl Store {pub fn make()->Self {Self} pub fn emit(&self){}}\npub struct Other;\n",
+    );
+    write(
+        &root,
+        "crates/caller/Cargo.toml",
+        "[package]\nname='caller'\nversion='0.1.0'\n[dependencies]\napi={path='../api'}\n",
+    );
+    write(
+        &root,
+        "crates/caller/src/lib.rs",
+        "use api::Store; pub fn run(){let value=Store::make();value.emit();}",
+    );
+    index(&root);
+    let (fresh, _) = context(
+        &root,
+        "api.lib.Store.emit",
+        &["--binding-step-limit", "32", "--budget-tokens", "32000"],
+    );
+    assert_eq!(
+        site(&fresh)["binding_path"]["status"],
+        "verified_indexed_path"
+    );
+    let steps = site(&fresh)["binding_path"]["steps"].as_array().unwrap();
+    assert!(steps.iter().any(|s| s["kind"] == "receiver_binding"));
+    assert!(steps.iter().any(|s| s["kind"] == "receiver_type"));
+    assert!(
+        steps
+            .iter()
+            .any(|s| s["kind"] == "definition" && s["to"] == "api.lib.Store.make")
+    );
+    write(
+        &root,
+        "crates/api/src/lib.rs",
+        "pub struct Store;\nimpl Store {pub fn make()->Other {Other} pub fn emit(&self){}}\npub struct Other;\n",
+    );
+    let (stale, _) = context(
+        &root,
+        "api.lib.Store.emit",
+        &["--binding-step-limit", "32", "--budget-tokens", "32000"],
+    );
+    assert_eq!(site(&stale)["binding_path"]["status"], "mismatch");
+    assert!(site(&stale).get("expression").is_none());
+    index(&root);
+    let (unknown, _) = context(
+        &root,
+        "api.lib.Store.emit",
+        &["--binding-step-limit", "32", "--budget-tokens", "32000"],
+    );
+    assert!(
+        unknown["symbols"][0]["callers"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}

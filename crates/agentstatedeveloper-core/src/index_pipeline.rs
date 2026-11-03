@@ -485,6 +485,43 @@ pub fn run_index(
             }
         }
     }
+    for ctx in &file_ctxs {
+        if ctx.adapter.language() == "rust" {
+            for symbol in &ctx.parsed {
+                if symbol.kind == crate::schema::SymbolKind::Class
+                    && symbol
+                        .signature
+                        .as_deref()
+                        .is_some_and(|s| s.starts_with("struct ") || s.starts_with("enum "))
+                {
+                    let owner = symbol
+                        .qname
+                        .rsplit_once(':')
+                        .filter(|(_, tail)| tail.bytes().all(|b| b.is_ascii_digit()))
+                        .map(|(name, _)| name)
+                        .unwrap_or(&symbol.qname);
+                    workspace
+                        .rust_concrete_types
+                        .entry(owner.to_owned())
+                        .and_modify(|old| {
+                            if old != &symbol.qname {
+                                old.clear();
+                            }
+                        })
+                        .or_insert_with(|| symbol.qname.clone());
+                }
+                if symbol.kind == crate::schema::SymbolKind::Method
+                    && symbol
+                        .signature
+                        .as_deref()
+                        .and_then(|s| s.split_once("->"))
+                        .is_some_and(|(_, ret)| ret.trim() == "Self")
+                {
+                    workspace.rust_self_returns.insert(symbol.qname.clone());
+                }
+            }
+        }
+    }
     // Build suffix index after all qnames are inserted so adapters can do
     // O(1) suffix-based lookup (e.g., "DriftCompiler.compile" →
     // "Sources.Models.DriftCompiler.compile").

@@ -1155,7 +1155,15 @@ fn public_reference_bindings(
             .and_then(|n| node_text(n, source.as_bytes()))
         {
             let canonical = format!("{module}.{name}");
-            if symbols.iter().any(|s| s.qname == canonical) {
+            if symbols.iter().any(|s| {
+                s.qname == canonical
+                    || (s.qname.rsplit_once(':').is_some_and(|(owner, line)| {
+                        owner == canonical && line.bytes().all(|b| b.is_ascii_digit())
+                    }) && s
+                        .signature
+                        .as_deref()
+                        .is_some_and(|sig| sig.starts_with("struct ") || sig.starts_with("enum ")))
+            }) {
                 emit(format!("{crate_name}.{name}"), canonical.clone(), None);
                 // Public types also expose their associated functions at this path.
                 for s in symbols
@@ -1267,6 +1275,15 @@ fn file_module_reference_bindings(
                                 .unwrap_or_default();
                             emit(&local, target, extra);
                         }
+                    } else if workspace.rust_crates.contains_key(file) {
+                        // Bare crate-root reexports refer to local modules;
+                        // unsupported external prefixes remain unresolved here.
+                        if let Some(target) = WorkspaceSymbols::rust_file_reference(
+                            file,
+                            &format!("crate.{reference}"),
+                        ) {
+                            emit(&local, target, vec![]);
+                        }
                     }
                 }
             }
@@ -1275,11 +1292,29 @@ fn file_module_reference_bindings(
             .and_then(|n| node_text(n, source.as_bytes()))
         {
             if let Some(symbol) = symbols.iter().find(|s| {
-                s.qname.ends_with(&format!(".{name}"))
+                s.qname
+                    .split(':')
+                    .next()
+                    .unwrap_or(&s.qname)
+                    .ends_with(&format!(".{name}"))
                     && s.start_line == node.start_position().row as u32 + 1
             }) {
                 // Definitions are independently proven again at the terminal step.
-                emit(&name, symbol.qname.clone(), vec![]);
+                let target = if symbol
+                    .signature
+                    .as_deref()
+                    .is_some_and(|s| s.starts_with("struct ") || s.starts_with("enum "))
+                {
+                    symbol
+                        .qname
+                        .rsplit_once(':')
+                        .filter(|(_, line)| line.bytes().all(|b| b.is_ascii_digit()))
+                        .map(|(owner, _)| owner.to_owned())
+                        .unwrap_or_else(|| symbol.qname.clone())
+                } else {
+                    symbol.qname.clone()
+                };
+                emit(&name, target, vec![]);
             }
         }
     }
@@ -1480,6 +1515,7 @@ fn collect_calls(
                 imports,
                 workspace,
                 enclosing_type,
+                sym,
             ) {
                 let callee = resolved.target.clone();
                 let expression = node_text(func, src).unwrap_or_default();
@@ -1579,6 +1615,207 @@ fn resolve_local(workspace: &WorkspaceSymbols, from: &str, target: &str) -> Reso
     resolved
 }
 
+/// Bounded syntactic receiver inference. No factory-name guessing or global
+/// method suffix matching. Only immutable, singly bound lexical locals/params.
+#[allow(clippy::too_many_arguments)]
+fn infer_receiver(
+    file: &str,
+    value: Node<'_>,
+    src: &[u8],
+    module: &str,
+    method_name: &str,
+    simple: &HashMap<String, String>,
+    known: &HashSet<&str>,
+    imports: &HashMap<String, UseBinding>,
+    ws: &WorkspaceSymbols,
+    sym: &ParsedSymbol,
+) -> Option<ResolvedReference> {
+    fn nodes<'t>(node: Node<'t>, out: &mut Vec<Node<'t>>) {
+        out.push(node);
+        let mut c = node.walk();
+        for n in node.named_children(&mut c) {
+            nodes(n, out);
+        }
+    }
+    fn concrete_type<'t>(mut n: Node<'t>) -> Option<Node<'t>> {
+        loop {
+            match n.kind() {
+                "reference_type" | "generic_type" => n = n.child_by_field_name("type")?,
+                "type_identifier" | "scoped_type_identifier" => return Some(n),
+                _ => return None,
+            }
+        }
+    }
+    let (origin, annotation, initializer) = if value.kind() == "identifier" {
+        let name = node_text(value, src)?;
+        let mut root = value;
+        while let Some(p) = root.parent() {
+            root = p;
+        }
+        let mut all = vec![];
+        nodes(root, &mut all);
+        if all.iter().any(|n| {
+            n.kind() == "match_arm"
+                && n.child_by_field_name("pattern")
+                    .and_then(|pattern| node_text(pattern, src))
+                    .is_some_and(|s| {
+                        s.split(|c: char| !c.is_alphanumeric() && c != '_')
+                            .any(|s| s == name)
+                    })
+        }) {
+            return None;
+        }
+        let mut bindings = vec![];
+        for n in &all {
+            if matches!(n.kind(), "let_declaration" | "parameter") {
+                if let Some(pattern) = n
+                    .child_by_field_name("pattern")
+                    .and_then(|p| node_text(p, src))
+                {
+                    if pattern == name {
+                        bindings.push(*n);
+                    } else if pattern
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .any(|s| s == name)
+                    {
+                        return None;
+                    }
+                }
+            }
+            if matches!(
+                n.kind(),
+                "closure_parameters"
+                    | "assignment_expression"
+                    | "compound_assignment_expr"
+                    | "for_expression"
+            ) {
+                let relevant = match n.kind() {
+                    "for_expression" => n.child_by_field_name("pattern")?,
+                    "assignment_expression" | "compound_assignment_expr" => {
+                        n.child_by_field_name("left")?
+                    }
+                    _ => *n,
+                };
+                let text = node_text(relevant, src)?;
+                if text
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .any(|s| s == name)
+                {
+                    return None;
+                }
+            }
+        }
+        if bindings.len() != 1 {
+            return None;
+        }
+        let b = bindings[0];
+        let mut binding_cursor = b.walk();
+        if b.named_children(&mut binding_cursor)
+            .any(|n| n.kind() == "mutable_specifier")
+        {
+            return None;
+        }
+        if b.start_byte() >= value.start_byte()
+            || node_text(b, src)?.trim_start().starts_with("let mut ")
+        {
+            return None;
+        }
+        let scope = if b.kind() == "parameter" {
+            b.parent()?.parent()?
+        } else {
+            b.parent()?
+        };
+        let mut parent = value.parent();
+        let mut visible = false;
+        while let Some(p) = parent {
+            if p == scope {
+                visible = true;
+                break;
+            }
+            parent = p.parent();
+        }
+        if !visible {
+            return None;
+        }
+        (
+            b,
+            b.child_by_field_name("type"),
+            b.child_by_field_name("value"),
+        )
+    } else if value.kind() == "call_expression" {
+        (value, None, Some(value))
+    } else {
+        return None;
+    };
+    let mut resolved = if let Some(annotation) = annotation {
+        let mut root = value;
+        while let Some(parent) = root.parent() {
+            root = parent;
+        }
+        let mut all = vec![];
+        nodes(root, &mut all);
+        if all.iter().any(|n| n.kind() == "type_parameters") {
+            return None;
+        }
+        let ty = node_text(concrete_type(annotation)?, src)?.replace("::", ".");
+        let mut method = if let Some(import) = imports.get(&ty) {
+            resolve_import(
+                ws,
+                file,
+                &ty,
+                &format!("{}.{method_name}", import.qname_prefix),
+                import,
+            )?
+        } else {
+            ws.resolve_rust_reference_with_path(file, &format!("{ty}.{method_name}"))
+                .or_else(|| {
+                    ws.resolve_reference_with_path(&format!("{module}.{ty}.{method_name}"))
+                })?
+        };
+        method.target = method.target.rsplit_once('.')?.0.to_owned();
+        method
+    } else {
+        let init = initializer?;
+        if init.kind() != "call_expression" {
+            return None;
+        }
+        let func = init.child_by_field_name("function")?;
+        if func.kind() != "scoped_identifier" {
+            return None;
+        }
+        let mut constructor = resolve_callee(
+            file, func, src, module, simple, known, imports, ws, None, sym,
+        )?;
+        if !ws.rust_self_returns.contains(&constructor.target) {
+            return None;
+        }
+        constructor.target = constructor.target.rsplit_once('.')?.0.to_owned();
+        constructor
+    };
+    let concrete = ws.rust_concrete_types.get(&resolved.target)?;
+    let type_proof = ws.definition_provenance.get(concrete)?.clone();
+    resolved.steps.push(BindingStep {
+        kind: "receiver_type".into(),
+        from: resolved.target.clone(),
+        to: concrete.clone(),
+        provenance: vec![type_proof],
+    });
+    let mut span = ws.definition_provenance.get(&sym.qname)?.clone();
+    span.kind = "receiver_binding".into();
+    span.start_line = sym.start_line + origin.start_position().row as u32;
+    span.end_line = sym.start_line + origin.end_position().row as u32;
+    resolved.steps.insert(
+        0,
+        BindingStep {
+            kind: "receiver_binding".into(),
+            from: node_text(value, src)?,
+            to: resolved.target.clone(),
+            provenance: vec![span],
+        },
+    );
+    Some(resolved)
+}
+
 fn resolve_callee(
     file: &str,
     func: Node<'_>,
@@ -1589,6 +1826,7 @@ fn resolve_callee(
     imports: &HashMap<String, UseBinding>,
     workspace: &WorkspaceSymbols,
     enclosing_type: Option<&str>,
+    sym: &ParsedSymbol,
 ) -> Option<ResolvedReference> {
     match func.kind() {
         "identifier" => {
@@ -1624,6 +1862,25 @@ fn resolve_callee(
                     ));
                 }
                 return None;
+            }
+            if let Some(mut receiver) = infer_receiver(
+                file,
+                value,
+                src,
+                module_prefix,
+                &field_name,
+                by_simple,
+                known,
+                imports,
+                workspace,
+                sym,
+            ) {
+                let method = workspace
+                    .resolve_reference_with_path(&format!("{}.{field_name}", receiver.target))?;
+                receiver.complete &= method.complete;
+                receiver.steps.extend(method.steps);
+                receiver.target = method.target;
+                return Some(receiver);
             }
             if value.kind() == "identifier" {
                 let obj_name = node_text(value, src)?;

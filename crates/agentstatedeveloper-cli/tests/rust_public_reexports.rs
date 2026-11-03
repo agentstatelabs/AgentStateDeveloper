@@ -528,3 +528,75 @@ fn file_module_reexports_keep_package_scope_and_follow_renamed_chains() {
         vec!["right.lib.run"]
     );
 }
+
+#[test]
+fn local_receiver_constructor_and_annotation_bind_exact_inherent_method() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write(
+        root,
+        "crates/receiver/Cargo.toml",
+        "[package]\nname='receiver'\nversion='0.1.0'\n",
+    );
+    write(
+        root,
+        "crates/receiver/src/lib.rs",
+        "pub mod store; use crate::store::Store; fn local(){let index=Store::new();index.run();} fn direct(){Store::new().run();} fn typed(index: &Store){index.run();}",
+    );
+    write(
+        root,
+        "crates/receiver/src/store.rs",
+        "pub struct Store; impl Store {pub fn new()->Self {Self} pub fn run(&self){}} pub struct Other; impl Other {pub fn run(&self){}}",
+    );
+    index(root);
+    assert_eq!(
+        callers(root, "store.Store.run"),
+        vec![
+            "receiver.lib.direct",
+            "receiver.lib.local",
+            "receiver.lib.typed"
+        ]
+    );
+    assert!(callers(root, "store.Other.run").is_empty());
+}
+
+#[test]
+fn uncertain_receivers_never_use_global_method_name_or_assumed_factory_returns() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write(
+        root,
+        "crates/receiver/Cargo.toml",
+        "[package]\nname='receiver'\nversion='0.1.0'\n",
+    );
+    write(
+        root,
+        "crates/receiver/src/lib.rs",
+        r#"
+mod store; use crate::store::{Store,Other};
+fn good(){let value=Store::make();value.run();}
+fn shadow(){let value=Store::make(); {let value=Other::make();value.run();}}
+fn mutable(){let mut value=Store::make();value=Store::make();value.run();}
+fn unknown(){let value=Store::not_self();value.run();}
+fn borrowed(){let value=&Store::make();value.run();}
+fn destructured(){let value=Store::make();let (value,)=(Other::make(),);value.run();}
+fn closure(){let value=Store::make();let c=|value:Other|{value.run();};}
+fn matched(){let value=Store::make();match Some(Other::make()){Some(value)=>value.run(),_=>()}}
+fn generic<Store>(value: &Store){value.run();}
+fn decoy(){let value=Other::make();value.run();}
+"#,
+    );
+    write(
+        root,
+        "crates/receiver/src/store.rs",
+        r#"
+pub struct Store;
+impl Store {pub fn make()->Self {Self} pub fn not_self()->Other{Other} pub fn run(&self){}}
+pub struct Other;
+impl Other {pub fn make()->Self {Self} pub fn run(&self){}}
+"#,
+    );
+    index(root);
+    assert_eq!(callers(root, "store.Store.run"), vec!["receiver.lib.good"]);
+    assert_eq!(callers(root, "store.Other.run"), vec!["receiver.lib.decoy"]);
+}
