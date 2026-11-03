@@ -28,6 +28,26 @@ pub struct CallEdge {
     pub callee_qname: String,
 }
 
+/// Parser-backed location for a resolved static edge. Import is a syntactic
+/// candidate, not a complete resolution proof or graph-completeness claim.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CallSite {
+    pub caller_qname: String,
+    pub callee_qname: String,
+    pub file: String,
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+    pub expression: String,
+    pub expression_complete: bool,
+    pub syntactic_import_candidate: Option<String>,
+    pub import_candidate_omitted: bool,
+    pub caller_symbol_fp: String,
+    pub caller_start_line: u32,
+    pub caller_end_line: u32,
+}
+
 /// Workspace-wide context passed to adapters when resolving call edges
 /// across module boundaries.
 ///
@@ -296,6 +316,20 @@ pub trait LanguageAdapter: Send + Sync {
         _workspace: &WorkspaceSymbols,
     ) -> Vec<CallEdge> {
         Vec::new()
+    }
+
+    /// Extract graph and optional site locations in one adapter pass.
+    fn extract_call_graph(
+        &self,
+        file: &str,
+        source: &str,
+        symbols: &[ParsedSymbol],
+        workspace: &WorkspaceSymbols,
+    ) -> (Vec<CallEdge>, Vec<CallSite>) {
+        (
+            self.extract_call_edges(file, source, symbols, workspace),
+            Vec::new(),
+        )
     }
 
     /// Detect cross-service endpoints (HTTP routes/clients, pub-sub

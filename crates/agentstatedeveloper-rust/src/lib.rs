@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 
 use agentstatedeveloper_core::adapter::{
-    CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols,
+    CallEdge, CallSite, LanguageAdapter, ParsedSymbol, WorkspaceSymbols,
 };
 use agentstatedeveloper_core::cross_service::{
     DetectedEndpoint, Direction, Transport, http_contract,
@@ -86,6 +86,16 @@ impl LanguageAdapter for RustAdapter {
         workspace: &WorkspaceSymbols,
     ) -> Vec<CallEdge> {
         extract_call_edges_impl(file, source, symbols, workspace)
+    }
+
+    fn extract_call_graph(
+        &self,
+        file: &str,
+        source: &str,
+        symbols: &[ParsedSymbol],
+        workspace: &WorkspaceSymbols,
+    ) -> (Vec<CallEdge>, Vec<CallSite>) {
+        extract_call_graph_impl(file, source, symbols, workspace)
     }
 }
 
@@ -897,6 +907,15 @@ fn extract_call_edges_impl(
     symbols: &[ParsedSymbol],
     workspace: &WorkspaceSymbols,
 ) -> Vec<CallEdge> {
+    extract_call_graph_impl(file, source, symbols, workspace).0
+}
+
+fn extract_call_graph_impl(
+    file: &str,
+    source: &str,
+    symbols: &[ParsedSymbol],
+    workspace: &WorkspaceSymbols,
+) -> (Vec<CallEdge>, Vec<CallSite>) {
     let module_prefix = workspace
         .rust_modules
         .get(file)
@@ -925,12 +944,13 @@ fn extract_call_edges_impl(
         .set_language(&tree_sitter_rust::LANGUAGE.into())
         .is_err()
     {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     let imports = parse_use_declarations(source, &mut parser);
 
     let mut edges: HashSet<CallEdge> = HashSet::new();
+    let mut sites = Vec::new();
 
     for sym in symbols {
         if !matches!(sym.kind, SymbolKind::Function | SymbolKind::Method) {
@@ -954,6 +974,7 @@ fn extract_call_edges_impl(
             workspace,
             enclosing_type.as_deref(),
             &mut edges,
+            &mut sites,
         );
     }
 
@@ -963,7 +984,21 @@ fn extract_call_edges_impl(
             .cmp(&b.caller_qname)
             .then_with(|| a.callee_qname.cmp(&b.callee_qname))
     });
-    out
+    sites.sort_by_key(|s: &CallSite| {
+        (
+            s.caller_qname.clone(),
+            s.start_line,
+            s.start_col,
+            s.callee_qname.clone(),
+        )
+    });
+    sites.dedup_by(|a, b| {
+        a.caller_qname == b.caller_qname
+            && a.callee_qname == b.callee_qname
+            && a.start_line == b.start_line
+            && a.start_col == b.start_col
+    });
+    (out, sites)
 }
 
 /// Collect explicit public exports from a Rust library entry point.
@@ -1243,6 +1278,7 @@ fn collect_calls(
     workspace: &WorkspaceSymbols,
     enclosing_type: Option<&str>,
     out: &mut HashSet<CallEdge>,
+    sites: &mut Vec<CallSite>,
 ) {
     if node.kind() == "call_expression" {
         if let Some(func) = node.child_by_field_name("function") {
@@ -1257,6 +1293,33 @@ fn collect_calls(
                 workspace,
                 enclosing_type,
             ) {
+                let expression = node_text(func, src).unwrap_or_default();
+                let head = expression.split("::").next().unwrap_or(&expression);
+                let candidate = imports.get(head).map(|v| v.qname_prefix.clone());
+                let start = func.start_position();
+                let end = func.end_position();
+                let mut boundary = expression.len().min(512);
+                while !expression.is_char_boundary(boundary) {
+                    boundary -= 1;
+                }
+                sites.push(CallSite {
+                    caller_qname: sym.qname.clone(),
+                    callee_qname: callee.clone(),
+                    file: file.to_owned(),
+                    start_line: sym.start_line + start.row as u32,
+                    start_col: start.column as u32 + if start.row == 0 { sym.start_col } else { 1 },
+                    end_line: sym.start_line + end.row as u32,
+                    end_col: end.column as u32 + if end.row == 0 { sym.start_col } else { 1 },
+                    expression: expression[..boundary].to_owned(),
+                    expression_complete: boundary == expression.len(),
+                    import_candidate_omitted: candidate.as_ref().is_some_and(|v| v.len() > 512),
+                    syntactic_import_candidate: candidate.filter(|v| v.len() <= 512),
+                    caller_symbol_fp: agentstatedeveloper_core::symbol::symbol_fingerprint(
+                        &sym.body,
+                    ),
+                    caller_start_line: sym.start_line,
+                    caller_end_line: sym.end_line,
+                });
                 out.insert(CallEdge {
                     caller_qname: sym.qname.clone(),
                     callee_qname: callee,
@@ -1278,6 +1341,7 @@ fn collect_calls(
             workspace,
             enclosing_type,
             out,
+            sites,
         );
     }
 }

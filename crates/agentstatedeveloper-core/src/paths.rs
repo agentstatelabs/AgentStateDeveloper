@@ -147,3 +147,8 @@ pub fn feedback_entry_path(symbol_id: &str, entry_id: &str) -> String {
 pub fn feedback_symbol_path(symbol_id: &str) -> String {
     format!("{}/feedback/{}", ASD_ROOT, symbol_id)
 }
+
+/// Resolved target ID -> caller ID -> parser call-site records.
+pub fn call_sites_root() -> String {
+    format!("{ASD_ROOT}/index/call-sites")
+}

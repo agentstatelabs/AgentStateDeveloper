@@ -345,3 +345,59 @@ mod tests {
         assert_eq!(v["_budget"]["truncated"], true);
     }
 }
+
+/// Render only records bound to this indexed caller and matching file bytes.
+pub(super) fn call_site_evidence(
+    root: &Path,
+    caller: &agentstatedeveloper_core::Symbol,
+    records: Option<&Value>,
+    limit: usize,
+    lines: usize,
+) -> Value {
+    let Some(records) = records.and_then(Value::as_array) else {
+        return json!({"status":"not_recorded","reason":"legacy index or adapter without call-site evidence; not proof of absence"});
+    };
+    let mut sites = Vec::new();
+    for record in records.iter().take(limit) {
+        let Ok(site) =
+            serde_json::from_value::<agentstatedeveloper_core::adapter::CallSite>(record.clone())
+        else {
+            sites.push(json!({"status":"unavailable","reason":"invalid call-site record"}));
+            continue;
+        };
+        if site.file != caller.file
+            || site.caller_qname != caller.qname
+            || site.caller_symbol_fp != caller.symbol_fp
+            || site.caller_start_line != caller.start.line
+            || site.caller_end_line != caller.end.line
+            || site.start_line < caller.start.line
+            || site.end_line > caller.end.line
+            || site.end_line < site.start_line
+        {
+            sites.push(json!({"status":"unavailable","reason":"call-site record does not match indexed caller"}));
+            continue;
+        }
+        let binding = json!({"file":site.file,"symbol_fp":site.caller_symbol_fp,
+            "start_line":site.caller_start_line,"end_line":site.caller_end_line,
+            "file_blake3":record["indexed_file_blake3"]});
+        let mut source = verify_indexed_source(
+            source_excerpt(root, &site.file, site.start_line, site.end_line, lines),
+            Some(&binding),
+            caller,
+        );
+        if source["index_match"] != "matched" || source["status"] != "available" {
+            source.as_object_mut().unwrap().remove("text");
+            // Do not leak stale expressions or import candidates either.
+            sites.push(json!({"status":"unavailable","source":source}));
+            continue;
+        }
+        sites.push(json!({"status":"available","expression":site.expression,
+            "expression_complete":site.expression_complete,
+            "syntactic_import_candidate":site.syntactic_import_candidate,
+            "import_candidate_omitted":site.import_candidate_omitted,
+            "location":{"file":site.file,"start_line":site.start_line,"start_col":site.start_col,
+                "end_line":site.end_line,"end_col":site.end_col},"source":source}));
+    }
+    json!({"status":"recorded","total_sites":records.len(),"omitted_sites":records.len().saturating_sub(limit),
+        "sites":sites,"binding_chain":"not_recorded"})
+}

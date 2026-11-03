@@ -445,3 +445,24 @@ form; qualified identities remain qualified on reindex after a counterpart is
 removed. Package-local calls and public module re-exports use the qualified
 identities. Run a whole-project reindex to migrate a pre-fix store; callers must
 not assume identical module/function names imply one symbol across crates.
+
+
+### Opt-in parser-backed Rust call sites
+
+`asd context-for events.record_event --include-call-sites --caller-limit 8 --call-site-limit 4 --budget-tokens 2000`
+adds per-caller `call_sites` records without changing the default context output.
+The Rust parser records each resolved expression and its byte-column source
+span (1-based columns, exclusive end), plus a syntactic import candidate when
+visible. Repeated calls within a function keep distinct locations even though
+the graph has one caller/callee edge. These records are **not a complete binding
+proof**: import/re-export/Cargo chains are not recorded and graph completeness
+is not certified. Other adapters and legacy indexes report `not_recorded`, not
+an empty set claimed to prove absence.
+
+Records carry the caller's indexed body/range and exact file fingerprint. The
+CLI emits expression/import text only when this provenance matches current
+bytes; changed or unavailable files require reindexing. `--caller-limit` applies
+to both caller bodies and call-site evidence; `--call-site-limit` bounds sites
+per caller. Limits and output-budget omissions are explicit. Run a whole-project
+reindex to populate records. MCP parity and complete binding receipts remain
+separate work.

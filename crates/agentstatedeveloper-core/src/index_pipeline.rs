@@ -253,6 +253,7 @@ pub fn run_index(
     let mut symbol_count = 0usize;
     let mut disambiguated_count = 0usize;
     let mut all_edges: Vec<CallEdge> = Vec::new();
+    let mut recorded_sites = Vec::new();
     // Track first-seen file for each qname to report cross-file collisions.
     let mut qname_first_file: HashMap<String, String> = HashMap::new();
     let mut collision_log: Vec<(String, String, String)> = Vec::new();
@@ -835,9 +836,11 @@ pub fn run_index(
         })
         .collect();
     for ctx in &file_ctxs {
-        let edges =
+        let (edges, sites) =
             ctx.adapter
-                .extract_call_edges(&ctx.file_str, &ctx.source, &ctx.parsed, &workspace);
+                .extract_call_graph(&ctx.file_str, &ctx.source, &ctx.parsed, &workspace);
+        let hash = blake3::hash(ctx.source.as_bytes()).to_hex().to_string();
+        recorded_sites.extend(sites.into_iter().map(|site| (site, hash.clone())));
         all_edges.extend(edges);
         // Per-file unresolved-call report. Default trait impl returns
         // empty for adapters that don't implement static resolution.
@@ -934,17 +937,35 @@ pub fn run_index(
         .map(|(sym_id, callers)| (sym_id.clone(), serde_json::json!({ "callers": callers })))
         .collect();
 
+    let mut sites_tree = serde_json::Map::new();
+    for (site, hash) in recorded_sites {
+        let (Some(caller), Some(callee)) = (
+            qname_to_sym_id.get(&site.caller_qname),
+            qname_to_sym_id.get(&site.callee_qname),
+        ) else {
+            continue;
+        };
+        let by_caller = sites_tree
+            .entry(callee.clone())
+            .or_insert_with(|| serde_json::json!({}));
+        let rows = by_caller
+            .as_object_mut()
+            .unwrap()
+            .entry(caller.clone())
+            .or_insert_with(|| serde_json::json!([]));
+        let mut record = serde_json::to_value(site).map_err(|e| AsdError::Other(e.to_string()))?;
+        record["indexed_file_blake3"] = Value::String(hash);
+        rows.as_array_mut().unwrap().push(record);
+    }
     let spec2 = repo
         .speculate(ref_name, Some("asd-index-pass2-edges".into()))
         .map_err(|e| AsdError::Other(e.to_string()))?;
-    if !callees_tree.is_empty() {
-        repo.spec_set_json(spec2, "/asd/v1/index/callees", &Value::Object(callees_tree))
-            .map_err(|e| AsdError::Other(e.to_string()))?;
-    }
-    if !callers_tree.is_empty() {
-        repo.spec_set_json(spec2, "/asd/v1/index/callers", &Value::Object(callers_tree))
-            .map_err(|e| AsdError::Other(e.to_string()))?;
-    }
+    repo.spec_set_json(spec2, "/asd/v1/index/callees", &Value::Object(callees_tree))
+        .map_err(|e| AsdError::Other(e.to_string()))?;
+    repo.spec_set_json(spec2, "/asd/v1/index/callers", &Value::Object(callers_tree))
+        .map_err(|e| AsdError::Other(e.to_string()))?;
+    repo.spec_set_json(spec2, &paths::call_sites_root(), &Value::Object(sites_tree))
+        .map_err(|e| AsdError::Other(e.to_string()))?;
 
     // t-002: endpoint registry, nested contract_hash → repo_id → symbol_id →
     // ServiceEndpoint, so endpoints sharing a contract (from any repo, once
