@@ -345,3 +345,153 @@ mod tests {
         assert_eq!(v["_budget"]["truncated"], true);
     }
 }
+
+/// Render only records bound to this indexed caller and matching file bytes.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn call_site_evidence(
+    root: &Path,
+    caller: &agentstatedeveloper_core::Symbol,
+    callee_qname: &str,
+    records: Option<&Value>,
+    limit: usize,
+    lines: usize,
+    include_paths: bool,
+    step_limit: usize,
+) -> Value {
+    let Some(records) = records.and_then(Value::as_array) else {
+        return json!({"status":"not_recorded","reason":"legacy index or adapter without call-site evidence; not proof of absence"});
+    };
+    let mut sites = Vec::new();
+    for record in records.iter().take(limit) {
+        let Ok(site) =
+            serde_json::from_value::<agentstatedeveloper_core::adapter::CallSite>(record.clone())
+        else {
+            sites.push(json!({"status":"unavailable","reason":"invalid call-site record"}));
+            continue;
+        };
+        if site.file != caller.file
+            || site.callee_qname != callee_qname
+            || site.caller_qname != caller.qname
+            || site.caller_symbol_fp != caller.symbol_fp
+            || site.caller_start_line != caller.start.line
+            || site.caller_end_line != caller.end.line
+            || site.start_line < caller.start.line
+            || site.end_line > caller.end.line
+            || site.end_line < site.start_line
+        {
+            sites.push(json!({"status":"unavailable","reason":"call-site record does not match indexed caller"}));
+            continue;
+        }
+        let binding = json!({"file":site.file,"symbol_fp":site.caller_symbol_fp,
+            "start_line":site.caller_start_line,"end_line":site.caller_end_line,
+            "file_blake3":record["indexed_file_blake3"]});
+        let mut source = verify_indexed_source(
+            source_excerpt(root, &site.file, site.start_line, site.end_line, lines),
+            Some(&binding),
+            caller,
+        );
+        if source["index_match"] != "matched" || source["status"] != "available" {
+            source.as_object_mut().unwrap().remove("text");
+            // Do not leak stale expressions or import candidates either.
+            sites.push(json!({"status":"unavailable","source":source}));
+            continue;
+        }
+        let path = if include_paths {
+            Some(binding_path_evidence(
+                root,
+                site.binding_path.as_ref(),
+                callee_qname,
+                step_limit,
+                lines,
+            ))
+        } else {
+            None
+        };
+        if path
+            .as_ref()
+            .is_some_and(|p| p["status"] == "mismatch" || p["status"] == "unavailable")
+        {
+            sites.push(json!({"status":"unavailable","binding_path":path}));
+            continue;
+        }
+        let mut rendered = json!({"status":"available","expression":site.expression,
+            "expression_complete":site.expression_complete,
+            "syntactic_import_candidate":site.syntactic_import_candidate,
+            "import_candidate_omitted":site.import_candidate_omitted,
+            "location":{"file":site.file,"start_line":site.start_line,"start_col":site.start_col,
+                "end_line":site.end_line,"end_col":site.end_col},"source":source});
+        if let Some(path) = path {
+            rendered["binding_path"] = path;
+        }
+        sites.push(rendered);
+    }
+    json!({"status":"recorded","total_sites":records.len(),"omitted_sites":records.len().saturating_sub(limit),
+        "sites":sites,"binding_chain":if include_paths {"per_site"} else {"not_recorded"}})
+}
+
+fn binding_path_evidence(
+    root: &Path,
+    path: Option<&agentstatedeveloper_core::adapter::ResolvedReference>,
+    expected: &str,
+    step_limit: usize,
+    lines: usize,
+) -> Value {
+    let Some(path) = path else {
+        return json!({"status":"not_recorded"});
+    };
+    if path.target != expected {
+        return json!({"status":"unavailable","reason":"binding path target differs from indexed edge"});
+    }
+    if path.steps.len() > step_limit {
+        return json!({"status":"omitted","reason":"binding-step-limit","total_steps":path.steps.len()});
+    }
+    if !path.complete || path.steps.is_empty() || path.steps.iter().any(|s| s.provenance.is_empty())
+    {
+        return json!({"status":"incomplete","reason":"one or more resolver hops lack indexed provenance","steps_recorded":path.steps.len()});
+    }
+    let mut spans = Vec::new();
+    let mut evidence = Vec::new();
+    let mut steps = Vec::new();
+    let mut unavailable = Vec::new();
+    let mut changed = Vec::new();
+    let mut truncated = false;
+    for step in &path.steps {
+        let mut refs = Vec::new();
+        for span in &step.provenance {
+            let index = if let Some(i) = spans.iter().position(|s| s == span) {
+                i
+            } else {
+                let i = spans.len();
+                spans.push(span.clone());
+                let mut source =
+                    source_excerpt(root, &span.file, span.start_line, span.end_line, lines);
+                let digest_valid = span.file_blake3.len() == 64
+                    && span.file_blake3.bytes().all(|b| b.is_ascii_hexdigit());
+                if !digest_valid || source["status"] != "available" {
+                    unavailable.push(span.file.clone());
+                } else if source["file_blake3"].as_str() != Some(span.file_blake3.as_str()) {
+                    changed.push(span.file.clone());
+                }
+                source["indexed_file_blake3"] = json!(span.file_blake3);
+                source["index_match"] = json!("matched");
+                truncated |= source["truncated"] == true;
+                evidence.push(json!({"span":span,"source":source}));
+                i
+            };
+            refs.push(index);
+        }
+        steps.push(json!({"kind":step.kind,"from":step.from,"to":step.to,"provenance":refs}));
+    }
+    // No partial chain or previously checked source text escapes on failure.
+    if !changed.is_empty() || !unavailable.is_empty() {
+        changed.sort();
+        changed.dedup();
+        unavailable.sort();
+        unavailable.dedup();
+        return json!({"status":if changed.is_empty(){"unavailable"}else{"mismatch"},
+            "changed_files":changed,"unavailable_files":unavailable,"reason":"reindex before relying on this path"});
+    }
+    json!({"status":"verified_indexed_path","target":path.target,"steps":steps,"evidence":evidence,
+        "route_shape":"directed steps including all recorded convergent branches",
+        "source_text_truncated":truncated,"scope":"recorded ASD resolver path and checked bytes; not compiler or graph-completeness proof"})
+}

@@ -253,6 +253,7 @@ pub fn run_index(
     let mut symbol_count = 0usize;
     let mut disambiguated_count = 0usize;
     let mut all_edges: Vec<CallEdge> = Vec::new();
+    let mut recorded_sites = Vec::new();
     // Track first-seen file for each qname to report cross-file collisions.
     let mut qname_first_file: HashMap<String, String> = HashMap::new();
     let mut collision_log: Vec<(String, String, String)> = Vec::new();
@@ -484,6 +485,43 @@ pub fn run_index(
             }
         }
     }
+    for ctx in &file_ctxs {
+        if ctx.adapter.language() == "rust" {
+            for symbol in &ctx.parsed {
+                if symbol.kind == crate::schema::SymbolKind::Class
+                    && symbol
+                        .signature
+                        .as_deref()
+                        .is_some_and(|s| s.starts_with("struct ") || s.starts_with("enum "))
+                {
+                    let owner = symbol
+                        .qname
+                        .rsplit_once(':')
+                        .filter(|(_, tail)| tail.bytes().all(|b| b.is_ascii_digit()))
+                        .map(|(name, _)| name)
+                        .unwrap_or(&symbol.qname);
+                    workspace
+                        .rust_concrete_types
+                        .entry(owner.to_owned())
+                        .and_modify(|old| {
+                            if old != &symbol.qname {
+                                old.clear();
+                            }
+                        })
+                        .or_insert_with(|| symbol.qname.clone());
+                }
+                if symbol.kind == crate::schema::SymbolKind::Method
+                    && symbol
+                        .signature
+                        .as_deref()
+                        .and_then(|s| s.split_once("->"))
+                        .is_some_and(|(_, ret)| ret.trim() == "Self")
+                {
+                    workspace.rust_self_returns.insert(symbol.qname.clone());
+                }
+            }
+        }
+    }
     // Build suffix index after all qnames are inserted so adapters can do
     // O(1) suffix-based lookup (e.g., "DriftCompiler.compile" →
     // "Sources.Models.DriftCompiler.compile").
@@ -501,6 +539,7 @@ pub fn run_index(
     // Discover Rust Cargo library identities, including [lib].name/path overrides.
     // Stay within this index root; no metadata command or dependency execution.
     let mut seen_manifests = HashSet::new();
+    let mut manifest_sources: HashMap<PathBuf, String> = HashMap::new();
     for ctx in &file_ctxs {
         if ctx.adapter.language() != "rust" {
             continue;
@@ -515,10 +554,15 @@ pub fn run_index(
                 continue;
             }
             if seen_manifests.insert(manifest_path.clone()) {
-                if let Some(manifest) = std::fs::read_to_string(&manifest_path)
-                    .ok()
-                    .and_then(|s| s.parse::<toml::Value>().ok())
-                {
+                if let Some(manifest) = std::fs::read_to_string(&manifest_path).ok().and_then(|s| {
+                    manifest_sources.insert(
+                        manifest_path
+                            .canonicalize()
+                            .unwrap_or_else(|_| manifest_path.clone()),
+                        s.clone(),
+                    );
+                    s.parse::<toml::Value>().ok()
+                }) {
                     let name = manifest
                         .get("lib")
                         .and_then(|l| l.get("name"))
@@ -551,39 +595,123 @@ pub fn run_index(
     // Only normal path dependencies with indexed libraries inside this root bind.
     let mut dependency_scopes = HashMap::new();
     let canonical_root = index_root.canonicalize().ok();
+    // Inherited paths are relative to the owning workspace manifest, not the
+    // consuming member. Only inspect manifests inside this index root. Keep the
+    // nearest workspace boundary even when it has no dependency for this key.
+    let mut workspace_manifests = HashMap::new();
+    for member in &seen_manifests {
+        let Some(dir) = member.parent() else { continue };
+        for ancestor in dir.ancestors().take_while(|p| p.starts_with(&index_root)) {
+            let path = ancestor.join("Cargo.toml");
+            let Ok(path) = path.canonicalize() else {
+                continue;
+            };
+            if !canonical_root
+                .as_ref()
+                .is_some_and(|root| path.starts_with(root))
+            {
+                continue;
+            }
+            let Some(source) = manifest_sources
+                .get(&path)
+                .cloned()
+                .or_else(|| std::fs::read_to_string(&path).ok())
+            else {
+                continue;
+            };
+            let Ok(manifest) = source.parse::<toml::Value>() else {
+                break;
+            };
+            manifest_sources.insert(path.clone(), source);
+            if manifest.get("workspace").is_some() {
+                workspace_manifests.insert(member.clone(), path);
+                break;
+            }
+        }
+    }
+    let manifest_span = |path: &Path| -> Option<crate::adapter::BindingSpan> {
+        let path = path.canonicalize().ok()?;
+        let source = manifest_sources.get(&path)?;
+        Some(crate::adapter::BindingSpan {
+            kind: "cargo_manifest".into(),
+            file: path
+                .strip_prefix(canonical_root.as_ref()?)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/"),
+            start_line: 1,
+            end_line: source.lines().count().max(1) as u32,
+            file_blake3: blake3::hash(source.as_bytes()).to_hex().to_string(),
+        })
+    };
+    let mut dependency_evidence = HashMap::new();
     for manifest_path in &seen_manifests {
         let Some(dir) = manifest_path.parent() else {
             continue;
         };
-        let Some(manifest) = std::fs::read_to_string(manifest_path)
+        let Some(manifest) = manifest_path
+            .canonicalize()
             .ok()
+            .and_then(|p| manifest_sources.get(&p))
             .and_then(|s| s.parse::<toml::Value>().ok())
         else {
             continue;
         };
         let mut scope = HashMap::new();
+        let mut evidence = HashMap::new();
         if let Some(deps) = manifest.get("dependencies").and_then(|v| v.as_table()) {
             for (key, value) in deps {
+                let mut provenance = Vec::new();
                 let target = (|| -> Option<String> {
                     if value.get("optional").and_then(|v| v.as_bool()) == Some(true) {
                         return None;
                     }
-                    let path = value.get("path")?.as_str()?;
-                    if value.get("workspace").and_then(|v| v.as_bool()) == Some(true) {
+                    let inherited = value.get("workspace").and_then(|v| v.as_bool()) == Some(true);
+                    let (dependency_value, path_base) = if inherited {
+                        // Explicit workspace relocation and mixed local/inherited
+                        // source declarations need Cargo semantics we do not infer.
+                        if manifest
+                            .get("package")
+                            .and_then(|v| v.get("workspace"))
+                            .is_some()
+                            || ["path", "package", "git", "version", "registry"]
+                                .iter()
+                                .any(|k| value.get(k).is_some())
+                        {
+                            return None;
+                        }
+                        let workspace_path = workspace_manifests.get(manifest_path)?;
+                        let workspace_manifest: toml::Value =
+                            manifest_sources.get(workspace_path)?.parse().ok()?;
+                        let dependency = workspace_manifest
+                            .get("workspace")?
+                            .get("dependencies")?
+                            .get(key)?
+                            .clone();
+                        provenance.push(manifest_span(workspace_path)?);
+                        (dependency, workspace_path.parent()?)
+                    } else {
+                        (value.clone(), dir)
+                    };
+                    if dependency_value.get("optional").and_then(|v| v.as_bool()) == Some(true)
+                        || dependency_value.get("workspace").is_some()
+                    {
                         return None;
                     }
-                    let folder = dir.join(path).canonicalize().ok()?;
+                    let path = dependency_value.get("path")?.as_str()?;
+                    let folder = path_base.join(path).canonicalize().ok()?;
                     let root = canonical_root.as_ref()?;
                     if !folder.starts_with(root) {
                         return None;
                     }
+                    let dependency_path = folder.join("Cargo.toml").canonicalize().ok()?;
                     let dependency: toml::Value =
-                        std::fs::read_to_string(folder.join("Cargo.toml"))
-                            .ok()?
-                            .parse()
-                            .ok()?;
+                        manifest_sources.get(&dependency_path)?.parse().ok()?;
                     let package = dependency.get("package")?.get("name")?.as_str()?;
-                    let expected = value.get("package").and_then(|v| v.as_str()).unwrap_or(key);
+                    let expected = dependency_value
+                        .get("package")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(key);
                     if expected != package {
                         return None;
                     }
@@ -598,8 +726,14 @@ pub fn run_index(
                         .ok()?
                         .to_string_lossy()
                         .replace('\\', "/");
-                    workspace.rust_crates.get(&relative).cloned()
+                    let library = workspace.rust_crates.get(&relative)?.clone();
+                    provenance.push(manifest_span(manifest_path)?);
+                    provenance.push(manifest_span(&dependency_path)?);
+                    Some(library)
                 })();
+                if target.is_some() {
+                    evidence.insert(key.replace('-', "_"), provenance);
+                }
                 scope
                     .entry(key.replace('-', "_"))
                     .and_modify(|binding| *binding = None)
@@ -625,6 +759,7 @@ pub fn run_index(
                 }
             }
         }
+        dependency_evidence.insert(dir.to_path_buf(), evidence);
         dependency_scopes.insert(dir.to_path_buf(), scope);
     }
     for ctx in &file_ctxs {
@@ -635,15 +770,26 @@ pub fn run_index(
         if let Some(scope) = full
             .ancestors()
             .skip(1)
-            .find_map(|dir| dependency_scopes.get(dir))
+            .find_map(|dir| dependency_scopes.get(dir).map(|scope| (dir, scope)))
         {
+            let (dir, scope) = scope;
             workspace
                 .rust_dependencies
                 .insert(ctx.file_str.clone(), scope.clone());
+            if let Some(evidence) = dependency_evidence.get(dir) {
+                workspace
+                    .rust_dependency_provenance
+                    .insert(ctx.file_str.clone(), evidence.clone());
+            }
+            if let Some(span) = manifest_span(&dir.join("Cargo.toml")) {
+                workspace
+                    .rust_manifest_provenance
+                    .insert(ctx.file_str.clone(), span);
+            }
         }
     }
     for ctx in &file_ctxs {
-        for (alias, target) in ctx.adapter.extract_reference_aliases(
+        for (alias, target, provenance) in ctx.adapter.extract_reference_bindings(
             &ctx.file_str,
             &ctx.source,
             &ctx.parsed,
@@ -651,12 +797,40 @@ pub fn run_index(
         ) {
             workspace
                 .reference_aliases
-                .entry(alias)
+                .entry(alias.clone())
                 .or_default()
-                .insert(target);
+                .insert(target.clone());
+            workspace
+                .reference_provenance
+                .entry((alias, target))
+                .or_default()
+                .extend(provenance);
         }
     }
 
+    let source_hashes: HashMap<_, _> = file_ctxs
+        .iter()
+        .map(|ctx| {
+            (
+                ctx.file_str.as_str(),
+                blake3::hash(ctx.source.as_bytes()).to_hex().to_string(),
+            )
+        })
+        .collect();
+    for symbol in &indexed_symbols {
+        if let Some(hash) = source_hashes.get(symbol.file.as_str()) {
+            workspace.definition_provenance.insert(
+                symbol.qname.clone(),
+                crate::adapter::BindingSpan {
+                    kind: "definition".into(),
+                    file: symbol.file.clone(),
+                    start_line: symbol.start.line,
+                    end_line: symbol.end.line,
+                    file_blake3: hash.clone(),
+                },
+            );
+        }
+    }
     // Flush Pass 1: 3 spec_set_json calls (complete subtrees) → O(N) objects.
     //
     // Each subtree is the one the speculation forked from plus this run's
@@ -835,9 +1009,11 @@ pub fn run_index(
         })
         .collect();
     for ctx in &file_ctxs {
-        let edges =
+        let (edges, sites) =
             ctx.adapter
-                .extract_call_edges(&ctx.file_str, &ctx.source, &ctx.parsed, &workspace);
+                .extract_call_graph(&ctx.file_str, &ctx.source, &ctx.parsed, &workspace);
+        let hash = blake3::hash(ctx.source.as_bytes()).to_hex().to_string();
+        recorded_sites.extend(sites.into_iter().map(|site| (site, hash.clone())));
         all_edges.extend(edges);
         // Per-file unresolved-call report. Default trait impl returns
         // empty for adapters that don't implement static resolution.
@@ -934,17 +1110,35 @@ pub fn run_index(
         .map(|(sym_id, callers)| (sym_id.clone(), serde_json::json!({ "callers": callers })))
         .collect();
 
+    let mut sites_tree = serde_json::Map::new();
+    for (site, hash) in recorded_sites {
+        let (Some(caller), Some(callee)) = (
+            qname_to_sym_id.get(&site.caller_qname),
+            qname_to_sym_id.get(&site.callee_qname),
+        ) else {
+            continue;
+        };
+        let by_caller = sites_tree
+            .entry(callee.clone())
+            .or_insert_with(|| serde_json::json!({}));
+        let rows = by_caller
+            .as_object_mut()
+            .unwrap()
+            .entry(caller.clone())
+            .or_insert_with(|| serde_json::json!([]));
+        let mut record = serde_json::to_value(site).map_err(|e| AsdError::Other(e.to_string()))?;
+        record["indexed_file_blake3"] = Value::String(hash);
+        rows.as_array_mut().unwrap().push(record);
+    }
     let spec2 = repo
         .speculate(ref_name, Some("asd-index-pass2-edges".into()))
         .map_err(|e| AsdError::Other(e.to_string()))?;
-    if !callees_tree.is_empty() {
-        repo.spec_set_json(spec2, "/asd/v1/index/callees", &Value::Object(callees_tree))
-            .map_err(|e| AsdError::Other(e.to_string()))?;
-    }
-    if !callers_tree.is_empty() {
-        repo.spec_set_json(spec2, "/asd/v1/index/callers", &Value::Object(callers_tree))
-            .map_err(|e| AsdError::Other(e.to_string()))?;
-    }
+    repo.spec_set_json(spec2, "/asd/v1/index/callees", &Value::Object(callees_tree))
+        .map_err(|e| AsdError::Other(e.to_string()))?;
+    repo.spec_set_json(spec2, "/asd/v1/index/callers", &Value::Object(callers_tree))
+        .map_err(|e| AsdError::Other(e.to_string()))?;
+    repo.spec_set_json(spec2, &paths::call_sites_root(), &Value::Object(sites_tree))
+        .map_err(|e| AsdError::Other(e.to_string()))?;
 
     // t-002: endpoint registry, nested contract_hash → repo_id → symbol_id →
     // ServiceEndpoint, so endpoints sharing a contract (from any repo, once

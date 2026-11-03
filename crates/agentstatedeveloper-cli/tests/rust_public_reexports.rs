@@ -369,3 +369,234 @@ fn equal_rust_module_names_keep_distinct_callers_and_reindex_identities() {
     assert_eq!(callers(root, "api.lib.check"), vec![qualified]);
     assert_eq!(callers(root, qualified), vec!["left.lib.bridge"]);
 }
+
+#[test]
+fn inherited_workspace_dependency_uses_workspace_relative_path_and_keeps_decoy_separate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write(
+        root,
+        "Cargo.toml",
+        "[workspace]\nmembers=['crates/api','crates/client']\n[workspace.dependencies]\nreader={package='real-api',path='crates/api'}\n",
+    );
+    write(
+        root,
+        "crates/api/Cargo.toml",
+        "[package]\nname='real-api'\nversion='0.1.0'\n[lib]\nname='public_api'\n",
+    );
+    write(
+        root,
+        "crates/api/src/lib.rs",
+        "pub mod audit; pub mod export; pub use audit::read_jsonl;",
+    );
+    write(root, "crates/api/src/audit.rs", "pub fn read_jsonl() {}");
+    write(
+        root,
+        "crates/api/src/export.rs",
+        "pub fn read_jsonl() {} pub fn merge(){read_jsonl();}",
+    );
+    write(
+        root,
+        "crates/client/Cargo.toml",
+        "[package]\nname='client'\nversion='0.1.0'\n[dependencies]\nreader={workspace=true}\n",
+    );
+    write(
+        root,
+        "crates/client/src/lib.rs",
+        "use reader::read_jsonl; fn imported(){read_jsonl();} struct Server; impl Server{fn handler(&self){reader::read_jsonl();}}",
+    );
+    index(root);
+    assert_eq!(
+        callers(root, "audit.read_jsonl"),
+        vec!["client.lib.Server.handler", "client.lib.imported"]
+    );
+    assert_eq!(callers(root, "export.read_jsonl"), vec!["export.merge"]);
+}
+
+#[test]
+fn unsupported_inherited_dependencies_do_not_guess_global_names_or_outer_workspaces() {
+    for (label, dependency, root_dependency, nested) in [
+        ("missing", "reader={workspace=true}", "", false),
+        ("registry", "reader={workspace=true}", "reader='1'", false),
+        (
+            "optional",
+            "reader={workspace=true,optional=true}",
+            "reader={path='crates/api'}",
+            false,
+        ),
+        (
+            "mixed",
+            "reader={workspace=true,path='../api'}",
+            "reader={path='crates/api'}",
+            false,
+        ),
+        (
+            "nearest",
+            "reader={workspace=true}",
+            "reader={path='crates/api'}",
+            true,
+        ),
+        (
+            "wrong-package",
+            "reader={workspace=true}",
+            "reader={package='wrong',path='crates/api'}",
+            false,
+        ),
+        (
+            "relocated",
+            "reader={workspace=true}",
+            "reader={path='crates/api'}",
+            false,
+        ),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            root,
+            "Cargo.toml",
+            &format!(
+                "[workspace]\nmembers=['crates/api','crates/client']\n[workspace.dependencies]\n{root_dependency}\n"
+            ),
+        );
+        write(
+            root,
+            "crates/api/Cargo.toml",
+            "[package]\nname='reader'\nversion='0.1.0'\n",
+        );
+        write(root, "crates/api/src/lib.rs", "pub fn read_jsonl() {}");
+        let relocated = if label == "relocated" {
+            "workspace='../..'\n"
+        } else {
+            ""
+        };
+        let boundary = if nested { "\n[workspace]\n" } else { "" };
+        write(
+            root,
+            "crates/client/Cargo.toml",
+            &format!(
+                "[package]\nname='client'\nversion='0.1.0'\n{relocated}[dependencies]\n{dependency}\n{boundary}"
+            ),
+        );
+        write(
+            root,
+            "crates/client/src/lib.rs",
+            "fn run(){reader::read_jsonl();}",
+        );
+        index(root);
+        assert!(callers(root, "api.lib.read_jsonl").is_empty(), "{label}");
+    }
+}
+
+#[test]
+fn file_module_reexports_keep_package_scope_and_follow_renamed_chains() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    for name in ["left", "right"] {
+        write(
+            root,
+            &format!("crates/{name}/Cargo.toml"),
+            &format!("[package]\nname='{name}'\nversion='0.1.0'\n"),
+        );
+        write(
+            root,
+            &format!("crates/{name}/src/lib.rs"),
+            "mod bridge; mod relay; mod worker; use crate::relay::check; fn run(){check();}",
+        );
+        write(
+            root,
+            &format!("crates/{name}/src/bridge.rs"),
+            "pub use crate::worker::work as emit;",
+        );
+        write(
+            root,
+            &format!("crates/{name}/src/relay.rs"),
+            "pub use crate::bridge::emit as check;",
+        );
+        write(
+            root,
+            &format!("crates/{name}/src/worker.rs"),
+            "pub fn work() {}",
+        );
+    }
+    index(root);
+    assert_eq!(
+        callers(root, "crates.left.src.worker.work"),
+        vec!["left.lib.run"]
+    );
+    assert_eq!(
+        callers(root, "crates.right.src.worker.work"),
+        vec!["right.lib.run"]
+    );
+}
+
+#[test]
+fn local_receiver_constructor_and_annotation_bind_exact_inherent_method() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write(
+        root,
+        "crates/receiver/Cargo.toml",
+        "[package]\nname='receiver'\nversion='0.1.0'\n",
+    );
+    write(
+        root,
+        "crates/receiver/src/lib.rs",
+        "pub mod store; use crate::store::Store; fn local(){let index=Store::new();index.run();} fn direct(){Store::new().run();} fn typed(index: &Store){index.run();}",
+    );
+    write(
+        root,
+        "crates/receiver/src/store.rs",
+        "pub struct Store; impl Store {pub fn new()->Self {Self} pub fn run(&self){}} pub struct Other; impl Other {pub fn run(&self){}}",
+    );
+    index(root);
+    assert_eq!(
+        callers(root, "store.Store.run"),
+        vec![
+            "receiver.lib.direct",
+            "receiver.lib.local",
+            "receiver.lib.typed"
+        ]
+    );
+    assert!(callers(root, "store.Other.run").is_empty());
+}
+
+#[test]
+fn uncertain_receivers_never_use_global_method_name_or_assumed_factory_returns() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write(
+        root,
+        "crates/receiver/Cargo.toml",
+        "[package]\nname='receiver'\nversion='0.1.0'\n",
+    );
+    write(
+        root,
+        "crates/receiver/src/lib.rs",
+        r#"
+mod store; use crate::store::{Store,Other};
+fn good(){let value=Store::make();value.run();}
+fn shadow(){let value=Store::make(); {let value=Other::make();value.run();}}
+fn mutable(){let mut value=Store::make();value=Store::make();value.run();}
+fn unknown(){let value=Store::not_self();value.run();}
+fn borrowed(){let value=&Store::make();value.run();}
+fn destructured(){let value=Store::make();let (value,)=(Other::make(),);value.run();}
+fn closure(){let value=Store::make();let c=|value:Other|{value.run();};}
+fn matched(){let value=Store::make();match Some(Other::make()){Some(value)=>value.run(),_=>()}}
+fn generic<Store>(value: &Store){value.run();}
+fn decoy(){let value=Other::make();value.run();}
+"#,
+    );
+    write(
+        root,
+        "crates/receiver/src/store.rs",
+        r#"
+pub struct Store;
+impl Store {pub fn make()->Self {Self} pub fn not_self()->Other{Other} pub fn run(&self){}}
+pub struct Other;
+impl Other {pub fn make()->Self {Self} pub fn run(&self){}}
+"#,
+    );
+    index(root);
+    assert_eq!(callers(root, "store.Store.run"), vec!["receiver.lib.good"]);
+    assert_eq!(callers(root, "store.Other.run"), vec!["receiver.lib.decoy"]);
+}

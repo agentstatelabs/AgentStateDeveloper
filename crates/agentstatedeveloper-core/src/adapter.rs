@@ -28,6 +28,72 @@ pub struct CallEdge {
     pub callee_qname: String,
 }
 
+/// Indexed source/manifest bytes supporting a resolver hop. Text is read only
+/// after the CLI checks the whole-file digest against this snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BindingSpan {
+    pub kind: String,
+    pub file: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub file_blake3: String,
+}
+
+impl BindingSpan {
+    pub fn from_source(
+        file: &str,
+        source: &str,
+        kind: &str,
+        start_line: u32,
+        end_line: u32,
+    ) -> Self {
+        Self {
+            kind: kind.into(),
+            file: file.into(),
+            start_line,
+            end_line,
+            file_blake3: blake3::hash(source.as_bytes()).to_hex().to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BindingStep {
+    pub kind: String,
+    pub from: String,
+    pub to: String,
+    pub provenance: Vec<BindingSpan>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ResolvedReference {
+    pub target: String,
+    pub steps: Vec<BindingStep>,
+    pub complete: bool,
+}
+
+/// Parser-backed location for a resolved static edge. Import is a syntactic
+/// candidate, not a complete resolution proof or graph-completeness claim.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CallSite {
+    pub caller_qname: String,
+    pub callee_qname: String,
+    pub file: String,
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+    pub expression: String,
+    pub expression_complete: bool,
+    pub syntactic_import_candidate: Option<String>,
+    pub import_candidate_omitted: bool,
+    pub caller_symbol_fp: String,
+    pub caller_start_line: u32,
+    pub caller_end_line: u32,
+    #[serde(default)]
+    pub binding_path: Option<ResolvedReference>,
+}
+
 /// Workspace-wide context passed to adapters when resolving call edges
 /// across module boundaries.
 ///
@@ -75,6 +141,13 @@ pub struct WorkspaceSymbols {
     /// Public reference paths -> possible canonical paths or other aliases.
     /// Multiple candidates are retained so conditional/ambiguous exports never guess.
     pub reference_aliases: HashMap<String, HashSet<String>>,
+    pub reference_provenance: HashMap<(String, String), Vec<BindingSpan>>,
+    pub rust_dependency_provenance: HashMap<String, HashMap<String, Vec<BindingSpan>>>,
+    pub rust_manifest_provenance: HashMap<String, BindingSpan>,
+    pub definition_provenance: HashMap<String, BindingSpan>,
+    /// Rust associated functions with an explicitly recorded `-> Self` return.
+    pub rust_self_returns: HashSet<String>,
+    pub rust_concrete_types: HashMap<String, String>,
 }
 
 impl WorkspaceSymbols {
@@ -117,8 +190,108 @@ impl WorkspaceSymbols {
         Some(reference.to_owned())
     }
 
+    /// Internal namespace for file-module aliases; never shared across packages.
+    pub fn rust_file_reference(file: &str, reference: &str) -> Option<String> {
+        let (package, relative) = file.rsplit_once("/src/")?;
+        let mut module: Vec<_> = relative.strip_suffix(".rs")?.split('/').collect();
+        if matches!(module.last(), Some(&"mod" | &"lib" | &"main")) {
+            module.pop();
+        }
+        let path = if let Some(rest) = reference.strip_prefix("crate.") {
+            rest.to_owned()
+        } else if let Some(rest) = reference.strip_prefix("self.") {
+            module.push(rest);
+            module.join(".")
+        } else if let Some(mut rest) = reference.strip_prefix("super.") {
+            module.pop()?;
+            while let Some(next) = rest.strip_prefix("super.") {
+                module.pop()?;
+                rest = next;
+            }
+            module.push(rest);
+            module.join(".")
+        } else {
+            return None;
+        };
+        Some(format!("@rust:{package}.{path}"))
+    }
+
     pub fn resolve_rust_reference(&self, file: &str, reference: &str) -> Option<String> {
-        self.resolve_reference(&self.rust_reference_path(file, reference)?)
+        self.resolve_rust_reference_with_path(file, reference)
+            .map(|v| v.target)
+    }
+
+    pub fn resolve_rust_reference_with_path(
+        &self,
+        file: &str,
+        reference: &str,
+    ) -> Option<ResolvedReference> {
+        let normalized = self.rust_reference_path(file, reference)?;
+        let scoped = Self::rust_file_reference(file, reference);
+        let (normalized, mut result) = if let Some((name, result)) = scoped.and_then(|name| {
+            self.resolve_reference_with_path(&name)
+                .map(|result| (name, result))
+        }) {
+            (name, result)
+        } else {
+            let result = self.resolve_reference_with_path(&normalized)?;
+            (normalized, result)
+        };
+        let head = reference.split('.').next().unwrap_or(reference);
+        let dependency = self
+            .rust_dependencies
+            .get(file)
+            .is_some_and(|v| v.contains_key(head));
+        if dependency || normalized != reference {
+            let provenance = if dependency {
+                self.rust_dependency_provenance
+                    .get(file)
+                    .and_then(|v| v.get(head))
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                self.rust_manifest_provenance
+                    .get(file)
+                    .cloned()
+                    .into_iter()
+                    .collect()
+            };
+            result.complete &= !provenance.is_empty();
+            result.steps.insert(
+                0,
+                BindingStep {
+                    kind: if dependency {
+                        "cargo_dependency"
+                    } else {
+                        "local_module"
+                    }
+                    .into(),
+                    from: reference.to_owned(),
+                    to: normalized,
+                    provenance,
+                },
+            );
+        }
+        Some(result)
+    }
+
+    pub fn definition_resolution(&self, name: &str) -> ResolvedReference {
+        let provenance: Vec<_> = self
+            .definition_provenance
+            .get(name)
+            .cloned()
+            .into_iter()
+            .collect();
+        ResolvedReference {
+            target: name.to_owned(),
+            complete: !provenance.is_empty(),
+            steps: vec![BindingStep {
+                kind: "definition".into(),
+                from: name.to_owned(),
+                to: name.to_owned(),
+                provenance,
+            }],
+        }
     }
 
     /// Exact qname membership test.
@@ -129,15 +302,21 @@ impl WorkspaceSymbols {
     /// Resolve exact definitions or explicit aliases, including module-prefix aliases.
     /// Every branch must terminate at the same definition; cycles/unknowns are rejected.
     pub fn resolve_reference(&self, reference: &str) -> Option<String> {
+        self.resolve_reference_with_path(reference)
+            .map(|v| v.target)
+    }
+
+    /// Same resolver, preserving every convergent branch rather than guessing a hop.
+    pub fn resolve_reference_with_path(&self, reference: &str) -> Option<ResolvedReference> {
         fn visit(
             ws: &WorkspaceSymbols,
             name: &str,
             active: &mut HashSet<String>,
-        ) -> Option<String> {
+        ) -> Option<ResolvedReference> {
             if ws.contains(name) {
-                return Some(name.to_string());
+                return Some(ws.definition_resolution(name));
             }
-            if active.len() >= 128 || !active.insert(name.to_string()) {
+            if active.len() >= 128 || !active.insert(name.to_owned()) {
                 return None;
             }
             let result = (|| {
@@ -145,13 +324,44 @@ impl WorkspaceSymbols {
                 loop {
                     if let Some(targets) = ws.reference_aliases.get(prefix) {
                         let suffix = &name[prefix.len()..];
-                        let mut found = None;
+                        let mut targets: Vec<_> = targets.iter().collect();
+                        targets.sort();
+                        let mut found: Option<ResolvedReference> = None;
                         for target in targets {
-                            let resolved = visit(ws, &format!("{target}{suffix}"), active)?;
-                            if found.as_ref().is_some_and(|old| old != &resolved) {
-                                return None;
+                            let expanded = format!("{target}{suffix}");
+                            let mut resolved = visit(ws, &expanded, active)?;
+                            let provenance = ws
+                                .reference_provenance
+                                .get(&(prefix.to_owned(), target.clone()))
+                                .cloned()
+                                .unwrap_or_default();
+                            resolved.complete &= !provenance.is_empty();
+                            resolved.steps.insert(
+                                0,
+                                BindingStep {
+                                    kind: "reference_alias".into(),
+                                    from: name.to_owned(),
+                                    to: expanded,
+                                    provenance,
+                                },
+                            );
+                            if let Some(old) = &mut found {
+                                if old.target != resolved.target {
+                                    return None;
+                                }
+                                old.complete &= resolved.complete;
+                                for step in resolved.steps {
+                                    if !old.steps.contains(&step) {
+                                        if old.steps.len() < 256 {
+                                            old.steps.push(step);
+                                        } else {
+                                            old.complete = false;
+                                        }
+                                    }
+                                }
+                            } else {
+                                found = Some(resolved);
                             }
-                            found = Some(resolved);
                         }
                         return found;
                     }
@@ -298,6 +508,34 @@ pub trait LanguageAdapter: Send + Sync {
         Vec::new()
     }
 
+    /// Extract graph and optional site locations in one adapter pass.
+    fn extract_call_graph(
+        &self,
+        file: &str,
+        source: &str,
+        symbols: &[ParsedSymbol],
+        workspace: &WorkspaceSymbols,
+    ) -> (Vec<CallEdge>, Vec<CallSite>) {
+        (
+            self.extract_call_edges(file, source, symbols, workspace),
+            Vec::new(),
+        )
+    }
+
+    /// Alias declarations with optional parser/manifest provenance.
+    fn extract_reference_bindings(
+        &self,
+        file: &str,
+        source: &str,
+        symbols: &[ParsedSymbol],
+        workspace: &WorkspaceSymbols,
+    ) -> Vec<(String, String, Vec<BindingSpan>)> {
+        self.extract_reference_aliases(file, source, symbols, workspace)
+            .into_iter()
+            .map(|(a, t)| (a, t, Vec::new()))
+            .collect()
+    }
+
     /// Detect cross-service endpoints (HTTP routes/clients, pub-sub
     /// emit/listen) in a file. Returns [`DetectedEndpoint`]s attributed to the
     /// owning symbol by qname; the index pipeline enriches them with repo +
@@ -405,5 +643,72 @@ mod reference_alias_tests {
             .unwrap()
             .insert("missing.inspect".into());
         assert_eq!(ws.resolve_reference("api.inspect"), None);
+    }
+}
+
+#[cfg(test)]
+mod binding_path_tests {
+    use super::*;
+    fn workspace() -> WorkspaceSymbols {
+        let mut ws = WorkspaceSymbols::default();
+        ws.qnames.insert("leaf".into());
+        ws.definition_provenance.insert(
+            "leaf".into(),
+            BindingSpan::from_source("src/lib.rs", "pub fn leaf() {}", "definition", 1, 1),
+        );
+        ws
+    }
+    fn alias(ws: &mut WorkspaceSymbols, from: &str, to: &str) {
+        ws.reference_aliases
+            .entry(from.into())
+            .or_default()
+            .insert(to.into());
+        ws.reference_provenance.insert(
+            (from.into(), to.into()),
+            vec![BindingSpan::from_source(
+                "src/lib.rs",
+                "pub use leaf as alias;",
+                "public_reexport",
+                1,
+                1,
+            )],
+        );
+    }
+    #[test]
+    fn convergent_alias_routes_are_all_preserved_and_ambiguous_routes_rejected() {
+        let mut ws = workspace();
+        alias(&mut ws, "root", "a");
+        alias(&mut ws, "root", "b");
+        alias(&mut ws, "a", "leaf");
+        alias(&mut ws, "b", "leaf");
+        let trace = ws.resolve_reference_with_path("root").unwrap();
+        assert_eq!(trace.target, "leaf");
+        assert!(trace.complete);
+        assert!(trace.steps.iter().any(|s| s.from == "root" && s.to == "a"));
+        assert!(trace.steps.iter().any(|s| s.from == "root" && s.to == "b"));
+        assert_eq!(ws.resolve_reference("root"), Some(trace.target));
+        ws.qnames.insert("other".into());
+        alias(&mut ws, "b", "other");
+        assert!(ws.resolve_reference_with_path("root").is_none());
+        assert!(ws.resolve_reference("root").is_none());
+    }
+    #[test]
+    fn missing_provenance_is_incomplete_without_changing_graph_resolution() {
+        let mut ws = workspace();
+        ws.reference_aliases
+            .entry("root".into())
+            .or_default()
+            .insert("leaf".into());
+        let trace = ws.resolve_reference_with_path("root").unwrap();
+        assert!(!trace.complete);
+        assert_eq!(trace.target, "leaf");
+        assert_eq!(ws.resolve_reference("root"), Some("leaf".into()));
+    }
+    #[test]
+    fn cyclic_routes_produce_no_binding_path() {
+        let mut ws = workspace();
+        alias(&mut ws, "a", "b");
+        alias(&mut ws, "b", "a");
+        assert!(ws.resolve_reference_with_path("a").is_none());
     }
 }

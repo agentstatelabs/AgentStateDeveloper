@@ -8,7 +8,8 @@
 use std::collections::{HashMap, HashSet};
 
 use agentstatedeveloper_core::adapter::{
-    CallEdge, LanguageAdapter, ParsedSymbol, WorkspaceSymbols,
+    BindingSpan, BindingStep, CallEdge, CallSite, LanguageAdapter, ParsedSymbol, ResolvedReference,
+    WorkspaceSymbols,
 };
 use agentstatedeveloper_core::cross_service::{
     DetectedEndpoint, Direction, Transport, http_contract,
@@ -78,6 +79,16 @@ impl LanguageAdapter for RustAdapter {
         public_reference_aliases(file, source, symbols, workspace)
     }
 
+    fn extract_reference_bindings(
+        &self,
+        file: &str,
+        source: &str,
+        symbols: &[ParsedSymbol],
+        workspace: &WorkspaceSymbols,
+    ) -> Vec<(String, String, Vec<BindingSpan>)> {
+        public_reference_bindings(file, source, symbols, workspace)
+    }
+
     fn extract_call_edges(
         &self,
         file: &str,
@@ -86,6 +97,16 @@ impl LanguageAdapter for RustAdapter {
         workspace: &WorkspaceSymbols,
     ) -> Vec<CallEdge> {
         extract_call_edges_impl(file, source, symbols, workspace)
+    }
+
+    fn extract_call_graph(
+        &self,
+        file: &str,
+        source: &str,
+        symbols: &[ParsedSymbol],
+        workspace: &WorkspaceSymbols,
+    ) -> (Vec<CallEdge>, Vec<CallSite>) {
+        extract_call_graph_impl(file, source, symbols, workspace)
     }
 }
 
@@ -897,6 +918,15 @@ fn extract_call_edges_impl(
     symbols: &[ParsedSymbol],
     workspace: &WorkspaceSymbols,
 ) -> Vec<CallEdge> {
+    extract_call_graph_impl(file, source, symbols, workspace).0
+}
+
+fn extract_call_graph_impl(
+    file: &str,
+    source: &str,
+    symbols: &[ParsedSymbol],
+    workspace: &WorkspaceSymbols,
+) -> (Vec<CallEdge>, Vec<CallSite>) {
     let module_prefix = workspace
         .rust_modules
         .get(file)
@@ -925,12 +955,13 @@ fn extract_call_edges_impl(
         .set_language(&tree_sitter_rust::LANGUAGE.into())
         .is_err()
     {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
-    let imports = parse_use_declarations(source, &mut parser);
+    let imports = parse_use_declarations(file, source, &mut parser);
 
     let mut edges: HashSet<CallEdge> = HashSet::new();
+    let mut sites = Vec::new();
 
     for sym in symbols {
         if !matches!(sym.kind, SymbolKind::Function | SymbolKind::Method) {
@@ -954,6 +985,7 @@ fn extract_call_edges_impl(
             workspace,
             enclosing_type.as_deref(),
             &mut edges,
+            &mut sites,
         );
     }
 
@@ -963,7 +995,21 @@ fn extract_call_edges_impl(
             .cmp(&b.caller_qname)
             .then_with(|| a.callee_qname.cmp(&b.callee_qname))
     });
-    out
+    sites.sort_by_key(|s: &CallSite| {
+        (
+            s.caller_qname.clone(),
+            s.start_line,
+            s.start_col,
+            s.callee_qname.clone(),
+        )
+    });
+    sites.dedup_by(|a, b| {
+        a.caller_qname == b.caller_qname
+            && a.callee_qname == b.callee_qname
+            && a.start_line == b.start_line
+            && a.start_col == b.start_col
+    });
+    (out, sites)
 }
 
 /// Collect explicit public exports from a Rust library entry point.
@@ -974,13 +1020,26 @@ fn public_reference_aliases(
     symbols: &[ParsedSymbol],
     workspace: &WorkspaceSymbols,
 ) -> Vec<(String, String)> {
+    public_reference_bindings(file, source, symbols, workspace)
+        .into_iter()
+        .map(|(a, t, _)| (a, t))
+        .collect()
+}
+
+fn public_reference_bindings(
+    file: &str,
+    source: &str,
+    symbols: &[ParsedSymbol],
+    workspace: &WorkspaceSymbols,
+) -> Vec<(String, String, Vec<BindingSpan>)> {
+    let mut file_aliases = file_module_reference_bindings(file, source, symbols, workspace);
     let crate_name = workspace.rust_crates.get(file).cloned().or_else(|| {
         file.ends_with("/src/lib.rs")
             .then(|| crate_name_from_path(file).map(|s| s.replace('-', "_")))
             .flatten()
     });
     let Some(crate_name) = crate_name else {
-        return Vec::new();
+        return file_aliases;
     };
     let source_dir = file
         .rsplit_once('/')
@@ -1003,6 +1062,7 @@ fn public_reference_aliases(
     let Some(tree) = parser.parse(source.as_bytes(), None) else {
         return Vec::new();
     };
+    let snapshot = BindingSpan::from_source(file, source, "", 1, 1);
     let mut aliases = Vec::new();
     let mut cursor = tree.root_node().walk();
     for node in tree.root_node().named_children(&mut cursor) {
@@ -1014,6 +1074,41 @@ fn public_reference_aliases(
         if !public {
             continue;
         }
+        let mut emit = |alias: String, target: String, reference: Option<&str>| {
+            let kind = if node.kind() == "use_declaration" {
+                "public_reexport"
+            } else if node.kind() == "mod_item" {
+                "public_module"
+            } else {
+                "public_definition"
+            };
+            let mut declaration = snapshot.clone();
+            declaration.kind = kind.into();
+            declaration.start_line = node.start_position().row as u32 + 1;
+            declaration.end_line = node.end_position().row as u32 + 1;
+            let mut provenance = vec![declaration];
+            if let Some(span) = workspace.rust_manifest_provenance.get(file) {
+                provenance.push(span.clone());
+            }
+            if let Some(reference) = reference {
+                let head = reference.split('.').next().unwrap_or(reference);
+                if let Some(spans) = workspace
+                    .rust_dependency_provenance
+                    .get(file)
+                    .and_then(|v| v.get(head))
+                {
+                    for span in spans {
+                        if !provenance.contains(span) {
+                            provenance.push(span.clone());
+                        }
+                    }
+                }
+            }
+            if !workspace.rust_manifest_provenance.contains_key(file) {
+                provenance.clear();
+            }
+            aliases.push((alias, target, provenance));
+        };
         if node.kind() == "use_declaration" {
             let Some(argument) = node.child_by_field_name("argument") else {
                 continue;
@@ -1049,21 +1144,37 @@ fn public_reference_aliases(
                     } else {
                         format!("{crate_name}.{raw}")
                     };
-                aliases.push((format!("{crate_name}.{local}"), target));
+                emit(
+                    format!("{crate_name}.{local}"),
+                    target,
+                    Some(&binding.qname_prefix),
+                );
             }
         } else if let Some(name) = node
             .child_by_field_name("name")
             .and_then(|n| node_text(n, source.as_bytes()))
         {
             let canonical = format!("{module}.{name}");
-            if symbols.iter().any(|s| s.qname == canonical) {
-                aliases.push((format!("{crate_name}.{name}"), canonical.clone()));
+            if symbols.iter().any(|s| {
+                s.qname == canonical
+                    || (s.qname.rsplit_once(':').is_some_and(|(owner, line)| {
+                        owner == canonical && line.bytes().all(|b| b.is_ascii_digit())
+                    }) && s
+                        .signature
+                        .as_deref()
+                        .is_some_and(|sig| sig.starts_with("struct ") || sig.starts_with("enum ")))
+            }) {
+                emit(format!("{crate_name}.{name}"), canonical.clone(), None);
                 // Public types also expose their associated functions at this path.
                 for s in symbols
                     .iter()
                     .filter(|s| s.qname.starts_with(&format!("{canonical}.")))
                 {
-                    aliases.push((s.qname.replacen(&module, &crate_name, 1), s.qname.clone()));
+                    emit(
+                        s.qname.replacen(&module, &crate_name, 1),
+                        s.qname.clone(),
+                        None,
+                    );
                 }
             } else if node.kind() == "mod_item" {
                 // Inline modules keep the lib prefix; file modules do not. Require
@@ -1077,18 +1188,144 @@ fn public_reference_aliases(
                     })
                 });
                 if let Some(target) = target {
-                    aliases.push((format!("{crate_name}.{name}"), target.clone()));
+                    emit(format!("{crate_name}.{name}"), target.clone(), None);
                 }
             }
         }
     }
-    aliases
+    file_aliases.extend(aliases);
+    file_aliases
+}
+
+/// Top-level declarations in each file module, using package-private alias keys.
+/// Inline scopes/globs/restricted visibility are not guessed here.
+fn file_module_reference_bindings(
+    file: &str,
+    source: &str,
+    symbols: &[ParsedSymbol],
+    workspace: &WorkspaceSymbols,
+) -> Vec<(String, String, Vec<BindingSpan>)> {
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_rust::LANGUAGE.into())
+        .is_err()
+    {
+        return vec![];
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return vec![];
+    };
+    let mut result = Vec::new();
+    let mut cursor = tree.root_node().walk();
+    for node in tree.root_node().named_children(&mut cursor) {
+        let mut children = node.walk();
+        if !node.named_children(&mut children).any(|n| {
+            n.kind() == "visibility_modifier"
+                && node_text(n, source.as_bytes()).as_deref() == Some("pub")
+        }) {
+            continue;
+        }
+        let span = BindingSpan::from_source(
+            file,
+            source,
+            if node.kind() == "use_declaration" {
+                "public_reexport"
+            } else {
+                "public_definition"
+            },
+            node.start_position().row as u32 + 1,
+            node.end_position().row as u32 + 1,
+        );
+        let mut provenance = vec![];
+        if let Some(manifest) = workspace.rust_manifest_provenance.get(file) {
+            provenance = vec![span.clone(), manifest.clone()];
+        }
+        let mut emit = |name: &str, target: String, extra: Vec<BindingSpan>| {
+            if let Some(alias) =
+                WorkspaceSymbols::rust_file_reference(file, &format!("self.{name}"))
+            {
+                let mut proof = provenance.clone();
+                proof.extend(extra);
+                result.push((alias, target, proof));
+            }
+        };
+        if node.kind() == "use_declaration" {
+            let Some(argument) = node.child_by_field_name("argument") else {
+                continue;
+            };
+            let mut bindings = HashMap::new();
+            collect_use_tree(argument, source.as_bytes(), "", &mut bindings);
+            for (local, binding) in bindings {
+                let reference = &binding.qname_prefix;
+                if let Some(target) = WorkspaceSymbols::rust_file_reference(file, reference) {
+                    emit(&local, target, vec![]);
+                } else {
+                    let head = reference.split('.').next().unwrap_or(reference);
+                    if workspace
+                        .rust_dependencies
+                        .get(file)
+                        .is_some_and(|scope| scope.contains_key(head))
+                    {
+                        if let Some(target) = workspace.rust_reference_path(file, reference) {
+                            let extra = workspace
+                                .rust_dependency_provenance
+                                .get(file)
+                                .and_then(|v| v.get(head))
+                                .cloned()
+                                .unwrap_or_default();
+                            emit(&local, target, extra);
+                        }
+                    } else if workspace.rust_crates.contains_key(file) {
+                        // Bare crate-root reexports refer to local modules;
+                        // unsupported external prefixes remain unresolved here.
+                        if let Some(target) = WorkspaceSymbols::rust_file_reference(
+                            file,
+                            &format!("crate.{reference}"),
+                        ) {
+                            emit(&local, target, vec![]);
+                        }
+                    }
+                }
+            }
+        } else if let Some(name) = node
+            .child_by_field_name("name")
+            .and_then(|n| node_text(n, source.as_bytes()))
+        {
+            if let Some(symbol) = symbols.iter().find(|s| {
+                s.qname
+                    .split(':')
+                    .next()
+                    .unwrap_or(&s.qname)
+                    .ends_with(&format!(".{name}"))
+                    && s.start_line == node.start_position().row as u32 + 1
+            }) {
+                // Definitions are independently proven again at the terminal step.
+                let target = if symbol
+                    .signature
+                    .as_deref()
+                    .is_some_and(|s| s.starts_with("struct ") || s.starts_with("enum "))
+                {
+                    symbol
+                        .qname
+                        .rsplit_once(':')
+                        .filter(|(_, line)| line.bytes().all(|b| b.is_ascii_digit()))
+                        .map(|(owner, _)| owner.to_owned())
+                        .unwrap_or_else(|| symbol.qname.clone())
+                } else {
+                    symbol.qname.clone()
+                };
+                emit(&name, target, vec![]);
+            }
+        }
+    }
+    result
 }
 
 /// Import binding: local name → qname prefix in ASD dotted form.
 #[derive(Debug, Clone)]
 struct UseBinding {
     qname_prefix: String,
+    declaration: Option<BindingSpan>,
 }
 
 /// Walk top-level `use_declaration` nodes and collect bindings.
@@ -1098,7 +1335,12 @@ struct UseBinding {
 /// - `use foo::bar as b;`         → `b`   → `foo.bar`
 /// - `use foo::{Bar, baz as z};`  → `Bar` → `foo.Bar`, `z` → `foo.baz`
 /// - `use foo::*;`                → skipped (can't statically enumerate)
-fn parse_use_declarations(source: &str, parser: &mut Parser) -> HashMap<String, UseBinding> {
+fn parse_use_declarations(
+    file: &str,
+    source: &str,
+    parser: &mut Parser,
+) -> HashMap<String, UseBinding> {
+    let snapshot = BindingSpan::from_source(file, source, "import", 1, 1);
     let mut out = HashMap::new();
     let src_bytes = source.as_bytes();
     let tree = match parser.parse(src_bytes, None) {
@@ -1110,7 +1352,15 @@ fn parse_use_declarations(source: &str, parser: &mut Parser) -> HashMap<String, 
     for child in root.children(&mut cursor) {
         if child.kind() == "use_declaration" {
             if let Some(arg) = child.child_by_field_name("argument") {
-                collect_use_tree(arg, src_bytes, "", &mut out);
+                let mut bindings = HashMap::new();
+                collect_use_tree(arg, src_bytes, "", &mut bindings);
+                for (name, mut binding) in bindings {
+                    let mut declaration = snapshot.clone();
+                    declaration.start_line = child.start_position().row as u32 + 1;
+                    declaration.end_line = child.end_position().row as u32 + 1;
+                    binding.declaration = Some(declaration);
+                    out.insert(name, binding);
+                }
             }
         }
     }
@@ -1167,6 +1417,7 @@ fn collect_use_tree(
                 out.insert(
                     alias,
                     UseBinding {
+                        declaration: None,
                         qname_prefix: qname,
                     },
                 );
@@ -1184,7 +1435,13 @@ fn collect_use_tree(
             };
             let local = text.rsplit('.').next().unwrap_or(&text).to_string();
             if !local.is_empty() {
-                out.insert(local, UseBinding { qname_prefix: full });
+                out.insert(
+                    local,
+                    UseBinding {
+                        qname_prefix: full,
+                        declaration: None,
+                    },
+                );
             }
         }
         "identifier" => {
@@ -1198,6 +1455,7 @@ fn collect_use_tree(
                 out.insert(
                     name,
                     UseBinding {
+                        declaration: None,
                         qname_prefix: qname,
                     },
                 );
@@ -1243,10 +1501,11 @@ fn collect_calls(
     workspace: &WorkspaceSymbols,
     enclosing_type: Option<&str>,
     out: &mut HashSet<CallEdge>,
+    sites: &mut Vec<CallSite>,
 ) {
     if node.kind() == "call_expression" {
         if let Some(func) = node.child_by_field_name("function") {
-            if let Some(callee) = resolve_callee(
+            if let Some(resolved) = resolve_callee(
                 file,
                 func,
                 src,
@@ -1256,7 +1515,37 @@ fn collect_calls(
                 imports,
                 workspace,
                 enclosing_type,
+                sym,
             ) {
+                let callee = resolved.target.clone();
+                let expression = node_text(func, src).unwrap_or_default();
+                let head = expression.split("::").next().unwrap_or(&expression);
+                let candidate = imports.get(head).map(|v| v.qname_prefix.clone());
+                let start = func.start_position();
+                let end = func.end_position();
+                let mut boundary = expression.len().min(512);
+                while !expression.is_char_boundary(boundary) {
+                    boundary -= 1;
+                }
+                sites.push(CallSite {
+                    caller_qname: sym.qname.clone(),
+                    callee_qname: callee.clone(),
+                    file: file.to_owned(),
+                    start_line: sym.start_line + start.row as u32,
+                    start_col: start.column as u32 + if start.row == 0 { sym.start_col } else { 1 },
+                    end_line: sym.start_line + end.row as u32,
+                    end_col: end.column as u32 + if end.row == 0 { sym.start_col } else { 1 },
+                    expression: expression[..boundary].to_owned(),
+                    expression_complete: boundary == expression.len(),
+                    import_candidate_omitted: candidate.as_ref().is_some_and(|v| v.len() > 512),
+                    syntactic_import_candidate: candidate.filter(|v| v.len() <= 512),
+                    caller_symbol_fp: agentstatedeveloper_core::symbol::symbol_fingerprint(
+                        &sym.body,
+                    ),
+                    binding_path: Some(resolved),
+                    caller_start_line: sym.start_line,
+                    caller_end_line: sym.end_line,
+                });
                 out.insert(CallEdge {
                     caller_qname: sym.qname.clone(),
                     callee_qname: callee,
@@ -1278,11 +1567,255 @@ fn collect_calls(
             workspace,
             enclosing_type,
             out,
+            sites,
         );
     }
 }
 
 #[allow(clippy::too_many_arguments)]
+fn resolve_import(
+    workspace: &WorkspaceSymbols,
+    file: &str,
+    from: &str,
+    reference: &str,
+    binding: &UseBinding,
+) -> Option<ResolvedReference> {
+    let mut resolved = workspace.resolve_rust_reference_with_path(file, reference)?;
+    let provenance: Vec<_> = binding.declaration.clone().into_iter().collect();
+    resolved.complete &= !provenance.is_empty();
+    resolved.steps.insert(
+        0,
+        BindingStep {
+            kind: "import".into(),
+            from: from.into(),
+            to: reference.into(),
+            provenance,
+        },
+    );
+    Some(resolved)
+}
+
+fn resolve_local(workspace: &WorkspaceSymbols, from: &str, target: &str) -> ResolvedReference {
+    let mut resolved = workspace.definition_resolution(target);
+    let provenance = workspace
+        .definition_provenance
+        .get(target)
+        .cloned()
+        .into_iter()
+        .collect();
+    resolved.steps.insert(
+        0,
+        BindingStep {
+            kind: "local_name".into(),
+            from: from.into(),
+            to: target.into(),
+            provenance,
+        },
+    );
+    resolved
+}
+
+/// Bounded syntactic receiver inference. No factory-name guessing or global
+/// method suffix matching. Only immutable, singly bound lexical locals/params.
+#[allow(clippy::too_many_arguments)]
+fn infer_receiver(
+    file: &str,
+    value: Node<'_>,
+    src: &[u8],
+    module: &str,
+    method_name: &str,
+    simple: &HashMap<String, String>,
+    known: &HashSet<&str>,
+    imports: &HashMap<String, UseBinding>,
+    ws: &WorkspaceSymbols,
+    sym: &ParsedSymbol,
+) -> Option<ResolvedReference> {
+    fn nodes<'t>(node: Node<'t>, out: &mut Vec<Node<'t>>) {
+        out.push(node);
+        let mut c = node.walk();
+        for n in node.named_children(&mut c) {
+            nodes(n, out);
+        }
+    }
+    fn concrete_type<'t>(mut n: Node<'t>) -> Option<Node<'t>> {
+        loop {
+            match n.kind() {
+                "reference_type" | "generic_type" => n = n.child_by_field_name("type")?,
+                "type_identifier" | "scoped_type_identifier" => return Some(n),
+                _ => return None,
+            }
+        }
+    }
+    let (origin, annotation, initializer) = if value.kind() == "identifier" {
+        let name = node_text(value, src)?;
+        let mut root = value;
+        while let Some(p) = root.parent() {
+            root = p;
+        }
+        let mut all = vec![];
+        nodes(root, &mut all);
+        if all.iter().any(|n| {
+            n.kind() == "match_arm"
+                && n.child_by_field_name("pattern")
+                    .and_then(|pattern| node_text(pattern, src))
+                    .is_some_and(|s| {
+                        s.split(|c: char| !c.is_alphanumeric() && c != '_')
+                            .any(|s| s == name)
+                    })
+        }) {
+            return None;
+        }
+        let mut bindings = vec![];
+        for n in &all {
+            if matches!(n.kind(), "let_declaration" | "parameter") {
+                if let Some(pattern) = n
+                    .child_by_field_name("pattern")
+                    .and_then(|p| node_text(p, src))
+                {
+                    if pattern == name {
+                        bindings.push(*n);
+                    } else if pattern
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .any(|s| s == name)
+                    {
+                        return None;
+                    }
+                }
+            }
+            if matches!(
+                n.kind(),
+                "closure_parameters"
+                    | "assignment_expression"
+                    | "compound_assignment_expr"
+                    | "for_expression"
+            ) {
+                let relevant = match n.kind() {
+                    "for_expression" => n.child_by_field_name("pattern")?,
+                    "assignment_expression" | "compound_assignment_expr" => {
+                        n.child_by_field_name("left")?
+                    }
+                    _ => *n,
+                };
+                let text = node_text(relevant, src)?;
+                if text
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .any(|s| s == name)
+                {
+                    return None;
+                }
+            }
+        }
+        if bindings.len() != 1 {
+            return None;
+        }
+        let b = bindings[0];
+        let mut binding_cursor = b.walk();
+        if b.named_children(&mut binding_cursor)
+            .any(|n| n.kind() == "mutable_specifier")
+        {
+            return None;
+        }
+        if b.start_byte() >= value.start_byte()
+            || node_text(b, src)?.trim_start().starts_with("let mut ")
+        {
+            return None;
+        }
+        let scope = if b.kind() == "parameter" {
+            b.parent()?.parent()?
+        } else {
+            b.parent()?
+        };
+        let mut parent = value.parent();
+        let mut visible = false;
+        while let Some(p) = parent {
+            if p == scope {
+                visible = true;
+                break;
+            }
+            parent = p.parent();
+        }
+        if !visible {
+            return None;
+        }
+        (
+            b,
+            b.child_by_field_name("type"),
+            b.child_by_field_name("value"),
+        )
+    } else if value.kind() == "call_expression" {
+        (value, None, Some(value))
+    } else {
+        return None;
+    };
+    let mut resolved = if let Some(annotation) = annotation {
+        let mut root = value;
+        while let Some(parent) = root.parent() {
+            root = parent;
+        }
+        let mut all = vec![];
+        nodes(root, &mut all);
+        if all.iter().any(|n| n.kind() == "type_parameters") {
+            return None;
+        }
+        let ty = node_text(concrete_type(annotation)?, src)?.replace("::", ".");
+        let mut method = if let Some(import) = imports.get(&ty) {
+            resolve_import(
+                ws,
+                file,
+                &ty,
+                &format!("{}.{method_name}", import.qname_prefix),
+                import,
+            )?
+        } else {
+            ws.resolve_rust_reference_with_path(file, &format!("{ty}.{method_name}"))
+                .or_else(|| {
+                    ws.resolve_reference_with_path(&format!("{module}.{ty}.{method_name}"))
+                })?
+        };
+        method.target = method.target.rsplit_once('.')?.0.to_owned();
+        method
+    } else {
+        let init = initializer?;
+        if init.kind() != "call_expression" {
+            return None;
+        }
+        let func = init.child_by_field_name("function")?;
+        if func.kind() != "scoped_identifier" {
+            return None;
+        }
+        let mut constructor = resolve_callee(
+            file, func, src, module, simple, known, imports, ws, None, sym,
+        )?;
+        if !ws.rust_self_returns.contains(&constructor.target) {
+            return None;
+        }
+        constructor.target = constructor.target.rsplit_once('.')?.0.to_owned();
+        constructor
+    };
+    let concrete = ws.rust_concrete_types.get(&resolved.target)?;
+    let type_proof = ws.definition_provenance.get(concrete)?.clone();
+    resolved.steps.push(BindingStep {
+        kind: "receiver_type".into(),
+        from: resolved.target.clone(),
+        to: concrete.clone(),
+        provenance: vec![type_proof],
+    });
+    let mut span = ws.definition_provenance.get(&sym.qname)?.clone();
+    span.kind = "receiver_binding".into();
+    span.start_line = sym.start_line + origin.start_position().row as u32;
+    span.end_line = sym.start_line + origin.end_position().row as u32;
+    resolved.steps.insert(
+        0,
+        BindingStep {
+            kind: "receiver_binding".into(),
+            from: node_text(value, src)?,
+            to: resolved.target.clone(),
+            provenance: vec![span],
+        },
+    );
+    Some(resolved)
+}
+
 fn resolve_callee(
     file: &str,
     func: Node<'_>,
@@ -1293,17 +1826,19 @@ fn resolve_callee(
     imports: &HashMap<String, UseBinding>,
     workspace: &WorkspaceSymbols,
     enclosing_type: Option<&str>,
-) -> Option<String> {
+    sym: &ParsedSymbol,
+) -> Option<ResolvedReference> {
     match func.kind() {
         "identifier" => {
             let name = node_text(func, src)?;
             // Intra-module first.
             if let Some(q) = by_simple.get(&name) {
-                return Some(q.clone());
+                return Some(resolve_local(workspace, &name, q));
             }
             // Import map.
             if let Some(binding) = imports.get(&name) {
-                if let Some(target) = workspace.resolve_rust_reference(file, &binding.qname_prefix)
+                if let Some(target) =
+                    resolve_import(workspace, file, &name, &binding.qname_prefix, binding)
                 {
                     return Some(target);
                 }
@@ -1320,9 +1855,32 @@ fn resolve_callee(
                 let class = enclosing_type?;
                 let candidate = format!("{class}.{field_name}");
                 if known.contains(candidate.as_str()) {
-                    return Some(candidate);
+                    return Some(resolve_local(
+                        workspace,
+                        &node_text(func, src).unwrap_or_default(),
+                        &candidate,
+                    ));
                 }
                 return None;
+            }
+            if let Some(mut receiver) = infer_receiver(
+                file,
+                value,
+                src,
+                module_prefix,
+                &field_name,
+                by_simple,
+                known,
+                imports,
+                workspace,
+                sym,
+            ) {
+                let method = workspace
+                    .resolve_reference_with_path(&format!("{}.{field_name}", receiver.target))?;
+                receiver.complete &= method.complete;
+                receiver.steps.extend(method.steps);
+                receiver.target = method.target;
+                return Some(receiver);
             }
             if value.kind() == "identifier" {
                 let obj_name = node_text(value, src)?;
@@ -1335,13 +1893,23 @@ fn resolve_callee(
                 if known.contains(type_qname.as_str()) {
                     let candidate = format!("{type_qname}.{field_name}");
                     if known.contains(candidate.as_str()) {
-                        return Some(candidate);
+                        return Some(resolve_local(
+                            workspace,
+                            &node_text(func, src).unwrap_or_default(),
+                            &candidate,
+                        ));
                     }
                 }
                 // Imported binding.
                 if let Some(binding) = imports.get(&obj_name) {
                     let candidate = format!("{}.{field_name}", binding.qname_prefix);
-                    if let Some(target) = workspace.resolve_rust_reference(file, &candidate) {
+                    if let Some(target) = resolve_import(
+                        workspace,
+                        file,
+                        &format!("{obj_name}.{field_name}"),
+                        &candidate,
+                        binding,
+                    ) {
                         return Some(target);
                     }
                 }
@@ -1352,21 +1920,25 @@ fn resolve_callee(
             // `Type::associated_fn()` or `module::function()`
             let text = node_text(func, src)?.replace("::", ".");
             // Direct workspace hit.
-            if let Some(target) = workspace.resolve_rust_reference(file, &text) {
+            if let Some(target) = workspace.resolve_rust_reference_with_path(file, &text) {
                 return Some(target);
             }
             if let Some((head, tail)) = text.split_once('.') {
                 if let Some(binding) = imports.get(head) {
-                    if let Some(target) = workspace
-                        .resolve_rust_reference(file, &format!("{}.{tail}", binding.qname_prefix))
-                    {
+                    if let Some(target) = resolve_import(
+                        workspace,
+                        file,
+                        &text,
+                        &format!("{}.{tail}", binding.qname_prefix),
+                        binding,
+                    ) {
                         return Some(target);
                     }
                 }
                 if head == "Self" {
                     if let Some(owner) = enclosing_type {
-                        if let Some(target) =
-                            workspace.resolve_rust_reference(file, &format!("{owner}.{tail}"))
+                        if let Some(target) = workspace
+                            .resolve_rust_reference_with_path(file, &format!("{owner}.{tail}"))
                         {
                             return Some(target);
                         }
@@ -1377,7 +1949,11 @@ fn resolve_callee(
             if !module_prefix.is_empty() {
                 let candidate = format!("{module_prefix}.{text}");
                 if workspace.contains(&candidate) {
-                    return Some(candidate);
+                    return Some(resolve_local(
+                        workspace,
+                        &node_text(func, src).unwrap_or_default(),
+                        &candidate,
+                    ));
                 }
             }
             // A matching final segment is not proof that a qualified path resolves.
