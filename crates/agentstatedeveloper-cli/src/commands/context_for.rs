@@ -45,6 +45,18 @@ pub struct ContextForArgs {
     #[arg(long)]
     pub include_call_sites: bool,
 
+    /// Include actual resolver paths with checked source/manifest provenance.
+    #[arg(long)]
+    pub include_binding_paths: bool,
+
+    /// Maximum path steps (1..64); a larger proof is omitted as a whole.
+    #[arg(long, default_value = "8", value_parser = clap::value_parser!(u32).range(1..=64))]
+    pub binding_step_limit: u32,
+
+    /// Restrict call-site/path evidence to one exact caller qname.
+    #[arg(long, requires = "include_binding_paths")]
+    pub caller_qname: Option<String>,
+
     /// Maximum recorded sites per caller (1..32); omissions remain explicit.
     #[arg(long, default_value = "4", value_parser = clap::value_parser!(u32).range(1..=32))]
     pub call_site_limit: u32,
@@ -172,7 +184,7 @@ pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
                 }
             }
         }
-        if args.include_call_sites {
+        if args.include_call_sites || args.include_binding_paths {
             let records = engine
                 .repo
                 .get_tree(
@@ -185,27 +197,47 @@ pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
                 )
                 .unwrap_or(serde_json::Value::Null);
             let ids = index_store.get_callers(&engine.ref_name, &symbol.symbol_id)?;
-            for (i, (row, id)) in sym_ctx["callers"]
+            let mut eligible = 0;
+            for (_i, (row, id)) in sym_ctx["callers"]
                 .as_array_mut()
                 .unwrap()
                 .iter_mut()
                 .zip(ids)
                 .enumerate()
             {
+                if args
+                    .caller_qname
+                    .as_ref()
+                    .is_some_and(|q| row["qname"].as_str() != Some(q.as_str()))
+                {
+                    continue;
+                }
+                let i = eligible;
+                eligible += 1;
                 row["call_sites"] = if i >= args.caller_limit as usize {
                     json!({"status":"omitted","reason":"caller-limit"})
                 } else if let Some(caller) = id_map.get(&id) {
                     super::context_evidence::call_site_evidence(
                         &root,
                         caller,
+                        &symbol.qname,
                         records.get(&id),
                         args.call_site_limit as usize,
                         args.body_lines as usize,
+                        args.include_binding_paths,
+                        args.binding_step_limit as usize,
                     )
                 } else {
                     json!({"status":"unavailable","reason":"unresolved indexed caller"})
                 };
             }
+        }
+        if let Some(qname) = &args.caller_qname {
+            let callers = sym_ctx["callers"].as_array_mut().unwrap();
+            let total = callers.len();
+            callers.retain(|row| row["qname"].as_str() == Some(qname.as_str()));
+            let kept = callers.len();
+            sym_ctx["caller_filter"] = json!({"qname":qname,"indexed_total":total,"returned":kept,"omitted_by_filter":total-kept});
         }
         t.phase("assemble_context");
         symbols_out.push(sym_ctx);
@@ -216,13 +248,18 @@ pub fn run(cfg: &Config, args: ContextForArgs) -> Result<()> {
         "count": symbols_out.len(),
         "symbols": symbols_out,
     });
-    if args.include_body || args.include_caller_bodies || args.include_call_sites {
+    if args.include_body
+        || args.include_caller_bodies
+        || args.include_call_sites
+        || args.include_binding_paths
+    {
         out["source_contract"] = json!({"origin":"current_worktree", "locations":"indexed_ranges",
             "index_verification":"per_excerpt", "graph_freshness":"not_verified",
             "graph_scope":"indexed direct edges; absence does not prove no callers",
             "body_lines":args.body_lines, "caller_body_limit":args.caller_limit,
             "call_site_limit":args.call_site_limit, "caller_evidence_limit":args.caller_limit,
-            "call_site_scope":"parser-recorded resolved calls; syntactic import candidate is not a binding proof; full chain not recorded"});
+            "binding_step_limit":args.binding_step_limit,
+            "call_site_scope":"parser-recorded calls; syntactic candidate is not a proof; optional binding paths are checked indexed resolver routes, not compiler/graph completeness"});
     }
 
     // Token economy (1.0.78): context_for output is always JSON

@@ -502,6 +502,7 @@ pub fn run_index(
     // Discover Rust Cargo library identities, including [lib].name/path overrides.
     // Stay within this index root; no metadata command or dependency execution.
     let mut seen_manifests = HashSet::new();
+    let mut manifest_sources: HashMap<PathBuf, String> = HashMap::new();
     for ctx in &file_ctxs {
         if ctx.adapter.language() != "rust" {
             continue;
@@ -516,10 +517,15 @@ pub fn run_index(
                 continue;
             }
             if seen_manifests.insert(manifest_path.clone()) {
-                if let Some(manifest) = std::fs::read_to_string(&manifest_path)
-                    .ok()
-                    .and_then(|s| s.parse::<toml::Value>().ok())
-                {
+                if let Some(manifest) = std::fs::read_to_string(&manifest_path).ok().and_then(|s| {
+                    manifest_sources.insert(
+                        manifest_path
+                            .canonicalize()
+                            .unwrap_or_else(|_| manifest_path.clone()),
+                        s.clone(),
+                    );
+                    s.parse::<toml::Value>().ok()
+                }) {
                     let name = manifest
                         .get("lib")
                         .and_then(|l| l.get("name"))
@@ -552,19 +558,39 @@ pub fn run_index(
     // Only normal path dependencies with indexed libraries inside this root bind.
     let mut dependency_scopes = HashMap::new();
     let canonical_root = index_root.canonicalize().ok();
+    let manifest_span = |path: &Path| -> Option<crate::adapter::BindingSpan> {
+        let path = path.canonicalize().ok()?;
+        let source = manifest_sources.get(&path)?;
+        Some(crate::adapter::BindingSpan {
+            kind: "cargo_manifest".into(),
+            file: path
+                .strip_prefix(canonical_root.as_ref()?)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/"),
+            start_line: 1,
+            end_line: source.lines().count().max(1) as u32,
+            file_blake3: blake3::hash(source.as_bytes()).to_hex().to_string(),
+        })
+    };
+    let mut dependency_evidence = HashMap::new();
     for manifest_path in &seen_manifests {
         let Some(dir) = manifest_path.parent() else {
             continue;
         };
-        let Some(manifest) = std::fs::read_to_string(manifest_path)
+        let Some(manifest) = manifest_path
+            .canonicalize()
             .ok()
+            .and_then(|p| manifest_sources.get(&p))
             .and_then(|s| s.parse::<toml::Value>().ok())
         else {
             continue;
         };
         let mut scope = HashMap::new();
+        let mut evidence = HashMap::new();
         if let Some(deps) = manifest.get("dependencies").and_then(|v| v.as_table()) {
             for (key, value) in deps {
+                let mut provenance = Vec::new();
                 let target = (|| -> Option<String> {
                     if value.get("optional").and_then(|v| v.as_bool()) == Some(true) {
                         return None;
@@ -578,11 +604,9 @@ pub fn run_index(
                     if !folder.starts_with(root) {
                         return None;
                     }
+                    let dependency_path = folder.join("Cargo.toml").canonicalize().ok()?;
                     let dependency: toml::Value =
-                        std::fs::read_to_string(folder.join("Cargo.toml"))
-                            .ok()?
-                            .parse()
-                            .ok()?;
+                        manifest_sources.get(&dependency_path)?.parse().ok()?;
                     let package = dependency.get("package")?.get("name")?.as_str()?;
                     let expected = value.get("package").and_then(|v| v.as_str()).unwrap_or(key);
                     if expected != package {
@@ -599,8 +623,14 @@ pub fn run_index(
                         .ok()?
                         .to_string_lossy()
                         .replace('\\', "/");
-                    workspace.rust_crates.get(&relative).cloned()
+                    let library = workspace.rust_crates.get(&relative)?.clone();
+                    provenance.push(manifest_span(manifest_path)?);
+                    provenance.push(manifest_span(&dependency_path)?);
+                    Some(library)
                 })();
+                if target.is_some() {
+                    evidence.insert(key.replace('-', "_"), provenance);
+                }
                 scope
                     .entry(key.replace('-', "_"))
                     .and_modify(|binding| *binding = None)
@@ -626,6 +656,7 @@ pub fn run_index(
                 }
             }
         }
+        dependency_evidence.insert(dir.to_path_buf(), evidence);
         dependency_scopes.insert(dir.to_path_buf(), scope);
     }
     for ctx in &file_ctxs {
@@ -636,15 +667,26 @@ pub fn run_index(
         if let Some(scope) = full
             .ancestors()
             .skip(1)
-            .find_map(|dir| dependency_scopes.get(dir))
+            .find_map(|dir| dependency_scopes.get(dir).map(|scope| (dir, scope)))
         {
+            let (dir, scope) = scope;
             workspace
                 .rust_dependencies
                 .insert(ctx.file_str.clone(), scope.clone());
+            if let Some(evidence) = dependency_evidence.get(dir) {
+                workspace
+                    .rust_dependency_provenance
+                    .insert(ctx.file_str.clone(), evidence.clone());
+            }
+            if let Some(span) = manifest_span(&dir.join("Cargo.toml")) {
+                workspace
+                    .rust_manifest_provenance
+                    .insert(ctx.file_str.clone(), span);
+            }
         }
     }
     for ctx in &file_ctxs {
-        for (alias, target) in ctx.adapter.extract_reference_aliases(
+        for (alias, target, provenance) in ctx.adapter.extract_reference_bindings(
             &ctx.file_str,
             &ctx.source,
             &ctx.parsed,
@@ -652,12 +694,40 @@ pub fn run_index(
         ) {
             workspace
                 .reference_aliases
-                .entry(alias)
+                .entry(alias.clone())
                 .or_default()
-                .insert(target);
+                .insert(target.clone());
+            workspace
+                .reference_provenance
+                .entry((alias, target))
+                .or_default()
+                .extend(provenance);
         }
     }
 
+    let source_hashes: HashMap<_, _> = file_ctxs
+        .iter()
+        .map(|ctx| {
+            (
+                ctx.file_str.as_str(),
+                blake3::hash(ctx.source.as_bytes()).to_hex().to_string(),
+            )
+        })
+        .collect();
+    for symbol in &indexed_symbols {
+        if let Some(hash) = source_hashes.get(symbol.file.as_str()) {
+            workspace.definition_provenance.insert(
+                symbol.qname.clone(),
+                crate::adapter::BindingSpan {
+                    kind: "definition".into(),
+                    file: symbol.file.clone(),
+                    start_line: symbol.start.line,
+                    end_line: symbol.end.line,
+                    file_blake3: hash.clone(),
+                },
+            );
+        }
+    }
     // Flush Pass 1: 3 spec_set_json calls (complete subtrees) → O(N) objects.
     //
     // Each subtree is the one the speculation forked from plus this run's

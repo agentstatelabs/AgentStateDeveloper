@@ -466,3 +466,30 @@ to both caller bodies and call-site evidence; `--call-site-limit` bounds sites
 per caller. Limits and output-budget omissions are explicit. Run a whole-project
 reindex to populate records. MCP parity and complete binding receipts remain
 separate work.
+
+### Checked indexed Rust binding paths
+
+`asd context-for events.record_event --include-binding-paths --caller-qname crates.consumer00.src.worker.retry --budget-tokens 2000`
+opts into the resolver's actual recorded path for one exact caller. The flag
+implies call-site evidence. `caller_filter` reports the indexed total and omitted
+callers so a filtered response cannot imply that no other callers exist.
+
+Each path includes selected local/import/Cargo/reference-alias/definition steps
+and deduplicated source/manifest provenance. Cargo inputs are parsed from the
+same cached bytes used to generate their provenance. All convergent branches
+are retained; ambiguous or cyclic references remain unresolved. Missing records
+report `not_recorded`; missing provenance reports `incomplete`. Known stale or
+unavailable inputs suppress the entire path and expression text.
+
+`verified_indexed_path` means the stored ASD route's supporting bytes match now.
+It is **not** compiler verification, feature/cfg evaluation, or a completeness or
+freshness guarantee for the whole graph. The pre-existing static resolver's
+supported Cargo scope is unchanged. Source snippets can be visibly truncated
+while their whole-file hashes are checked. `--binding-step-limit` defaults to8
+(max64); exceeding it omits a whole path, never presents a partial proof as
+complete. The normal site/caller/serialized-byte budgets still apply. Full paths
+for every caller may be expensive; request a specific caller where possible.
+
+A whole-project reindex populates paths; older call-site records remain readable
+without falsely claiming a complete path. CLI-only; no default prompt change,
+MCP parity or agent-efficiency claim is implied.
