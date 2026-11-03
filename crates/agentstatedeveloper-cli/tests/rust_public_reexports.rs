@@ -369,3 +369,120 @@ fn equal_rust_module_names_keep_distinct_callers_and_reindex_identities() {
     assert_eq!(callers(root, "api.lib.check"), vec![qualified]);
     assert_eq!(callers(root, qualified), vec!["left.lib.bridge"]);
 }
+
+#[test]
+fn inherited_workspace_dependency_uses_workspace_relative_path_and_keeps_decoy_separate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write(
+        root,
+        "Cargo.toml",
+        "[workspace]\nmembers=['crates/api','crates/client']\n[workspace.dependencies]\nreader={package='real-api',path='crates/api'}\n",
+    );
+    write(
+        root,
+        "crates/api/Cargo.toml",
+        "[package]\nname='real-api'\nversion='0.1.0'\n[lib]\nname='public_api'\n",
+    );
+    write(
+        root,
+        "crates/api/src/lib.rs",
+        "pub mod audit; pub mod export; pub use audit::read_jsonl;",
+    );
+    write(root, "crates/api/src/audit.rs", "pub fn read_jsonl() {}");
+    write(
+        root,
+        "crates/api/src/export.rs",
+        "pub fn read_jsonl() {} pub fn merge(){read_jsonl();}",
+    );
+    write(
+        root,
+        "crates/client/Cargo.toml",
+        "[package]\nname='client'\nversion='0.1.0'\n[dependencies]\nreader={workspace=true}\n",
+    );
+    write(
+        root,
+        "crates/client/src/lib.rs",
+        "use reader::read_jsonl; fn imported(){read_jsonl();} struct Server; impl Server{fn handler(&self){reader::read_jsonl();}}",
+    );
+    index(root);
+    assert_eq!(
+        callers(root, "audit.read_jsonl"),
+        vec!["client.lib.Server.handler", "client.lib.imported"]
+    );
+    assert_eq!(callers(root, "export.read_jsonl"), vec!["export.merge"]);
+}
+
+#[test]
+fn unsupported_inherited_dependencies_do_not_guess_global_names_or_outer_workspaces() {
+    for (label, dependency, root_dependency, nested) in [
+        ("missing", "reader={workspace=true}", "", false),
+        ("registry", "reader={workspace=true}", "reader='1'", false),
+        (
+            "optional",
+            "reader={workspace=true,optional=true}",
+            "reader={path='crates/api'}",
+            false,
+        ),
+        (
+            "mixed",
+            "reader={workspace=true,path='../api'}",
+            "reader={path='crates/api'}",
+            false,
+        ),
+        (
+            "nearest",
+            "reader={workspace=true}",
+            "reader={path='crates/api'}",
+            true,
+        ),
+        (
+            "wrong-package",
+            "reader={workspace=true}",
+            "reader={package='wrong',path='crates/api'}",
+            false,
+        ),
+        (
+            "relocated",
+            "reader={workspace=true}",
+            "reader={path='crates/api'}",
+            false,
+        ),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            root,
+            "Cargo.toml",
+            &format!(
+                "[workspace]\nmembers=['crates/api','crates/client']\n[workspace.dependencies]\n{root_dependency}\n"
+            ),
+        );
+        write(
+            root,
+            "crates/api/Cargo.toml",
+            "[package]\nname='reader'\nversion='0.1.0'\n",
+        );
+        write(root, "crates/api/src/lib.rs", "pub fn read_jsonl() {}");
+        let relocated = if label == "relocated" {
+            "workspace='../..'\n"
+        } else {
+            ""
+        };
+        let boundary = if nested { "\n[workspace]\n" } else { "" };
+        write(
+            root,
+            "crates/client/Cargo.toml",
+            &format!(
+                "[package]\nname='client'\nversion='0.1.0'\n{relocated}[dependencies]\n{dependency}\n{boundary}"
+            ),
+        );
+        write(
+            root,
+            "crates/client/src/lib.rs",
+            "fn run(){reader::read_jsonl();}",
+        );
+        index(root);
+        assert!(callers(root, "api.lib.read_jsonl").is_empty(), "{label}");
+    }
+}

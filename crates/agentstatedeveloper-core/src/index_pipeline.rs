@@ -558,6 +558,40 @@ pub fn run_index(
     // Only normal path dependencies with indexed libraries inside this root bind.
     let mut dependency_scopes = HashMap::new();
     let canonical_root = index_root.canonicalize().ok();
+    // Inherited paths are relative to the owning workspace manifest, not the
+    // consuming member. Only inspect manifests inside this index root. Keep the
+    // nearest workspace boundary even when it has no dependency for this key.
+    let mut workspace_manifests = HashMap::new();
+    for member in &seen_manifests {
+        let Some(dir) = member.parent() else { continue };
+        for ancestor in dir.ancestors().take_while(|p| p.starts_with(&index_root)) {
+            let path = ancestor.join("Cargo.toml");
+            let Ok(path) = path.canonicalize() else {
+                continue;
+            };
+            if !canonical_root
+                .as_ref()
+                .is_some_and(|root| path.starts_with(root))
+            {
+                continue;
+            }
+            let Some(source) = manifest_sources
+                .get(&path)
+                .cloned()
+                .or_else(|| std::fs::read_to_string(&path).ok())
+            else {
+                continue;
+            };
+            let Ok(manifest) = source.parse::<toml::Value>() else {
+                break;
+            };
+            manifest_sources.insert(path.clone(), source);
+            if manifest.get("workspace").is_some() {
+                workspace_manifests.insert(member.clone(), path);
+                break;
+            }
+        }
+    }
     let manifest_span = |path: &Path| -> Option<crate::adapter::BindingSpan> {
         let path = path.canonicalize().ok()?;
         let source = manifest_sources.get(&path)?;
@@ -595,11 +629,40 @@ pub fn run_index(
                     if value.get("optional").and_then(|v| v.as_bool()) == Some(true) {
                         return None;
                     }
-                    let path = value.get("path")?.as_str()?;
-                    if value.get("workspace").and_then(|v| v.as_bool()) == Some(true) {
+                    let inherited = value.get("workspace").and_then(|v| v.as_bool()) == Some(true);
+                    let (dependency_value, path_base) = if inherited {
+                        // Explicit workspace relocation and mixed local/inherited
+                        // source declarations need Cargo semantics we do not infer.
+                        if manifest
+                            .get("package")
+                            .and_then(|v| v.get("workspace"))
+                            .is_some()
+                            || ["path", "package", "git", "version", "registry"]
+                                .iter()
+                                .any(|k| value.get(k).is_some())
+                        {
+                            return None;
+                        }
+                        let workspace_path = workspace_manifests.get(manifest_path)?;
+                        let workspace_manifest: toml::Value =
+                            manifest_sources.get(workspace_path)?.parse().ok()?;
+                        let dependency = workspace_manifest
+                            .get("workspace")?
+                            .get("dependencies")?
+                            .get(key)?
+                            .clone();
+                        provenance.push(manifest_span(workspace_path)?);
+                        (dependency, workspace_path.parent()?)
+                    } else {
+                        (value.clone(), dir)
+                    };
+                    if dependency_value.get("optional").and_then(|v| v.as_bool()) == Some(true)
+                        || dependency_value.get("workspace").is_some()
+                    {
                         return None;
                     }
-                    let folder = dir.join(path).canonicalize().ok()?;
+                    let path = dependency_value.get("path")?.as_str()?;
+                    let folder = path_base.join(path).canonicalize().ok()?;
                     let root = canonical_root.as_ref()?;
                     if !folder.starts_with(root) {
                         return None;
@@ -608,7 +671,10 @@ pub fn run_index(
                     let dependency: toml::Value =
                         manifest_sources.get(&dependency_path)?.parse().ok()?;
                     let package = dependency.get("package")?.get("name")?.as_str()?;
-                    let expected = value.get("package").and_then(|v| v.as_str()).unwrap_or(key);
+                    let expected = dependency_value
+                        .get("package")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(key);
                     if expected != package {
                         return None;
                     }

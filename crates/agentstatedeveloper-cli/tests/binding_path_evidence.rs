@@ -354,3 +354,55 @@ fn identical_dependency_keys_keep_distinct_evidence_scopes_and_legacy_is_explici
         "not_recorded"
     );
 }
+
+#[test]
+fn inherited_workspace_manifest_is_provenance_and_drift_suppresses_then_rebinds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("fixture");
+    fixture(&root);
+    let workspace = "[workspace]\nmembers=['crates/api','crates/decoy','crates/facade','crates/caller']\nresolver='2'\n[workspace.dependencies]\nevent_front={package='front',path='crates/facade'}\n";
+    write(&root, "Cargo.toml", workspace);
+    write(
+        &root,
+        "crates/caller/Cargo.toml",
+        "[package]\nname='consumer'\nversion='0.1.0'\nedition='2021'\n[dependencies]\nevent_front={workspace=true}\n",
+    );
+    index(&root);
+    let (fresh, _) = context(&root, "api.lib.record_event", &[]);
+    assert_eq!(
+        site(&fresh)["binding_path"]["status"],
+        "verified_indexed_path"
+    );
+    assert!(
+        site(&fresh)["binding_path"]["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["span"]["file"] == "Cargo.toml")
+    );
+    let rebound = workspace.replace(
+        "package='front',path='crates/facade'",
+        "package='decoy',path='crates/decoy'",
+    );
+    // Give the alternate facade the same exported entry point.
+    write(
+        &root,
+        "crates/decoy/src/lib.rs",
+        "pub fn publish() -> bool { false } pub use publish as emit;",
+    );
+    // Reindex this source change before testing manifest-only drift.
+    index(&root);
+    write(&root, "Cargo.toml", &rebound);
+    let (stale, _) = context(&root, "api.lib.record_event", &[]);
+    assert_eq!(site(&stale)["binding_path"]["status"], "mismatch");
+    assert!(site(&stale).get("expression").is_none());
+    assert!(site(&stale)["binding_path"].get("evidence").is_none());
+    index(&root);
+    let (old, _) = context(&root, "api.lib.record_event", &[]);
+    assert!(old["symbols"][0]["callers"].as_array().unwrap().is_empty());
+    let (new, _) = context(&root, "decoy.lib.publish", &[]);
+    assert_eq!(
+        site(&new)["binding_path"]["status"],
+        "verified_indexed_path"
+    );
+}
