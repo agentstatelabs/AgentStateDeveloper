@@ -6,7 +6,7 @@
 //! carrying the policy path or a structured `{ "status": "denied" }`
 //! response — whichever shape the tool emits.
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -127,12 +127,30 @@ fn mcp_ledger_append_denied_by_policy() {
         r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"ledger_append","arguments":{{"qname":"greetings.hello","kind":"tradeoff","summary":"should be denied","author_id":"test-agent"}}}}}}"#
     )
     .unwrap();
+    // Keep the transport open until the response: EOF otherwise races request
+    // handling and can shut the server down before the denial is delivered.
+    let output = child.stdout.take().expect("stdout");
+    let (send, receive) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut transcript = String::new();
+        for line in BufReader::new(output).lines() {
+            let Ok(line) = line else { break };
+            let is_reply =
+                serde_json::from_str::<serde_json::Value>(&line).is_ok_and(|v| v["id"] == 2);
+            transcript.push_str(&line);
+            transcript.push('\n');
+            if is_reply {
+                break;
+            }
+        }
+        let _ = send.send(transcript);
+    });
+    let result = receive.recv_timeout(Duration::from_secs(10));
     drop(stdin);
-
-    std::thread::sleep(Duration::from_millis(1500));
     let _ = child.kill();
-    let out = child.wait_with_output().expect("wait");
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let _ = child.wait();
+    let _ = reader.join();
+    let stdout = result.expect("MCP policy response within 10 seconds");
 
     eprintln!("POLICY_STDOUT:\n{}", stdout);
 
