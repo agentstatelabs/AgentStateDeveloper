@@ -486,3 +486,45 @@ fn unsupported_inherited_dependencies_do_not_guess_global_names_or_outer_workspa
         assert!(callers(root, "api.lib.read_jsonl").is_empty(), "{label}");
     }
 }
+
+#[test]
+fn file_module_reexports_keep_package_scope_and_follow_renamed_chains() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    for name in ["left", "right"] {
+        write(
+            root,
+            &format!("crates/{name}/Cargo.toml"),
+            &format!("[package]\nname='{name}'\nversion='0.1.0'\n"),
+        );
+        write(
+            root,
+            &format!("crates/{name}/src/lib.rs"),
+            "mod bridge; mod relay; mod worker; use crate::relay::check; fn run(){check();}",
+        );
+        write(
+            root,
+            &format!("crates/{name}/src/bridge.rs"),
+            "pub use crate::worker::work as emit;",
+        );
+        write(
+            root,
+            &format!("crates/{name}/src/relay.rs"),
+            "pub use crate::bridge::emit as check;",
+        );
+        write(
+            root,
+            &format!("crates/{name}/src/worker.rs"),
+            "pub fn work() {}",
+        );
+    }
+    index(root);
+    assert_eq!(
+        callers(root, "crates.left.src.worker.work"),
+        vec!["left.lib.run"]
+    );
+    assert_eq!(
+        callers(root, "crates.right.src.worker.work"),
+        vec!["right.lib.run"]
+    );
+}

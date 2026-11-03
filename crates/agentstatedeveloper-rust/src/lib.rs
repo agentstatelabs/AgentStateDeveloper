@@ -1032,13 +1032,14 @@ fn public_reference_bindings(
     symbols: &[ParsedSymbol],
     workspace: &WorkspaceSymbols,
 ) -> Vec<(String, String, Vec<BindingSpan>)> {
+    let mut file_aliases = file_module_reference_bindings(file, source, symbols, workspace);
     let crate_name = workspace.rust_crates.get(file).cloned().or_else(|| {
         file.ends_with("/src/lib.rs")
             .then(|| crate_name_from_path(file).map(|s| s.replace('-', "_")))
             .flatten()
     });
     let Some(crate_name) = crate_name else {
-        return Vec::new();
+        return file_aliases;
     };
     let source_dir = file
         .rsplit_once('/')
@@ -1184,7 +1185,105 @@ fn public_reference_bindings(
             }
         }
     }
-    aliases
+    file_aliases.extend(aliases);
+    file_aliases
+}
+
+/// Top-level declarations in each file module, using package-private alias keys.
+/// Inline scopes/globs/restricted visibility are not guessed here.
+fn file_module_reference_bindings(
+    file: &str,
+    source: &str,
+    symbols: &[ParsedSymbol],
+    workspace: &WorkspaceSymbols,
+) -> Vec<(String, String, Vec<BindingSpan>)> {
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_rust::LANGUAGE.into())
+        .is_err()
+    {
+        return vec![];
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return vec![];
+    };
+    let mut result = Vec::new();
+    let mut cursor = tree.root_node().walk();
+    for node in tree.root_node().named_children(&mut cursor) {
+        let mut children = node.walk();
+        if !node.named_children(&mut children).any(|n| {
+            n.kind() == "visibility_modifier"
+                && node_text(n, source.as_bytes()).as_deref() == Some("pub")
+        }) {
+            continue;
+        }
+        let span = BindingSpan::from_source(
+            file,
+            source,
+            if node.kind() == "use_declaration" {
+                "public_reexport"
+            } else {
+                "public_definition"
+            },
+            node.start_position().row as u32 + 1,
+            node.end_position().row as u32 + 1,
+        );
+        let mut provenance = vec![];
+        if let Some(manifest) = workspace.rust_manifest_provenance.get(file) {
+            provenance = vec![span.clone(), manifest.clone()];
+        }
+        let mut emit = |name: &str, target: String, extra: Vec<BindingSpan>| {
+            if let Some(alias) =
+                WorkspaceSymbols::rust_file_reference(file, &format!("self.{name}"))
+            {
+                let mut proof = provenance.clone();
+                proof.extend(extra);
+                result.push((alias, target, proof));
+            }
+        };
+        if node.kind() == "use_declaration" {
+            let Some(argument) = node.child_by_field_name("argument") else {
+                continue;
+            };
+            let mut bindings = HashMap::new();
+            collect_use_tree(argument, source.as_bytes(), "", &mut bindings);
+            for (local, binding) in bindings {
+                let reference = &binding.qname_prefix;
+                if let Some(target) = WorkspaceSymbols::rust_file_reference(file, reference) {
+                    emit(&local, target, vec![]);
+                } else {
+                    let head = reference.split('.').next().unwrap_or(reference);
+                    if workspace
+                        .rust_dependencies
+                        .get(file)
+                        .is_some_and(|scope| scope.contains_key(head))
+                    {
+                        if let Some(target) = workspace.rust_reference_path(file, reference) {
+                            let extra = workspace
+                                .rust_dependency_provenance
+                                .get(file)
+                                .and_then(|v| v.get(head))
+                                .cloned()
+                                .unwrap_or_default();
+                            emit(&local, target, extra);
+                        }
+                    }
+                }
+            }
+        } else if let Some(name) = node
+            .child_by_field_name("name")
+            .and_then(|n| node_text(n, source.as_bytes()))
+        {
+            if let Some(symbol) = symbols.iter().find(|s| {
+                s.qname.ends_with(&format!(".{name}"))
+                    && s.start_line == node.start_position().row as u32 + 1
+            }) {
+                // Definitions are independently proven again at the terminal step.
+                emit(&name, symbol.qname.clone(), vec![]);
+            }
+        }
+    }
+    result
 }
 
 /// Import binding: local name → qname prefix in ASD dotted form.

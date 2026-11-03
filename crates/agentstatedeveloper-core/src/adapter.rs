@@ -187,6 +187,32 @@ impl WorkspaceSymbols {
         Some(reference.to_owned())
     }
 
+    /// Internal namespace for file-module aliases; never shared across packages.
+    pub fn rust_file_reference(file: &str, reference: &str) -> Option<String> {
+        let (package, relative) = file.rsplit_once("/src/")?;
+        let mut module: Vec<_> = relative.strip_suffix(".rs")?.split('/').collect();
+        if matches!(module.last(), Some(&"mod" | &"lib" | &"main")) {
+            module.pop();
+        }
+        let path = if let Some(rest) = reference.strip_prefix("crate.") {
+            rest.to_owned()
+        } else if let Some(rest) = reference.strip_prefix("self.") {
+            module.push(rest);
+            module.join(".")
+        } else if let Some(mut rest) = reference.strip_prefix("super.") {
+            module.pop()?;
+            while let Some(next) = rest.strip_prefix("super.") {
+                module.pop()?;
+                rest = next;
+            }
+            module.push(rest);
+            module.join(".")
+        } else {
+            return None;
+        };
+        Some(format!("@rust:{package}.{path}"))
+    }
+
     pub fn resolve_rust_reference(&self, file: &str, reference: &str) -> Option<String> {
         self.resolve_rust_reference_with_path(file, reference)
             .map(|v| v.target)
@@ -198,7 +224,16 @@ impl WorkspaceSymbols {
         reference: &str,
     ) -> Option<ResolvedReference> {
         let normalized = self.rust_reference_path(file, reference)?;
-        let mut result = self.resolve_reference_with_path(&normalized)?;
+        let scoped = Self::rust_file_reference(file, reference);
+        let (normalized, mut result) = if let Some((name, result)) = scoped.and_then(|name| {
+            self.resolve_reference_with_path(&name)
+                .map(|result| (name, result))
+        }) {
+            (name, result)
+        } else {
+            let result = self.resolve_reference_with_path(&normalized)?;
+            (normalized, result)
+        };
         let head = reference.split('.').next().unwrap_or(reference);
         let dependency = self
             .rust_dependencies

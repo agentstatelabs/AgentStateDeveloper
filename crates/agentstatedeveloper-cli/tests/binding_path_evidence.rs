@@ -406,3 +406,99 @@ fn inherited_workspace_manifest_is_provenance_and_drift_suppresses_then_rebinds(
         "verified_indexed_path"
     );
 }
+
+#[test]
+fn file_module_reexport_provenance_drift_rebind_cycles_and_delete() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("fixture");
+    fixture(&root);
+    write(
+        &root,
+        "crates/caller/src/lib.rs",
+        "mod bridge; use crate::bridge::send; pub fn run()->bool {send()}",
+    );
+    write(
+        &root,
+        "crates/caller/src/bridge.rs",
+        "pub use event_front::emit as send;",
+    );
+    index(&root);
+    let (fresh, _) = context(&root, "api.lib.record_event", &[]);
+    assert_eq!(
+        site(&fresh)["binding_path"]["status"],
+        "verified_indexed_path"
+    );
+    assert!(
+        site(&fresh)["binding_path"]["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["span"]["file"] == "crates/caller/src/bridge.rs")
+    );
+    // Only the intermediate alias module changes: old proof must disappear.
+    write(
+        &root,
+        "crates/caller/src/bridge.rs",
+        "pub use crate::bridge::send as send;",
+    );
+    let (stale, _) = context(&root, "api.lib.record_event", &[]);
+    assert_eq!(site(&stale)["binding_path"]["status"], "mismatch");
+    assert!(site(&stale).get("expression").is_none());
+    index(&root);
+    let (cycle, _) = context(&root, "api.lib.record_event", &[]);
+    assert!(
+        cycle["symbols"][0]["callers"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    // Rebind through a different dependency and verify old edges are removed.
+    let manifest = std::fs::read_to_string(root.join("crates/caller/Cargo.toml")).unwrap();
+    write(
+        &root,
+        "crates/caller/Cargo.toml",
+        &(manifest + "other={package='decoy',path='../decoy'}\n"),
+    );
+    write(
+        &root,
+        "crates/caller/src/bridge.rs",
+        "pub use other::publish as send;",
+    );
+    index(&root);
+    let (new, _) = context(&root, "decoy.lib.publish", &[]);
+    assert_eq!(
+        site(&new)["binding_path"]["status"],
+        "verified_indexed_path"
+    );
+    // Conflicting explicit aliases are unknown, not whichever was visited last.
+    write(
+        &root,
+        "crates/caller/src/bridge.rs",
+        "pub use other::publish as send; pub use event_front::emit as send;",
+    );
+    index(&root);
+    for target in ["api.lib.record_event", "decoy.lib.publish"] {
+        let (value, _) = context(&root, target, &[]);
+        assert!(
+            value["symbols"][0]["callers"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+    write(
+        &root,
+        "crates/caller/src/bridge.rs",
+        "pub use other::publish as send;",
+    );
+    index(&root);
+    std::fs::remove_file(root.join("crates/caller/src/bridge.rs")).unwrap();
+    index(&root);
+    let (deleted, _) = context(&root, "decoy.lib.publish", &[]);
+    assert!(
+        deleted["symbols"][0]["callers"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
