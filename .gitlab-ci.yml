@@ -5,16 +5,6 @@
 # pipeline, so clippy, test and the realism jobs skip their work
 # (.ci/already-tested.sh). A merge that combined other changes, a direct push,
 # a tag and "Run pipeline" all run in full.
-# Every pipeline is created as before; this only keeps a newer pipeline from
-# cancelling a tag pipeline, which publishes.
-workflow:
-  rules:
-    # A tag pipeline publishes; a newer pipeline never cancels it.
-    - if: $CI_COMMIT_TAG
-      auto_cancel:
-        on_new_commit: none
-    - when: always
-
 stages:
   - check
   - test
@@ -43,8 +33,10 @@ default:
     - if command -v sccache >/dev/null 2>&1; then sccache --show-stats || true; fi
   # A newer pipeline on the same merge request or branch cancels this one
   # (auto-cancel redundant pipelines), so a re-push doesn't build twice.
-  # Publish and release jobs set interruptible: false, and tag pipelines
-  # never auto-cancel.
+  # Publish and release jobs set interruptible: false, so a pipeline that has
+  # started publishing always finishes. There is no workflow block: adding one
+  # would also run every job in merge request pipelines, duplicating the full
+  # branch pipeline.
   interruptible: true
 
 variables:
