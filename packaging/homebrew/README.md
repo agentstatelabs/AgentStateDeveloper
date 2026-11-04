@@ -40,7 +40,7 @@ brew untap agentstatelabs/agentstatedeveloper
 ## Pipeline architecture
 
 ```
-  GitLab origin  ──CI: fmt/clippy/build/test (.gitlab-ci.yml)
+  GitLab origin  ──CI: fmt/clippy/test (.gitlab-ci.yml)
        │
        └─ mirror ──► agentstatelabs/AgentStateDeveloper (private GitHub)
                           │
