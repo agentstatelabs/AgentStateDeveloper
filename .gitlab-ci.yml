@@ -1,10 +1,28 @@
 # CI for AgentStateDeveloper (Rust Cargo workspace)
 #
-# Every branch push gets a full pipeline. A merge to main whose tree is
-# identical to the merged branch's head was already tested by that branch's
-# pipeline, so clippy, test and the realism jobs skip their work
-# (.ci/already-tested.sh). A merge that combined other changes, a direct push,
-# a tag and "Run pipeline" all run in full.
+# Only run pipelines that matter, and never the same commit twice, as in the
+# other Rust projects:
+#  * a merge request gets a pipeline with every check, so the MR page and
+#    auto-merge wait for them. Its jobs fetch the MR's own ref, so a merge
+#    that deletes the branch can't cut a queued job short;
+#  * a plain push of any other branch gets no pipeline: its merge request's
+#    pipeline covers it;
+#  * main, tags, and pipelines started by hand, by schedule or through the
+#    API run as before.
+# A merge to main whose tree is identical to the merged MR's head was already
+# tested by that MR's pipeline, so clippy, test and the realism jobs skip
+# their work (.ci/already-tested.sh). A merge that combined other changes, a
+# direct push, a tag and "Run pipeline" all run in full.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # A tag pipeline publishes; a newer pipeline never cancels it.
+    - if: $CI_COMMIT_TAG
+      auto_cancel:
+        on_new_commit: none
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE =~ /^(web|schedule|api|trigger|pipeline)$/
+    - when: never
 stages:
   - check
   - test
@@ -34,9 +52,7 @@ default:
   # A newer pipeline on the same merge request or branch cancels this one
   # (auto-cancel redundant pipelines), so a re-push doesn't build twice.
   # Publish and release jobs set interruptible: false, so a pipeline that has
-  # started publishing always finishes. There is no workflow block: adding one
-  # would also run every job in merge request pipelines, duplicating the full
-  # branch pipeline.
+  # started publishing always finishes.
   interruptible: true
 
 variables:
