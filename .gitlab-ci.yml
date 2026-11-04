@@ -1,4 +1,10 @@
 # CI for AgentStateDeveloper (Rust Cargo workspace)
+#
+# Every branch push gets a full pipeline. A merge to main whose tree is
+# identical to the merged branch's head was already tested by that branch's
+# pipeline, so clippy, test and the realism jobs skip their work
+# (.ci/already-tested.sh). A merge that combined other changes, a direct push,
+# a tag and "Run pipeline" all run in full.
 stages:
   - check
   - test
@@ -51,23 +57,24 @@ fmt:
     - rustup component add rustfmt
     - cargo fmt --all -- --check
 
+# The builder has two job slots, so a pipeline runs two heavy jobs at a time,
+# clippy and test, and both start at once. There is no separate build job:
+# test compiles everything it did.
 clippy:
   stage: check
   script:
+    - if sh .ci/already-tested.sh; then exit 0; fi
     - rustup component add clippy
     - cargo clippy --workspace --all-targets -- -D clippy::correctness
 
-build:
+test:
+  stage: test
+  needs: []
   cache:
     <<: *rust_dependency_cache
     policy: pull-push
-  stage: check
   script:
-    - cargo build --workspace --locked
-
-test:
-  stage: test
-  script:
+    - if sh .ci/already-tested.sh; then exit 0; fi
     - cargo test --workspace --locked
 
 # --- Tier-2 conformance realism -------------------------------------------
@@ -81,6 +88,7 @@ test:
 realism:self:
   stage: realism
   script:
+    - if sh .ci/already-tested.sh; then exit 0; fi
     - cargo test -p agentstatedeveloper-conformance --test realism realism_asd_self -- --ignored --nocapture
 
 # Regression guard for the O(all-symbols) conclusions hang (fix branch
@@ -93,6 +101,7 @@ realism:self:
 realism:conclusions-scale:
   stage: realism
   script:
+    - if sh .ci/already-tested.sh; then exit 0; fi
     - cargo build --release -p agentstatedeveloper-cli --locked
     - ASD_BIN="$CI_PROJECT_DIR/target/release/asd" bash scripts/perf-conclusions-scale.sh
 
@@ -128,7 +137,7 @@ publish-github:
     - if: '$CI_COMMIT_BRANCH == "main" && $GITHUB_REPO'
     # Also mirror on tag pipelines so a release tag (v*) reaches GitHub and
     # fires its release.yml Action. Matches agentstategraph/ctxone. The .post
-    # stage still anchors because fmt/clippy/build/test run on tag pipelines.
+    # stage still anchors because fmt/clippy/test run on tag pipelines.
     - if: '$CI_COMMIT_TAG && $GITHUB_REPO'
   variables:
     GIT_DEPTH: 0
