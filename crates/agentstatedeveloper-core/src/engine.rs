@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use agentstategraph::Repository;
 use agentstategraph_core::Namespace;
-use agentstategraph_storage::SqliteStorage;
+use agentstategraph_storage::{DEFAULT_GC_GRACE, SqliteStorage};
 
 use crate::audit::{AuditEvent, AuditSink, NullSink, emit_audit, event_types};
 use crate::error::{AsdError, Result};
@@ -120,7 +121,18 @@ impl Engine {
     /// to the DB file, hydrates automatically — this covers the fresh-clone
     /// case without requiring a manual `asd hydrate` invocation.
     pub fn open_sqlite(db_path: &Path) -> Result<Self> {
-        let storage = SqliteStorage::open(db_path).map_err(|e| AsdError::Other(e.to_string()))?;
+        Self::open_sqlite_with_gc_grace(db_path, DEFAULT_GC_GRACE)
+    }
+
+    /// [`open_sqlite`](Self::open_sqlite), with the grace period a GC sweep
+    /// gives recent objects. A sweep spares any object written within it, so a
+    /// write another process has in flight (its objects stored, its commit not
+    /// yet) isn't swept out from under it. Only `asd gc` needs anything but
+    /// the default, [`DEFAULT_GC_GRACE`].
+    pub fn open_sqlite_with_gc_grace(db_path: &Path, gc_grace: Duration) -> Result<Self> {
+        let storage = SqliteStorage::open(db_path)
+            .map_err(|e| AsdError::Other(e.to_string()))?
+            .with_gc_grace(gc_grace);
         let namespace = Self::namespace_for_db(db_path)?;
         let repo = Repository::new(Box::new(storage)).with_namespace(namespace);
         repo.init()?;

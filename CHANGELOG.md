@@ -17,6 +17,13 @@ Versions use semantic versioning.
 
 ## [Unreleased]
 
+### Changed
+- **Built on AgentStateGraph 1.5.4** (was 1.2.8), from crates.io. ASD's code needed no changes for it beyond `asd gc` below. The first time a store is opened it gets AgentStateGraph's schema stamp, a table recording the schema version; nothing else in it changes, and earlier `asd` releases still read and write it. Checked on copies of two real stores (173 MB and 3.0 GB): asd 1.4.7 and this build reported the same symbols, ledger entries, conclusions, thinking entries, top search result and repair findings, before and after, and each read the other's writes.
+- **`asd gc --sweep` spares objects written in the last 10 minutes.** That's AgentStateGraph's GC grace period (since 1.3.0): a write another ASD process has in flight, its objects stored but not yet committed, keeps them. So a sweep straight after writes deletes less than the preview counts. The preview and sweep lines now say so, and the JSON reports `gc_grace_secs`.
+
+### Added
+- **`asd gc --grace-secs <N>`** sets that grace period (default 600). `0` spares nothing: use it only when nothing else writes to the store. The library gains `Engine::open_sqlite_with_gc_grace`.
+
 ## [v1.4.9] — 2026-10-22
 
 ### Added

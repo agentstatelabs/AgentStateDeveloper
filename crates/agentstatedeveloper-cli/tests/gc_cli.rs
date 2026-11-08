@@ -1,8 +1,9 @@
 //! `asd gc` end to end, through the real binary.
 //!
 //! The properties that matter to a user running it by hand: the default only
-//! previews and deletes nothing; `--sweep` deletes what the preview said it
-//! would; the live state survives; and the flags are wired through.
+//! previews and deletes nothing; `--sweep` spares objects written within the
+//! grace period and otherwise deletes what the preview said it would; the live
+//! state survives; and the flags are wired through.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -82,9 +83,23 @@ fn gc_previews_by_default_and_sweeps_only_when_asked() {
         "a preview must not delete anything"
     );
 
-    // --sweep deletes exactly what the preview predicted; --vacuum and
-    // --unpin-legacy are wired through (a store written by v1.2.2+ has no
-    // legacy pins, so the count is zero).
+    // Under the default grace period a sweep spares everything just written,
+    // so a write another process has in flight can't lose its objects.
+    let (ok, spared, stderr) = gc(&db, &["--keep-recent", "1", "--sweep"]);
+    assert!(ok, "{spared} {stderr}");
+    assert_eq!(spared["gc_grace_secs"], 600, "{spared}");
+    assert_eq!(
+        spared["result"]["objects_deleted"], 0,
+        "objects written within the grace period must be spared: {spared}"
+    );
+    assert!(
+        stderr.contains("written in the last 10 minutes"),
+        "{stderr}"
+    );
+
+    // With no grace period, --sweep deletes exactly what the preview predicted;
+    // --vacuum and --unpin-legacy are wired through (a store written by v1.2.2+
+    // has no legacy pins, so the count is zero).
     let (ok, swept, stderr) = gc(
         &db,
         &[
@@ -93,6 +108,8 @@ fn gc_previews_by_default_and_sweeps_only_when_asked() {
             "--sweep",
             "--vacuum",
             "--unpin-legacy",
+            "--grace-secs",
+            "0",
         ],
     );
     assert!(ok, "{swept} {stderr}");

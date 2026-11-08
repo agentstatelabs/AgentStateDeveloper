@@ -9,8 +9,9 @@
 //! objects. `asd gc` is how that space comes back.
 //!
 //! **By default it only previews.** Nothing is deleted without `--sweep`, and
-//! the preview reports exactly what a sweep under the same policy would keep and
-//! reclaim. When mutating, the steps run in this order:
+//! the preview reports what a sweep under the same policy would keep and
+//! reclaim, less any objects written within the grace period (`--grace-secs`),
+//! which a sweep spares. When mutating, the steps run in this order:
 //!
 //! 1. Distil any not-yet-extracted history. A sweep refuses while any commit is
 //!    undistilled, so its signal is never lost with its state.
@@ -20,6 +21,9 @@
 //!    AgentStateGraph holds the store's write lock from computing that keep-set
 //!    to the last delete, so another ASD process committing meanwhile — a git
 //!    hook, `asd-serve`, an MCP server — waits or fails rather than losing data.
+//!    Objects written within the last `--grace-secs` (10 minutes by default)
+//!    are spared too, so a write whose objects are stored but not yet committed
+//!    survives (AgentStateGraph v1.3.0 and later).
 //! 4. `--vacuum`: shrink the file. A sweep frees pages inside the database;
 //!    only a vacuum returns them to the OS.
 //!
@@ -31,7 +35,7 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use agentstatedeveloper_core::Engine;
-use agentstatedeveloper_core::gc::{GC_CHECKPOINT_EVERY, GC_KEEP_RECENT, gc_policy};
+use agentstatedeveloper_core::gc::{GC_CHECKPOINT_EVERY, GC_GRACE_SECS, GC_KEEP_RECENT, gc_policy};
 
 use crate::config::Config;
 
@@ -69,10 +73,21 @@ pub struct GcArgs {
     /// thousands of full snapshots.
     #[arg(long, default_value_t = GC_CHECKPOINT_EVERY)]
     pub checkpoint_every: usize,
+
+    /// Spare objects written in the last N seconds, so a write another ASD
+    /// process (a git hook, asd-serve, an MCP server) has in flight isn't
+    /// swept out from under it. A sweep straight after writes therefore
+    /// deletes less than the preview counts. 0 spares nothing: use it only
+    /// when nothing else writes to this store.
+    #[arg(long, default_value_t = GC_GRACE_SECS)]
+    pub grace_secs: u64,
 }
 
 pub fn run(cfg: &Config, args: GcArgs) -> Result<()> {
-    let engine = Engine::open_sqlite(&cfg.db_path)?;
+    let engine = Engine::open_sqlite_with_gc_grace(
+        &cfg.db_path,
+        std::time::Duration::from_secs(args.grace_secs),
+    )?;
     let repo = &engine.repo;
 
     let distilled = repo
@@ -106,6 +121,7 @@ pub fn run(cfg: &Config, args: GcArgs) -> Result<()> {
         "db": cfg.db_path.display().to_string(),
         "distilled_now": distilled,
         "unpinned_legacy_milestones": unpinned,
+        "gc_grace_secs": args.grace_secs,
         "result": result,
     });
     println!("{}", serde_json::to_string_pretty(&out)?);
@@ -128,7 +144,7 @@ fn summary(args: &GcArgs, result: &Value) -> String {
     if result["dry_run"] == true {
         let w = &result["would_reclaim"];
         return format!(
-            "preview: a sweep would delete {} of {} objects ({:.1}%), keeping {} live{}. \
+            "preview: a sweep would delete {} of {} objects ({:.1}%), keeping {} live{}.{} \
              Nothing was deleted — re-run with --sweep to reclaim.",
             n(&w["reclaimable_objects"]),
             n(&w["total_objects"]),
@@ -139,6 +155,10 @@ fn summary(args: &GcArgs, result: &Value) -> String {
             } else {
                 " (a sweep would currently be refused: history is not fully distilled)"
             },
+            match grace(args.grace_secs) {
+                Some(g) => format!(" It spares objects written in the last {g}."),
+                None => String::new(),
+            },
         );
     }
     if result["mutated"] == true {
@@ -148,6 +168,9 @@ fn summary(args: &GcArgs, result: &Value) -> String {
             n(&result["objects_before"]),
             n(&result["objects_after"]),
         );
+        if let Some(g) = grace(args.grace_secs) {
+            line.push_str(&format!(" Objects written in the last {g} were spared."));
+        }
         if let Some(v) = result.get("vacuum") {
             line.push_str(&format!(
                 " vacuum reclaimed {} bytes on disk.",
@@ -165,4 +188,15 @@ fn summary(args: &GcArgs, result: &Value) -> String {
         );
     }
     "no change.".to_string()
+}
+
+/// The grace period in words, or `None` when there is none.
+fn grace(secs: u64) -> Option<String> {
+    match secs {
+        0 => None,
+        1 => Some("second".to_string()),
+        60 => Some("minute".to_string()),
+        s if s % 60 == 0 => Some(format!("{} minutes", s / 60)),
+        s => Some(format!("{s} seconds")),
+    }
 }
