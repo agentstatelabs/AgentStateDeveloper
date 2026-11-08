@@ -19,6 +19,12 @@ pub const GC_KEEP_RECENT: usize = 100;
 /// Sparse checkpoints among older commits: none. See the module docs.
 pub const GC_CHECKPOINT_EVERY: usize = 0;
 
+/// Seconds a sweep spares a newly written object for: AgentStateGraph's
+/// default (`DEFAULT_GC_GRACE`, 10 minutes). It keeps a write another ASD
+/// process has in flight safe, so a sweep straight after writes deletes less
+/// than a preview counts.
+pub const GC_GRACE_SECS: u64 = agentstategraph_storage::DEFAULT_GC_GRACE.as_secs();
+
 /// The retention policy an ASD sweep runs under.
 ///
 /// Milestones are always kept, but since AgentStateGraph v1.2.2 a milestone

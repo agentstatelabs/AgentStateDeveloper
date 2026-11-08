@@ -33,10 +33,10 @@ exclude = [".asd/", ".asd-*"]
 
 [workspace.dependencies]
 # ASG family, from crates.io. Bump deliberately; the version must already be published.
-agentstategraph = "1.2.8"
-agentstategraph-core = "1.2.8"
-agentstategraph-storage = "1.2.8"
-agentstategraph-policy = "1.2.8"
+agentstategraph = "1.5.4"
+agentstategraph-core = "1.5.4"
+agentstategraph-storage = "1.5.4"
+agentstategraph-policy = "1.5.4"
 
 # Common
 rusqlite = { version = "0.33", features = ["bundled"] }
